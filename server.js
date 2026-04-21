@@ -41,7 +41,7 @@ const PACKAGES = {
   },
 };
 
-const NETWORK_MENU = `Welcome to NestyDatagh💙\n\n1 - MTN Data\n2 - Telecel Data`;
+const NETWORK_MENU = `Welcome to Nesty💙\n\n1 - MTN Data\n2 - Telecel Data`;
 
 const MTN_MENU = `MTN Bundles:\n\n1 - 1GB ₵4.80\n2 - 2GB ₵9.50\n3 - 3GB ₵14.80\n4 - 4GB ₵19.80\n5 - 5GB ₵24.50\n6 - 6GB ₵29.50\n7 - 8GB ₵37.00\n8 - 10GB ₵45.00\n9 - 15GB ₵65.00\n10 - 20GB ₵85.00\n11 - 25GB ₵105.00\n12 - 30GB ₵126.00\n13 - 40GB ₵162.00\n14 - 50GB ₵208.90\n\nReply with the bundle number:`;
 
