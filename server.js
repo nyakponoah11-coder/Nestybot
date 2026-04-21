@@ -128,41 +128,81 @@ async function resetSession(from) {
 // ---- BOT FLOW ----
 async function handleMessage(from, text) {
   const msg = (text || "").trim();
+  const cleanMsg = msg.replace(/\s+/g, ""); // ✅ fix input issue
+
+  console.log("RAW:", msg, "| CLEAN:", cleanMsg);
+
   const session = await getSession(from);
 
   // Reset words
-  if (/^(menu|start|hi|hello|reset)$/i.test(msg)) {
+  if (/^(menu|start|hi|hello|reset)$/i.test(cleanMsg)) {
     await resetSession(from);
     return sendWhatsApp(from, NETWORK_MENU);
   }
 
   switch (session.step) {
+
     case 0: // pick network
-      if (msg === "1") { await updateSession(from, { step: 1, network: "MTN" }); return sendWhatsApp(from, MTN_MENU); }
-      if (msg === "2") { await updateSession(from, { step: 1, network: "TELECEL" }); return sendWhatsApp(from, TELECEL_MENU); }
+      if (cleanMsg === "1") {
+        await updateSession(from, { step: 1, network: "MTN" });
+        return sendWhatsApp(from, MTN_MENU);
+      }
+
+      if (cleanMsg === "2") {
+        await updateSession(from, { step: 1, network: "TELECEL" });
+        return sendWhatsApp(from, TELECEL_MENU);
+      }
+
       return sendWhatsApp(from, NETWORK_MENU);
 
     case 1: { // pick bundle
-      const bundle = PACKAGES[session.network]?.[msg];
-      if (!bundle) return sendWhatsApp(from, "Invalid choice. " + (session.network === "MTN" ? MTN_MENU : TELECEL_MENU));
-      await updateSession(from, { step: 2, bundle: msg });
-      return sendWhatsApp(from, `You picked ${bundle.size} for ₵${bundle.price.toFixed(2)}.\n\nEnter the recipient phone number (e.g. 0241234567):`);
+      const bundle = PACKAGES[session.network]?.[cleanMsg];
+
+      if (!bundle) {
+        return sendWhatsApp(
+          from,
+          "Invalid choice.\n\n" + (session.network === "MTN" ? MTN_MENU : TELECEL_MENU)
+        );
+      }
+
+      await updateSession(from, { step: 2, bundle: cleanMsg });
+
+      return sendWhatsApp(
+        from,
+        `You picked ${bundle.size} for ₵${bundle.price.toFixed(2)}.\n\nEnter the recipient phone number (e.g. 0241234567):`
+      );
     }
 
-    case 2: { // recipient + create payment
-      const phone = msg.replace(/\D/g, "");
-      if (phone.length < 10) return sendWhatsApp(from, "Invalid number. Please enter a 10-digit number:");
+    case 2: { // recipient + payment
+      const phone = cleanMsg.replace(/\D/g, "");
+
+      if (phone.length < 10) {
+        return sendWhatsApp(from, "Invalid number. Please enter a 10-digit number:");
+      }
+
       const bundle = PACKAGES[session.network][session.bundle];
       const reference = `NDG-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
       try {
         const link = await createPaystackLink(bundle.price, reference, from);
+
         await supabase.from("orders").insert({
-          reference, whatsapp_from: from, recipient_number: phone,
-          network: session.network, bundle_size: bundle.size, price_ghs: bundle.price,
+          reference,
+          whatsapp_from: from,
+          recipient_number: phone,
+          network: session.network,
+          bundle_size: bundle.size,
+          price_ghs: bundle.price,
           paystack_link: link,
         });
+
         await resetSession(from);
-        return sendWhatsApp(from, `💳 Pay ₵${bundle.price.toFixed(2)} for ${bundle.size} (${session.network}) → ${phone}\n\n${link}\n\nData will be delivered automatically after payment.`);
+
+        return sendWhatsApp(
+          from,
+          `💳 Pay ₵${bundle.price.toFixed(2)} for ${bundle.size} (${session.network}) → ${phone}\n\n${link}\n\nData will be delivered automatically after payment.`
+        );
+
       } catch (e) {
         console.error(e);
         return sendWhatsApp(from, "❌ Could not create payment link. Try again later.");
@@ -170,7 +210,6 @@ async function handleMessage(from, text) {
     }
   }
 }
-
 // ---- ROUTES ----
 app.get("/", (_, res) => res.send("NestyDatagh bot ✅"));
 
