@@ -1,284 +1,279 @@
 const express = require("express");
-const crypto = require("crypto");
+const axios = require("axios");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
+app.use(express.json());
 
-// ---- ENV ----
-const {
-  ACCESS_TOKEN,
-  PHONE_ID,
-  VERIFY_TOKEN,
-  PAYSTACK_SECRET,
-  DATA_API_KEY,
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  PORT = 3000,
-} = process.env;
+// ============ ENV VARS (set these in Render) ============
+const PORT = process.env.PORT || 3000;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN;       // WhatsApp Cloud API token
+const PHONE_ID = process.env.PHONE_ID;               // WhatsApp phone number ID
+const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET; // sk_live_... or sk_test_...
+const DATA_API_KEY = process.env.DATA_API_KEY;       // Datamart API key
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-// ---- BUNDLES ----
+// ============ PACKAGE CATALOG ============
 const PACKAGES = {
   MTN: {
-    "1":  { size: "1GB",  price: 4.8,   capacity: "1",  apiNetwork: "YELLO" },
-    "2":  { size: "2GB",  price: 9.5,   capacity: "2",  apiNetwork: "YELLO" },
-    "3":  { size: "3GB",  price: 14.8,  capacity: "3",  apiNetwork: "YELLO" },
-    "4":  { size: "4GB",  price: 19.8,  capacity: "4",  apiNetwork: "YELLO" },
-    "5":  { size: "5GB",  price: 24.5,  capacity: "5",  apiNetwork: "YELLO" },
-    "6":  { size: "6GB",  price: 29.5,  capacity: "6",  apiNetwork: "YELLO" },
-    "7":  { size: "8GB",  price: 37,    capacity: "8",  apiNetwork: "YELLO" },
-    "8":  { size: "10GB", price: 45,    capacity: "10", apiNetwork: "YELLO" },
-    "9":  { size: "15GB", price: 65,    capacity: "15", apiNetwork: "YELLO" },
-    "10": { size: "20GB", price: 85,    capacity: "20", apiNetwork: "YELLO" },
-    "11": { size: "25GB", price: 105,   capacity: "25", apiNetwork: "YELLO" },
-    "12": { size: "30GB", price: 126,   capacity: "30", apiNetwork: "YELLO" },
-    "13": { size: "40GB", price: 162,   capacity: "40", apiNetwork: "YELLO" },
-    "14": { size: "50GB", price: 208.9, capacity: "50", apiNetwork: "YELLO" },
+    "1":  { size: "1GB",  price: 4.80,  capacity: "1",  apiNetwork: "YELLO" },
+    "2":  { size: "2GB",  price: 9.50,  capacity: "2",  apiNetwork: "YELLO" },
+    "3":  { size: "3GB",  price: 14.80, capacity: "3",  apiNetwork: "YELLO" },
+    "4":  { size: "4GB",  price: 19.80, capacity: "4",  apiNetwork: "YELLO" },
+    "5":  { size: "5GB",  price: 24.50, capacity: "5",  apiNetwork: "YELLO" },
+    "6":  { size: "6GB",  price: 29.50, capacity: "6",  apiNetwork: "YELLO" },
+    "7":  { size: "8GB",  price: 37.00, capacity: "8",  apiNetwork: "YELLO" },
+    "8":  { size: "10GB", price: 45.00, capacity: "10", apiNetwork: "YELLO" },
+    "9":  { size: "15GB", price: 65.00, capacity: "15", apiNetwork: "YELLO" },
+    "10": { size: "20GB", price: 85.00, capacity: "20", apiNetwork: "YELLO" },
+    "11": { size: "25GB", price: 105.00,capacity: "25", apiNetwork: "YELLO" },
+    "12": { size: "30GB", price: 126.00,capacity: "30", apiNetwork: "YELLO" },
+    "13": { size: "40GB", price: 162.00,capacity: "40", apiNetwork: "YELLO" },
+    "14": { size: "50GB", price: 208.90,capacity: "50", apiNetwork: "YELLO" },
   },
   TELECEL: {
-    "1": { size: "5GB",  price: 25, capacity: "5",  apiNetwork: "TELECEL" },
-    "2": { size: "10GB", price: 38, capacity: "10", apiNetwork: "TELECEL" },
+    "1": { size: "5GB",  price: 25.00, capacity: "5",  apiNetwork: "TELECEL" },
+    "2": { size: "10GB", price: 38.00, capacity: "10", apiNetwork: "TELECEL" },
   },
 };
 
-const NETWORK_MENU =
-`Welcome to NestyDatagh💙
+const NETWORK_MENU = `Welcome to NestyDatagh💙\n\n1 - MTN Data\n2 - Telecel Data`;
 
-1 - MTN Data
-2 - Telecel Data`;
+const MTN_MENU = `MTN Bundles:\n\n1 - 1GB ₵4.80\n2 - 2GB ₵9.50\n3 - 3GB ₵14.80\n4 - 4GB ₵19.80\n5 - 5GB ₵24.50\n6 - 6GB ₵29.50\n7 - 8GB ₵37.00\n8 - 10GB ₵45.00\n9 - 15GB ₵65.00\n10 - 20GB ₵85.00\n11 - 25GB ₵105.00\n12 - 30GB ₵126.00\n13 - 40GB ₵162.00\n14 - 50GB ₵208.90\n\nReply with the bundle number:`;
 
-const MTN_MENU =
-`MTN Bundles:
+const TELECEL_MENU = `Telecel Bundles:\n\n1 - 5GB ₵25.00\n2 - 10GB ₵38.00\n\nReply with the bundle number:`;
 
-${Object.entries(PACKAGES.MTN)
-  .map(([k, v]) => `${k} - ${v.size} ₵${v.price}`)
-  .join("\n")}
-
-Reply with the bundle number:`;
-
-const TELECEL_MENU =
-`Telecel Bundles:
-
-${Object.entries(PACKAGES.TELECEL)
-  .map(([k, v]) => `${k} - ${v.size} ₵${v.price}`)
-  .join("\n")}
-
-Reply with the bundle number:`;
-
-// ---- WHATSAPP ----
-async function sendWhatsApp(to, body) {
+// ============ WHATSAPP HELPER ============
+async function sendWhatsApp(to, text) {
   try {
-    await fetch(`https://graph.facebook.com/v18.0/${PHONE_ID}/messages`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ messaging_product: "whatsapp", to, text: { body } }),
-    });
-  } catch (e) { console.error("WA send failed:", e.message); }
+    await axios.post(
+      `https://graph.facebook.com/v20.0/${PHONE_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to,
+        type: "text",
+        text: { body: text },
+      },
+      { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+    );
+  } catch (e) {
+    console.error("WhatsApp send error:", e.response?.data || e.message);
+  }
 }
 
-// ---- DATAMART ----
-async function deliverData(phoneNumber, apiNetwork, capacity) {
-  const res = await fetch("https://api.datamartgh.shop/api/developer/purchase", {
-    method: "POST",
-    headers: { "X-API-Key": DATA_API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ phoneNumber, network: apiNetwork, capacity, gateway: "wallet" }),
-  });
-  const txt = await res.text();
-  if (!res.ok) throw new Error(`Datamart ${res.status}: ${txt}`);
-  try {
-    const j = JSON.parse(txt);
-    if (j.status && j.status !== "success") throw new Error(j.message || txt);
-  } catch (_) {}
-  return txt;
-}
-
-// ---- PAYSTACK ----
-async function createPaystackLink(amountGhs, reference, whatsappFrom) {
-  const res = await fetch("https://api.paystack.co/transaction/initialize", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${PAYSTACK_SECRET}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      email: `${whatsappFrom}@nestydatagh.com`,
-      amount: Math.round(amountGhs * 100), // pesewas
-      currency: "GHS",
-      reference,
-    }),
-  });
-  const j = await res.json();
-  if (!j.status) throw new Error(`Paystack: ${j.message}`);
-  return j.data.authorization_url;
-}
-
-// ---- SESSION HELPERS ----
+// ============ SESSION HELPERS ============
 async function getSession(from) {
   const { data } = await supabase
     .from("bot_sessions")
     .select("*")
     .eq("whatsapp_from", from)
     .maybeSingle();
-
-  // ✅ if not found, create new session
-  if (!data) {
-    const { data: created, error } = await supabase
-      .from("bot_sessions")
-      .insert({
-        whatsapp_from: from,
-        step: 0
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.log("SESSION ERROR:", error);
-      return { step: 0 }; // fallback
-    }
-
-    return created;
-  }
-
   return data;
 }
 
-// ---- BOT FLOW ----
-async function handleMessage(from, text) {
-  const msg = (text || "").trim();
-  const cleanMsg = msg.replace(/\s+/g, ""); // ✅ fix input issue
-
-  console.log("RAW:", msg, "| CLEAN:", cleanMsg);
-
-  const session = await getSession(from);
-
-  // Reset words
-  if (/^(menu|start|hi|hello|reset)$/i.test(cleanMsg)) {
-    await resetSession(from);
-    return sendWhatsApp(from, NETWORK_MENU);
-  }
-
-  switch (session.step) {
-
-    case 0: // pick network
-      if (cleanMsg === "1") {
-        await updateSession(from, { step: 1, network: "MTN" });
-        return sendWhatsApp(from, MTN_MENU);
-      }
-
-      if (cleanMsg === "2") {
-        await updateSession(from, { step: 1, network: "TELECEL" });
-        return sendWhatsApp(from, TELECEL_MENU);
-      }
-
-      return sendWhatsApp(from, NETWORK_MENU);
-
-    case 1: { // pick bundle
-      const bundle = PACKAGES[session.network]?.[cleanMsg];
-
-      if (!bundle) {
-        return sendWhatsApp(
-          from,
-          "Invalid choice.\n\n" + (session.network === "MTN" ? MTN_MENU : TELECEL_MENU)
-        );
-      }
-
-      await updateSession(from, { step: 2, bundle: cleanMsg });
-
-      return sendWhatsApp(
-        from,
-        `You picked ${bundle.size} for ₵${bundle.price.toFixed(2)}.\n\nEnter the recipient phone number (e.g. 0241234567):`
-      );
-    }
-
-    case 2: { // recipient + payment
-      const phone = cleanMsg.replace(/\D/g, "");
-
-      if (phone.length < 10) {
-        return sendWhatsApp(from, "Invalid number. Please enter a 10-digit number:");
-      }
-
-      const bundle = PACKAGES[session.network][session.bundle];
-      const reference = `NDG-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-      try {
-        const link = await createPaystackLink(bundle.price, reference, from);
-
-        await supabase.from("orders").insert({
-          reference,
-          whatsapp_from: from,
-          recipient_number: phone,
-          network: session.network,
-          bundle_size: bundle.size,
-          price_ghs: bundle.price,
-          paystack_link: link,
-        });
-
-        await resetSession(from);
-
-        return sendWhatsApp(
-          from,
-          `💳 Pay ₵${bundle.price.toFixed(2)} for ${bundle.size} (${session.network}) → ${phone}\n\n${link}\n\nData will be delivered automatically after payment.`
-        );
-
-      } catch (e) {
-        console.error(e);
-        return sendWhatsApp(from, "❌ Could not create payment link. Try again later.");
-      }
-    }
+async function saveSession(from, fields) {
+  const existing = await getSession(from);
+  if (existing) {
+    await supabase
+      .from("bot_sessions")
+      .update({ ...fields, updated_at: new Date().toISOString() })
+      .eq("whatsapp_from", from);
+  } else {
+    await supabase
+      .from("bot_sessions")
+      .insert({ whatsapp_from: from, ...fields });
   }
 }
-// ---- ROUTES ----
-app.get("/", (_, res) => res.send("NestyDatagh bot ✅"));
 
-// WhatsApp verify
+async function clearSession(from) {
+  await supabase.from("bot_sessions").delete().eq("whatsapp_from", from);
+}
+
+// ============ PAYSTACK ============
+async function createPaystackLink(amountGhs, reference, from) {
+  const res = await axios.post(
+    "https://api.paystack.co/transaction/initialize",
+    {
+      email: `${from}@nestydatagh.com`,
+      amount: Math.round(amountGhs * 100), // pesewas
+      currency: "GHS",
+      reference,
+      metadata: { whatsapp_from: from },
+    },
+    { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
+  );
+  return res.data.data.authorization_url;
+}
+
+// ============ DATAMART DELIVERY ============
+async function deliverData(order) {
+  try {
+    const res = await axios.post(
+      "https://api.datamartgh.shop/api/developer/purchase",
+      {
+        phoneNumber: order.recipient_number,
+        network: PACKAGES[order.network][order.bundle_size_key].apiNetwork,
+        capacity: PACKAGES[order.network][order.bundle_size_key].capacity,
+        gateway: "wallet",
+        ref: order.reference,
+      },
+      { headers: { "x-api-key": DATA_API_KEY } }
+    );
+    console.log("Datamart response:", res.data);
+    return { ok: true };
+  } catch (e) {
+    console.error("Datamart error:", e.response?.data || e.message);
+    return { ok: false, error: JSON.stringify(e.response?.data || e.message) };
+  }
+}
+
+// ============ WHATSAPP WEBHOOK (verify) ============
 app.get("/webhook", (req, res) => {
-  if (req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === VERIFY_TOKEN) {
-    return res.status(200).send(req.query["hub.challenge"]);
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
   }
   res.sendStatus(403);
 });
 
-// WhatsApp incoming
-app.post("/webhook", express.json(), async (req, res) => {
+// ============ WHATSAPP WEBHOOK (messages) ============
+app.post("/webhook", async (req, res) => {
+  res.sendStatus(200); // ack immediately
   try {
     const entry = req.body.entry?.[0]?.changes?.[0]?.value;
-    const message = entry?.messages?.[0];
-    if (message?.type === "text") {
-      await handleMessage(message.from, message.text.body);
+    const msg = entry?.messages?.[0];
+    if (!msg) return;
+
+    const from = msg.from;
+    const text = (msg.text?.body || "").trim();
+    const session = await getSession(from);
+
+    // Restart triggers
+    if (/^(hi|hello|menu|start|hey)$/i.test(text) || !session) {
+      await saveSession(from, { step: 1, network: null, bundle: null, recipient_number: null });
+      return sendWhatsApp(from, NETWORK_MENU);
     }
-  } catch (e) { console.error("WA webhook err:", e); }
-  res.sendStatus(200);
-});
 
-// Paystack webhook (RAW body for signature)
-app.post("/paystack-webhook", express.raw({ type: "*/*" }), async (req, res) => {
-  const raw = req.body.toString("utf8");
-  const sig = req.headers["x-paystack-signature"];
-  const expected = crypto.createHmac("sha512", PAYSTACK_SECRET).update(raw).digest("hex");
-  if (sig !== expected) return res.status(401).send("bad sig");
+    // Step 1: choose network
+    if (session.step === 1) {
+      if (text === "1") {
+        await saveSession(from, { step: 2, network: "MTN" });
+        return sendWhatsApp(from, MTN_MENU);
+      }
+      if (text === "2") {
+        await saveSession(from, { step: 2, network: "TELECEL" });
+        return sendWhatsApp(from, TELECEL_MENU);
+      }
+      return sendWhatsApp(from, "Please reply 1 or 2.\n\n" + NETWORK_MENU);
+    }
 
-  let event;
-  try { event = JSON.parse(raw); } catch { return res.status(400).send("bad json"); }
-  if (event.event !== "charge.success") return res.send("ok");
+    // Step 2: choose bundle
+    if (session.step === 2) {
+      const bundle = PACKAGES[session.network]?.[text];
+      if (!bundle) return sendWhatsApp(from, "Invalid choice. Reply with the bundle number.");
+      await saveSession(from, { step: 3, bundle: text });
+      return sendWhatsApp(from, `You picked ${bundle.size} for ₵${bundle.price.toFixed(2)}.\n\nNow send the recipient phone number (e.g. 0241234567):`);
+    }
 
-  const reference = event.data.reference;
-  const { data: order } = await supabase.from("orders").select("*").eq("reference", reference).maybeSingle();
-  if (!order) return res.send("ok");
+    // Step 3: recipient number
+    if (session.step === 3) {
+      const phone = text.replace(/\s+/g, "");
+      if (!/^0\d{9}$/.test(phone)) {
+        return sendWhatsApp(from, "Invalid number. Send a 10-digit number starting with 0 (e.g. 0241234567).");
+      }
+      const bundle = PACKAGES[session.network][session.bundle];
+      const reference = `NDG-${Date.now()}-${Math.floor(Math.random() * 9999)}`;
 
-  await supabase.from("orders").update({ payment_status: "paid" }).eq("reference", reference);
+      const payLink = await createPaystackLink(bundle.price, reference, from);
 
-  try {
-    const bundle = Object.values(PACKAGES[order.network] || {}).find(b => b.size === order.bundle_size);
-    if (!bundle) throw new Error("Unknown bundle");
-    await deliverData(order.recipient_number, bundle.apiNetwork, bundle.capacity);
-    await supabase.from("orders").update({ delivery_status: "delivered" }).eq("reference", reference);
-    await sendWhatsApp(order.whatsapp_from,
-      `✅ Payment received!\n\n${order.bundle_size} (${order.network}) is on the way to ${order.recipient_number}.\n\nThank you for choosing NestyDatagh 💙`);
+      await supabase.from("orders").insert({
+        reference,
+        whatsapp_from: from,
+        recipient_number: phone,
+        network: session.network,
+        bundle_size: session.bundle, // store the key (e.g. "8")
+        price_ghs: bundle.price,
+        payment_status: "pending",
+        delivery_status: "pending",
+        paystack_link: payLink,
+      });
+
+      await clearSession(from);
+
+      return sendWhatsApp(
+        from,
+        `Order created ✅\n\nNetwork: ${session.network}\nBundle: ${bundle.size}\nRecipient: ${phone}\nAmount: ₵${bundle.price.toFixed(2)}\n\nPay here:\n${payLink}\n\nYour data will be delivered automatically after payment.`
+      );
+    }
   } catch (e) {
-    console.error("Delivery failed:", e.message);
-    await supabase.from("orders").update({ delivery_status: "failed", delivery_error: String(e.message).slice(0, 500) }).eq("reference", reference);
-    await sendWhatsApp(order.whatsapp_from,
-      `⚠️ Payment received but delivery delayed for ${order.bundle_size}. Reference: ${reference}`);
+    console.error("Webhook error:", e);
   }
-  res.send("ok");
 });
 
-app.listen(PORT, () => console.log(`🚀 NestyDatagh bot on :${PORT}`));
+// ============ PAYSTACK WEBHOOK ============
+app.post("/paystack-webhook", async (req, res) => {
+  res.sendStatus(200);
+  try {
+    const event = req.body;
+    if (event.event !== "charge.success") return;
+
+    const reference = event.data.reference;
+
+    const { data: order } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("reference", reference)
+      .maybeSingle();
+
+    if (!order) return console.error("Order not found:", reference);
+    if (order.payment_status === "paid") return; // already processed
+
+    await supabase
+      .from("orders")
+      .update({ payment_status: "paid", updated_at: new Date().toISOString() })
+      .eq("reference", reference);
+
+    // Deliver via Datamart
+    const result = await deliverData({
+      ...order,
+      bundle_size_key: order.bundle_size, // the "8" key
+    });
+
+    if (result.ok) {
+      await supabase
+        .from("orders")
+        .update({ delivery_status: "delivered", updated_at: new Date().toISOString() })
+        .eq("reference", reference);
+      await sendWhatsApp(
+        order.whatsapp_from,
+        `✅ Payment received!\nYour ${PACKAGES[order.network][order.bundle_size].size} for ${order.recipient_number} is being delivered. Thank you for choosing NestyDatagh💙`
+      );
+    } else {
+      await supabase
+        .from("orders")
+        .update({
+          delivery_status: "failed",
+          delivery_error: result.error,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("reference", reference);
+      await sendWhatsApp(
+        order.whatsapp_from,
+        `⚠️ Payment received but delivery failed. Our team has been notified and will resolve this shortly.`
+      );
+    }
+  } catch (e) {
+    console.error("Paystack webhook error:", e);
+  }
+});
+
+// ============ HEALTH ============
+app.get("/", (_req, res) => res.send("NestyDatagh bot is running ✅"));
+
+app.listen(PORT, () => console.log(`Bot listening on ${PORT}`));
