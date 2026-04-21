@@ -42,13 +42,29 @@ const PACKAGES = {
   },
 };
 
-const NETWORK_MENU = `Welcome to NestyDatagh💙\n\n1 - MTN Data\n2 - Telecel Data`;
-const MTN_MENU = `MTN Bundles:\n\n` +
-  Object.entries(PACKAGES.MTN).map(([k, v]) => `${k} - ${v.size} ₵${v.price.toFixed(2)}`).join("\n") +
-  `\n\nReply with the bundle number:`;
-const TELECEL_MENU = `Telecel Bundles:\n\n` +
-  Object.entries(PACKAGES.TELECEL).map(([k, v]) => `${k} - ${v.size} ₵${v.price.toFixed(2)}`).join("\n") +
-  `\n\nReply with the bundle number:`;
+const NETWORK_MENU =
+`Welcome to NestyDatagh💙
+
+1 - MTN Data
+2 - Telecel Data`;
+
+const MTN_MENU =
+`MTN Bundles:
+
+${Object.entries(PACKAGES.MTN)
+  .map(([k, v]) => `${k} - ${v.size} ₵${v.price}`)
+  .join("\n")}
+
+Reply with the bundle number:`;
+
+const TELECEL_MENU =
+`Telecel Bundles:
+
+${Object.entries(PACKAGES.TELECEL)
+  .map(([k, v]) => `${k} - ${v.size} ₵${v.price}`)
+  .join("\n")}
+
+Reply with the bundle number:`;
 
 // ---- WHATSAPP ----
 async function sendWhatsApp(to, body) {
