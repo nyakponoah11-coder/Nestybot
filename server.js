@@ -112,17 +112,32 @@ async function createPaystackLink(amountGhs, reference, whatsappFrom) {
 
 // ---- SESSION HELPERS ----
 async function getSession(from) {
-  const { data } = await supabase.from("bot_sessions").select("*").eq("whatsapp_from", from).maybeSingle();
-  if (data) return data;
-  const { data: created } = await supabase
-    .from("bot_sessions").insert({ whatsapp_from: from, step: 0 }).select().single();
-  return created;
-}
-async function updateSession(from, patch) {
-  await supabase.from("bot_sessions").update({ ...patch, updated_at: new Date().toISOString() }).eq("whatsapp_from", from);
-}
-async function resetSession(from) {
-  await supabase.from("bot_sessions").update({ step: 0, network: null, bundle: null, recipient_number: null }).eq("whatsapp_from", from);
+  const { data } = await supabase
+    .from("bot_sessions")
+    .select("*")
+    .eq("whatsapp_from", from)
+    .maybeSingle();
+
+  // ✅ if not found, create new session
+  if (!data) {
+    const { data: created, error } = await supabase
+      .from("bot_sessions")
+      .insert({
+        whatsapp_from: from,
+        step: 0
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.log("SESSION ERROR:", error);
+      return { step: 0 }; // fallback
+    }
+
+    return created;
+  }
+
+  return data;
 }
 
 // ---- BOT FLOW ----
