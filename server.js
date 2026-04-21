@@ -42,20 +42,46 @@ const PACKAGES = {
   },
 };
 
-const NETWORK_MENU =
-`Welcome to NestyDatagh💙
+if (!users[from]) {
+  users[from] = { step: 0 };
+}
 
-1 - MTN Data
-2 - Telecel Data`;
+let reply = "";
 
-const MTN_MENU =
-`MTN Bundles:
+// STEP 0
+if (users[from].step === 0) {
+  users[from].step = 1;
+  reply = NETWORK_MENU;
+}
 
-${Object.entries(PACKAGES.MTN)
-  .map(([k, v]) => `${k} - ${v.size} ₵${v.price}`)
-  .join("\n")}
+// STEP 1
+else if (users[from].step === 1) {
+  if (text === "1") {
+    users[from].network = "MTN";
+    users[from].step = 2;
+    reply = MTN_MENU;
+  } else if (text === "2") {
+    users[from].network = "TELECEL";
+    users[from].step = 2;
+    reply = TELECEL_MENU;
+  } else {
+    reply = "Reply with 1 or 2";
+  }
+}
 
-Reply with the bundle number:`;
+// STEP 2
+else if (users[from].step === 2) {
+  const selected = PACKAGES[users[from].network][text];
+
+  if (!selected) {
+    reply = "Invalid bundle. Try again.";
+  } else {
+    users[from].bundle = text;
+    users[from].size = selected.size;
+    users[from].step = 3;
+    reply = "Enter your phone number:";
+  }
+}
 
 const TELECEL_MENU =
 `Telecel Bundles:
