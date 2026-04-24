@@ -67,32 +67,29 @@ async function sendWhatsApp(to, text) {
 
 // ============ SESSION HELPERS ============
 async function getSession(from) {
-  const { data } = await supabase
+  let { data } = await supabase
     .from("bot_sessions")
     .select("*")
     .eq("whatsapp_from", from)
     .maybeSingle();
+
+  if (!data) {
+    const { data: newSession } = await supabase
+      .from("bot_sessions")
+      .insert({
+        whatsapp_from: from,
+        step: 1,
+        network: null,
+        bundle: null,
+      })
+      .select()
+      .single();
+
+    return newSession;
+  }
+
   return data;
 }
-
-async function saveSession(from, fields) {
-  const existing = await getSession(from);
-  if (existing) {
-    await supabase
-      .from("bot_sessions")
-      .update({ ...fields, updated_at: new Date().toISOString() })
-      .eq("whatsapp_from", from);
-  } else {
-    await supabase
-      .from("bot_sessions")
-      .insert({ whatsapp_from: from, ...fields });
-  }
-}
-
-async function clearSession(from) {
-  await supabase.from("bot_sessions").delete().eq("whatsapp_from", from);
-}
-
 // ============ PAYSTACK ============
 async function createPaystackLink(amountGhs, reference, from) {
   const res = await axios.post(
@@ -153,9 +150,12 @@ app.post("/webhook", async (req, res) => {
     const from = msg.from;
     const text = (msg.text?.body || "").trim();
     const session = await getSession(from);
+    console.log("FROM:", from);
+    console.log("TEXT:", text);
+    console.log("SESSION:", session);
 
     // Restart triggers
-    if (/^(hi|hello|menu|start|hey)$/i.test(text) || !session) {
+    if (/^(hi|hello|menu|start|hey)$/i.test(text) {
       await saveSession(from, { step: 1, network: null, bundle: null, recipient_number: null });
       return sendWhatsApp(from, NETWORK_MENU);
     }
