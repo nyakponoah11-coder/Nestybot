@@ -7,7 +7,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-/* ================= ENV ================= */
+// ================= ENV =================
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_ID = process.env.PHONE_ID;
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET;
@@ -17,12 +17,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-/* ================= FIX PHONE FORMAT ================= */
-function normalizePhone(phone) {
-  return phone.replace(/\D/g, ""); // removes +, spaces, etc
-}
-
-/* ================= PACKAGES ================= */
+// ================= PACKAGES =================
 const PACKAGES = {
   MTN: {
     "1": { size: "1GB", price: 5, capacity: "1", apiNetwork: "YELLO" },
@@ -33,7 +28,7 @@ const PACKAGES = {
 const MENU = `Welcome 💙\n\n1 - MTN Data`;
 const BUNDLE_MENU = `MTN Bundles:\n1 - 1GB ₵5\n2 - 2GB ₵10`;
 
-/* ================= WHATSAPP ================= */
+// ================= WHATSAPP =================
 async function sendWhatsApp(to, text) {
   try {
     await axios.post(
@@ -55,12 +50,12 @@ async function sendWhatsApp(to, text) {
   }
 }
 
-/* ================= WEBHOOK VERIFY ================= */
+// ================= WEBHOOK VERIFY =================
 app.get("/webhook", (req, res) => {
   res.send(req.query["hub.challenge"]);
 });
 
-/* ================= MAIN BOT ================= */
+// ================= BOT =================
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
@@ -68,49 +63,43 @@ app.post("/webhook", async (req, res) => {
     const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return;
 
-    const from = normalizePhone(msg.from);
+    const from = msg.from;
     const text = (msg.text?.body || "").trim();
 
-    console.log("📩 MESSAGE:", from, text);
+    console.log("📩", from, text);
 
-    /* ================= GET SESSION ================= */
+    // ================= UPSERT SESSION (FIX) =================
+    await supabase
+      .from("sessions")
+      .upsert(
+        [{ phone: from, step: 1 }],
+        { onConflict: "phone" }
+      );
+
+    // ================= GET SESSION =================
     let { data: session } = await supabase
       .from("sessions")
       .select("*")
       .eq("phone", from)
-      .maybeSingle();
+      .single();
 
-    /* ================= CREATE SESSION ================= */
-    if (!session) {
-      await supabase.from("sessions").insert([
-        { phone: from, step: 1 }
-      ]);
-
-      return sendWhatsApp(from, MENU);
-    }
-
-    /* ================= RESET ================= */
+    // ================= RESET =================
     if (/^(hi|hello|start)$/i.test(text)) {
       await supabase
         .from("sessions")
-        .update({ step: 1, bundle: null, ref: null })
+        .update({ step: 1 })
         .eq("phone", from);
 
       return sendWhatsApp(from, MENU);
     }
 
-    /* ================= STEP 1 ================= */
+    // ================= STEP 1 =================
     if (session.step === 1) {
       if (text === "1") {
-        const { error } = await supabase
+        await supabase
           .from("sessions")
           .update({ step: 2, network: "MTN" })
           .eq("phone", from);
-
-        if (error) {
-          console.error("DB ERROR:", error);
-          return sendWhatsApp(from, "System error. Try again.");
-        }
 
         return sendWhatsApp(from, BUNDLE_MENU);
       }
@@ -118,13 +107,11 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, MENU);
     }
 
-    /* ================= STEP 2 ================= */
+    // ================= STEP 2 =================
     if (session.step === 2) {
       const bundle = PACKAGES.MTN[text];
 
-      if (!bundle) {
-        return sendWhatsApp(from, "Invalid option ❌");
-      }
+      if (!bundle) return sendWhatsApp(from, "Invalid option ❌");
 
       await supabase
         .from("sessions")
@@ -134,9 +121,9 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, "Enter phone number:");
     }
 
-    /* ================= STEP 3 ================= */
+    // ================= STEP 3 =================
     if (session.step === 3) {
-      const phone = normalizePhone(text);
+      const phone = text.replace(/\D/g, "");
 
       if (phone.length < 10) {
         return sendWhatsApp(from, "Invalid number ❌");
@@ -180,7 +167,7 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-/* ================= START SERVER ================= */
+// ================= START =================
 app.listen(PORT, () => {
-  console.log("🚀 BOT RUNNING ON PORT", PORT);
+  console.log("🚀 BOT RUNNING ON", PORT);
 });
