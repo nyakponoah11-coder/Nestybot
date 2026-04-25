@@ -34,7 +34,7 @@ const PACKAGES = {
   }
 };
 
-const MENU = `Welcome 💙\n\n1 - MTN Data`;
+const MENU = `Welcome stony💙\n\n1 - MTN Data`;
 const BUNDLE_MENU = `MTN Bundles:\n1 - 1GB ₵5\n2 - 2GB ₵10`;
 
 // ================= WHATSAPP =================
