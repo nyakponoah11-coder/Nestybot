@@ -1,22 +1,18 @@
 const express = require("express");
 const axios = require("axios");
-const crypto = require("crypto");
-const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(express.json());
 
-// ===== ENV =====
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_ID = process.env.PHONE_ID;
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET;
 const DATA_API_KEY = process.env.DATA_API_KEY;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// ===== MEMORY SESSION (FIXED) =====
+const sessions = {};
 
 // ===== PACKAGES =====
 const PACKAGES = {
@@ -26,11 +22,10 @@ const PACKAGES = {
   }
 };
 
-// ===== MENUS =====
 const MENU = `Welcome 💙\n\n1 - MTN Data`;
 const BUNDLE_MENU = `MTN Bundles:\n1 - 1GB ₵5\n2 - 2GB ₵10`;
 
-// ===== SEND WA =====
+// ===== SEND WHATSAPP =====
 async function sendWhatsApp(to, text) {
   try {
     await axios.post(
@@ -53,35 +48,6 @@ async function sendWhatsApp(to, text) {
   }
 }
 
-// ===== SESSION =====
-async function getSession(from) {
-  let { data } = await supabase
-    .from("bot_sessions")
-    .select("*")
-    .eq("whatsapp_from", from)
-    .maybeSingle();
-
-  if (!data) {
-    const { data: newSession } = await supabase
-      .from("bot_sessions")
-      .insert({ whatsapp_from: from, step: 1 })
-      .select()
-      .single();
-
-    return newSession;
-  }
-
-  return data;
-}
-
-async function updateSession(from, fields) {
-  await supabase.from("bot_sessions").update(fields).eq("whatsapp_from", from);
-}
-
-async function clearSession(from) {
-  await supabase.from("bot_sessions").delete().eq("whatsapp_from", from);
-}
-
 // ===== PAYSTACK =====
 async function createPaystackLink(amount, ref, from) {
   const res = await axios.post(
@@ -98,21 +64,18 @@ async function createPaystackLink(amount, ref, from) {
 }
 
 // ===== DELIVERY =====
-async function deliverData(order) {
+async function deliverData(phone, bundle) {
   try {
-    const bundle = PACKAGES[order.network][order.bundle];
-
     await axios.post(
       "https://api.datamartgh.shop/api/developer/purchase",
       {
-        phoneNumber: order.recipient_number,
+        phoneNumber: phone,
         network: bundle.apiNetwork,
         capacity: bundle.capacity,
         gateway: "wallet"
       },
       { headers: { "x-api-key": DATA_API_KEY } }
     );
-
     return true;
   } catch (e) {
     console.error("Delivery error:", e.response?.data || e.message);
@@ -142,52 +105,58 @@ app.post("/webhook", async (req, res) => {
     const from = msg.from;
     const text = (msg.text?.body || "").trim();
 
-    console.log("📩", text);
+    console.log("📩", from, text);
 
-    const session = await getSession(from);
-
-    // RESET
-    if (/^(hi|hello|start)$/i.test(text)) {
-      await updateSession(from, { step: 1 });
+    // CREATE SESSION IF NOT EXISTS
+    if (!sessions[from]) {
+      sessions[from] = { step: 1 };
       return sendWhatsApp(from, MENU);
     }
 
-    // STEP 1
+    const session = sessions[from];
+
+    // RESET
+    if (/^(hi|hello|start)$/i.test(text)) {
+      sessions[from] = { step: 1 };
+      return sendWhatsApp(from, MENU);
+    }
+
+    // STEP 1 → NETWORK
     if (session.step === 1) {
       if (text === "1") {
-        await updateSession(from, { step: 2, network: "MTN" });
+        session.step = 2;
+        session.network = "MTN";
         return sendWhatsApp(from, BUNDLE_MENU);
       }
       return sendWhatsApp(from, MENU);
     }
 
-    // STEP 2
+    // STEP 2 → BUNDLE
     if (session.step === 2) {
       const bundle = PACKAGES.MTN[text];
-      if (!bundle) return sendWhatsApp(from, "Invalid");
+      if (!bundle) return sendWhatsApp(from, "Invalid option");
 
-      await updateSession(from, { step: 3, bundle: text });
+      session.step = 3;
+      session.bundle = text;
+
       return sendWhatsApp(from, "Enter phone number:");
     }
 
-    // STEP 3
+    // STEP 3 → PHONE + PAYMENT
     if (session.step === 3) {
       const phone = text.replace(/\D/g, "");
+      if (phone.length < 10) return sendWhatsApp(from, "Invalid number");
+
       const bundle = PACKAGES.MTN[session.bundle];
       const ref = "REF-" + Date.now();
 
       const link = await createPaystackLink(bundle.price, ref, from);
 
-      await supabase.from("orders").insert({
-        reference: ref,
-        whatsapp_from: from,
-        recipient_number: phone,
-        network: "MTN",
-        bundle: session.bundle,
-        price_ghs: bundle.price
-      });
+      // store temporarily
+      session.phone = phone;
+      session.ref = ref;
 
-      await clearSession(from);
+      session.step = 4;
 
       return sendWhatsApp(from, `Pay here:\n${link}`);
     }
@@ -201,22 +170,27 @@ app.post("/webhook", async (req, res) => {
 app.post("/paystack-webhook", async (req, res) => {
   res.sendStatus(200);
 
-  const event = req.body;
-  if (event.event !== "charge.success") return;
+  try {
+    const event = req.body;
+    if (event.event !== "charge.success") return;
 
-  const ref = event.data.reference;
+    const ref = event.data.reference;
 
-  const { data: order } = await supabase
-    .from("orders")
-    .select("*")
-    .eq("reference", ref)
-    .maybeSingle();
+    // find session by ref
+    const entry = Object.values(sessions).find(s => s.ref === ref);
+    if (!entry) return;
 
-  if (!order) return;
+    const bundle = PACKAGES.MTN[entry.bundle];
 
-  await deliverData(order);
+    const ok = await deliverData(entry.phone, bundle);
 
-  await sendWhatsApp(order.whatsapp_from, "✅ Data delivered!");
+    if (ok) {
+      await sendWhatsApp(event.data.customer.email.split("@")[0], "✅ Data delivered!");
+    }
+
+  } catch (e) {
+    console.error("Payment webhook error:", e);
+  }
 });
 
 // ===== SERVER =====
