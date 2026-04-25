@@ -7,7 +7,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ================= ENV =================
+/* ================= ENV ================= */
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_ID = process.env.PHONE_ID;
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET;
@@ -17,7 +17,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ================= PACKAGES =================
+/* ================= PACKAGES ================= */
 const PACKAGES = {
   MTN: {
     "1": { size: "1GB", price: 5, capacity: "1", apiNetwork: "YELLO" },
@@ -28,7 +28,7 @@ const PACKAGES = {
 const MENU = `Welcome 💙\n\n1 - MTN Data`;
 const BUNDLE_MENU = `MTN Bundles:\n1 - 1GB ₵5\n2 - 2GB ₵10`;
 
-// ================= WHATSAPP =================
+/* ================= SEND MESSAGE ================= */
 async function sendWhatsApp(to, text) {
   try {
     await axios.post(
@@ -50,12 +50,12 @@ async function sendWhatsApp(to, text) {
   }
 }
 
-// ================= WEBHOOK VERIFY =================
+/* ================= WEBHOOK VERIFY ================= */
 app.get("/webhook", (req, res) => {
   res.send(req.query["hub.challenge"]);
 });
 
-// ================= BOT =================
+/* ================= BOT ================= */
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
@@ -68,22 +68,23 @@ app.post("/webhook", async (req, res) => {
 
     console.log("📩", from, text);
 
-    // ================= UPSERT SESSION (FIX) =================
-    await supabase
-      .from("sessions")
-      .upsert(
-        [{ phone: from, step: 1 }],
-        { onConflict: "phone" }
-      );
-
-    // ================= GET SESSION =================
+    /* ================= GET SESSION ================= */
     let { data: session } = await supabase
       .from("sessions")
       .select("*")
       .eq("phone", from)
       .single();
 
-    // ================= RESET =================
+    /* ================= CREATE SESSION ================= */
+    if (!session) {
+      await supabase
+        .from("sessions")
+        .insert([{ phone: from, step: 1 }]);
+
+      return sendWhatsApp(from, MENU);
+    }
+
+    /* ================= RESET ================= */
     if (/^(hi|hello|start)$/i.test(text)) {
       await supabase
         .from("sessions")
@@ -93,7 +94,7 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, MENU);
     }
 
-    // ================= STEP 1 =================
+    /* ================= STEP 1 ================= */
     if (session.step === 1) {
       if (text === "1") {
         await supabase
@@ -107,7 +108,7 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, MENU);
     }
 
-    // ================= STEP 2 =================
+    /* ================= STEP 2 ================= */
     if (session.step === 2) {
       const bundle = PACKAGES.MTN[text];
 
@@ -115,13 +116,16 @@ app.post("/webhook", async (req, res) => {
 
       await supabase
         .from("sessions")
-        .update({ step: 3, bundle: text })
+        .update({
+          step: 3,
+          bundle: text
+        })
         .eq("phone", from);
 
       return sendWhatsApp(from, "Enter phone number:");
     }
 
-    // ================= STEP 3 =================
+    /* ================= STEP 3 ================= */
     if (session.step === 3) {
       const phone = text.replace(/\D/g, "");
 
@@ -132,6 +136,7 @@ app.post("/webhook", async (req, res) => {
       const bundle = PACKAGES.MTN[session.bundle];
       const ref = "REF-" + Date.now();
 
+      /* ================= PAYMENT ================= */
       const pay = await axios.post(
         "https://api.paystack.co/transaction/initialize",
         {
@@ -156,10 +161,7 @@ app.post("/webhook", async (req, res) => {
         })
         .eq("phone", from);
 
-      return sendWhatsApp(
-        from,
-        `Pay here:\n${pay.data.data.authorization_url}`
-      );
+      return sendWhatsApp(from, `Pay here:\n${pay.data.data.authorization_url}`);
     }
 
   } catch (e) {
@@ -167,7 +169,57 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ================= START =================
+/* ================= PAYSTACK WEBHOOK ================= */
+app.post("/paystack-webhook", async (req, res) => {
+  res.sendStatus(200);
+
+  try {
+    const event = req.body;
+    if (event.event !== "charge.success") return;
+
+    const ref = event.data.reference;
+
+    const { data: session } = await supabase
+      .from("sessions")
+      .select("*")
+      .eq("ref", ref)
+      .single();
+
+    if (!session) return;
+
+    const bundle = PACKAGES.MTN[session.bundle];
+
+    /* ================= DELIVERY ================= */
+    const delivery = await axios.post(
+      "https://api.datamartgh.shop/api/developer/purchase",
+      {
+        phoneNumber: session.phone_number,
+        network: bundle.apiNetwork,
+        capacity: bundle.capacity,
+        gateway: "wallet"
+      },
+      {
+        headers: {
+          "x-api-key": DATA_API_KEY
+        }
+      }
+    );
+
+    console.log("DELIVERY RESULT:", delivery.data);
+
+    await supabase
+      .from("sessions")
+      .update({ step: 5 })
+      .eq("ref", ref);
+
+    await sendWhatsApp(session.phone, "✅ Data delivered successfully!");
+
+  } catch (e) {
+    console.error("PAYSTACK ERROR:", e.response?.data || e.message);
+  }
+});
+
+/* ================= START ================= */
 app.listen(PORT, () => {
   console.log("🚀 BOT RUNNING ON", PORT);
 });
