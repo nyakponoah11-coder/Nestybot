@@ -20,6 +20,9 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
+// 🔥 FIX: prevent duplicate webhook processing
+const processedMessages = new Set();
+
 // PACKAGES
 const PACKAGES = {
   MTN: {
@@ -90,6 +93,7 @@ async function deliverData(phone, bundle) {
         }
       }
     );
+
     return true;
   } catch (e) {
     console.error("DELIVERY ERROR:", e.response?.data || e.message);
@@ -97,9 +101,9 @@ async function deliverData(phone, bundle) {
   }
 }
 
-//
-// WEBHOOK VERIFY
-//
+/* =========================
+   WEBHOOK VERIFY
+========================= */
 app.get("/webhook", (req, res) => {
   if (
     req.query["hub.mode"] === "subscribe" &&
@@ -110,24 +114,29 @@ app.get("/webhook", (req, res) => {
   res.sendStatus(403);
 });
 
-//
-// MAIN BOT FLOW (FIXED)
-//
+/* =========================
+   MAIN WHATSAPP BOT
+========================= */
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
+  res.sendStatus(200); // MUST respond fast
 
   try {
     const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return;
 
+    const messageId = msg.id;
     const from = msg.from;
     const text = (msg.text?.body || "").trim();
 
+    // 🔥 FIX: stop duplicate webhook processing
+    if (processedMessages.has(messageId)) return;
+    processedMessages.add(messageId);
+
+    setTimeout(() => processedMessages.delete(messageId), 5 * 60 * 1000);
+
     console.log("📩", from, text);
 
-    //
-    // 1. GET OR CREATE ORDER (ONLY ONCE)
-    //
+    // GET LAST ORDER
     let { data: order } = await supabase
       .from("orders")
       .select("*")
@@ -136,23 +145,16 @@ app.post("/webhook", async (req, res) => {
       .limit(1)
       .maybeSingle();
 
-    //
-    // 2. NEW USER
-    //
+    // NEW USER
     if (!order) {
-      const { data } = await supabase
-        .from("orders")
-        .insert([{ phone: from, step: 1, status: "active" }])
-        .select()
-        .single();
+      await supabase.from("orders").insert([
+        { phone: from, step: 1, status: "active" }
+      ]);
 
-      await sendWhatsApp(from, MENU);
-      return;
+      return sendWhatsApp(from, MENU);
     }
 
-    //
-    // 3. RESET FLOW ONLY IF USER TYPES START
-    //
+    // RESET FLOW
     if (text.toLowerCase() === "start") {
       await supabase
         .from("orders")
@@ -162,9 +164,7 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, MENU);
     }
 
-    //
-    // 4. STEP 1 → NETWORK
-    //
+    // STEP 1
     if (order.step === 1) {
       if (text === "1") {
         await supabase
@@ -178,9 +178,7 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, MENU);
     }
 
-    //
-    // 5. STEP 2 → BUNDLE
-    //
+    // STEP 2
     if (order.step === 2) {
       const bundle = PACKAGES.MTN[text];
 
@@ -200,9 +198,7 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, "Enter phone number:");
     }
 
-    //
-    // 6. STEP 3 → PHONE + PAYMENT
-    //
+    // STEP 3
     if (order.step === 3) {
       const phone = text.replace(/\D/g, "");
 
@@ -230,9 +226,9 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-//
-// PAYSTACK WEBHOOK (FIXED)
-//
+/* =========================
+   PAYSTACK WEBHOOK
+========================= */
 app.post("/paystack-webhook", async (req, res) => {
   res.sendStatus(200);
 
@@ -267,9 +263,9 @@ app.post("/paystack-webhook", async (req, res) => {
   }
 });
 
-//
-// START SERVER
-//
+/* =========================
+   START SERVER
+========================= */
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Bot running on port", PORT);
 });
