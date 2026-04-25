@@ -170,26 +170,30 @@ app.post("/webhook", async (req, res) => {
 });
 
 /* ================= PAYSTACK WEBHOOK ================= */
-app.post("/paystack-webhook", async (req, res) => {
+ app.post("/paystack-webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
+    console.log("🔥 WEBHOOK HIT");
+
     const event = req.body;
     if (event.event !== "charge.success") return;
 
     const ref = event.data.reference;
 
-    const { data: session } = await supabase
+    const { data: session, error } = await supabase
       .from("sessions")
       .select("*")
       .eq("ref", ref)
       .single();
 
+    console.log("SESSION FOUND:", session);
+    console.log("SESSION ERROR:", error);
+
     if (!session) return;
 
     const bundle = PACKAGES.MTN[session.bundle];
 
-    /* ================= DELIVERY ================= */
     const delivery = await axios.post(
       "https://api.datamartgh.shop/api/developer/purchase",
       {
@@ -207,15 +211,10 @@ app.post("/paystack-webhook", async (req, res) => {
 
     console.log("DELIVERY RESULT:", delivery.data);
 
-    await supabase
-      .from("sessions")
-      .update({ step: 5 })
-      .eq("ref", ref);
-
     await sendWhatsApp(session.phone, "✅ Data delivered successfully!");
 
   } catch (e) {
-    console.error("PAYSTACK ERROR:", e.response?.data || e.message);
+    console.error("WEBHOOK ERROR:", e.response?.data || e.message);
   }
 });
 
