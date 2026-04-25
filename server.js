@@ -98,7 +98,7 @@ async function deliverData(phone, bundle) {
 }
 
 //
-// VERIFY WEBHOOK
+// WEBHOOK VERIFY
 //
 app.get("/webhook", (req, res) => {
   if (
@@ -111,7 +111,7 @@ app.get("/webhook", (req, res) => {
 });
 
 //
-// MAIN BOT
+// MAIN BOT FLOW (FIXED)
 //
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
@@ -125,34 +125,45 @@ app.post("/webhook", async (req, res) => {
 
     console.log("📩", from, text);
 
-    // FIND OR CREATE ORDER
+    //
+    // 1. GET OR CREATE ORDER (ONLY ONCE)
+    //
     let { data: order } = await supabase
       .from("orders")
       .select("*")
       .eq("phone", from)
       .order("id", { ascending: false })
       .limit(1)
-      .single();
+      .maybeSingle();
 
+    //
+    // 2. NEW USER
+    //
     if (!order) {
-      const { data: newOrder } = await supabase
+      const { data } = await supabase
         .from("orders")
-        .insert([{ phone: from, step: 1 }])
+        .insert([{ phone: from, step: 1, status: "active" }])
         .select()
         .single();
 
-      order = newOrder;
-      return sendWhatsApp(from, MENU);
+      await sendWhatsApp(from, MENU);
+      return;
     }
 
-    // RESET
-    if (/^(hi|hello|start)$/i.test(text)) {
-      await supabase.from("orders").update({ step: 1 }).eq("id", order.id);
+    //
+    // 3. RESET FLOW ONLY IF USER TYPES START
+    //
+    if (text.toLowerCase() === "start") {
+      await supabase
+        .from("orders")
+        .update({ step: 1, bundle: null, reference: null })
+        .eq("id", order.id);
+
       return sendWhatsApp(from, MENU);
     }
 
     //
-    // STEP 1 → NETWORK
+    // 4. STEP 1 → NETWORK
     //
     if (order.step === 1) {
       if (text === "1") {
@@ -163,15 +174,19 @@ app.post("/webhook", async (req, res) => {
 
         return sendWhatsApp(from, BUNDLE_MENU);
       }
+
       return sendWhatsApp(from, MENU);
     }
 
     //
-    // STEP 2 → BUNDLE
+    // 5. STEP 2 → BUNDLE
     //
     if (order.step === 2) {
       const bundle = PACKAGES.MTN[text];
-      if (!bundle) return sendWhatsApp(from, "Invalid option");
+
+      if (!bundle) {
+        return sendWhatsApp(from, "Invalid option. Try again.");
+      }
 
       await supabase
         .from("orders")
@@ -186,12 +201,13 @@ app.post("/webhook", async (req, res) => {
     }
 
     //
-    // STEP 3 → PHONE + PAYMENT
+    // 6. STEP 3 → PHONE + PAYMENT
     //
     if (order.step === 3) {
       const phone = text.replace(/\D/g, "");
+
       if (phone.length < 10) {
-        return sendWhatsApp(from, "Invalid number");
+        return sendWhatsApp(from, "Invalid phone number");
       }
 
       const ref = "REF-" + Date.now();
@@ -215,7 +231,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 //
-// PAYSTACK WEBHOOK
+// PAYSTACK WEBHOOK (FIXED)
 //
 app.post("/paystack-webhook", async (req, res) => {
   res.sendStatus(200);
@@ -241,7 +257,7 @@ app.post("/paystack-webhook", async (req, res) => {
     if (ok) {
       await supabase
         .from("orders")
-        .update({ status: "delivered" })
+        .update({ status: "delivered", step: 5 })
         .eq("reference", ref);
 
       await sendWhatsApp(order.phone, "✅ Data delivered successfully!");
@@ -255,5 +271,5 @@ app.post("/paystack-webhook", async (req, res) => {
 // START SERVER
 //
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 Running on port", PORT);
+  console.log("🚀 Bot running on port", PORT);
 });
