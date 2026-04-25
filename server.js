@@ -20,10 +20,7 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
-// 🔥 FIX: prevent duplicate webhook processing
-const processedMessages = new Set();
-
-// PACKAGES
+// ================= PACKAGES =================
 const PACKAGES = {
   MTN: {
     "1": { size: "1GB", price: 5, capacity: "1", apiNetwork: "YELLO" },
@@ -31,10 +28,10 @@ const PACKAGES = {
   }
 };
 
-const MENU = `Welcome 💙\n\n1 - MTN Data`;
+const MENU = `Welcome Stony💙\n\n1 - MTN Data`;
 const BUNDLE_MENU = `MTN Bundles:\n1 - 1GB ₵5\n2 - 2GB ₵10`;
 
-// SEND WHATSAPP
+// ================= WHATSAPP SEND =================
 async function sendWhatsApp(to, text) {
   try {
     await axios.post(
@@ -56,12 +53,12 @@ async function sendWhatsApp(to, text) {
   }
 }
 
-// PAYSTACK
+// ================= PAYSTACK =================
 async function createPaystackLink(amount, ref, email) {
   const res = await axios.post(
     "https://api.paystack.co/transaction/initialize",
     {
-      email: `${email}@test.com`,
+      email: `${email}@nesty.com`,
       amount: amount * 100,
       currency: "GHS",
       reference: ref
@@ -76,7 +73,7 @@ async function createPaystackLink(amount, ref, email) {
   return res.data.data.authorization_url;
 }
 
-// DELIVERY
+// ================= DELIVERY =================
 async function deliverData(phone, bundle) {
   try {
     await axios.post(
@@ -101,9 +98,7 @@ async function deliverData(phone, bundle) {
   }
 }
 
-/* =========================
-   WEBHOOK VERIFY
-========================= */
+// ================= VERIFY WEBHOOK =================
 app.get("/webhook", (req, res) => {
   if (
     req.query["hub.mode"] === "subscribe" &&
@@ -114,11 +109,9 @@ app.get("/webhook", (req, res) => {
   res.sendStatus(403);
 });
 
-/* =========================
-   MAIN WHATSAPP BOT
-========================= */
+// ================= MAIN BOT =================
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // MUST respond fast
+  res.sendStatus(200);
 
   try {
     const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
@@ -128,49 +121,54 @@ app.post("/webhook", async (req, res) => {
     const from = msg.from;
     const text = (msg.text?.body || "").trim();
 
-    // 🔥 FIX: stop duplicate webhook processing
-    if (processedMessages.has(messageId)) return;
-    processedMessages.add(messageId);
-
-    setTimeout(() => processedMessages.delete(messageId), 5 * 60 * 1000);
-
     console.log("📩", from, text);
 
-    // GET LAST ORDER
-    let { data: order } = await supabase
-      .from("orders")
+    // ================= DEDUP (CRITICAL FIX) =================
+    const { data: exists } = await supabase
+      .from("processed_messages")
+      .select("message_id")
+      .eq("message_id", messageId)
+      .maybeSingle();
+
+    if (exists) return;
+
+    await supabase
+      .from("processed_messages")
+      .insert([{ message_id: messageId }]);
+
+    // ================= GET SESSION =================
+    let { data: session } = await supabase
+      .from("sessions")
       .select("*")
       .eq("phone", from)
-      .order("id", { ascending: false })
-      .limit(1)
       .maybeSingle();
 
     // NEW USER
-    if (!order) {
-      await supabase.from("orders").insert([
-        { phone: from, step: 1, status: "active" }
+    if (!session) {
+      await supabase.from("sessions").insert([
+        { phone: from, step: 1 }
       ]);
 
       return sendWhatsApp(from, MENU);
     }
 
-    // RESET FLOW
-    if (text.toLowerCase() === "start") {
+    // RESET
+    if (/^(hi|hello|start)$/i.test(text)) {
       await supabase
-        .from("orders")
-        .update({ step: 1, bundle: null, reference: null })
-        .eq("id", order.id);
+        .from("sessions")
+        .update({ step: 1 })
+        .eq("phone", from);
 
       return sendWhatsApp(from, MENU);
     }
 
-    // STEP 1
-    if (order.step === 1) {
+    // ================= STEP 1 =================
+    if (session.step === 1) {
       if (text === "1") {
         await supabase
-          .from("orders")
+          .from("sessions")
           .update({ step: 2, network: "MTN" })
-          .eq("id", order.id);
+          .eq("phone", from);
 
         return sendWhatsApp(from, BUNDLE_MENU);
       }
@@ -178,57 +176,53 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, MENU);
     }
 
-    // STEP 2
-    if (order.step === 2) {
+    // ================= STEP 2 =================
+    if (session.step === 2) {
       const bundle = PACKAGES.MTN[text];
-
-      if (!bundle) {
-        return sendWhatsApp(from, "Invalid option. Try again.");
-      }
+      if (!bundle) return sendWhatsApp(from, "Invalid option");
 
       await supabase
-        .from("orders")
-        .update({
-          step: 3,
-          bundle: text,
-          amount: bundle.price
-        })
-        .eq("id", order.id);
+        .from("sessions")
+        .update({ step: 3, bundle: text })
+        .eq("phone", from);
 
       return sendWhatsApp(from, "Enter phone number:");
     }
 
-    // STEP 3
-    if (order.step === 3) {
+    // ================= STEP 3 =================
+    if (session.step === 3) {
       const phone = text.replace(/\D/g, "");
-
       if (phone.length < 10) {
-        return sendWhatsApp(from, "Invalid phone number");
+        return sendWhatsApp(from, "Invalid number");
       }
 
+      const bundle = PACKAGES.MTN[session.bundle];
       const ref = "REF-" + Date.now();
 
+      const link = await createPaystackLink(
+        bundle.price,
+        ref,
+        from
+      );
+
       await supabase
-        .from("orders")
+        .from("sessions")
         .update({
-          phone,
-          reference: ref,
+          phone_number: phone,
+          ref,
           step: 4
         })
-        .eq("id", order.id);
-
-      const link = await createPaystackLink(order.amount, ref, from);
+        .eq("phone", from);
 
       return sendWhatsApp(from, `Pay here:\n${link}`);
     }
+
   } catch (e) {
     console.error("BOT ERROR:", e);
   }
 });
 
-/* =========================
-   PAYSTACK WEBHOOK
-========================= */
+// ================= PAYSTACK WEBHOOK =================
 app.post("/paystack-webhook", async (req, res) => {
   res.sendStatus(200);
 
@@ -238,34 +232,33 @@ app.post("/paystack-webhook", async (req, res) => {
 
     const ref = event.data.reference;
 
-    const { data: order } = await supabase
-      .from("orders")
+    const { data: session } = await supabase
+      .from("sessions")
       .select("*")
-      .eq("reference", ref)
-      .single();
+      .eq("ref", ref)
+      .maybeSingle();
 
-    if (!order) return;
+    if (!session) return;
 
-    const bundle = PACKAGES.MTN[order.bundle];
+    const bundle = PACKAGES.MTN[session.bundle];
 
-    const ok = await deliverData(order.phone, bundle);
+    const ok = await deliverData(session.phone_number, bundle);
 
     if (ok) {
       await supabase
-        .from("orders")
-        .update({ status: "delivered", step: 5 })
-        .eq("reference", ref);
+        .from("sessions")
+        .update({ step: 5 })
+        .eq("ref", ref);
 
-      await sendWhatsApp(order.phone, "✅ Data delivered successfully!");
+      await sendWhatsApp(session.phone, "✅ Data delivered successfully!");
     }
+
   } catch (e) {
     console.error("PAYSTACK ERROR:", e);
   }
 });
 
-/* =========================
-   START SERVER
-========================= */
+// ================= START SERVER =================
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Bot running on port", PORT);
 });
