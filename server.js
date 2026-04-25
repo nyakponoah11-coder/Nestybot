@@ -7,24 +7,20 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// ================= ENV SAFETY =================
-const must = (v) => {
-  if (!process.env[v]) {
-    console.error("❌ Missing ENV:", v);
-    process.exit(1);
-  }
-  return process.env[v];
-};
+// ================= ENV =================
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
+const PHONE_ID = process.env.PHONE_ID;
+const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET;
+const DATA_API_KEY = process.env.DATA_API_KEY;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-const ACCESS_TOKEN = must("ACCESS_TOKEN");
-const PHONE_ID = must("PHONE_ID");
-const PAYSTACK_SECRET = must("PAYSTACK_SECRET");
-const DATA_API_KEY = must("DATA_API_KEY");
-const SUPABASE_URL = must("SUPABASE_URL");
-const SUPABASE_KEY = must("SUPABASE_KEY");
-
-// ================= SUPABASE =================
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ================= FIX: PHONE NORMALIZER =================
+function normalizePhone(phone) {
+  return phone.replace(/\+/g, "").trim();
+}
 
 // ================= PACKAGES =================
 const PACKAGES = {
@@ -34,10 +30,10 @@ const PACKAGES = {
   }
 };
 
-const MENU = `Welcome stony💙\n\n1 - MTN Data`;
+const MENU = `Welcome 💙\n\n1 - MTN Data`;
 const BUNDLE_MENU = `MTN Bundles:\n1 - 1GB ₵5\n2 - 2GB ₵10`;
 
-// ================= WHATSAPP =================
+// ================= SEND MESSAGE =================
 async function sendWhatsApp(to, text) {
   try {
     await axios.post(
@@ -64,10 +60,6 @@ app.get("/webhook", (req, res) => {
   res.send(req.query["hub.challenge"]);
 });
 
-// ================= BULLETPROOF LOCK TABLE =================
-// prevents duplicate processing
-const processed = new Set();
-
 // ================= MAIN BOT =================
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
@@ -76,15 +68,8 @@ app.post("/webhook", async (req, res) => {
     const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return;
 
-    const id = msg.id;
-    const from = msg.from;
+    const from = normalizePhone(msg.from); // 🔥 IMPORTANT FIX
     const text = (msg.text?.body || "").trim();
-
-    // 🔥 LOCK (prevents duplicate webhook spam)
-    if (processed.has(id)) return;
-    processed.add(id);
-
-    setTimeout(() => processed.delete(id), 5 * 60 * 1000);
 
     console.log("📩", from, text);
 
@@ -95,11 +80,17 @@ app.post("/webhook", async (req, res) => {
       .eq("phone", from)
       .maybeSingle();
 
-    // CREATE SESSION
+    // ================= CREATE SESSION =================
     if (!session) {
-      await supabase.from("sessions").insert([
-        { phone: from, step: 1 }
-      ]);
+      const { data, error } = await supabase
+        .from("sessions")
+        .insert([{ phone: from, step: 1 }])
+        .select()
+        .single();
+
+      if (error) {
+        console.error("SESSION CREATE ERROR:", error);
+      }
 
       return sendWhatsApp(from, MENU);
     }
@@ -108,10 +99,9 @@ app.post("/webhook", async (req, res) => {
     if (/^(hi|hello|start)$/i.test(text)) {
       await supabase
         .from("sessions")
-        .update({ step: 1, bundle: null, ref: null })
+        .update({ step: 1, bundle: null })
         .eq("phone", from);
 
-      session.step = 1;
       return sendWhatsApp(from, MENU);
     }
 
@@ -122,9 +112,6 @@ app.post("/webhook", async (req, res) => {
           .from("sessions")
           .update({ step: 2, network: "MTN" })
           .eq("phone", from);
-
-        session.step = 2;
-        session.network = "MTN";
 
         return sendWhatsApp(from, BUNDLE_MENU);
       }
@@ -143,9 +130,6 @@ app.post("/webhook", async (req, res) => {
         .update({ step: 3, bundle: text })
         .eq("phone", from);
 
-      session.step = 3;
-      session.bundle = text;
-
       return sendWhatsApp(from, "Enter phone number:");
     }
 
@@ -160,10 +144,10 @@ app.post("/webhook", async (req, res) => {
       const bundle = PACKAGES.MTN[session.bundle];
       const ref = "REF-" + Date.now();
 
-      const link = await axios.post(
+      const pay = await axios.post(
         "https://api.paystack.co/transaction/initialize",
         {
-          email: `${from}@nesty.com`,
+          email: `${from}@test.com`,
           amount: bundle.price * 100,
           currency: "GHS",
           reference: ref
@@ -184,9 +168,7 @@ app.post("/webhook", async (req, res) => {
         })
         .eq("phone", from);
 
-      session.step = 4;
-
-      return sendWhatsApp(from, `Pay here:\n${link.data.data.authorization_url}`);
+      return sendWhatsApp(from, `Pay here:\n${pay.data.data.authorization_url}`);
     }
 
   } catch (e) {
@@ -195,6 +177,6 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ================= START =================
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 BULLETPROOF BOT RUNNING ON", PORT);
+app.listen(PORT, () => {
+  console.log("🚀 Bot running on port", PORT);
 });
