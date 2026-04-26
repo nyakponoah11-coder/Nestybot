@@ -266,10 +266,14 @@ Reply YES to pay or NO to cancel`);
           .eq("phone", from);
 
         return sendWhatsApp(from,
-`💳 Payment Ready
+`💳 Payment Link
+
+Your order is ready for payment.
 
 Tap to pay:
-${pay.data.data.authorization_url}`);
+${pay.data.data.authorization_url}
+
+We’ll deliver your order shortly ✅`);
       }
 
       return sendWhatsApp(from, "Reply YES or NO");
@@ -282,7 +286,7 @@ ${pay.data.data.authorization_url}`);
 
 /* ===== SUCCESS PAGE ===== */
 app.get("/success", (req, res) => {
-  res.send("<h2>Payment Successful ✅</h2>");
+  res.send("<h2>Payment Successful ✅,   Order placed successfully🎉💙 </h2>");
 });
 
 /* ===== PAYSTACK WEBHOOK ===== */
@@ -322,7 +326,7 @@ app.post("/paystack-webhook", async (req, res) => {
 
     console.log("DELIVERY:", delivery.data);
 
-    await sendWhatsApp(session.phone, "✅ Order placed successfully!. NOTE: Delivery times varies(10min-30min). If there is to0 much delay contact support: 0547100951 for assistant");
+    await sendWhatsApp(session.phone, "✅ Order placed successfully!.  NOTE: Delivery time varies (10min-30min). For any reasons contact support: 0547100951 for assistant");
 
   } catch (e) {
     console.error("WEBHOOK ERROR:", e.response?.data || e.message);
