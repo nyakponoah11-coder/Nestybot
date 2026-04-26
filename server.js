@@ -333,6 +333,40 @@ app.post("/paystack-webhook", async (req, res) => {
   }
 });
 
+/* ===== ADMIN PAGE ===== */
+app.get("/admin", (req, res) => {
+  res.sendFile(__dirname + "/admin.html");
+});
+
+/* ===== ADMIN DATA ===== */
+app.get("/admin-data", async (req, res) => {
+  try {
+    const { data } = await supabase
+      .from("sessions")
+      .select("*");
+
+    let revenue = 0;
+
+    data.forEach(x => {
+      if (x.step === 5) {
+        const bundle = PACKAGES[x.network]?.[x.bundle];
+        if (bundle) revenue += bundle.price;
+      }
+    });
+
+    res.json({
+      total: data.length,
+      delivered: data.filter(x => x.step === 5).length,
+      pending: data.filter(x => x.step < 5).length,
+      revenue,
+      orders: data.slice(-10).reverse()
+    });
+
+  } catch (e) {
+    res.json({ error: e.message });
+  }
+});
+
 /* ===== START ===== */
 app.listen(PORT, () => {
   console.log("🚀 RUNNING ON", PORT);
