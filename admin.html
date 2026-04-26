@@ -1,17 +1,91 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Admin</title>
+  <title>Nesty Dashboard</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      color: #fff;
+      padding: 20px;
+      margin: 0;
+    }
+
+    h1 {
+      text-align: center;
+      color: #38bdf8;
+      margin-bottom: 30px;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+      margin-bottom: 30px;
+    }
+
+    .card {
+      background: #1e293b;
+      padding: 20px;
+      border-radius: 10px;
+      text-align: center;
+      box-shadow: 0 0 10px rgba(0,0,0,0.3);
+    }
+
+    .card h2 {
+      margin: 0;
+      font-size: 18px;
+      color: #94a3b8;
+    }
+
+    .card p {
+      font-size: 22px;
+      margin-top: 10px;
+      color: #38bdf8;
+      font-weight: bold;
+    }
+
+    .orders {
+      background: #1e293b;
+      padding: 15px;
+      border-radius: 10px;
+    }
+
+    .order {
+      padding: 10px;
+      border-bottom: 1px solid #334155;
+    }
+
+    .order:last-child {
+      border-bottom: none;
+    }
+  </style>
 </head>
 <body>
 
-<h1>NestyDatagh💙 Dashboard</h1>
+<h1>📊 NestyDatagh Dashboard</h1>
 
-<p>Total Orders: <span id="orders">0</span></p>
-<p>Revenue: ₵<span id="revenue">0</span></p>
-<p>Delivered: <span id="delivered">0</span></p>
+<div class="stats">
+  <div class="card">
+    <h2>Total Orders</h2>
+    <p id="orders">0</p>
+  </div>
 
-<div id="list"></div>
+  <div class="card">
+    <h2>Revenue</h2>
+    <p>₵<span id="revenue">0</span></p>
+  </div>
+
+  <div class="card">
+    <h2>Delivered</h2>
+    <p id="delivered">0</p>
+  </div>
+</div>
+
+<div class="orders">
+  <h2>Recent Orders</h2>
+  <div id="list"></div>
+</div>
 
 <script>
 async function load() {
@@ -26,8 +100,11 @@ async function load() {
   list.innerHTML = "";
 
   data.orders.forEach(o => {
-    list.innerHTML +=
-      `<p>${o.phone} - ${o.network} - ₵${o.amount}</p>`;
+    list.innerHTML += `
+      <div class="order">
+        📱 ${o.phone} | 🌐 ${o.network} | 💾 ${o.bundle}GB | 💰 ₵${o.amount}
+      </div>
+    `;
   });
 }
 
