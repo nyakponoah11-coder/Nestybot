@@ -7,43 +7,55 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-/* ================= ENV ================= */
+/* ===== ENV ===== */
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_ID = process.env.PHONE_ID;
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET;
 const DATA_API_KEY = process.env.DATA_API_KEY;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
+);
 
-/* ================= PACKAGES ================= */
+/* ===== PACKAGES ===== */
 const PACKAGES = {
   MTN: {
-    "1": { size: "1GB", price: 5, capacity: "1", apiNetwork: "YELLO" },
-    "2": { size: "2GB", price: 10, capacity: "2", apiNetwork: "YELLO" }
+    "1": { price: 5, capacity: "1", apiNetwork: "YELLO" },
+    "2": { price: 10, capacity: "2", apiNetwork: "YELLO" }
   },
   AIRTELTIGO: {
-    "1": { size: "1GB", price: 4, capacity: "1", apiNetwork: "AT" },
-    "2": { size: "2GB", price: 9, capacity: "2", apiNetwork: "AT" }
+    "1": { price: 4, capacity: "1", apiNetwork: "AT" },
+    "2": { price: 9, capacity: "2", apiNetwork: "AT" }
+  },
+  TELECEL: {
+    "1": { price: 5, capacity: "1", apiNetwork: "TELECEL" },
+    "2": { price: 10, capacity: "2", apiNetwork: "TELECEL" }
   }
 };
 
-/* ================= MENUS ================= */
-const MENU = `Welcome 💙
+/* ===== MENUS ===== */
+const MENU = `Welcome Nesty💙
 
 1 - MTN Data
-2 - AirtelTigo Data`;
+2 - AirtelTigo Data
+3 - Telecel Data`;
 
-const MTN_MENU = `MTN Bundles:
+const MENUS = {
+  MTN: `MTN Bundles:
 1 - 1GB ₵5
-2 - 2GB ₵10`;
+2 - 2GB ₵10`,
 
-const AIRTEL_MENU = `AirtelTigo Bundles:
+  AIRTELTIGO: `AirtelTigo Bundles:
 1 - 1GB ₵4
-2 - 2GB ₵9`;
+2 - 2GB ₵9`,
 
-/* ================= SEND MESSAGE ================= */
+  TELECEL: `Telecel Bundles:
+1 - 1GB ₵5
+2 - 2GB ₵10`
+};
+
+/* ===== SEND WA ===== */
 async function sendWhatsApp(to, text) {
   try {
     await axios.post(
@@ -65,12 +77,12 @@ async function sendWhatsApp(to, text) {
   }
 }
 
-/* ================= VERIFY ================= */
+/* ===== VERIFY ===== */
 app.get("/webhook", (req, res) => {
   res.send(req.query["hub.challenge"]);
 });
 
-/* ================= BOT ================= */
+/* ===== BOT ===== */
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
@@ -83,21 +95,22 @@ app.post("/webhook", async (req, res) => {
 
     console.log("📩", from, text);
 
-    /* ===== UPSERT SESSION ===== */
-    await supabase
-      .from("sessions")
-      .upsert([{ phone: from, step: 1 }], { onConflict: "phone" });
-
+    /* ===== GET SESSION ===== */
     let { data: session } = await supabase
       .from("sessions")
       .select("*")
       .eq("phone", from)
-      .single();
+      .maybeSingle();
+
+    /* ===== CREATE SESSION ===== */
+    if (!session) {
+      await supabase.from("sessions").insert([{ phone: from, step: 1 }]);
+      return sendWhatsApp(from, MENU);
+    }
 
     /* ===== RESET ===== */
     if (/^(hi|hello|start)$/i.test(text)) {
-      await supabase
-        .from("sessions")
+      await supabase.from("sessions")
         .update({ step: 1 })
         .eq("phone", from);
 
@@ -106,42 +119,35 @@ app.post("/webhook", async (req, res) => {
 
     /* ===== STEP 1 ===== */
     if (session.step === 1) {
-      if (text === "1") {
-        await supabase
-          .from("sessions")
-          .update({ step: 2, network: "MTN" })
-          .eq("phone", from);
+      let network;
 
-        return sendWhatsApp(from, MTN_MENU);
-      }
+      if (text === "1") network = "MTN";
+      else if (text === "2") network = "AIRTELTIGO";
+      else if (text === "3") network = "TELECEL";
+      else return sendWhatsApp(from, MENU);
 
-      if (text === "2") {
-        await supabase
-          .from("sessions")
-          .update({ step: 2, network: "AIRTELTIGO" })
-          .eq("phone", from);
+      const { error } = await supabase
+        .from("sessions")
+        .update({ step: 2, network })
+        .eq("phone", from);
 
-        return sendWhatsApp(from, AIRTEL_MENU);
-      }
+      if (error) console.log("STEP1 ERROR:", error);
 
-      return sendWhatsApp(from, MENU);
+      return sendWhatsApp(from, MENUS[network]);
     }
 
     /* ===== STEP 2 ===== */
     if (session.step === 2) {
-      const bundle = PACKAGES[session.network][text];
+      const bundle = PACKAGES[session.network]?.[text];
 
-      if (!bundle) {
-        return sendWhatsApp(from, "Invalid option ❌");
-      }
+      if (!bundle) return sendWhatsApp(from, "Invalid option ❌");
 
-      await supabase
+      const { error } = await supabase
         .from("sessions")
-        .update({
-          step: 3,
-          bundle: text
-        })
+        .update({ step: 3, bundle: text })
         .eq("phone", from);
+
+      if (error) console.log("STEP2 ERROR:", error);
 
       return sendWhatsApp(from, "Enter phone number:");
     }
@@ -167,14 +173,11 @@ app.post("/webhook", async (req, res) => {
           callback_url: "https://nestybot.onrender.com/success"
         },
         {
-          headers: {
-            Authorization: `Bearer ${PAYSTACK_SECRET}`
-          }
+          headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
         }
       );
 
-      await supabase
-        .from("sessions")
+      await supabase.from("sessions")
         .update({
           phone_number: phone,
           ref,
@@ -190,15 +193,12 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-/* ================= SUCCESS PAGE ================= */
+/* ===== SUCCESS PAGE ===== */
 app.get("/success", (req, res) => {
-  res.send(`
-    <h2>Payment Successful ✅</h2>
-    <p>Your data will be delivered shortly.</p>
-  `);
+  res.send("<h2>Payment Successful ✅</h2>");
 });
 
-/* ================= PAYSTACK WEBHOOK ================= */
+/* ===== PAYSTACK WEBHOOK ===== */
 app.post("/paystack-webhook", async (req, res) => {
   res.sendStatus(200);
 
@@ -214,7 +214,7 @@ app.post("/paystack-webhook", async (req, res) => {
       .from("sessions")
       .select("*")
       .eq("ref", ref)
-      .single();
+      .maybeSingle();
 
     if (!session) return;
 
@@ -229,9 +229,7 @@ app.post("/paystack-webhook", async (req, res) => {
         gateway: "wallet"
       },
       {
-        headers: {
-          "x-api-key": DATA_API_KEY
-        }
+        headers: { "x-api-key": DATA_API_KEY }
       }
     );
 
@@ -244,7 +242,7 @@ app.post("/paystack-webhook", async (req, res) => {
   }
 });
 
-/* ================= START ================= */
+/* ===== START ===== */
 app.listen(PORT, () => {
-  console.log("🚀 BOT RUNNING ON", PORT);
+  console.log("🚀 RUNNING ON", PORT);
 });
