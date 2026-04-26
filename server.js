@@ -21,16 +21,45 @@ const supabase = createClient(
 /* ===== PACKAGES ===== */
 const PACKAGES = {
   MTN: {
-    "1": { price: 5, capacity: "1", apiNetwork: "YELLO" },
-    "2": { price: 10, capacity: "2", apiNetwork: "YELLO" }
+    "1": { price: 4.50, capacity: "1", apiNetwork: "YELLO" },
+"2": { price: 9.20, capacity: "2", apiNetwork: "YELLO" },
+"3": { price: 13.50, capacity: "3", apiNetwork: "YELLO" },
+"4": { price: 18.50, capacity: "4", apiNetwork: "YELLO" },
+"5": { price: 23.50, capacity: "5", apiNetwork: "YELLO" },
+"6": { price: 27.50, capacity: "6", apiNetwork: "YELLO" },
+"7": { price: 35.50, capacity: "8", apiNetwork: "YELLO" },
+"8": { price: 44.00, capacity: "10", apiNetwork: "YELLO" },
+"9": { price: 63.50, capacity: "15", apiNetwork: "YELLO" },
+"10": { price: 83.50, capacity: "20", apiNetwork: "YELLO" },
+"11": { price: 103.50, capacity: "25", apiNetwork: "YELLO" },
+"12": { price: 160.50, capacity: "40", apiNetwork: "YELLO" },
+"13": { price: 206.50, capacity: "50", apiNetwork: "YELLO" },
   },
   AIRTELTIGO: {
-    "1": { price: 4, capacity: "1", apiNetwork: "AT" },
-    "2": { price: 9, capacity: "2", apiNetwork: "AT" }
+    "1": { price: 4.50, capacity: "1", apiNetwork: "YELLO" },
+"2": { price: 11.00, capacity: "2", apiNetwork: "YELLO" },
+"3": { price: 15.00, capacity: "3", apiNetwork: "YELLO" },
+"4": { price: 18.00, capacity: "4", apiNetwork: "YELLO" },
+"5": { price: 23.00, capacity: "5", apiNetwork: "YELLO" },
+"6": { price: 27.00, capacity: "6", apiNetwork: "YELLO" },
+"7": { price: 35.00, capacity: "8", apiNetwork: "YELLO" },
+"8": { price: 44.00, capacity: "10", apiNetwork: "YELLO" },
+"9": { price: 62.00, capacity: "15", apiNetwork: "YELLO" },
+"10": { price: 106.00, capacity: "25", apiNetwork: "YELLO" },
+"11": { price: 121.00, capacity: "30", apiNetwork: "YELLO" },
   },
   TELECEL: {
-    "1": { price: 5, capacity: "1", apiNetwork: "TELECEL" },
-    "2": { price: 10, capacity: "2", apiNetwork: "TELECEL" }
+    "1": { price: 38.50, capacity: "10", apiNetwork: "YELLO" },
+"2": { price: 45.50, capacity: "12", apiNetwork: "YELLO" },
+"3": { price: 56.40, capacity: "15", apiNetwork: "YELLO" },
+"4": { price: 27.90, capacity: "20", apiNetwork: "YELLO" },
+"5": { price: 100.50, capacity: "25", apiNetwork: "YELLO" },
+"6": { price: 110.00, capacity: "30", apiNetwork: "YELLO" },
+"7": { price: 133.40, capacity: "35", apiNetwork: "YELLO" },
+"8": { price: 145.00, capacity: "40", apiNetwork: "YELLO" },
+"9": { price: 160.80, capacity: "45", apiNetwork: "YELLO" },
+"10": { price: 180.00, capacity: "50", apiNetwork: "YELLO" },
+"11": { price: 400.75, capacity: "100", apiNetwork: "YELLO" },
   }
 };
 
@@ -43,16 +72,45 @@ const MENU = `Welcome 💙
 
 const MENUS = {
   MTN: `MTN Bundles:
-1 - 1GB ₵5
-2 - 2GB ₵10`,
+1 - 1GB ₵4.50
+2 - 2GB ₵9.20
+3 - 3GB ₵13.50
+4 - 4GB ₵18.50
+5 - 5GB ₵23.50
+6 - 6GB ₵27.00
+7 - 8GB ₵35.50
+8 - 10GB ₵44.00
+9 - 15GB ₵63.50
+10 - 20GB ₵83.50
+11 - 25GB ₵103.50
+12 - 40GB ₵160.50
+13 - 50GB ₵206.50`,
 
   AIRTELTIGO: `AirtelTigo Bundles:
-1 - 1GB ₵4
-2 - 2GB ₵9`,
+1 - 1GB ₵4.50
+2 - 2GB ₵11.00
+3 - 3GB ₵15.00
+4 - 4GB ₵18.00
+5 - 5GB ₵23.00
+6 - 6GB ₵27.00
+7 - 8GB ₵35.00
+8 - 10GB ₵44.00
+9 - 15GB ₵62.00
+10 - 25GB ₵106.00
+11 - 30GB ₵121.00`,
 
   TELECEL: `Telecel Bundles:
-1 - 1GB ₵5
-2 - 2GB ₵10`
+1 - 10GB ₵38.50
+2 - 12GB ₵45.50
+3 - 15GB ₵56.40
+4 - 20GB ₵27.90
+5 - 25GB ₵100.50
+6 - 30GB ₵110.00
+7 - 35GB ₵133.40
+8 - 40GB ₵145.00
+9 - 45GB ₵160.80
+10 - 50GB ₵180.00
+11 - 100GB ₵400.75`
 };
 
 /* ===== SEND WHATSAPP ===== */
