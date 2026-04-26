@@ -64,11 +64,12 @@ const PACKAGES = {
 };
 
 /* ===== MENUS ===== */
-const MENU = `Welcome 💙
+const MENU = `Welcome NestyDatagh💙
 
 1 - MTN Data
 2 - AirtelTigo Data
-3 - Telecel Data`;
+3 - Telecel Data
+NOTE: Only MTN currently available`;
 
 const MENUS = {
   MTN: `MTN Bundles:
@@ -320,7 +321,7 @@ app.post("/paystack-webhook", async (req, res) => {
 
     console.log("DELIVERY:", delivery.data);
 
-    await sendWhatsApp(session.phone, "✅ Data delivered successfully!");
+    await sendWhatsApp(session.phone, "✅ Order placed successfully!. NOTE: Delivery times varies(10min-30min). If there is to0 much delay contact support: 0547100951 for assistant");
 
   } catch (e) {
     console.error("WEBHOOK ERROR:", e.response?.data || e.message);
