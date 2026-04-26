@@ -22,11 +22,26 @@ const PACKAGES = {
   MTN: {
     "1": { size: "1GB", price: 5, capacity: "1", apiNetwork: "YELLO" },
     "2": { size: "2GB", price: 10, capacity: "2", apiNetwork: "YELLO" }
+  },
+  AIRTELTIGO: {
+    "1": { size: "1GB", price: 4, capacity: "1", apiNetwork: "AT" },
+    "2": { size: "2GB", price: 9, capacity: "2", apiNetwork: "AT" }
   }
 };
 
-const MENU = `Welcome 💙\n\n1 - MTN Data`;
-const BUNDLE_MENU = `MTN Bundles:\n1 - 1GB ₵5\n2 - 2GB ₵10`;
+/* ================= MENUS ================= */
+const MENU = `Welcome 💙
+
+1 - MTN Data
+2 - AirtelTigo Data`;
+
+const MTN_MENU = `MTN Bundles:
+1 - 1GB ₵5
+2 - 2GB ₵10`;
+
+const AIRTEL_MENU = `AirtelTigo Bundles:
+1 - 1GB ₵4
+2 - 2GB ₵9`;
 
 /* ================= SEND MESSAGE ================= */
 async function sendWhatsApp(to, text) {
@@ -50,7 +65,7 @@ async function sendWhatsApp(to, text) {
   }
 }
 
-/* ================= WEBHOOK VERIFY ================= */
+/* ================= VERIFY ================= */
 app.get("/webhook", (req, res) => {
   res.send(req.query["hub.challenge"]);
 });
@@ -68,23 +83,18 @@ app.post("/webhook", async (req, res) => {
 
     console.log("📩", from, text);
 
-    /* ================= GET SESSION ================= */
+    /* ===== UPSERT SESSION ===== */
+    await supabase
+      .from("sessions")
+      .upsert([{ phone: from, step: 1 }], { onConflict: "phone" });
+
     let { data: session } = await supabase
       .from("sessions")
       .select("*")
       .eq("phone", from)
       .single();
 
-    /* ================= CREATE SESSION ================= */
-    if (!session) {
-      await supabase
-        .from("sessions")
-        .insert([{ phone: from, step: 1 }]);
-
-      return sendWhatsApp(from, MENU);
-    }
-
-    /* ================= RESET ================= */
+    /* ===== RESET ===== */
     if (/^(hi|hello|start)$/i.test(text)) {
       await supabase
         .from("sessions")
@@ -94,7 +104,7 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, MENU);
     }
 
-    /* ================= STEP 1 ================= */
+    /* ===== STEP 1 ===== */
     if (session.step === 1) {
       if (text === "1") {
         await supabase
@@ -102,17 +112,28 @@ app.post("/webhook", async (req, res) => {
           .update({ step: 2, network: "MTN" })
           .eq("phone", from);
 
-        return sendWhatsApp(from, BUNDLE_MENU);
+        return sendWhatsApp(from, MTN_MENU);
+      }
+
+      if (text === "2") {
+        await supabase
+          .from("sessions")
+          .update({ step: 2, network: "AIRTELTIGO" })
+          .eq("phone", from);
+
+        return sendWhatsApp(from, AIRTEL_MENU);
       }
 
       return sendWhatsApp(from, MENU);
     }
 
-    /* ================= STEP 2 ================= */
+    /* ===== STEP 2 ===== */
     if (session.step === 2) {
-      const bundle = PACKAGES.MTN[text];
+      const bundle = PACKAGES[session.network][text];
 
-      if (!bundle) return sendWhatsApp(from, "Invalid option ❌");
+      if (!bundle) {
+        return sendWhatsApp(from, "Invalid option ❌");
+      }
 
       await supabase
         .from("sessions")
@@ -125,7 +146,7 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, "Enter phone number:");
     }
 
-    /* ================= STEP 3 ================= */
+    /* ===== STEP 3 ===== */
     if (session.step === 3) {
       const phone = text.replace(/\D/g, "");
 
@@ -133,17 +154,17 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid number ❌");
       }
 
-      const bundle = PACKAGES.MTN[session.bundle];
+      const bundle = PACKAGES[session.network][session.bundle];
       const ref = "REF-" + Date.now();
 
-      /* ================= PAYMENT ================= */
       const pay = await axios.post(
         "https://api.paystack.co/transaction/initialize",
         {
           email: `${from}@test.com`,
           amount: bundle.price * 100,
           currency: "GHS",
-          reference: ref
+          reference: ref,
+          callback_url: "https://nestybot.onrender.com/success"
         },
         {
           headers: {
@@ -169,8 +190,16 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+/* ================= SUCCESS PAGE ================= */
+app.get("/success", (req, res) => {
+  res.send(`
+    <h2>Payment Successful ✅</h2>
+    <p>Your data will be delivered shortly.</p>
+  `);
+});
+
 /* ================= PAYSTACK WEBHOOK ================= */
- app.post("/paystack-webhook", async (req, res) => {
+app.post("/paystack-webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
@@ -181,18 +210,15 @@ app.post("/webhook", async (req, res) => {
 
     const ref = event.data.reference;
 
-    const { data: session, error } = await supabase
+    const { data: session } = await supabase
       .from("sessions")
       .select("*")
       .eq("ref", ref)
       .single();
 
-    console.log("SESSION FOUND:", session);
-    console.log("SESSION ERROR:", error);
-
     if (!session) return;
 
-    const bundle = PACKAGES.MTN[session.bundle];
+    const bundle = PACKAGES[session.network][session.bundle];
 
     const delivery = await axios.post(
       "https://api.datamartgh.shop/api/developer/purchase",
@@ -209,7 +235,7 @@ app.post("/webhook", async (req, res) => {
       }
     );
 
-    console.log("DELIVERY RESULT:", delivery.data);
+    console.log("DELIVERY:", delivery.data);
 
     await sendWhatsApp(session.phone, "✅ Data delivered successfully!");
 
