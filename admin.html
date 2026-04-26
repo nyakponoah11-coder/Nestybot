@@ -2,133 +2,68 @@
 <html>
 <head>
   <title>Nesty Dashboard</title>
-
   <style>
-    * {
-      box-sizing: border-box;
-    }
-
     body {
-      margin: 0;
-      padding: 20px;
       font-family: Arial, sans-serif;
-      background: radial-gradient(circle at top, #0f172a, #020617);
+      background: #0f172a;
       color: #fff;
+      padding: 20px;
+      margin: 0;
     }
 
     h1 {
       text-align: center;
       color: #38bdf8;
-      margin-bottom: 25px;
-      font-size: 28px;
+      margin-bottom: 30px;
     }
 
-    /* GLASS STATS */
     .stats {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
       gap: 15px;
-      margin-bottom: 25px;
+      margin-bottom: 30px;
     }
 
     .card {
-      background: rgba(255, 255, 255, 0.06);
-      backdrop-filter: blur(12px);
-      border: 1px solid rgba(255,255,255,0.1);
+      background: #1e293b;
       padding: 20px;
-      border-radius: 14px;
+      border-radius: 10px;
       text-align: center;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.4);
-      transition: 0.2s;
-    }
-
-    .card:hover {
-      transform: translateY(-4px);
+      box-shadow: 0 0 10px rgba(0,0,0,0.3);
     }
 
     .card h2 {
-      font-size: 13px;
-      color: #94a3b8;
       margin: 0;
-      letter-spacing: 1px;
+      font-size: 18px;
+      color: #94a3b8;
     }
 
     .card p {
-      font-size: 28px;
+      font-size: 22px;
       margin-top: 10px;
       color: #38bdf8;
       font-weight: bold;
     }
 
-    /* ORDERS SECTION */
     .orders {
-      background: rgba(255,255,255,0.06);
-      backdrop-filter: blur(12px);
-      border: 1px solid rgba(255,255,255,0.1);
+      background: #1e293b;
       padding: 15px;
-      border-radius: 14px;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.4);
-    }
-
-    .orders h2 {
-      font-size: 16px;
-      color: #94a3b8;
-      margin-bottom: 10px;
+      border-radius: 10px;
     }
 
     .order {
-      padding: 12px;
-      border-bottom: 1px solid rgba(255,255,255,0.1);
-      font-size: 14px;
+      padding: 10px;
+      border-bottom: 1px solid #334155;
     }
 
     .order:last-child {
       border-bottom: none;
     }
-
-    .loading {
-      text-align: center;
-      color: #94a3b8;
-      padding: 15px;
-    }
-
-    .error {
-      text-align: center;
-      color: #f87171;
-      padding: 15px;
-    }
-
-    /* small live indicator */
-    .live {
-      text-align: center;
-      margin-bottom: 10px;
-      font-size: 12px;
-      color: #22c55e;
-    }
-
-    .dot {
-      height: 8px;
-      width: 8px;
-      background: #22c55e;
-      border-radius: 50%;
-      display: inline-block;
-      margin-right: 5px;
-      animation: blink 1s infinite;
-    }
-
-    @keyframes blink {
-      50% { opacity: 0.3; }
-    }
   </style>
 </head>
-
 <body>
 
 <h1>📊 NestyDatagh💙 Dashboard</h1>
-
-<div class="live">
-  <span class="dot"></span> LIVE UPDATING EVERY 3 SECONDS
-</div>
 
 <div class="stats">
   <div class="card">
@@ -149,65 +84,31 @@
 
 <div class="orders">
   <h2>Recent Orders</h2>
-  <div id="list" class="loading">Loading...</div>
+  <div id="list"></div>
 </div>
 
 <script>
-let isLoading = false;
-
 async function load() {
-  if (isLoading) return;
-  isLoading = true;
+  const res = await fetch("/admin-data");
+  const data = await res.json();
 
-  try {
-    const res = await fetch("/admin-data");
-    const data = await res.json();
+  document.getElementById("orders").innerText = data.total;
+  document.getElementById("revenue").innerText = data.revenue;
+  document.getElementById("delivered").innerText = data.delivered;
 
-    console.log("ADMIN DATA:", data);
+  const list = document.getElementById("list");
+  list.innerHTML = "";
 
-    // SAFE VALUES
-    document.getElementById("orders").innerText =
-      Number(data.total) || 0;
-
-    document.getElementById("revenue").innerText =
-      Number(data.revenue) || 0;
-
-    document.getElementById("delivered").innerText =
-      Number(data.delivered) || 0;
-
-    const list = document.getElementById("list");
-    list.innerHTML = "";
-
-    if (!data.orders || data.orders.length === 0) {
-      list.innerHTML = `<div class="loading">No orders yet</div>`;
-      isLoading = false;
-      return;
-    }
-
-    data.orders.slice().reverse().forEach(o => {
-      list.innerHTML += `
-        <div class="order">
-          📱 ${o.phone || "-"} |
-          🌐 ${o.network || "-"} |
-          💾 ${o.bundle || "-"}GB |
-        </div>
-      `;
-    });
-
-  } catch (err) {
-    console.error(err);
-    document.getElementById("list").innerHTML =
-      `<div class="error">Failed to load dashboard</div>`;
-  }
-
-  isLoading = false;
+  data.orders.forEach(o => {
+    list.innerHTML += `
+      <div class="order">
+        📱 ${o.phone} | 🌐 ${o.network} | 💾 ${o.bundle}GB | 💰 ₵${o.amount}
+      </div>
+    `;
+  });
 }
 
-// FIRST LOAD
 load();
-
-// 🔴 LIVE AUTO REFRESH EVERY 3 SECONDS
-setInterval(load, 3000);
 </script>
 
 </body>
