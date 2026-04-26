@@ -35,7 +35,7 @@ const PACKAGES = {
 };
 
 /* ===== MENUS ===== */
-const MENU = `Welcome Nesty💙
+const MENU = `Welcome 💙
 
 1 - MTN Data
 2 - AirtelTigo Data
@@ -55,7 +55,7 @@ const MENUS = {
 2 - 2GB ₵10`
 };
 
-/* ===== SEND WA ===== */
+/* ===== SEND WHATSAPP ===== */
 async function sendWhatsApp(to, text) {
   try {
     await axios.post(
@@ -95,7 +95,6 @@ app.post("/webhook", async (req, res) => {
 
     console.log("📩", from, text);
 
-    /* ===== GET SESSION ===== */
     let { data: session } = await supabase
       .from("sessions")
       .select("*")
@@ -126,12 +125,9 @@ app.post("/webhook", async (req, res) => {
       else if (text === "3") network = "TELECEL";
       else return sendWhatsApp(from, MENU);
 
-      const { error } = await supabase
-        .from("sessions")
+      await supabase.from("sessions")
         .update({ step: 2, network })
         .eq("phone", from);
-
-      if (error) console.log("STEP1 ERROR:", error);
 
       return sendWhatsApp(from, MENUS[network]);
     }
@@ -139,15 +135,11 @@ app.post("/webhook", async (req, res) => {
     /* ===== STEP 2 ===== */
     if (session.step === 2) {
       const bundle = PACKAGES[session.network]?.[text];
-
       if (!bundle) return sendWhatsApp(from, "Invalid option ❌");
 
-      const { error } = await supabase
-        .from("sessions")
+      await supabase.from("sessions")
         .update({ step: 3, bundle: text })
         .eq("phone", from);
-
-      if (error) console.log("STEP2 ERROR:", error);
 
       return sendWhatsApp(from, "Enter phone number:");
     }
@@ -161,31 +153,66 @@ app.post("/webhook", async (req, res) => {
       }
 
       const bundle = PACKAGES[session.network][session.bundle];
-      const ref = "REF-" + Date.now();
-
-      const pay = await axios.post(
-        "https://api.paystack.co/transaction/initialize",
-        {
-          email: `${from}@test.com`,
-          amount: bundle.price * 100,
-          currency: "GHS",
-          reference: ref,
-          callback_url: "https://nestybot.onrender.com/success"
-        },
-        {
-          headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
-        }
-      );
 
       await supabase.from("sessions")
         .update({
           phone_number: phone,
-          ref,
           step: 4
         })
         .eq("phone", from);
 
-      return sendWhatsApp(from, `Pay here:\n${pay.data.data.authorization_url}`);
+      return sendWhatsApp(from,
+`Confirm Order ✅
+
+Network: ${session.network}
+Data: ${bundle.capacity}GB
+Amount: ₵${bundle.price}
+Phone: ${phone}
+
+Reply YES to pay or NO to cancel`);
+    }
+
+    /* ===== STEP 4 (CONFIRM) ===== */
+    if (session.step === 4) {
+
+      if (/^no$/i.test(text)) {
+        await supabase.from("sessions")
+          .update({ step: 1 })
+          .eq("phone", from);
+
+        return sendWhatsApp(from, "❌ Cancelled\n\n" + MENU);
+      }
+
+      if (/^yes$/i.test(text)) {
+        const bundle = PACKAGES[session.network][session.bundle];
+        const ref = "REF-" + Date.now();
+
+        const pay = await axios.post(
+          "https://api.paystack.co/transaction/initialize",
+          {
+            email: `${from}@test.com`,
+            amount: bundle.price * 100,
+            currency: "GHS",
+            reference: ref,
+            callback_url: "https://nestybot.onrender.com/success"
+          },
+          {
+            headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` }
+          }
+        );
+
+        await supabase.from("sessions")
+          .update({ ref, step: 5 })
+          .eq("phone", from);
+
+        return sendWhatsApp(from,
+`💳 Payment Ready
+
+Tap to pay:
+${pay.data.data.authorization_url}`);
+      }
+
+      return sendWhatsApp(from, "Reply YES or NO");
     }
 
   } catch (e) {
