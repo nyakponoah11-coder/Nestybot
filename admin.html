@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Admin Dashboard</title>
+</head>
+<body>
+
+<h1>Dashboard</h1>
+
+<p>Total Orders: <span id="orders"></span></p>
+<p>Revenue: ₵<span id="revenue"></span></p>
+<p>Delivered: <span id="delivered"></span></p>
+
+<div id="list"></div>
+
+<script>
+async function load() {
+  const res = await fetch("/admin-data");
+  const data = await res.json();
+
+  document.getElementById("orders").innerText = data.total;
+  document.getElementById("revenue").innerText = data.revenue;
+  document.getElementById("delivered").innerText = data.delivered;
+
+  data.orders.forEach(o => {
+    document.getElementById("list").innerHTML +=
+      `<p>${o.phone} - ${o.network} - ₵${o.amount}</p>`;
+  });
+}
+
+load();
+</script>
+
+</body>
+</html>
