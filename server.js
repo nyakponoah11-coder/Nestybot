@@ -22,7 +22,7 @@ const supabase = createClient(
 const PACKAGES = {
   MTN: {
     "1": { price: 4.50, capacity: "1", apiNetwork: "YELLO" },
-"2": { price: 9.20, capacity: "2", apiNetwork: "YELLO" },
+"2": { price: 9.50, capacity: "2", apiNetwork: "YELLO" },
 "3": { price: 13.50, capacity: "3", apiNetwork: "YELLO" },
 "4": { price: 18.50, capacity: "4", apiNetwork: "YELLO" },
 "5": { price: 23.50, capacity: "5", apiNetwork: "YELLO" },
@@ -75,7 +75,7 @@ NOTE: Only MTN currently available`;
 const MENUS = {
   MTN: `MTN Bundles:
 1 - 1GB ₵4.50
-2 - 2GB ₵9.20
+2 - 2GB ₵9.50
 3 - 3GB ₵13.50
 4 - 4GB ₵18.50
 5 - 5GB ₵23.50
