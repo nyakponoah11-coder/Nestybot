@@ -3,13 +3,13 @@
 <head>
   <title>Admin</title>
 </head>
-<body
+<body>
 
-<h1>NestyDatagh>💙 Dashboard</h1>
+<h1>NestyDatagh💙 Dashboard</h1>
 
-<p>Total Orders: <span id="orders"></span></p>
-<p>Revenue: ₵<span id="revenue"></span></p>
-<p>Delivered: <span id="delivered"></span></p>
+<p>Total Orders: <span id="orders">0</span></p>
+<p>Revenue: ₵<span id="revenue">0</span></p>
+<p>Delivered: <span id="delivered">0</span></p>
 
 <div id="list"></div>
 
@@ -22,8 +22,11 @@ async function load() {
   document.getElementById("revenue").innerText = data.revenue;
   document.getElementById("delivered").innerText = data.delivered;
 
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+
   data.orders.forEach(o => {
-    document.getElementById("list").innerHTML +=
+    list.innerHTML +=
       `<p>${o.phone} - ${o.network} - ₵${o.amount}</p>`;
   });
 }
