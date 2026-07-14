@@ -70,7 +70,7 @@ const MENU = `Welcome to Data1gh🇬🇭
 2 - AirtelTigo Data
 3 - Telecel Data
 
-OTHER SERVICE:
+Other Services:\n
 4 - Netflix subscription
 5 - AFA registration`;
 
