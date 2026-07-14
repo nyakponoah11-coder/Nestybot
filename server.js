@@ -191,12 +191,12 @@ app.post("/webhook", async (req, res) => {
   } else if (text === "4") {
     return sendWhatsApp(
       from,
-      "Subscribe to Netflix here:\nhttps:data-ease-shop.lovable.app/services"
+      "Subscribe to Netflix here:\n https://data-ease-shop.lovable.app/services"
     );
   } else if (text === "5") {
     return sendWhatsApp(
       from,
-      "Register for AFA here:\nhttps:data-ease-shop.lovable.app/services"
+      "Register for AFA here:\ :data-ease-shop.lovable.app/services"
     );
   } else {
     return sendWhatsApp(from, MENU);
