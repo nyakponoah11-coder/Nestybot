@@ -64,13 +64,15 @@ const PACKAGES = {
 };
 
 /* ===== MENUS ===== */
-const MENU = `Welcome NestyDatagh💙
+const MENU = `Welcome to Data1gh🇬🇭
 
 1 - MTN Data
 2 - AirtelTigo Data
 3 - Telecel Data
 
-NOTE: Only MTN currently available`;
+OTHER SERVICE:
+4 - Netflix subscription
+5 - AFA registration`;
 
 const MENUS = {
   MTN: `MTN Bundles:
@@ -177,20 +179,36 @@ app.post("/webhook", async (req, res) => {
     }
 
     /* ===== STEP 1 ===== */
-    if (session.step === 1) {
-      let network;
+ if (session.step === 1) {
+  let network;
 
-      if (text === "1") network = "MTN";
-      else if (text === "2") network = "AIRTELTIGO";
-      else if (text === "3") network = "TELECEL";
-      else return sendWhatsApp(from, MENU);
+  if (text === "1") {
+    network = "MTN";
+  } else if (text === "2") {
+    network = "AIRTELTIGO";
+  } else if (text === "3") {
+    network = "TELECEL";
+  } else if (text === "4") {
+    return sendWhatsApp(
+      from,
+      "Subscribe to Netflix here:\nhttps://https://data-ease-shop.lovable.app/services"
+    );
+  } else if (text === "5") {
+    return sendWhatsApp(
+      from,
+      "Register for AFA here:\nhttps://https://data-ease-shop.lovable.app/services"
+    );
+  } else {
+    return sendWhatsApp(from, MENU);
+  }
 
-      await supabase.from("sessions")
-        .update({ step: 2, network })
-        .eq("phone", from);
+  await supabase
+    .from("sessions")
+    .update({ step: 2, network })
+    .eq("phone", from);
 
-      return sendWhatsApp(from, MENUS[network]);
-    }
+  return sendWhatsApp(from, MENUS[network]);
+}
 
     /* ===== STEP 2 ===== */
     if (session.step === 2) {
