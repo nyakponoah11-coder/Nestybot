@@ -196,7 +196,7 @@ app.post("/webhook", async (req, res) => {
   } else if (text === "5") {
     return sendWhatsApp(
       from,
-      "Register for AFA here:\ :data-ease-shop.lovable.app/services"
+      "Register for AFA here:\n https://data-ease-shop.lovable.app/services"
     );
   } else {
     return sendWhatsApp(from, MENU);
