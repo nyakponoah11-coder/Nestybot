@@ -7,7 +7,10 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-/* ===== ENV ===== */
+/* =========================================================
+   ENVIRONMENT VARIABLES
+   ========================================================= */
+
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_ID = process.env.PHONE_ID;
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET;
@@ -69,7 +72,7 @@ const PACKAGES = {
 };
 
 /* =========================================================
-   MENUS
+   MAIN MENU
    ========================================================= */
 
 const MENU = `Welcome to Data1gh🇬🇭
@@ -77,14 +80,15 @@ const MENU = `Welcome to Data1gh🇬🇭
 1 - MTN Data
 2 - AirtelTigo Data
 3 - Telecel Data
-
-Other Services:
-
-4 - Netflix subscription
-5 - AFA registration
-6 - Track Order
+4 - Track Order
+5 - Netflix subscription
+6 - AFA registration
 
 Choose an option to continue`;
+
+/* =========================================================
+   NETWORK MENUS
+   ========================================================= */
 
 const MENUS = {
   MTN: `MTN Bundles:
@@ -136,7 +140,7 @@ Choose an option to continue`
 };
 
 /* =========================================================
-   SEND WHATSAPP
+   SEND WHATSAPP MESSAGE
    ========================================================= */
 
 async function sendWhatsApp(to, text) {
@@ -146,7 +150,9 @@ async function sendWhatsApp(to, text) {
       {
         messaging_product: "whatsapp",
         to,
-        text: { body: text }
+        text: {
+          body: text
+        }
       },
       {
         headers: {
@@ -164,21 +170,16 @@ async function sendWhatsApp(to, text) {
 }
 
 /* =========================================================
-   PHONE NUMBER NORMALIZER
+   NORMALIZE PHONE NUMBER
    ========================================================= */
 
 function normalizePhone(phone) {
   let value = String(phone || "").replace(/\D/g, "");
 
-  /*
-    Convert Ghana international format:
-
-    233241234567
-          ↓
-    0241234567
-  */
-
-  if (value.startsWith("233") && value.length === 12) {
+  if (
+    value.startsWith("233") &&
+    value.length === 12
+  ) {
     value = "0" + value.substring(3);
   }
 
@@ -213,11 +214,10 @@ async function getDatamartOrderStatus(reference) {
 }
 
 /* =========================================================
-   FORMAT DATE
+   FORMAT DATE AND TIME
    ========================================================= */
 
 function formatDateTime(dateValue) {
-
   if (!dateValue) {
     return {
       date: "N/A",
@@ -252,13 +252,13 @@ function formatDateTime(dateValue) {
 }
 
 /* =========================================================
-   STATUS DISPLAY
+   STATUS EMOJI
    ========================================================= */
 
 function statusEmoji(status) {
-
-  switch (String(status || "").toLowerCase()) {
-
+  switch (
+    String(status || "").toLowerCase()
+  ) {
     case "completed":
       return "✅";
 
@@ -287,9 +287,7 @@ function statusEmoji(status) {
    ========================================================= */
 
 async function saveOrder(order) {
-
   try {
-
     const { error } = await supabase
       .from("orders")
       .upsert(
@@ -316,7 +314,6 @@ async function saveOrder(order) {
     return true;
 
   } catch (e) {
-
     console.error(
       "SAVE ORDER ERROR:",
       e.message
@@ -330,17 +327,18 @@ async function saveOrder(order) {
    TRACK LAST 3 ORDERS
    ========================================================= */
 
-async function trackOrders(from, phoneNumber) {
-
-  const phone = normalizePhone(phoneNumber);
+async function trackOrders(
+  from,
+  phoneNumber
+) {
+  const phone =
+    normalizePhone(phoneNumber);
 
   try {
-
-    /*
-      First search exact normalized number.
-    */
-
-    let { data: orders, error } = await supabase
+    const {
+      data: orders,
+      error
+    } = await supabase
       .from("orders")
       .select("*")
       .eq("phone_number", phone)
@@ -349,9 +347,7 @@ async function trackOrders(from, phoneNumber) {
       })
       .limit(3);
 
-
     if (error) {
-
       console.error(
         "ORDER SEARCH ERROR:",
         error
@@ -359,18 +355,19 @@ async function trackOrders(from, phoneNumber) {
 
       return sendWhatsApp(
         from,
-        `❌ We could not check your orders right now.
+`❌ We could not check your orders right now.
 
 Please try again shortly.`
       );
     }
 
-
-    if (!orders || orders.length === 0) {
-
+    if (
+      !orders ||
+      orders.length === 0
+    ) {
       return sendWhatsApp(
         from,
-        `❌ No orders found for:
+`❌ No orders found for:
 
 📱 ${phone}
 
@@ -378,30 +375,26 @@ Make sure you entered the same phone number used when purchasing the data.`
       );
     }
 
-
     let message =
-      `📦 YOUR LAST ${orders.length} ORDER${orders.length > 1 ? "S" : ""}\n\n`;
+`📦 YOUR LAST ${orders.length} ORDER${orders.length > 1 ? "S" : ""}
 
+`;
 
-    /*
-      Check every order against Datamart
-      so the user gets the LIVE status.
-    */
-
-    for (let i = 0; i < orders.length; i++) {
-
+    for (
+      let i = 0;
+      i < orders.length;
+      i++
+    ) {
       const order = orders[i];
 
-      let liveOrder =
+      /*
+        Get LIVE status from Datamart.
+      */
+
+      const liveOrder =
         await getDatamartOrderStatus(
           order.ref
         );
-
-
-      /*
-        If Datamart responds, update
-        our local order information.
-      */
 
       if (liveOrder) {
 
@@ -410,16 +403,9 @@ Make sure you entered the same phone number used when purchasing the data.`
           order.status ||
           "pending";
 
-        await supabase
-          .from("orders")
-          .update({
-            status: liveStatus,
-            updated_at:
-              liveOrder.updatedAt ||
-              new Date().toISOString()
-          })
-          .eq("ref", order.ref);
 
+        const paidAmount =
+          order.amount;
 
         const dateTime =
           formatDateTime(
@@ -427,24 +413,15 @@ Make sure you entered the same phone number used when purchasing the data.`
             order.created_at
           );
 
-
         const network =
           liveOrder.network ||
           order.network ||
           "N/A";
 
-
         const capacity =
           liveOrder.capacity ??
           order.capacity ??
           "N/A";
-
-
-        const price =
-          liveOrder.price ??
-          order.amount ??
-          "N/A";
-
 
         message +=
 `━━━━━━━━━━━━━━━━
@@ -454,9 +431,16 @@ ${i + 1}. 📦 ORDER
 📶 Network: ${network}
 📦 Data: ${capacity}GB
 📱 Number: ${liveOrder.phoneNumber || order.phone_number}
-💰 Amount: ₵${Number(price).toFixed(2)}
 
-${statusEmoji(liveStatus)} Status: ${String(liveStatus).toUpperCase()}
+💰 Amount Paid: ₵${Number(
+          paidAmount || 0
+        ).toFixed(2)}
+
+${statusEmoji(
+          liveStatus
+        )} Status: ${String(
+          liveStatus
+        ).toUpperCase()}
 
 📅 Date: ${dateTime.date}
 🕐 Time: ${dateTime.time}
@@ -464,18 +448,26 @@ ${statusEmoji(liveStatus)} Status: ${String(liveStatus).toUpperCase()}
 
 `;
 
-      } else {
+        await supabase
+          .from("orders")
+          .update({
+            status: liveStatus,
 
-        /*
-          If Datamart cannot be reached,
-          still show the saved order.
-        */
+            updated_at:
+              liveOrder.updatedAt ||
+              new Date().toISOString()
+          })
+          .eq(
+            "ref",
+            order.ref
+          );
+
+      } else {
 
         const dateTime =
           formatDateTime(
             order.created_at
           );
-
 
         message +=
 `━━━━━━━━━━━━━━━━
@@ -485,8 +477,15 @@ ${i + 1}. 📦 ORDER
 📶 Network: ${order.network || "N/A"}
 📦 Data: ${order.capacity || "N/A"}GB
 📱 Number: ${order.phone_number}
-💰 Amount: ₵${Number(order.amount || 0).toFixed(2)}
-${statusEmoji(order.status)} Status: ${String(order.status || "pending").toUpperCase()}
+💰 Amount Paid: ₵${Number(
+          order.amount || 0
+        ).toFixed(2)}
+
+${statusEmoji(
+          order.status
+        )} Status: ${String(
+          order.status || "pending"
+        ).toUpperCase()}
 📅 Date: ${dateTime.date}
 🕐 Time: ${dateTime.time}
 
@@ -497,15 +496,13 @@ ${statusEmoji(order.status)} Status: ${String(order.status || "pending").toUpper
       }
     }
 
-
     message +=
-      `\nReply *HI* to return to the main menu.`;
+`\nReply HI to return to the main menu.`;
 
     return sendWhatsApp(
       from,
       message
     );
-
 
   } catch (e) {
 
@@ -514,10 +511,9 @@ ${statusEmoji(order.status)} Status: ${String(order.status || "pending").toUpper
       e.response?.data || e.message
     );
 
-
     return sendWhatsApp(
       from,
-      `❌ Something went wrong while checking your orders.
+`❌ Something went wrong while checking your orders.
 
 Please try again.`
     );
@@ -525,208 +521,73 @@ Please try again.`
 }
 
 /* =========================================================
-   VERIFY
+   WEBHOOK VERIFICATION
    ========================================================= */
 
-app.get("/webhook", (req, res) => {
-  res.send(
-    req.query["hub.challenge"]
-  );
-});
+app.get(
+  "/webhook",
+  (req, res) => {
+    res.send(
+      req.query["hub.challenge"]
+    );
+  }
+);
 
 /* =========================================================
-   BOT
+   WHATSAPP WEBHOOK
    ========================================================= */
 
-app.post("/webhook", async (req, res) => {
+app.post(
+  "/webhook",
+  async (req, res) => {
 
-  res.sendStatus(200);
+    res.sendStatus(200);
 
-  try {
+    try {
 
-    const msg =
-      req.body.entry?.[0]
-        ?.changes?.[0]
-        ?.value
-        ?.messages?.[0];
+      const msg =
+        req.body.entry?.[0]
+          ?.changes?.[0]
+          ?.value
+          ?.messages?.[0];
 
+      if (!msg) return;
 
-    if (!msg) return;
+      const from =
+        msg.from;
 
+      const text =
+        (msg.text?.body || "")
+          .trim();
 
-    const from =
-      msg.from;
+      console.log(
+        "📩",
+        from,
+        text
+      );
 
-
-    const text =
-      (msg.text?.body || "").trim();
-
-
-    console.log(
-      "📩",
-      from,
-      text
-    );
-
-
-    let { data: session } =
-      await supabase
+      let {
+        data: session
+      } = await supabase
         .from("sessions")
         .select("*")
         .eq("phone", from)
         .maybeSingle();
 
+      /* =====================================================
+         CREATE SESSION
+         ===================================================== */
 
-    /* =====================================================
-       CREATE SESSION
-       ===================================================== */
+      if (!session) {
 
-    if (!session) {
-
-      await supabase
-        .from("sessions")
-        .insert([
-          {
-            phone: from,
-            step: 1
-          }
-        ]);
-
-
-      return sendWhatsApp(
-        from,
-        MENU
-      );
-    }
-
-
-    /* =====================================================
-       RESET
-       ===================================================== */
-
-    if (
-      /^(hi|hello|start)$/i.test(text)
-    ) {
-
-      await supabase
-        .from("sessions")
-        .update({
-          step: 1
-        })
-        .eq("phone", from);
-
-
-      return sendWhatsApp(
-        from,
-        MENU
-      );
-    }
-
-
-    /* =====================================================
-       TRACK ORDER MENU
-       ===================================================== */
-
-    if (
-      text === "6" &&
-      session.step === 1
-    ) {
-
-      await supabase
-        .from("sessions")
-        .update({
-          step: 6
-        })
-        .eq("phone", from);
-
-
-      return sendWhatsApp(
-        from,
-`📦 TRACK YOUR ORDER
-
-Enter the phone number used when you purchased the data.
-
-Example:
-0241234567`
-      );
-    }
-
-
-    /* =====================================================
-       TRACK ORDER - ENTER PHONE
-       ===================================================== */
-
-    if (session.step === 6) {
-
-      const trackingPhone =
-        normalizePhone(text);
-
-
-      if (
-        trackingPhone.length !== 10 ||
-        !trackingPhone.startsWith("0")
-      ) {
-
-        return sendWhatsApp(
-          from,
-`❌ Invalid phone number.
-
-Please enter a valid Ghana phone number.
-
-Example:
-0241234567`
-        );
-      }
-
-
-      /*
-        Search the last 3 purchases
-        and check their live status.
-      */
-
-      return trackOrders(
-        from,
-        trackingPhone
-      );
-    }
-
-
-    /* =====================================================
-       STEP 1
-       ===================================================== */
-
-    if (session.step === 1) {
-
-      let network;
-
-
-      if (text === "1") {
-
-        network = "MTN";
-
-      } else if (text === "2") {
-
-        network = "AIRTELTIGO";
-
-      } else if (text === "3") {
-
-        network = "TELECEL";
-
-      } else if (text === "4") {
-
-        return sendWhatsApp(
-          from,
-          "Subscribe to Netflix here:\n https://data-ease-shop.lovable.app/services"
-        );
-
-      } else if (text === "5") {
-
-        return sendWhatsApp(
-          from,
-          "Register for AFA here:\n https://data-ease-shop.lovable.app/services"
-        );
-
-      } else {
+        await supabase
+          .from("sessions")
+          .insert([
+            {
+              phone: from,
+              step: 1
+            }
+          ]);
 
         return sendWhatsApp(
           from,
@@ -734,99 +595,249 @@ Example:
         );
       }
 
-
-      await supabase
-        .from("sessions")
-        .update({
-          step: 2,
-          network
-        })
-        .eq("phone", from);
-
-
-      return sendWhatsApp(
-        from,
-        MENUS[network]
-      );
-    }
-
-
-    /* =====================================================
-       STEP 2
-       ===================================================== */
-
-    if (session.step === 2) {
-
-      const bundle =
-        PACKAGES[
-          session.network
-        ]?.[text];
-
-
-      if (!bundle) {
-
-        return sendWhatsApp(
-          from,
-          "Invalid option ❌ Choose any option to continue"
-        );
-      }
-
-
-      await supabase
-        .from("sessions")
-        .update({
-          step: 3,
-          bundle: text
-        })
-        .eq("phone", from);
-
-
-      return sendWhatsApp(
-        from,
-        "Enter phone number:"
-      );
-    }
-
-
-    /* =====================================================
-       STEP 3
-       ===================================================== */
-
-    if (session.step === 3) {
-
-      const phone =
-        normalizePhone(text);
-
+      /* =====================================================
+         RESET TO MAIN MENU
+         ===================================================== */
 
       if (
-        phone.length !== 10 ||
-        !phone.startsWith("0")
+        /^(hi|hello|start)$/i.test(
+          text
+        )
       ) {
+
+        await supabase
+          .from("sessions")
+          .update({
+            step: 1
+          })
+          .eq(
+            "phone",
+            from
+          );
 
         return sendWhatsApp(
           from,
-          "Invalid number ❌ Enter correct number to continue"
+          MENU
         );
       }
 
+      /* =====================================================
+         4 - TRACK ORDER
+         ===================================================== */
 
-      const bundle =
-        PACKAGES[
-          session.network
-        ][session.bundle];
+      if (
+        text === "4" &&
+        session.step === 1
+      ) {
 
+    
+        await supabase
+          .from("sessions")
+          .update({
+            step: 6
+          })
+          .eq(
+            "phone",
+            from
+          );
 
-      await supabase
-        .from("sessions")
-        .update({
-          phone_number: phone,
-          step: 4
-        })
-        .eq("phone", from);
+        return sendWhatsApp(
+          from,
 
+`📦 TRACK YOUR ORDER
 
-      return sendWhatsApp(
-        from,
+Enter the phone number used when you purchased the data.
+
+Example:
+0241234567`
+        );
+      }
+
+      /* =====================================================
+         TRACK ORDER - ENTER PHONE
+         ===================================================== */
+
+      if (
+        session.step === 6
+      ) {
+
+        const trackingPhone =
+          normalizePhone(text);
+
+        if (
+          trackingPhone.length !== 10 ||
+          !trackingPhone.startsWith("0")
+        ) {
+
+          return sendWhatsApp(
+            from,
+
+`❌ Invalid phone number.
+
+Please enter a valid Ghana phone number.
+
+Example:
+0241234567`
+          );
+        }
+
+        return trackOrders(
+          from,
+          trackingPhone
+        );
+      }
+
+      /* =====================================================
+         STEP 1 - MAIN MENU
+         ===================================================== */
+
+      if (
+        session.step === 1
+      ) {
+
+        let network;
+
+        if (text === "1") {
+
+          network = "MTN";
+
+        } else if (text === "2") {
+
+          network = "AIRTELTIGO";
+
+        } else if (text === "3") {
+
+          network = "TELECEL";
+
+        }
+
+        /*
+          5 = NETFLIX
+        */
+
+        else if (text === "5") {
+
+          return sendWhatsApp(
+            from,
+            "Subscribe to Netflix here:\nhttps://data-ease-shop.lovable.app/services"
+          );
+        }
+
+        /*
+          6 = AFA
+        */
+
+        else if (text === "6") {
+
+          return sendWhatsApp(
+            from,
+            "Register for AFA here:\nhttps://data-ease-shop.lovable.app/services"
+          );
+        }
+
+        else {
+
+          return sendWhatsApp(
+            from,
+            MENU
+          );
+        }
+
+        await supabase
+          .from("sessions")
+          .update({
+            step: 2,
+            network
+          })
+          .eq(
+            "phone",
+            from
+          );
+
+        return sendWhatsApp(
+          from,
+          MENUS[network]
+        );
+      }
+
+      /* =====================================================
+         STEP 2 - SELECT BUNDLE
+         ===================================================== */
+
+      if (
+        session.step === 2
+      ) {
+
+        const bundle =
+          PACKAGES[
+            session.network
+          ]?.[text];
+
+        if (!bundle) {
+
+          return sendWhatsApp(
+            from,
+            "Invalid option ❌ Choose any option to continue"
+          );
+        }
+
+        await supabase
+          .from("sessions")
+          .update({
+            step: 3,
+            bundle: text
+          })
+          .eq(
+            "phone",
+            from
+          );
+
+        return sendWhatsApp(
+          from,
+          "Enter phone number:"
+        );
+      }
+
+      /* =====================================================
+         STEP 3 - PHONE NUMBER
+         ===================================================== */
+
+      if (
+        session.step === 3
+      ) {
+
+        const phone =
+          normalizePhone(text);
+
+        if (
+          phone.length !== 10 ||
+          !phone.startsWith("0")
+        ) {
+
+          return sendWhatsApp(
+            from,
+            "Invalid number ❌ Enter correct number to continue"
+          );
+        }
+
+        const bundle =
+          PACKAGES[
+            session.network
+          ][session.bundle];
+
+        await supabase
+          .from("sessions")
+          .update({
+            phone_number: phone,
+            step: 4
+          })
+          .eq(
+            "phone",
+            from
+          );
+
+        return sendWhatsApp(
+          from,
 
 `Confirm Order: Your order will be delivered✅
 
@@ -836,94 +847,94 @@ Amount: ₵${bundle.price}
 Phone: ${phone}
 
 Reply YES to pay or NO to cancel`
-      );
-    }
-
-
-    /* =====================================================
-       STEP 4 - CONFIRM
-       ===================================================== */
-
-    if (session.step === 4) {
-
-
-      if (
-        /^no$/i.test(text)
-      ) {
-
-        await supabase
-          .from("sessions")
-          .update({
-            step: 1
-          })
-          .eq("phone", from);
-
-
-        return sendWhatsApp(
-          from,
-          "❌ Cancelled\n\n" +
-          MENU
         );
       }
 
+      /* =====================================================
+         STEP 4 - PAYMENT CONFIRMATION
+         ===================================================== */
 
       if (
-        /^yes$/i.test(text)
+        session.step === 4
       ) {
 
-        const bundle =
-          PACKAGES[
-            session.network
-          ][session.bundle];
+        if (
+          /^no$/i.test(text)
+        ) {
 
+          await supabase
+            .from("sessions")
+            .update({
+              step: 1
+            })
+            .eq(
+              "phone",
+              from
+            );
 
-        const ref =
-          "REF-" +
-          Date.now();
-
-
-        const pay =
-          await axios.post(
-
-            "https://api.paystack.co/transaction/initialize",
-
-            {
-              email:
-                `${from}@test.com`,
-
-              amount:
-                bundle.price * 100,
-
-              currency:
-                "GHS",
-
-              reference:
-                ref,
-
-              callback_url:
-                "https://nestybot.onrender.com/success"
-            },
-
-            {
-              headers: {
-                Authorization:
-                  `Bearer ${PAYSTACK_SECRET}`
-              }
-            }
+          return sendWhatsApp(
+            from,
+            "❌ Cancelled\n\n" +
+            MENU
           );
+        }
 
+        if (
+          /^yes$/i.test(text)
+        ) {
 
-        await supabase
-          .from("sessions")
-          .update({
-            ref,
-            step: 5
-          })
-          .eq("phone", from);
+          const bundle =
+            PACKAGES[
+              session.network
+            ][session.bundle];
 
+          const ref =
+            "REF-" +
+            Date.now();
 
-        return sendWhatsApp(
-          from,
+          const pay =
+            await axios.post(
+
+              "https://api.paystack.co/transaction/initialize",
+
+              {
+                email:
+                  `${from}@test.com`,
+
+                amount:
+                  bundle.price * 100,
+
+                currency:
+                  "GHS",
+
+                reference:
+                  ref,
+
+                callback_url:
+                  "https://nestybot.onrender.com/success"
+              },
+
+              {
+                headers: {
+                  Authorization:
+                    `Bearer ${PAYSTACK_SECRET}`
+                }
+              }
+            );
+
+          await supabase
+            .from("sessions")
+            .update({
+              ref,
+              step: 5
+            })
+            .eq(
+              "phone",
+              from
+            );
+
+          return sendWhatsApp(
+            from,
 
 `💳 Payment Link
 
@@ -933,38 +944,40 @@ Tap to pay:
 ${pay.data.data.authorization_url}
 
 We’ll deliver your order shortly ✅`
+          );
+        }
+
+        return sendWhatsApp(
+          from,
+          "Reply YES or NO"
         );
       }
 
+    } catch (e) {
 
-      return sendWhatsApp(
-        from,
-        "Reply YES or NO"
+      console.error(
+        "BOT ERROR:",
+        e.response?.data ||
+        e.message
       );
     }
-
-
-  } catch (e) {
-
-    console.error(
-      "BOT ERROR:",
-      e.response?.data ||
-      e.message
-    );
   }
-});
+);
 
 /* =========================================================
    SUCCESS PAGE
    ========================================================= */
 
-app.get("/success", (req, res) => {
+app.get(
+  "/success",
+  (req, res) => {
 
-  res.send(
-    "<h2>Payment Successful ✅, Order placed successfully🎉💙 </h2>"
-  );
+    res.send(
+      "<h2>Payment Successful ✅, Order placed successfully🎉💙</h2>"
+    );
 
-});
+  }
+);
 
 /* =========================================================
    PAYSTACK WEBHOOK
@@ -976,17 +989,14 @@ app.post(
 
     res.sendStatus(200);
 
-
     try {
 
       console.log(
-        "🔥 WEBHOOK HIT"
+        "🔥 PAYSTACK WEBHOOK HIT"
       );
-
 
       const event =
         req.body;
-
 
       if (
         event.event !==
@@ -995,35 +1005,54 @@ app.post(
         return;
       }
 
-
       const paystackRef =
         event.data.reference;
 
+   
 
-      const { data: session } =
-        await supabase
-          .from("sessions")
-          .select("*")
-          .eq("ref", paystackRef)
-          .maybeSingle();
+      const paidAmount =
+        Number(
+          event.data.amount
+        ) / 100;
 
+      console.log(
+        "💰 ACTUAL PAYSTACK AMOUNT:",
+        paidAmount
+      );
+
+      /* =================================================
+         FIND SESSION
+         ================================================= */
+
+      const {
+        data: session
+      } = await supabase
+        .from("sessions")
+        .select("*")
+        .eq(
+          "ref",
+          paystackRef
+        )
+        .maybeSingle();
 
       if (!session) {
 
         console.error(
-          "❌ SESSION NOT FOUND FOR:",
+          "❌ SESSION NOT FOUND:",
           paystackRef
         );
 
         return;
       }
 
+      /* =================================================
+         GET BUNDLE
+         ================================================= */
 
       const bundle =
         PACKAGES[
           session.network
         ]?.[session.bundle];
-
 
       if (!bundle) {
 
@@ -1034,9 +1063,8 @@ app.post(
         return;
       }
 
-
       /* =================================================
-         SEND PURCHASE TO DATAMART
+         SEND ORDER TO DATAMART
          ================================================= */
 
       const delivery =
@@ -1066,55 +1094,35 @@ app.post(
           }
         );
 
-
       console.log(
         "DELIVERY:",
         delivery.data
       );
 
-
       /* =================================================
-         GET DATAMART ORDER DATA
+         DATAMART RESPONSE
          ================================================= */
 
       const datamartData =
         delivery.data?.data ||
         delivery.data;
 
-
-      /*
-        Datamart's tracking endpoint uses
-        the Datamart reference.
-
-        We try the common reference fields
-        returned by the purchase response.
-      */
-
       const datamartReference =
         datamartData?.reference ||
         datamartData?.orderReference ||
         datamartData?.order_reference;
-
 
       const datamartOrderId =
         datamartData?.orderId ||
         datamartData?.order_id ||
         null;
 
-
       if (!datamartReference) {
 
         console.error(
-          "⚠️ DATAMART REFERENCE NOT FOUND IN PURCHASE RESPONSE:",
+          "⚠️ DATAMART REFERENCE NOT FOUND:",
           delivery.data
         );
-
-
-        /*
-          We still tell the customer the order
-          was placed, but tracking cannot work
-          until Datamart gives us a reference.
-        */
 
         await sendWhatsApp(
           session.phone,
@@ -1123,7 +1131,7 @@ app.post(
 
 NOTE: Delivery time varies (10min-30min).
 
-For assistance contact:
+For assistance:
 0547100951
 
 Say:
@@ -1134,7 +1142,6 @@ to buy again.`
 
         return;
       }
-
 
       /* =================================================
          SAVE ORDER HISTORY
@@ -1151,6 +1158,11 @@ to buy again.`
               session.phone_number
             ),
 
+          /*
+            This is the Datamart reference
+            used for tracking.
+          */
+
           ref:
             datamartReference,
 
@@ -1163,8 +1175,15 @@ to buy again.`
           capacity:
             bundle.capacity,
 
+          /*
+            IMPORTANT:
+
+            Save the actual amount
+            paid through Paystack.
+          */
+
           amount:
-            bundle.price,
+            paidAmount,
 
           status:
             datamartData?.orderStatus ||
@@ -1180,17 +1199,23 @@ to buy again.`
             new Date().toISOString()
         });
 
+      console.log(
+        "✅ ORDER HISTORY SAVED:",
+        saved
+      );
 
       console.log(
-        "ORDER HISTORY SAVED:",
-        saved,
-        datamartReference,
+        "🆔 DATAMART ORDER ID:",
         datamartOrderId
       );
 
+      console.log(
+        "🆔 DATAMART REFERENCE:",
+        datamartReference
+      );
 
       /* =================================================
-         CUSTOMER MESSAGE
+         CUSTOMER SUCCESS MESSAGE
          ================================================= */
 
       await sendWhatsApp(
@@ -1200,16 +1225,17 @@ to buy again.`
 
 🆔 Order Reference:
 ${datamartReference}
-
 📦 ${bundle.capacity}GB
 📶 ${session.network}
 📱 ${session.phone_number}
+💰 Amount Paid:
+₵${paidAmount.toFixed(2)}
 
 NOTE: Delivery time varies (10min-30min).
 
 You can track your order anytime by choosing:
 
-6 - Track Order
+4 - Track Order
 
 For assistance:
 0547100951
@@ -1220,16 +1246,14 @@ hi / hello / start
 to buy again.`
       );
 
-
     } catch (e) {
 
       console.error(
-        "WEBHOOK ERROR:",
+        "PAYSTACK WEBHOOK ERROR:",
         e.response?.data ||
         e.message
       );
     }
-
   }
 );
 
@@ -1242,7 +1266,8 @@ app.get(
   (req, res) => {
 
     res.sendFile(
-      __dirname + "/admin.html"
+      __dirname +
+      "/admin.html"
     );
 
   }
@@ -1258,37 +1283,34 @@ app.get(
 
     try {
 
-      const { data } =
-        await supabase
-          .from("sessions")
-          .select("*");
-
+      const {
+        data
+      } = await supabase
+        .from("sessions")
+        .select("*");
 
       let revenue = 0;
-
 
       (data || []).forEach(
         x => {
 
-          if (x.step === 5) {
+          if (
+            x.step === 5
+          ) {
 
             const bundle =
               PACKAGES[
                 x.network
               ]?.[x.bundle];
 
-
             if (bundle) {
-
               revenue +=
                 bundle.price;
-
             }
           }
 
         }
       );
-
 
       res.json({
 
@@ -1298,14 +1320,16 @@ app.get(
         delivered:
           (data || [])
             .filter(
-              x => x.step === 5
+              x =>
+                x.step === 5
             )
             .length,
 
         pending:
           (data || [])
             .filter(
-              x => x.step < 5
+              x =>
+                x.step < 5
             )
             .length,
 
@@ -1318,7 +1342,6 @@ app.get(
 
       });
 
-
     } catch (e) {
 
       res.json({
@@ -1327,12 +1350,11 @@ app.get(
       });
 
     }
-
   }
 );
 
 /* =========================================================
-   START
+   START SERVER
    ========================================================= */
 
 app.listen(
@@ -1340,7 +1362,7 @@ app.listen(
   () => {
 
     console.log(
-      "🚀 RUNNING ON",
+      "🚀 RUNNING ON PORT",
       PORT
     );
 
