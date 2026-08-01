@@ -352,7 +352,7 @@ app.post("/paystack-webhook", async (req, res) => {
 
     console.log("DELIVERY:", delivery.data);
 
-    await sendWhatsApp(session.phone, "✅ Order placed successfully!.  NOTE: Delivery time varies (10min-30min). For any reasons contact support: 0547100951 for assistant");
+    await sendWhatsApp(session.phone, "✅ Order placed successfully!.  NOTE: Delivery time varies (10min-30min). For any reasons contact support: 0547100951 for assistant\n Say: hi/hello/start to buy again");
 
   } catch (e) {
     console.error("WEBHOOK ERROR:", e.response?.data || e.message);
