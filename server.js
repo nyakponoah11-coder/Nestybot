@@ -486,9 +486,7 @@ ${i + 1}. 📦 ORDER
 📦 Data: ${order.capacity || "N/A"}GB
 📱 Number: ${order.phone_number}
 💰 Amount: ₵${Number(order.amount || 0).toFixed(2)}
-
 ${statusEmoji(order.status)} Status: ${String(order.status || "pending").toUpperCase()}
-
 📅 Date: ${dateTime.date}
 🕐 Time: ${dateTime.time}
 
