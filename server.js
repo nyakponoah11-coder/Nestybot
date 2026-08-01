@@ -72,7 +72,9 @@ const MENU = `Welcome to Data1gh🇬🇭
 
 Other Services:\n
 4 - Netflix subscription
-5 - AFA registration`;
+5 - AFA registration
+
+Choose an option to continue`;
 
 const MENUS = {
   MTN: `MTN Bundles:
@@ -88,7 +90,9 @@ const MENUS = {
 10 - 20GB ₵83.50
 11 - 25GB ₵103.50
 12 - 40GB ₵160.50
-13 - 50GB ₵206.50`,
+13 - 50GB ₵206.50
+
+Choose an option to continue`,
 
   AIRTELTIGO: `AirtelTigo Bundles:
 1 - 1GB ₵4.50
@@ -101,7 +105,9 @@ const MENUS = {
 8 - 10GB ₵44.00
 9 - 15GB ₵62.00
 10 - 25GB ₵106.00
-11 - 30GB ₵121.00`,
+11 - 30GB ₵121.00
+
+Choose an option to continue`,
 
   TELECEL: `Telecel Bundles:
 1 - 10GB ₵38.50
@@ -114,7 +120,9 @@ const MENUS = {
 8 - 40GB ₵145.00
 9 - 45GB ₵160.80
 10 - 50GB ₵180.00
-11 - 100GB ₵400.75`
+11 - 100GB ₵400.75
+
+Choose an option to continue`
 };
 
 /* ===== SEND WHATSAPP ===== */
@@ -213,7 +221,7 @@ app.post("/webhook", async (req, res) => {
     /* ===== STEP 2 ===== */
     if (session.step === 2) {
       const bundle = PACKAGES[session.network]?.[text];
-      if (!bundle) return sendWhatsApp(from, "Invalid option ❌");
+      if (!bundle) return sendWhatsApp(from, "Invalid option ❌ Choose anY option to continue");
 
       await supabase.from("sessions")
         .update({ step: 3, bundle: text })
@@ -227,7 +235,7 @@ app.post("/webhook", async (req, res) => {
       const phone = text.replace(/\D/g, "");
 
       if (phone.length < 10) {
-        return sendWhatsApp(from, "Invalid number ❌");
+        return sendWhatsApp(from, "Invalid number ❌Enter correct number to continue");
       }
 
       const bundle = PACKAGES[session.network][session.bundle];
@@ -240,7 +248,7 @@ app.post("/webhook", async (req, res) => {
         .eq("phone", from);
 
       return sendWhatsApp(from,
-`Confirm Order ✅
+`Confirm Order: Your order will be delivered✅
 
 Network: ${session.network}
 Data: ${bundle.capacity}GB
