@@ -469,9 +469,8 @@ The latest estimate will be available through Track Order.`;
   ) {
 
     return `
-
 📊 Latest Delivery Information
-
+━━━━━━━━━━━━━━━━
 📦 Last order placed: ${tracker.placedTime}
 ✅ Delivered at: ${tracker.deliveredTime}
 
