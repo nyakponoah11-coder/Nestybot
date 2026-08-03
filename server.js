@@ -473,11 +473,7 @@ The latest estimate will be available through Track Order.`;
 ━━━━━━━━━━━━━━━━
 📦 Last order placed: ${tracker.placedTime}
 ✅ Delivered at: ${tracker.deliveredTime}
-
-⏱️ Estimated delivery time: ${tracker.estimatedTime}
-
-
-This estimate is based on the latest completed delivery batch.`;
+⏱️ Estimated delivery time: ${tracker.estimatedTime} `;
 
   }
 
@@ -1191,7 +1187,6 @@ Reply YES to pay or NO to cancel`
 Your order is ready for payment.
 
 Tap to pay:
-
 ${pay.data.data.authorization_url}
 
 After payment, your data order will be processed automatically.`
@@ -1277,6 +1272,9 @@ app.get(
 
           <p>
             Your order has been placed successfully 🎉💙
+          </p>
+          <p>
+            Built by __Nyakpo Noah__ (Stony)
           </p>
 
         </body>
@@ -1543,9 +1541,7 @@ app.post(
       let successMessage =
 `✅ ORDER PLACED SUCCESSFULLY! 🎉
 
-🆔 Order Reference:
-${datamartReference || ref}
-
+🆔 Order Reference: ${datamartReference || ref}
 📦 Data: ${bundle.capacity}GB
 📶 Network: ${session.network}
 📱 Number: ${session.phone_number}
@@ -1554,12 +1550,9 @@ ${datamartReference || ref}
 ${estimateMessage}
 
 📦 You can track your order anytime:
-For assistance:
-0547100951
+For assistance: Whatsapp 0547100951 (@stony11)
 
-Say:
-hi / hello / start
-to buy again.`;
+SEND: hi / hello / start To buy again.`;
 
       await sendWhatsApp(
         session.phone,
