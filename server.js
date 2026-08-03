@@ -8,8 +8,8 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 /* =========================================================
-   ENVIRONMENT VARIABLES
-   ========================================================= */
+   ENV
+========================================================= */
 
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_ID = process.env.PHONE_ID;
@@ -22,8 +22,15 @@ const supabase = createClient(
 );
 
 /* =========================================================
+   DATAMART API
+========================================================= */
+
+const DATAMART_BASE =
+  "https://api.datamartgh.shop/api/developer";
+
+/* =========================================================
    PACKAGES
-   ========================================================= */
+========================================================= */
 
 const PACKAGES = {
   MTN: {
@@ -73,7 +80,7 @@ const PACKAGES = {
 
 /* =========================================================
    MAIN MENU
-   ========================================================= */
+========================================================= */
 
 const MENU = `Welcome to Data1gh🇬🇭
 
@@ -87,10 +94,11 @@ const MENU = `Welcome to Data1gh🇬🇭
 Choose an option to continue`;
 
 /* =========================================================
-   NETWORK MENUS
-   ========================================================= */
+   BUNDLE MENUS
+========================================================= */
 
 const MENUS = {
+
   MTN: `MTN Bundles:
 1 - 1GB ₵4.50
 2 - 2GB ₵9.50
@@ -140,11 +148,13 @@ Choose an option to continue`
 };
 
 /* =========================================================
-   SEND WHATSAPP MESSAGE
-   ========================================================= */
+   SEND WHATSAPP
+========================================================= */
 
 async function sendWhatsApp(to, text) {
+
   try {
+
     await axios.post(
       `https://graph.facebook.com/v20.0/${PHONE_ID}/messages`,
       {
@@ -161,20 +171,25 @@ async function sendWhatsApp(to, text) {
         }
       }
     );
+
   } catch (e) {
+
     console.error(
       "WA ERROR:",
       e.response?.data || e.message
     );
+
   }
 }
 
 /* =========================================================
-   NORMALIZE PHONE NUMBER
-   ========================================================= */
+   NORMALIZE PHONE
+========================================================= */
 
 function normalizePhone(phone) {
-  let value = String(phone || "").replace(/\D/g, "");
+
+  let value = String(phone || "")
+    .replace(/\D/g, "");
 
   if (
     value.startsWith("233") &&
@@ -187,37 +202,11 @@ function normalizePhone(phone) {
 }
 
 /* =========================================================
-   DATAMART ORDER STATUS
-   ========================================================= */
-
-async function getDatamartOrderStatus(reference) {
-  try {
-    const response = await axios.get(
-      `https://api.datamartgh.shop/api/developer/order-status/${encodeURIComponent(reference)}`,
-      {
-        headers: {
-          "x-api-key": DATA_API_KEY
-        }
-      }
-    );
-
-    return response.data?.data || null;
-
-  } catch (e) {
-    console.error(
-      "DATAMART STATUS ERROR:",
-      e.response?.data || e.message
-    );
-
-    return null;
-  }
-}
-
-/* =========================================================
-   FORMAT DATE AND TIME
-   ========================================================= */
+   FORMAT DATE
+========================================================= */
 
 function formatDateTime(dateValue) {
+
   if (!dateValue) {
     return {
       date: "N/A",
@@ -235,30 +224,337 @@ function formatDateTime(dateValue) {
   }
 
   return {
-    date: date.toLocaleDateString("en-GH", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-      timeZone: "Africa/Accra"
-    }),
 
-    time: date.toLocaleTimeString("en-GH", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: true,
-      timeZone: "Africa/Accra"
-    })
+    date: date.toLocaleDateString(
+      "en-GH",
+      {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        timeZone: "Africa/Accra"
+      }
+    ),
+
+    time: date.toLocaleTimeString(
+      "en-GH",
+      {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+        timeZone: "Africa/Accra"
+      }
+    )
+
   };
 }
 
 /* =========================================================
+   CALCULATE DELIVERY DURATION
+========================================================= */
+
+function calculateDuration(
+  placedAt,
+  deliveredAt
+) {
+
+  const placed =
+    new Date(placedAt);
+
+  const delivered =
+    new Date(deliveredAt);
+
+  if (
+    isNaN(placed.getTime()) ||
+    isNaN(delivered.getTime())
+  ) {
+    return null;
+  }
+
+  const difference =
+    delivered.getTime() -
+    placed.getTime();
+
+  if (difference <= 0) {
+    return null;
+  }
+
+  const totalMinutes =
+    Math.round(
+      difference / 60000
+    );
+
+  const hours =
+    Math.floor(
+      totalMinutes / 60
+    );
+
+  const minutes =
+    totalMinutes % 60;
+
+  if (hours > 0 && minutes > 0) {
+
+    return `${hours} hour${hours === 1 ? "" : "s"} ${minutes} minute${minutes === 1 ? "" : "s"}`;
+
+  }
+
+  if (hours > 0) {
+
+    return `${hours} hour${hours === 1 ? "" : "s"}`;
+
+  }
+
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+
+/* =========================================================
+   GET DELIVERY TRACKER
+========================================================= */
+
+async function getDeliveryEstimate() {
+
+  try {
+
+    const response =
+      await axios.get(
+        `${DATAMART_BASE}/delivery-tracker`,
+        {
+          headers: {
+            "x-api-key": DATA_API_KEY
+          },
+          timeout: 15000
+        }
+      );
+
+    const data =
+      response.data?.data;
+
+    if (!data) {
+      return null;
+    }
+
+    const lastDelivered =
+      data.lastDelivered;
+
+    if (!lastDelivered) {
+
+      return {
+        active:
+          data.scanner?.active || false,
+
+        waiting:
+          data.scanner?.waiting || false,
+
+        estimatedTime:
+          null,
+
+        placedTime:
+          null,
+
+        deliveredTime:
+          null
+      };
+    }
+
+    /*
+      Example from DataMart:
+
+      Tracking #1557392 —
+      placed at Apr 03, 10:03 AM,
+      delivered at Apr 03, 11:51 AM
+    */
+
+    const summary =
+      lastDelivered.summary || "";
+
+    const match =
+      summary.match(
+        /placed at (.*?), delivered at (.*)$/i
+      );
+
+    let placedText = null;
+    let deliveredText = null;
+    let estimatedTime = null;
+
+    if (match) {
+
+      placedText =
+        match[1].trim();
+
+      deliveredText =
+        match[2].trim();
+
+      /*
+        The summary does not include
+        the year, so use the current year.
+      */
+
+      const currentYear =
+        new Date().getFullYear();
+
+      const placedDate =
+        new Date(
+          `${placedText} ${currentYear}`
+        );
+
+      const deliveredDate =
+        new Date(
+          `${deliveredText} ${currentYear}`
+        );
+
+      estimatedTime =
+        calculateDuration(
+          placedDate,
+          deliveredDate
+        );
+    }
+
+    return {
+
+      active:
+        data.scanner?.active || false,
+
+      waiting:
+        data.scanner?.waiting || false,
+
+      trackingId:
+        lastDelivered.trackingId ||
+        null,
+
+      summary,
+
+      placedTime:
+        placedText,
+
+      deliveredTime:
+        deliveredText,
+
+      estimatedTime
+    };
+
+  } catch (e) {
+
+    console.error(
+      "DELIVERY TRACKER ERROR:",
+      e.response?.data ||
+      e.message
+    );
+
+    return null;
+  }
+}
+
+/* =========================================================
+   BUILD DELIVERY ESTIMATE MESSAGE
+========================================================= */
+
+function buildDeliveryEstimateMessage(
+  tracker
+) {
+
+  if (!tracker) {
+
+    return `
+
+⏳ Delivery Estimate:
+Delivery timing is currently being checked.
+
+The latest estimate will be available through Track Order.`;
+
+  }
+
+  if (
+    tracker.estimatedTime &&
+    tracker.placedTime &&
+    tracker.deliveredTime
+  ) {
+
+    return `
+
+📊 Latest Delivery Information
+
+📦 Last order placed:
+${tracker.placedTime}
+
+✅ Delivered at:
+${tracker.deliveredTime}
+
+⏱️ Estimated delivery time:
+${tracker.estimatedTime}
+
+This estimate is based on the latest completed delivery batch.`;
+
+  }
+
+  if (tracker.active) {
+
+    return `
+
+📊 Delivery Information
+
+🔄 DataMart delivery scanner is currently checking orders.
+
+⏳ Estimated delivery time:
+Currently being processed.
+
+You can use 4 - Track Order to check your order status.`;
+
+  }
+
+  return `
+
+⏳ Delivery Estimate:
+Currently being checked by the delivery system.
+
+You can use 4 - Track Order to check your order status.`;
+
+}
+
+/* =========================================================
+   GET DATAMART ORDER STATUS
+========================================================= */
+
+async function getOrderStatus(
+  reference
+) {
+
+  try {
+
+    const response =
+      await axios.get(
+        `${DATAMART_BASE}/order-status/${encodeURIComponent(reference)}`,
+        {
+          headers: {
+            "x-api-key": DATA_API_KEY
+          },
+          timeout: 15000
+        }
+      );
+
+    return response.data?.data || null;
+
+  } catch (e) {
+
+    console.error(
+      "ORDER STATUS ERROR:",
+      e.response?.data ||
+      e.message
+    );
+
+    return null;
+  }
+}
+
+/* =========================================================
    STATUS EMOJI
-   ========================================================= */
+========================================================= */
 
 function statusEmoji(status) {
+
   switch (
-    String(status || "").toLowerCase()
+    String(status || "")
+      .toLowerCase()
   ) {
+
     case "completed":
       return "✅";
 
@@ -283,73 +579,46 @@ function statusEmoji(status) {
 }
 
 /* =========================================================
-   SAVE ORDER
-   ========================================================= */
-
-async function saveOrder(order) {
-  try {
-    const { error } = await supabase
-      .from("orders")
-      .upsert(
-        [order],
-        {
-          onConflict: "ref"
-        }
-      );
-
-    if (error) {
-      console.error(
-        "SAVE ORDER ERROR:",
-        error
-      );
-
-      return false;
-    }
-
-    console.log(
-      "✅ ORDER SAVED:",
-      order.ref
-    );
-
-    return true;
-
-  } catch (e) {
-    console.error(
-      "SAVE ORDER ERROR:",
-      e.message
-    );
-
-    return false;
-  }
-}
-
-/* =========================================================
-   TRACK LAST 3 ORDERS
-   ========================================================= */
+   TRACK ORDERS
+========================================================= */
 
 async function trackOrders(
   from,
   phoneNumber
 ) {
+
   const phone =
     normalizePhone(phoneNumber);
 
   try {
+
+    /*
+      We use the orders table for history.
+      Each successful purchase is saved there.
+    */
+
     const {
       data: orders,
       error
     } = await supabase
       .from("orders")
       .select("*")
-      .eq("phone_number", phone)
-      .order("created_at", {
-        ascending: false
-      })
+      .eq(
+        "phone_number",
+        phone
+      )
+      .order(
+        "created_at",
+        {
+          ascending: false
+        }
+      )
       .limit(3);
 
     if (error) {
+
       console.error(
-        "ORDER SEARCH ERROR:",
+        "TRACK SEARCH ERROR:",
         error
       );
 
@@ -357,7 +626,7 @@ async function trackOrders(
         from,
 `❌ We could not check your orders right now.
 
-Please try again shortly.`
+Please try again later.`
       );
     }
 
@@ -365,18 +634,19 @@ Please try again shortly.`
       !orders ||
       orders.length === 0
     ) {
+
       return sendWhatsApp(
         from,
 `❌ No orders found for:
 
 📱 ${phone}
 
-Make sure you entered the same phone number used when purchasing the data.`
+Make sure you entered the same number used when purchasing.`
       );
     }
 
     let message =
-`📦 YOUR LAST ${orders.length} ORDER${orders.length > 1 ? "S" : ""}
+`📦 YOUR LAST ${orders.length} ORDER${orders.length === 1 ? "" : "S"}
 
 `;
 
@@ -385,114 +655,114 @@ Make sure you entered the same phone number used when purchasing the data.`
       i < orders.length;
       i++
     ) {
-      const order = orders[i];
+
+      const order =
+        orders[i];
+
+      const reference =
+        order.ref ||
+        order.reference;
+
+      let live =
+        null;
+
+      if (reference) {
+
+        live =
+          await getOrderStatus(
+            reference
+          );
+      }
+
+      const status =
+        live?.orderStatus ||
+        order.status ||
+        "pending";
+
+      const network =
+        live?.network ||
+        order.network ||
+        "N/A";
+
+      const capacity =
+        live?.capacity ??
+        order.capacity ??
+        "N/A";
+
+      const customerNumber =
+        live?.phoneNumber ||
+        order.phone_number ||
+        phone;
 
       /*
-        Get LIVE status from Datamart.
+        IMPORTANT:
+        Amount always comes from Paystack/order record,
+        NOT Datamart price.
       */
 
-      const liveOrder =
-        await getDatamartOrderStatus(
-          order.ref
+      const amount =
+        Number(
+          order.amount || 0
         );
 
-      if (liveOrder) {
+      const dateTime =
+        formatDateTime(
+          live?.createdAt ||
+          order.created_at
+        );
 
-        const liveStatus =
-          liveOrder.orderStatus ||
-          order.status ||
-          "pending";
-
-
-        const paidAmount =
-          order.amount;
-
-        const dateTime =
-          formatDateTime(
-            liveOrder.createdAt ||
-            order.created_at
-          );
-
-        const network =
-          liveOrder.network ||
-          order.network ||
-          "N/A";
-
-        const capacity =
-          liveOrder.capacity ??
-          order.capacity ??
-          "N/A";
-
-        message +=
+      message +=
 `━━━━━━━━━━━━━━━━
 ${i + 1}. 📦 ORDER
 
-🆔 Reference: ${liveOrder.reference || order.ref}
-📶 Network: ${network}
-📦 Data: ${capacity}GB
-📱 Number: ${liveOrder.phoneNumber || order.phone_number}
+🆔 Reference:
+${reference || "N/A"}
 
-💰 Amount Paid: ₵${Number(
-          paidAmount || 0
-        ).toFixed(2)}
+📶 Network:
+${network}
 
-${statusEmoji(
-          liveStatus
-        )} Status: ${String(
-          liveStatus
-        ).toUpperCase()}
+📦 Data:
+${capacity}GB
 
-📅 Date: ${dateTime.date}
-🕐 Time: ${dateTime.time}
+📱 Number:
+${customerNumber}
+
+💰 Amount Paid:
+₵${amount.toFixed(2)}
+
+${statusEmoji(status)} Status:
+${String(status).toUpperCase()}
+
+📅 Date:
+${dateTime.date}
+
+🕐 Time:
+${dateTime.time}
 ━━━━━━━━━━━━━━━━
 
 `;
+
+      /*
+        Update current status in database.
+      */
+
+      if (
+        live &&
+        reference
+      ) {
 
         await supabase
           .from("orders")
           .update({
-            status: liveStatus,
-
+            status,
             updated_at:
-              liveOrder.updatedAt ||
+              live.updatedAt ||
               new Date().toISOString()
           })
           .eq(
             "ref",
-            order.ref
+            reference
           );
-
-      } else {
-
-        const dateTime =
-          formatDateTime(
-            order.created_at
-          );
-
-        message +=
-`━━━━━━━━━━━━━━━━
-${i + 1}. 📦 ORDER
-
-🆔 Reference: ${order.ref}
-📶 Network: ${order.network || "N/A"}
-📦 Data: ${order.capacity || "N/A"}GB
-📱 Number: ${order.phone_number}
-💰 Amount Paid: ₵${Number(
-          order.amount || 0
-        ).toFixed(2)}
-
-${statusEmoji(
-          order.status
-        )} Status: ${String(
-          order.status || "pending"
-        ).toUpperCase()}
-📅 Date: ${dateTime.date}
-🕐 Time: ${dateTime.time}
-
-⚠️ Live status temporarily unavailable.
-━━━━━━━━━━━━━━━━
-
-`;
       }
     }
 
@@ -507,8 +777,9 @@ ${statusEmoji(
   } catch (e) {
 
     console.error(
-      "TRACK ORDER ERROR:",
-      e.response?.data || e.message
+      "TRACK ERROR:",
+      e.response?.data ||
+      e.message
     );
 
     return sendWhatsApp(
@@ -521,21 +792,23 @@ Please try again.`
 }
 
 /* =========================================================
-   WEBHOOK VERIFICATION
-   ========================================================= */
+   WEBHOOK VERIFY
+========================================================= */
 
 app.get(
   "/webhook",
   (req, res) => {
+
     res.send(
       req.query["hub.challenge"]
     );
+
   }
 );
 
 /* =========================================================
    WHATSAPP WEBHOOK
-   ========================================================= */
+========================================================= */
 
 app.post(
   "/webhook",
@@ -548,8 +821,7 @@ app.post(
       const msg =
         req.body.entry?.[0]
           ?.changes?.[0]
-          ?.value
-          ?.messages?.[0];
+          ?.value?.messages?.[0];
 
       if (!msg) return;
 
@@ -571,12 +843,15 @@ app.post(
       } = await supabase
         .from("sessions")
         .select("*")
-        .eq("phone", from)
+        .eq(
+          "phone",
+          from
+        )
         .maybeSingle();
 
       /* =====================================================
          CREATE SESSION
-         ===================================================== */
+      ===================================================== */
 
       if (!session) {
 
@@ -596,8 +871,8 @@ app.post(
       }
 
       /* =====================================================
-         RESET TO MAIN MENU
-         ===================================================== */
+         RESET
+      ===================================================== */
 
       if (
         /^(hi|hello|start)$/i.test(
@@ -622,74 +897,8 @@ app.post(
       }
 
       /* =====================================================
-         4 - TRACK ORDER
-         ===================================================== */
-
-      if (
-        text === "4" &&
-        session.step === 1
-      ) {
-
-    
-        await supabase
-          .from("sessions")
-          .update({
-            step: 6
-          })
-          .eq(
-            "phone",
-            from
-          );
-
-        return sendWhatsApp(
-          from,
-
-`📦 TRACK YOUR ORDER
-
-Enter the phone number used when you purchased the data.
-
-Example:
-0241234567`
-        );
-      }
-
-      /* =====================================================
-         TRACK ORDER - ENTER PHONE
-         ===================================================== */
-
-      if (
-        session.step === 6
-      ) {
-
-        const trackingPhone =
-          normalizePhone(text);
-
-        if (
-          trackingPhone.length !== 10 ||
-          !trackingPhone.startsWith("0")
-        ) {
-
-          return sendWhatsApp(
-            from,
-
-`❌ Invalid phone number.
-
-Please enter a valid Ghana phone number.
-
-Example:
-0241234567`
-          );
-        }
-
-        return trackOrders(
-          from,
-          trackingPhone
-        );
-      }
-
-      /* =====================================================
          STEP 1 - MAIN MENU
-         ===================================================== */
+      ===================================================== */
 
       if (
         session.step === 1
@@ -709,6 +918,39 @@ Example:
 
           network = "TELECEL";
 
+        }
+
+        /*
+          4 = TRACK ORDER
+        */
+
+        else if (text === "4") {
+
+          /*
+            Use 6 internally for tracking.
+            Customer menu number remains 4.
+          */
+
+          await supabase
+            .from("sessions")
+            .update({
+              step: 6
+            })
+            .eq(
+              "phone",
+              from
+            );
+
+          return sendWhatsApp(
+            from,
+
+`📦 TRACK YOUR ORDER
+
+Please enter the phone number used when you purchased your data.
+
+Example:
+0241234567`
+          );
         }
 
         /*
@@ -762,7 +1004,7 @@ Example:
 
       /* =====================================================
          STEP 2 - SELECT BUNDLE
-         ===================================================== */
+      ===================================================== */
 
       if (
         session.step === 2
@@ -777,7 +1019,7 @@ Example:
 
           return sendWhatsApp(
             from,
-            "Invalid option ❌ Choose any option to continue"
+            "Invalid option ❌ Choose an option to continue"
           );
         }
 
@@ -800,7 +1042,7 @@ Example:
 
       /* =====================================================
          STEP 3 - PHONE NUMBER
-         ===================================================== */
+      ===================================================== */
 
       if (
         session.step === 3
@@ -816,7 +1058,7 @@ Example:
 
           return sendWhatsApp(
             from,
-            "Invalid number ❌ Enter correct number to continue"
+            "Invalid number ❌ Enter a correct Ghana phone number to continue"
           );
         }
 
@@ -836,23 +1078,47 @@ Example:
             from
           );
 
+        /*
+          =====================================================
+          GET LATEST DELIVERY ESTIMATE
+          BEFORE PAYMENT
+          =====================================================
+        */
+
+        const tracker =
+          await getDeliveryEstimate();
+
+        const estimateMessage =
+          buildDeliveryEstimateMessage(
+            tracker
+          );
+
         return sendWhatsApp(
           from,
 
-`Confirm Order: Your order will be delivered✅
+`Confirm Order: Your order will be delivered ✅
 
-Network: ${session.network}
-Data: ${bundle.capacity}GB
-Amount: ₵${bundle.price}
-Phone: ${phone}
+📶 Network:
+${session.network}
+
+📦 Data:
+${bundle.capacity}GB
+
+💰 Amount:
+₵${bundle.price.toFixed(2)}
+
+📱 Phone:
+${phone}
+
+${estimateMessage}
 
 Reply YES to pay or NO to cancel`
         );
       }
 
       /* =====================================================
-         STEP 4 - PAYMENT CONFIRMATION
-         ===================================================== */
+         STEP 4 - CONFIRM PAYMENT
+      ===================================================== */
 
       if (
         session.step === 4
@@ -901,8 +1167,14 @@ Reply YES to pay or NO to cancel`
                 email:
                   `${from}@test.com`,
 
+                /*
+                  Paystack amount is in pesewas.
+                */
+
                 amount:
-                  bundle.price * 100,
+                  Math.round(
+                    bundle.price * 100
+                  ),
 
                 currency:
                   "GHS",
@@ -917,7 +1189,10 @@ Reply YES to pay or NO to cancel`
               {
                 headers: {
                   Authorization:
-                    `Bearer ${PAYSTACK_SECRET}`
+                    `Bearer ${PAYSTACK_SECRET}`,
+
+                  "Content-Type":
+                    "application/json"
                 }
               }
             );
@@ -936,20 +1211,55 @@ Reply YES to pay or NO to cancel`
           return sendWhatsApp(
             from,
 
-`💳 Payment Link
+`💳 PAYMENT
 
 Your order is ready for payment.
 
 Tap to pay:
+
 ${pay.data.data.authorization_url}
 
-We’ll deliver your order shortly ✅`
+After payment, your data order will be processed automatically.`
           );
         }
 
         return sendWhatsApp(
           from,
-          "Reply YES or NO"
+          "Reply YES to pay or NO to cancel."
+        );
+      }
+
+      /* =====================================================
+         STEP 6 - TRACKING PHONE
+      ===================================================== */
+
+      if (
+        session.step === 6
+      ) {
+
+        const trackingPhone =
+          normalizePhone(text);
+
+        if (
+          trackingPhone.length !== 10 ||
+          !trackingPhone.startsWith("0")
+        ) {
+
+          return sendWhatsApp(
+            from,
+
+`❌ Invalid phone number.
+
+Please enter a valid Ghana phone number.
+
+Example:
+0241234567`
+          );
+        }
+
+        return trackOrders(
+          from,
+          trackingPhone
         );
       }
 
@@ -960,32 +1270,58 @@ We’ll deliver your order shortly ✅`
         e.response?.data ||
         e.message
       );
+
     }
   }
 );
 
 /* =========================================================
    SUCCESS PAGE
-   ========================================================= */
+========================================================= */
 
 app.get(
   "/success",
   (req, res) => {
 
-    res.send(
-      "<h2>Payment Successful ✅, Order placed successfully🎉💙</h2>"
-    );
+    res.send(`
+      <html>
+        <head>
+          <title>Payment Successful</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+        </head>
+
+        <body style="
+          font-family: Arial, sans-serif;
+          text-align: center;
+          padding: 50px;
+        ">
+
+          <h2>
+            Payment Successful ✅
+          </h2>
+
+          <p>
+            Your order has been placed successfully 🎉💙
+          </p>
+
+        </body>
+      </html>
+    `);
 
   }
 );
 
 /* =========================================================
    PAYSTACK WEBHOOK
-   ========================================================= */
+========================================================= */
 
 app.post(
   "/paystack-webhook",
   async (req, res) => {
+
+    /*
+      Respond immediately to Paystack.
+    */
 
     res.sendStatus(200);
 
@@ -1005,10 +1341,19 @@ app.post(
         return;
       }
 
-      const paystackRef =
+      const ref =
         event.data.reference;
 
-   
+      /*
+        =====================================================
+        ACTUAL AMOUNT PAID
+        =====================================================
+
+        Paystack sends amount in pesewas.
+
+        Example:
+        2350 = ₵23.50
+      */
 
       const paidAmount =
         Number(
@@ -1016,13 +1361,13 @@ app.post(
         ) / 100;
 
       console.log(
-        "💰 ACTUAL PAYSTACK AMOUNT:",
+        "💰 ACTUAL AMOUNT PAID:",
         paidAmount
       );
 
-      /* =================================================
+      /* =====================================================
          FIND SESSION
-         ================================================= */
+      ===================================================== */
 
       const {
         data: session
@@ -1031,7 +1376,7 @@ app.post(
         .select("*")
         .eq(
           "ref",
-          paystackRef
+          ref
         )
         .maybeSingle();
 
@@ -1039,15 +1384,15 @@ app.post(
 
         console.error(
           "❌ SESSION NOT FOUND:",
-          paystackRef
+          ref
         );
 
         return;
       }
 
-      /* =================================================
-         GET BUNDLE
-         ================================================= */
+      /* =====================================================
+         GET PACKAGE
+      ===================================================== */
 
       const bundle =
         PACKAGES[
@@ -1063,14 +1408,14 @@ app.post(
         return;
       }
 
-      /* =================================================
-         SEND ORDER TO DATAMART
-         ================================================= */
+      /* =====================================================
+         SEND PURCHASE TO DATAMART
+      ===================================================== */
 
       const delivery =
         await axios.post(
 
-          "https://api.datamartgh.shop/api/developer/purchase",
+          `${DATAMART_BASE}/purchase`,
 
           {
             phoneNumber:
@@ -1089,8 +1434,14 @@ app.post(
           {
             headers: {
               "x-api-key":
-                DATA_API_KEY
-            }
+                DATA_API_KEY,
+
+              "Content-Type":
+                "application/json"
+            },
+
+            timeout:
+              30000
           }
         );
 
@@ -1099,141 +1450,142 @@ app.post(
         delivery.data
       );
 
-      /* =================================================
+      /* =====================================================
          DATAMART RESPONSE
-         ================================================= */
+      ===================================================== */
 
       const datamartData =
         delivery.data?.data ||
-        delivery.data;
+        delivery.data ||
+        {};
 
       const datamartReference =
-        datamartData?.reference ||
-        datamartData?.orderReference ||
-        datamartData?.order_reference;
+        datamartData.reference ||
+        datamartData.orderReference ||
+        datamartData.order_reference;
 
       const datamartOrderId =
-        datamartData?.orderId ||
-        datamartData?.order_id ||
+        datamartData.orderId ||
+        datamartData.order_id ||
         null;
 
-      if (!datamartReference) {
+      const datamartStatus =
+        datamartData.orderStatus ||
+        datamartData.status ||
+        "pending";
 
-        console.error(
-          "⚠️ DATAMART REFERENCE NOT FOUND:",
-          delivery.data
-        );
+      /*
+        =====================================================
+        SAVE ORDER HISTORY
+        =====================================================
 
-        await sendWhatsApp(
-          session.phone,
+        IMPORTANT:
 
-`✅ Order placed successfully!
+        amount = actual Paystack amount.
+        NOT Datamart price.
+      */
 
-NOTE: Delivery time varies (10min-30min).
+      if (datamartReference) {
 
-For assistance:
-0547100951
+        const {
+          error: orderError
+        } = await supabase
+          .from("orders")
+          .insert([
 
-Say:
-hi / hello / start
+            {
+              whatsapp_phone:
+                session.phone,
 
-to buy again.`
-        );
+              phone_number:
+                normalizePhone(
+                  session.phone_number
+                ),
 
-        return;
+              ref:
+                datamartReference,
+
+              network:
+                session.network,
+
+              bundle:
+                session.bundle,
+
+              capacity:
+                bundle.capacity,
+
+              amount:
+                paidAmount,
+
+              status:
+                datamartStatus,
+
+              created_at:
+                datamartData.createdAt ||
+                new Date().toISOString(),
+
+              updated_at:
+                datamartData.updatedAt ||
+                new Date().toISOString()
+            }
+
+          ]);
+
+        if (orderError) {
+
+          console.error(
+            "❌ ORDER SAVE ERROR:",
+            orderError
+          );
+
+        } else {
+
+          console.log(
+            "✅ ORDER HISTORY SAVED:",
+            datamartReference
+          );
+
+        }
+
       }
 
-      /* =================================================
-         SAVE ORDER HISTORY
-         ================================================= */
+      /* =====================================================
+         GET CURRENT DELIVERY ESTIMATE
+      ===================================================== */
 
-      const saved =
-        await saveOrder({
+      const tracker =
+        await getDeliveryEstimate();
 
-          whatsapp_phone:
-            session.phone,
+      const estimateMessage =
+        buildDeliveryEstimateMessage(
+          tracker
+        );
 
-          phone_number:
-            normalizePhone(
-              session.phone_number
-            ),
-
-          /*
-            This is the Datamart reference
-            used for tracking.
-          */
-
-          ref:
-            datamartReference,
-
-          network:
-            session.network,
-
-          bundle:
-            session.bundle,
-
-          capacity:
-            bundle.capacity,
-
-          /*
-            IMPORTANT:
-
-            Save the actual amount
-            paid through Paystack.
-          */
-
-          amount:
-            paidAmount,
-
-          status:
-            datamartData?.orderStatus ||
-            datamartData?.status ||
-            "pending",
-
-          created_at:
-            datamartData?.createdAt ||
-            new Date().toISOString(),
-
-          updated_at:
-            datamartData?.updatedAt ||
-            new Date().toISOString()
-        });
-
-      console.log(
-        "✅ ORDER HISTORY SAVED:",
-        saved
-      );
-
-      console.log(
-        "🆔 DATAMART ORDER ID:",
-        datamartOrderId
-      );
-
-      console.log(
-        "🆔 DATAMART REFERENCE:",
-        datamartReference
-      );
-
-      /* =================================================
+      /* =====================================================
          CUSTOMER SUCCESS MESSAGE
-         ================================================= */
+      ===================================================== */
 
-      await sendWhatsApp(
-        session.phone,
-
-`✅ Order placed successfully!
+      let successMessage =
+`✅ ORDER PLACED SUCCESSFULLY! 🎉
 
 🆔 Order Reference:
-${datamartReference}
-📦 ${bundle.capacity}GB
-📶 ${session.network}
-📱 ${session.phone_number}
+${datamartReference || ref}
+
+📦 Data:
+${bundle.capacity}GB
+
+📶 Network:
+${session.network}
+
+📱 Number:
+${session.phone_number}
+
 💰 Amount Paid:
 ₵${paidAmount.toFixed(2)}
 
-NOTE: Delivery time varies (10min-30min).
+${estimateMessage}
 
-You can track your order anytime by choosing:
+📦 You can track your order anytime:
 
 4 - Track Order
 
@@ -1243,23 +1595,42 @@ For assistance:
 Say:
 hi / hello / start
 
-to buy again.`
+to buy again.`;
+
+      await sendWhatsApp(
+        session.phone,
+        successMessage
+      );
+
+      console.log(
+        "✅ CUSTOMER NOTIFIED"
+      );
+
+      console.log(
+        "DATAMART ORDER ID:",
+        datamartOrderId
+      );
+
+      console.log(
+        "DATAMART REFERENCE:",
+        datamartReference
       );
 
     } catch (e) {
 
       console.error(
-        "PAYSTACK WEBHOOK ERROR:",
+        "WEBHOOK ERROR:",
         e.response?.data ||
         e.message
       );
+
     }
   }
 );
 
 /* =========================================================
    ADMIN PAGE
-   ========================================================= */
+========================================================= */
 
 app.get(
   "/admin",
@@ -1275,7 +1646,7 @@ app.get(
 
 /* =========================================================
    ADMIN DATA
-   ========================================================= */
+========================================================= */
 
 app.get(
   "/admin-data",
@@ -1289,9 +1660,12 @@ app.get(
         .from("sessions")
         .select("*");
 
+      const sessions =
+        data || [];
+
       let revenue = 0;
 
-      (data || []).forEach(
+      sessions.forEach(
         x => {
 
           if (
@@ -1304,9 +1678,12 @@ app.get(
               ]?.[x.bundle];
 
             if (bundle) {
+
               revenue +=
                 bundle.price;
+
             }
+
           }
 
         }
@@ -1315,28 +1692,24 @@ app.get(
       res.json({
 
         total:
-          data?.length || 0,
+          sessions.length,
 
         delivered:
-          (data || [])
-            .filter(
-              x =>
-                x.step === 5
-            )
-            .length,
+          sessions.filter(
+            x =>
+              x.step === 5
+          ).length,
 
         pending:
-          (data || [])
-            .filter(
-              x =>
-                x.step < 5
-            )
-            .length,
+          sessions.filter(
+            x =>
+              x.step < 5
+          ).length,
 
         revenue,
 
         orders:
-          (data || [])
+          sessions
             .slice(-10)
             .reverse()
 
@@ -1355,14 +1728,14 @@ app.get(
 
 /* =========================================================
    START SERVER
-   ========================================================= */
+========================================================= */
 
 app.listen(
   PORT,
   () => {
 
     console.log(
-      "🚀 RUNNING ON PORT",
+      "🚀 RUNNING ON",
       PORT
     );
 
