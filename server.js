@@ -472,14 +472,11 @@ The latest estimate will be available through Track Order.`;
 
 📊 Latest Delivery Information
 
-📦 Last order placed:
-${tracker.placedTime}
+📦 Last order placed: ${tracker.placedTime}
+✅ Delivered at: ${tracker.deliveredTime}
 
-✅ Delivered at:
-${tracker.deliveredTime}
+⏱️ Estimated delivery time: ${tracker.estimatedTime}
 
-⏱️ Estimated delivery time:
-${tracker.estimatedTime}
 
 This estimate is based on the latest completed delivery batch.`;
 
@@ -718,26 +715,13 @@ ${i + 1}. 📦 ORDER
 🆔 Reference:
 ${reference || "N/A"}
 
-📶 Network:
-${network}
+📶 Network: ${network}
+📦 Data: ${capacity}GB
+📱 Number:${customerNumber}
+💰 Amount Paid: ₵${amount.toFixed(2)} ${statusEmoji(status)} Status: ${String(status).toUpperCase()}
+📅 Date: ${dateTime.date}
+🕐 Time: ${dateTime.time}
 
-📦 Data:
-${capacity}GB
-
-📱 Number:
-${customerNumber}
-
-💰 Amount Paid:
-₵${amount.toFixed(2)}
-
-${statusEmoji(status)} Status:
-${String(status).toUpperCase()}
-
-📅 Date:
-${dateTime.date}
-
-🕐 Time:
-${dateTime.time}
 ━━━━━━━━━━━━━━━━
 
 `;
@@ -1098,17 +1082,10 @@ Example:
 
 `Confirm Order: Your order will be delivered ✅
 
-📶 Network:
-${session.network}
-
-📦 Data:
-${bundle.capacity}GB
-
-💰 Amount:
-₵${bundle.price.toFixed(2)}
-
-📱 Phone:
-${phone}
+📶 Network: ${session.network}
+📦 Data:${bundle.capacity}GB
+💰 Amount: ₵${bundle.price.toFixed(2)}
+📱 Phone: ${phone}
 
 ${estimateMessage}
 
@@ -1571,30 +1548,19 @@ app.post(
 🆔 Order Reference:
 ${datamartReference || ref}
 
-📦 Data:
-${bundle.capacity}GB
-
-📶 Network:
-${session.network}
-
-📱 Number:
-${session.phone_number}
-
-💰 Amount Paid:
-₵${paidAmount.toFixed(2)}
+📦 Data: ${bundle.capacity}GB
+📶 Network: ${session.network}
+📱 Number: ${session.phone_number}
+💰 Amount Paid: ₵${paidAmount.toFixed(2)}
 
 ${estimateMessage}
 
 📦 You can track your order anytime:
-
-4 - Track Order
-
 For assistance:
 0547100951
 
 Say:
 hi / hello / start
-
 to buy again.`;
 
       await sendWhatsApp(
