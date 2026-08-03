@@ -712,13 +712,12 @@ Make sure you entered the same number used when purchasing.`
 `━━━━━━━━━━━━━━━━
 ${i + 1}. 📦 ORDER
 
-🆔 Reference:
-${reference || "N/A"}
-
+🆔 Reference: ${reference || "N/A"}
 📶 Network: ${network}
 📦 Data: ${capacity}GB
 📱 Number:${customerNumber}
-💰 Amount Paid: ₵${amount.toFixed(2)} ${statusEmoji(status)} Status: ${String(status).toUpperCase()}
+💰 Amount Paid: ₵${amount.toFixed(2)} 
+${statusEmoji(status)} Status: ${String(status).toUpperCase()}
 📅 Date: ${dateTime.date}
 🕐 Time: ${dateTime.time}
 
