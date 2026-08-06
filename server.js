@@ -1257,9 +1257,9 @@ Example:
         return sendWhatsApp(
           from,
 
-`📲 Enter the Mobile Money number to pay from:
+`📲 Enter the MoMo to pay from:
 
-(This can be the same number or a different one)`
+This can be the same number or a different one`
         );
       }
 
@@ -1282,7 +1282,7 @@ Example:
 
           return sendWhatsApp(
             from,
-            "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue"
+            "Invalid number ❌ Enter a correct MoMo number to continue"
           );
         }
 
