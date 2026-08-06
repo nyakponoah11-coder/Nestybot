@@ -202,6 +202,19 @@ function normalizePhone(phone) {
 }
 
 /* =========================================================
+   MOMO PROVIDER MAPPING
+========================================================= */
+
+function momoProvider(network) {
+
+  if (network === "MTN") return "mtn";
+  if (network === "AIRTELTIGO") return "atl";
+  if (network === "TELECEL") return "vod";
+
+  return null;
+}
+
+/* =========================================================
    FORMAT DATE
 ========================================================= */
 
@@ -584,11 +597,6 @@ async function trackOrders(
 
   try {
 
-    /*
-      We use the orders table for history.
-      Each successful purchase is saved there.
-    */
-
     const {
       data: orders,
       error
@@ -686,12 +694,6 @@ Make sure you entered the same number used when purchasing.`
         order.phone_number ||
         phone;
 
-      /*
-        IMPORTANT:
-        Amount always comes from Paystack/order record,
-        NOT Datamart price.
-      */
-
       const amount =
         Number(
           order.amount || 0
@@ -719,10 +721,6 @@ ${statusEmoji(status)} Status: ${String(status).toUpperCase()}
 ━━━━━━━━━━━━━━━━
 
 `;
-
-      /*
-        Update current status in database.
-      */
 
       if (
         live &&
@@ -765,6 +763,227 @@ ${statusEmoji(status)} Status: ${String(status).toUpperCase()}
 `❌ Something went wrong while checking your orders.
 
 Please try again.`
+    );
+  }
+}
+
+/* =========================================================
+   INITIATE DIRECT MOBILE MONEY CHARGE
+   Sends a PIN prompt straight to the MOMO number's phone —
+   no checkout URL involved. Result arrives via /paystack-webhook.
+========================================================= */
+
+async function initiateMomoCharge(
+  from,
+  session,
+  bundle
+) {
+
+  const ref =
+    "REF-" + Date.now();
+
+  const provider =
+    momoProvider(session.network);
+
+  if (!provider) {
+
+    console.error(
+      "MOMO PROVIDER NOT FOUND FOR:",
+      session.network
+    );
+
+    return sendWhatsApp(
+      from,
+      "❌ We could not start payment for this network. Please contact support."
+    );
+  }
+
+  try {
+
+    const charge =
+      await axios.post(
+
+        "https://api.paystack.co/charge",
+
+        {
+          email:
+            `${from}@test.com`,
+
+          amount:
+            Math.round(
+              bundle.price * 100
+            ),
+
+          currency:
+            "GHS",
+
+          reference:
+            ref,
+
+          mobile_money: {
+            phone:
+              session.momo_number,
+
+            provider
+          }
+        },
+
+        {
+          headers: {
+            Authorization:
+              `Bearer ${PAYSTACK_SECRET}`,
+
+            "Content-Type":
+              "application/json"
+          },
+
+          timeout: 30000
+        }
+      );
+
+    const status =
+      charge.data?.data?.status;
+
+    console.log(
+      "MOMO CHARGE STATUS:",
+      status
+    );
+
+    if (status === "send_otp") {
+
+      await supabase
+        .from("sessions")
+        .update({
+          ref,
+          step: 9
+        })
+        .eq(
+          "phone",
+          from
+        );
+
+      return sendWhatsApp(
+        from,
+
+`📲 An OTP has been sent to ${session.momo_number}.
+
+Please reply with the OTP to complete your payment.`
+      );
+    }
+
+    await supabase
+      .from("sessions")
+      .update({
+        ref,
+        step: 5
+      })
+      .eq(
+        "phone",
+        from
+      );
+
+    return sendWhatsApp(
+      from,
+
+`📲 A payment prompt has been sent to ${session.momo_number}.
+
+Please check that phone and enter your Mobile Money PIN to complete payment of ₵${bundle.price.toFixed(2)}.
+
+You'll get a message here once it's confirmed.`
+    );
+
+  } catch (e) {
+
+    console.error(
+      "MOMO CHARGE ERROR:",
+      e.response?.data ||
+      e.message
+    );
+
+    await supabase
+      .from("sessions")
+      .update({
+        step: 1
+      })
+      .eq(
+        "phone",
+        from
+      );
+
+    return sendWhatsApp(
+      from,
+
+`❌ We could not start payment right now.
+
+Please reply HI to try again.`
+    );
+  }
+}
+
+/* =========================================================
+   SUBMIT MOMO OTP
+   (only needed if the charge above came back "send_otp")
+========================================================= */
+
+async function submitMomoOtp(
+  from,
+  session,
+  otp
+) {
+
+  try {
+
+    await axios.post(
+
+      "https://api.paystack.co/charge/submit_otp",
+
+      {
+        otp,
+        reference: session.ref
+      },
+
+      {
+        headers: {
+          Authorization:
+            `Bearer ${PAYSTACK_SECRET}`,
+
+          "Content-Type":
+            "application/json"
+        },
+
+        timeout: 30000
+      }
+    );
+
+    await supabase
+      .from("sessions")
+      .update({
+        step: 5
+      })
+      .eq(
+        "phone",
+        from
+      );
+
+    return sendWhatsApp(
+      from,
+      "✅ OTP received. Confirming your payment now — you'll get a message here once it's done."
+    );
+
+  } catch (e) {
+
+    console.error(
+      "SUBMIT OTP ERROR:",
+      e.response?.data ||
+      e.message
+    );
+
+    return sendWhatsApp(
+      from,
+
+`❌ That OTP did not work.
+
+Please reply with the OTP again, or reply HI to start over.`
     );
   }
 }
@@ -898,16 +1117,7 @@ app.post(
 
         }
 
-        /*
-          4 = TRACK ORDER
-        */
-
         else if (text === "4") {
-
-          /*
-            Use 6 internally for tracking.
-            Customer menu number remains 4.
-          */
 
           await supabase
             .from("sessions")
@@ -931,10 +1141,6 @@ Example:
           );
         }
 
-        /*
-          5 = NETFLIX
-        */
-
         else if (text === "5") {
 
           return sendWhatsApp(
@@ -942,10 +1148,6 @@ Example:
             "Subscribe to Netflix here:\nhttps://data-ease-shop.lovable.app/services"
           );
         }
-
-        /*
-          6 = AFA
-        */
 
         else if (text === "6") {
 
@@ -1014,12 +1216,13 @@ Example:
 
         return sendWhatsApp(
           from,
-          "Enter phone number:"
+          "Enter phone number to receive the data on:"
         );
       }
 
       /* =====================================================
-         STEP 3 - PHONE NUMBER
+         STEP 3 - DELIVERY PHONE NUMBER
+         (the number the data bundle is delivered to)
       ===================================================== */
 
       if (
@@ -1040,6 +1243,49 @@ Example:
           );
         }
 
+        await supabase
+          .from("sessions")
+          .update({
+            phone_number: phone,
+            step: 8
+          })
+          .eq(
+            "phone",
+            from
+          );
+
+        return sendWhatsApp(
+          from,
+
+`📲 Enter the Mobile Money number to pay from:
+
+(This can be the same number or a different one)`
+        );
+      }
+
+      /* =====================================================
+         STEP 8 - MOMO PAYMENT NUMBER
+         Shows the Confirm Order screen with BOTH numbers
+      ===================================================== */
+
+      if (
+        session.step === 8
+      ) {
+
+        const momoNumber =
+          normalizePhone(text);
+
+        if (
+          momoNumber.length !== 10 ||
+          !momoNumber.startsWith("0")
+        ) {
+
+          return sendWhatsApp(
+            from,
+            "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue"
+          );
+        }
+
         const bundle =
           PACKAGES[
             session.network
@@ -1048,20 +1294,13 @@ Example:
         await supabase
           .from("sessions")
           .update({
-            phone_number: phone,
+            momo_number: momoNumber,
             step: 4
           })
           .eq(
             "phone",
             from
           );
-
-        /*
-          =====================================================
-          GET LATEST DELIVERY ESTIMATE
-          BEFORE PAYMENT
-          =====================================================
-        */
 
         const tracker =
           await getDeliveryEstimate();
@@ -1077,9 +1316,10 @@ Example:
 `Confirm Order: Your order will be delivered ✅
 
 📶 Network: ${session.network}
-📦 Data:${bundle.capacity}GB
+📦 Data: ${bundle.capacity}GB
 💰 Amount: ₵${bundle.price.toFixed(2)}
-📱 Phone: ${phone}
+📱 Data goes to: ${session.phone_number}
+💳 Pay from (Momo): ${momoNumber}
 
 ${estimateMessage}
 
@@ -1089,6 +1329,7 @@ Reply YES to pay or NO to cancel`
 
       /* =====================================================
          STEP 4 - CONFIRM PAYMENT
+         YES triggers the direct momo PIN prompt (no link)
       ===================================================== */
 
       if (
@@ -1125,77 +1366,32 @@ Reply YES to pay or NO to cancel`
               session.network
             ][session.bundle];
 
-          const ref =
-            "REF-" +
-            Date.now();
-
-          const pay =
-            await axios.post(
-
-              "https://api.paystack.co/transaction/initialize",
-
-              {
-                email:
-                  `${from}@test.com`,
-
-                /*
-                  Paystack amount is in pesewas.
-                */
-
-                amount:
-                  Math.round(
-                    bundle.price * 100
-                  ),
-
-                currency:
-                  "GHS",
-
-                reference:
-                  ref,
-
-                callback_url:
-                  "https://nestybot.onrender.com/success"
-              },
-
-              {
-                headers: {
-                  Authorization:
-                    `Bearer ${PAYSTACK_SECRET}`,
-
-                  "Content-Type":
-                    "application/json"
-                }
-              }
-            );
-
-          await supabase
-            .from("sessions")
-            .update({
-              ref,
-              step: 5
-            })
-            .eq(
-              "phone",
-              from
-            );
-
-          return sendWhatsApp(
+          return initiateMomoCharge(
             from,
-
-`💳 PAYMENT
-
-Your order is ready for payment.
-
-Tap to pay:
-${pay.data.data.authorization_url}
-
-After payment, your data order will be processed automatically.`
+            session,
+            bundle
           );
         }
 
         return sendWhatsApp(
           from,
           "Reply YES to pay or NO to cancel."
+        );
+      }
+
+      /* =====================================================
+         STEP 9 - AWAITING OTP
+         (only reached if Paystack requested one)
+      ===================================================== */
+
+      if (
+        session.step === 9
+      ) {
+
+        return submitMomoOtp(
+          from,
+          session,
+          text.trim()
         );
       }
 
@@ -1247,6 +1443,8 @@ Example:
 
 /* =========================================================
    SUCCESS PAGE
+   (kept for reference — no longer used in the momo flow,
+   but harmless to leave in)
 ========================================================= */
 
 app.get(
@@ -1292,10 +1490,6 @@ app.post(
   "/paystack-webhook",
   async (req, res) => {
 
-    /*
-      Respond immediately to Paystack.
-    */
-
     res.sendStatus(200);
 
     try {
@@ -1317,17 +1511,6 @@ app.post(
       const ref =
         event.data.reference;
 
-      /*
-        =====================================================
-        ACTUAL AMOUNT PAID
-        =====================================================
-
-        Paystack sends amount in pesewas.
-
-        Example:
-        2350 = ₵23.50
-      */
-
       const paidAmount =
         Number(
           event.data.amount
@@ -1337,10 +1520,6 @@ app.post(
         "💰 ACTUAL AMOUNT PAID:",
         paidAmount
       );
-
-      /* =====================================================
-         FIND SESSION
-      ===================================================== */
 
       const {
         data: session
@@ -1363,10 +1542,6 @@ app.post(
         return;
       }
 
-      /* =====================================================
-         GET PACKAGE
-      ===================================================== */
-
       const bundle =
         PACKAGES[
           session.network
@@ -1383,6 +1558,7 @@ app.post(
 
       /* =====================================================
          SEND PURCHASE TO DATAMART
+         (always uses the DELIVERY number, not the momo number)
       ===================================================== */
 
       const delivery =
@@ -1423,10 +1599,6 @@ app.post(
         delivery.data
       );
 
-      /* =====================================================
-         DATAMART RESPONSE
-      ===================================================== */
-
       const datamartData =
         delivery.data?.data ||
         delivery.data ||
@@ -1447,17 +1619,6 @@ app.post(
         datamartData.status ||
         "pending";
 
-      /*
-        =====================================================
-        SAVE ORDER HISTORY
-        =====================================================
-
-        IMPORTANT:
-
-        amount = actual Paystack amount.
-        NOT Datamart price.
-      */
-
       if (datamartReference) {
 
         const {
@@ -1472,6 +1633,12 @@ app.post(
 
               phone_number:
                 normalizePhone(
+                  session.phone_number
+                ),
+
+              momo_number:
+                normalizePhone(
+                  session.momo_number ||
                   session.phone_number
                 ),
 
@@ -1522,10 +1689,6 @@ app.post(
 
       }
 
-      /* =====================================================
-         GET CURRENT DELIVERY ESTIMATE
-      ===================================================== */
-
       const tracker =
         await getDeliveryEstimate();
 
@@ -1533,10 +1696,6 @@ app.post(
         buildDeliveryEstimateMessage(
           tracker
         );
-
-      /* =====================================================
-         CUSTOMER SUCCESS MESSAGE
-      ===================================================== */
 
       let successMessage =
 `✅ ORDER PLACED SUCCESSFULLY! 🎉
