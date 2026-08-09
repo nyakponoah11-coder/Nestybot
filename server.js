@@ -79,6 +79,319 @@ const PACKAGES = {
 };
 
 /* =========================================================
+   MASHUP OFFERS (MTN)
+
+   These are fulfilled MANUALLY by dialing *567*2# on the
+   admin's own phone and entering the customer's paid amount
+   — there is no API for this, so payment just triggers an
+   alert to the admin instead of an automatic DataMart
+   purchase. The actual data+minutes mix is whatever MTN's
+   system offers for that amount at the time of dialing, so
+   the customer just picks an amount, not a specific combo.
+========================================================= */
+
+const MASHUP_MIN_AMOUNT = 1;
+const MASHUP_MAX_AMOUNT = 30;
+
+function isValidMashupAmount(value) {
+
+  if (!/^\d+(\.\d{1,2})?$/.test(String(value).trim())) {
+    return false;
+  }
+
+  const amount = parseFloat(value);
+
+  return (
+    amount >= MASHUP_MIN_AMOUNT &&
+    amount <= MASHUP_MAX_AMOUNT
+  );
+}
+
+/*
+  ⚠️ EDIT ME — each price (₵1 through ₵30) has its own 5
+  combo options below. Replace the "label" text for any entry
+  once you know the real numbers. Nothing else in the code
+  needs to change — the bot always looks up combos by the
+  whole-cedi amount the customer typed.
+*/
+
+const MASHUP_KNOWN_COMBOS = {
+
+  "1": [
+    { id: "1", label: "25 Mins + 25MB" },
+    { id: "2", label: "20 Mins + 30MB" },
+    { id: "3", label: "15 Mins + 35MB" }
+  ],
+
+  "2": [
+    { id: "1", label: "50 Mins + 50MB" },
+    { id: "2", label: "35 Mins + 65MB" },
+    { id: "3", label: "20 Mins + 80MB" },
+    { id: "4", label: "5 Mins + 95MB" },
+    { id: "5", label: "100MB only" }
+  ],
+
+  "3": [
+    { id: "1", label: "75 Mins + 75MB" },
+    { id: "2", label: "53 Mins + 98MB" },
+    { id: "3", label: "30 Mins + 120MB" },
+    { id: "4", label: "8 Mins + 143MB" },
+    { id: "5", label: "150MB only" }
+  ],
+
+  "4": [
+    { id: "1", label: "100 Mins + 100MB" },
+    { id: "2", label: "70 Mins + 130MB" },
+    { id: "3", label: "40 Mins + 160MB" },
+    { id: "4", label: "10 Mins + 190MB" },
+    { id: "5", label: "200MB only" }
+  ],
+
+  "5": [
+    { id: "1", label: "125 Mins + 125MB" },
+    { id: "2", label: "100 Mins + 150MB" },
+    { id: "3", label: "50 Mins + 200MB" }
+  ],
+
+  "6": [
+    { id: "1", label: "150 Mins + 150MB" },
+    { id: "2", label: "105 Mins + 195MB" },
+    { id: "3", label: "60 Mins + 240MB" },
+    { id: "4", label: "15 Mins + 285MB" },
+    { id: "5", label: "300MB only" }
+  ],
+
+  "7": [
+    { id: "1", label: "175 Mins + 175MB" },
+    { id: "2", label: "122 Mins + 228MB" },
+    { id: "3", label: "70 Mins + 280MB" },
+    { id: "4", label: "18 Mins + 333MB" },
+    { id: "5", label: "350MB only" }
+  ],
+
+  "8": [
+    { id: "1", label: "200 Mins + 200MB" },
+    { id: "2", label: "140 Mins + 260MB" },
+    { id: "3", label: "80 Mins + 320MB" },
+    { id: "4", label: "20 Mins + 380MB" },
+    { id: "5", label: "400MB only" }
+  ],
+
+  "9": [
+    { id: "1", label: "225 Mins + 225MB" },
+    { id: "2", label: "158 Mins + 293MB" },
+    { id: "3", label: "90 Mins + 360MB" },
+    { id: "4", label: "23 Mins + 428MB" },
+    { id: "5", label: "450MB only" }
+  ],
+
+  "10": [
+    { id: "1", label: "250 Mins + 250MB" },
+    { id: "2", label: "200 Mins + 300MB" },
+    { id: "3", label: "150 Mins + 350MB" }
+  ],
+
+  "11": [
+    { id: "1", label: "275 Mins + 275MB" },
+    { id: "2", label: "193 Mins + 358MB" },
+    { id: "3", label: "110 Mins + 440MB" },
+    { id: "4", label: "28 Mins + 523MB" },
+    { id: "5", label: "550MB only" }
+  ],
+
+  "12": [
+    { id: "1", label: "300 Mins + 300MB" },
+    { id: "2", label: "210 Mins + 390MB" },
+    { id: "3", label: "120 Mins + 480MB" },
+    { id: "4", label: "30 Mins + 570MB" },
+    { id: "5", label: "600MB only" }
+  ],
+
+  "13": [
+    { id: "1", label: "325 Mins + 325MB" },
+    { id: "2", label: "227 Mins + 423MB" },
+    { id: "3", label: "130 Mins + 520MB" },
+    { id: "4", label: "33 Mins + 618MB" },
+    { id: "5", label: "650MB only" }
+  ],
+
+  "14": [
+    { id: "1", label: "350 Mins + 350MB" },
+    { id: "2", label: "245 Mins + 455MB" },
+    { id: "3", label: "140 Mins + 560MB" },
+    { id: "4", label: "35 Mins + 665MB" },
+    { id: "5", label: "700MB only" }
+  ],
+
+  "15": [
+    { id: "1", label: "375 Mins + 375MB" },
+    { id: "2", label: "263 Mins + 488MB" },
+    { id: "3", label: "150 Mins + 600MB" },
+    { id: "4", label: "38 Mins + 713MB" },
+    { id: "5", label: "750MB only" }
+  ],
+
+  "16": [
+    { id: "1", label: "400 Mins + 400MB" },
+    { id: "2", label: "280 Mins + 520MB" },
+    { id: "3", label: "160 Mins + 640MB" },
+    { id: "4", label: "40 Mins + 760MB" },
+    { id: "5", label: "800MB only" }
+  ],
+
+  "17": [
+    { id: "1", label: "425 Mins + 425MB" },
+    { id: "2", label: "298 Mins + 553MB" },
+    { id: "3", label: "170 Mins + 680MB" },
+    { id: "4", label: "43 Mins + 808MB" },
+    { id: "5", label: "850MB only" }
+  ],
+
+  "18": [
+    { id: "1", label: "450 Mins + 450MB" },
+    { id: "2", label: "315 Mins + 585MB" },
+    { id: "3", label: "180 Mins + 720MB" },
+    { id: "4", label: "45 Mins + 855MB" },
+    { id: "5", label: "900MB only" }
+  ],
+
+  "19": [
+    { id: "1", label: "475 Mins + 475MB" },
+    { id: "2", label: "333 Mins + 618MB" },
+    { id: "3", label: "190 Mins + 760MB" },
+    { id: "4", label: "48 Mins + 903MB" },
+    { id: "5", label: "950MB only" }
+  ],
+
+  "20": [
+    { id: "1", label: "500 Mins + 500MB" },
+    { id: "2", label: "350 Mins + 650MB" },
+    { id: "3", label: "200 Mins + 800MB" },
+    { id: "4", label: "50 Mins + 950MB" },
+    { id: "5", label: "1000MB only" }
+  ],
+
+  "21": [
+    { id: "1", label: "525 Mins + 525MB" },
+    { id: "2", label: "368 Mins + 683MB" },
+    { id: "3", label: "210 Mins + 840MB" },
+    { id: "4", label: "53 Mins + 998MB" },
+    { id: "5", label: "1050MB only" }
+  ],
+
+  "22": [
+    { id: "1", label: "550 Mins + 550MB" },
+    { id: "2", label: "385 Mins + 715MB" },
+    { id: "3", label: "220 Mins + 880MB" },
+    { id: "4", label: "55 Mins + 1045MB" },
+    { id: "5", label: "1100MB only" }
+  ],
+
+  "23": [
+    { id: "1", label: "575 Mins + 575MB" },
+    { id: "2", label: "403 Mins + 748MB" },
+    { id: "3", label: "230 Mins + 920MB" },
+    { id: "4", label: "58 Mins + 1093MB" },
+    { id: "5", label: "1150MB only" }
+  ],
+
+  "24": [
+    { id: "1", label: "600 Mins + 600MB" },
+    { id: "2", label: "420 Mins + 780MB" },
+    { id: "3", label: "240 Mins + 960MB" },
+    { id: "4", label: "60 Mins + 1140MB" },
+    { id: "5", label: "1200MB only" }
+  ],
+
+  "25": [
+    { id: "1", label: "625 Mins + 625MB" },
+    { id: "2", label: "438 Mins + 813MB" },
+    { id: "3", label: "250 Mins + 1000MB" },
+    { id: "4", label: "63 Mins + 1188MB" },
+    { id: "5", label: "1250MB only" }
+  ],
+
+  "26": [
+    { id: "1", label: "650 Mins + 650MB" },
+    { id: "2", label: "455 Mins + 845MB" },
+    { id: "3", label: "260 Mins + 1040MB" },
+    { id: "4", label: "65 Mins + 1235MB" },
+    { id: "5", label: "1300MB only" }
+  ],
+
+  "27": [
+    { id: "1", label: "675 Mins + 675MB" },
+    { id: "2", label: "472 Mins + 878MB" },
+    { id: "3", label: "270 Mins + 1080MB" },
+    { id: "4", label: "68 Mins + 1283MB" },
+    { id: "5", label: "1350MB only" }
+  ],
+
+  "28": [
+    { id: "1", label: "700 Mins + 700MB" },
+    { id: "2", label: "490 Mins + 910MB" },
+    { id: "3", label: "280 Mins + 1120MB" },
+    { id: "4", label: "70 Mins + 1330MB" },
+    { id: "5", label: "1400MB only" }
+  ],
+
+  "29": [
+    { id: "1", label: "725 Mins + 725MB" },
+    { id: "2", label: "507 Mins + 943MB" },
+    { id: "3", label: "290 Mins + 1160MB" },
+    { id: "4", label: "73 Mins + 1378MB" },
+    { id: "5", label: "1450MB only" }
+  ],
+
+  "30": [
+    { id: "1", label: "750 Mins + 750MB" },
+    { id: "2", label: "525 Mins + 975MB" },
+    { id: "3", label: "300 Mins + 1200MB" },
+    { id: "4", label: "75 Mins + 1425MB" },
+    { id: "5", label: "1500MB only" }
+  ]
+
+};
+
+function getMashupCombos(amountText) {
+
+  const wholeAmount =
+    String(parseInt(amountText, 10));
+
+  return (
+    MASHUP_KNOWN_COMBOS[wholeAmount] ||
+    []
+  );
+}
+
+/*
+  session.bundle for mashup orders is stored as "amount|comboId"
+  e.g. "5|3" = ₵5, combo option #3
+*/
+
+function parseMashupSelection(bundleStr) {
+
+  const [amountText, comboId] =
+    String(bundleStr || "").split("|");
+
+  if (!isValidMashupAmount(amountText)) {
+    return null;
+  }
+
+  const combo =
+    getMashupCombos(amountText).find(
+      c => c.id === comboId
+    );
+
+  if (!combo) return null;
+
+  return {
+    amount: parseFloat(amountText),
+    combo
+  };
+}
+
+/* =========================================================
    MAIN MENU
 ========================================================= */
 
@@ -90,6 +403,7 @@ const MENU = `Welcome to Data1gh🇬🇭
 4 - Track Order
 5 - Netflix subscription
 6 - AFA registration
+7 - MashUp Bundle (MTN)
 
 Choose an option to continue`;
 
@@ -210,6 +524,7 @@ function momoProvider(network) {
   if (network === "MTN") return "mtn";
   if (network === "AIRTELTIGO") return "atl";
   if (network === "TELECEL") return "vod";
+  if (network === "MASHUP") return "mtn";
 
   return null;
 }
@@ -1157,6 +1472,32 @@ Example:
           );
         }
 
+        else if (text === "7") {
+
+          await supabase
+            .from("sessions")
+            .update({
+              step: 10,
+              network: "MASHUP"
+            })
+            .eq(
+              "phone",
+              from
+            );
+
+          return sendWhatsApp(
+            from,
+
+`📶 MTN MashUp Bundle
+
+Enter the amount you want to pay (₵${MASHUP_MIN_AMOUNT} - ₵${MASHUP_MAX_AMOUNT}):
+
+Example: 5
+
+The data + minutes mix you get depends on what MTN offers for that amount — this will be applied to your number manually.`
+          );
+        }
+
         else {
 
           return sendWhatsApp(
@@ -1257,9 +1598,9 @@ Example:
         return sendWhatsApp(
           from,
 
-`📲 Enter the MoMo to pay from:
+`📲 Enter the Mobile Money number to pay from:
 
-This can be the same number or a different one`
+(This can be the same number or a different one)`
         );
       }
 
@@ -1282,7 +1623,7 @@ This can be the same number or a different one`
 
           return sendWhatsApp(
             from,
-            "Invalid number ❌ Enter a correct MoMo number to continue"
+            "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue"
           );
         }
 
@@ -1291,7 +1632,9 @@ This can be the same number or a different one`
             session.network
           ][session.bundle];
 
-        await supabase
+        const {
+          error: momoUpdateError
+        } = await supabase
           .from("sessions")
           .update({
             momo_number: momoNumber,
@@ -1301,6 +1644,19 @@ This can be the same number or a different one`
             "phone",
             from
           );
+
+        if (momoUpdateError) {
+
+          console.error(
+            "❌ FAILED TO SAVE MOMO NUMBER / STEP 4:",
+            momoUpdateError
+          );
+
+          return sendWhatsApp(
+            from,
+            "❌ Something went wrong saving your details. Please reply HI and try again."
+          );
+        }
 
         const tracker =
           await getDeliveryEstimate();
@@ -1392,6 +1748,313 @@ Reply YES to pay or NO to cancel`
           from,
           session,
           text.trim()
+        );
+      }
+
+      /* =====================================================
+         STEP 10 - MASHUP CUSTOM AMOUNT
+      ===================================================== */
+
+      if (
+        session.step === 10
+      ) {
+
+        const amountText =
+          text.trim();
+
+        if (
+          !isValidMashupAmount(
+            amountText
+          )
+        ) {
+
+          return sendWhatsApp(
+            from,
+            `Invalid amount ❌ Enter an amount between ₵${MASHUP_MIN_AMOUNT} and ₵${MASHUP_MAX_AMOUNT} (e.g. 5)`
+          );
+        }
+
+        await supabase
+          .from("sessions")
+          .update({
+            bundle: amountText,
+            step: 11
+          })
+          .eq(
+            "phone",
+            from
+          );
+
+        const combos =
+          getMashupCombos(amountText);
+
+        let comboMenu =
+          `MashUp ₵${amountText} — choose a package:\n\n`;
+
+        combos.forEach(
+          (c, i) => {
+
+            comboMenu +=
+              `${i + 1} - ${c.label}\n`;
+
+          }
+        );
+
+        comboMenu +=
+          `\nChoose an option to continue`;
+
+        return sendWhatsApp(
+          from,
+          comboMenu
+        );
+      }
+
+      /* =====================================================
+         STEP 11 - MASHUP COMBO SELECTION
+      ===================================================== */
+
+      if (
+        session.step === 11
+      ) {
+
+        const combos =
+          getMashupCombos(
+            session.bundle
+          );
+
+        const combo =
+          combos[
+            Number(text) - 1
+          ];
+
+        if (!combo) {
+
+          return sendWhatsApp(
+            from,
+            "Invalid option ❌ Choose an option to continue"
+          );
+        }
+
+        await supabase
+          .from("sessions")
+          .update({
+            bundle: `${session.bundle}|${combo.id}`,
+            step: 12
+          })
+          .eq(
+            "phone",
+            from
+          );
+
+        return sendWhatsApp(
+          from,
+          "Enter phone number to receive the MashUp bundle on:"
+        );
+      }
+
+      /* =====================================================
+         STEP 12 - MASHUP DELIVERY PHONE NUMBER
+      ===================================================== */
+
+      if (
+        session.step === 12
+      ) {
+
+        const phone =
+          normalizePhone(text);
+
+        if (
+          phone.length !== 10 ||
+          !phone.startsWith("0")
+        ) {
+
+          return sendWhatsApp(
+            from,
+            "Invalid number ❌ Enter a correct Ghana phone number to continue"
+          );
+        }
+
+        await supabase
+          .from("sessions")
+          .update({
+            phone_number: phone,
+            step: 13
+          })
+          .eq(
+            "phone",
+            from
+          );
+
+        return sendWhatsApp(
+          from,
+
+`📲 Enter the Mobile Money number to pay from:
+
+(This can be the same number or a different one)`
+        );
+      }
+
+      /* =====================================================
+         STEP 13 - MASHUP MOMO PAYMENT NUMBER
+         Shows the Confirm Order screen
+      ===================================================== */
+
+      if (
+        session.step === 13
+      ) {
+
+        const momoNumber =
+          normalizePhone(text);
+
+        if (
+          momoNumber.length !== 10 ||
+          !momoNumber.startsWith("0")
+        ) {
+
+          return sendWhatsApp(
+            from,
+            "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue"
+          );
+        }
+
+        const parsed =
+          parseMashupSelection(
+            session.bundle
+          );
+
+        if (!parsed) {
+
+          await supabase
+            .from("sessions")
+            .update({
+              step: 1
+            })
+            .eq(
+              "phone",
+              from
+            );
+
+          return sendWhatsApp(
+            from,
+            "❌ Something went wrong with your selection. Please reply HI and try again."
+          );
+        }
+
+        const {
+          error: momoUpdateError
+        } = await supabase
+          .from("sessions")
+          .update({
+            momo_number: momoNumber,
+            step: 14
+          })
+          .eq(
+            "phone",
+            from
+          );
+
+        if (momoUpdateError) {
+
+          console.error(
+            "❌ FAILED TO SAVE MOMO NUMBER / STEP 14:",
+            momoUpdateError
+          );
+
+          return sendWhatsApp(
+            from,
+            "❌ Something went wrong saving your details. Please reply HI and try again."
+          );
+        }
+
+        return sendWhatsApp(
+          from,
+
+`Confirm Order: Your MashUp will be applied manually ✅
+
+📶 Network: MTN (MashUp)
+📦 Package: ${parsed.combo.label}
+💰 Amount: ₵${parsed.amount.toFixed(2)}
+📱 Data goes to: ${session.phone_number}
+💳 Pay from (Momo): ${momoNumber}
+
+⏳ Note: MashUp bundles are applied manually and may take a little longer than regular data orders.
+
+Reply YES to pay or NO to cancel`
+        );
+      }
+
+      /* =====================================================
+         STEP 14 - CONFIRM MASHUP PAYMENT
+         YES triggers the direct momo PIN prompt (no link)
+      ===================================================== */
+
+      if (
+        session.step === 14
+      ) {
+
+        if (
+          /^no$/i.test(text)
+        ) {
+
+          await supabase
+            .from("sessions")
+            .update({
+              step: 1
+            })
+            .eq(
+              "phone",
+              from
+            );
+
+          return sendWhatsApp(
+            from,
+            "❌ Cancelled\n\n" +
+            MENU
+          );
+        }
+
+        if (
+          /^yes$/i.test(text)
+        ) {
+
+          const parsed =
+            parseMashupSelection(
+              session.bundle
+            );
+
+          if (!parsed) {
+
+            await supabase
+              .from("sessions")
+              .update({
+                step: 1
+              })
+              .eq(
+                "phone",
+                from
+              );
+
+            return sendWhatsApp(
+              from,
+              "❌ Something went wrong with your selection. Please reply HI and try again."
+            );
+          }
+
+          const bundle = {
+            price: parsed.amount,
+            capacity: parsed.combo.label
+          };
+
+          return initiateMomoCharge(
+            from,
+            session,
+            bundle
+          );
+        }
+
+        return sendWhatsApp(
+          from,
+          "Reply YES to pay or NO to cancel."
         );
       }
 
@@ -1537,6 +2200,137 @@ app.post(
         console.error(
           "❌ SESSION NOT FOUND:",
           ref
+        );
+
+        return;
+      }
+
+      /* =====================================================
+         MASHUP ORDERS — fulfilled MANUALLY, no DataMart call
+      ===================================================== */
+
+      if (session.network === "MASHUP") {
+
+        const parsed =
+          parseMashupSelection(
+            session.bundle
+          );
+
+        if (!parsed) {
+
+          console.error(
+            "❌ MASHUP SELECTION NOT FOUND FOR SESSION:",
+            session.phone,
+            session.bundle
+          );
+
+          return;
+        }
+
+        const mashupRef =
+          "MASHUP-" + ref;
+
+        const {
+          error: orderError
+        } = await supabase
+          .from("orders")
+          .insert([
+
+            {
+              whatsapp_phone:
+                session.phone,
+
+              phone_number:
+                normalizePhone(
+                  session.phone_number
+                ),
+
+              momo_number:
+                normalizePhone(
+                  session.momo_number ||
+                  session.phone_number
+                ),
+
+              ref:
+                mashupRef,
+
+              network:
+                "MASHUP",
+
+              bundle:
+                session.bundle,
+
+              capacity:
+                parsed.combo.label,
+
+              amount:
+                paidAmount,
+
+              status:
+                "pending_manual",
+
+              created_at:
+                new Date().toISOString(),
+
+              updated_at:
+                new Date().toISOString()
+            }
+
+          ]);
+
+        if (orderError) {
+
+          console.error(
+            "❌ MASHUP ORDER SAVE ERROR:",
+            orderError
+          );
+
+        } else {
+
+          console.log(
+            "✅ MASHUP ORDER SAVED:",
+            mashupRef
+          );
+
+        }
+
+        /*
+          Alert the admin to go dial *567*2# and
+          apply this manually.
+        */
+
+        await sendWhatsApp(
+          "233547100951",
+
+`🔔 NEW MASHUP ORDER — MANUAL ACTION NEEDED
+
+💰 Amount: ₵${parsed.amount.toFixed(2)}
+📦 Option selected: ${parsed.combo.label}
+📱 Deliver to: ${session.phone_number}
+💳 Paid via momo: ${session.momo_number}
+💵 Confirmed paid: ₵${paidAmount.toFixed(2)}
+
+Dial *567*2#, select MashUp Offers, enter ₵${parsed.amount.toFixed(2)}, pick the option matching "${parsed.combo.label}", and apply it to the number above.`
+        );
+
+        await sendWhatsApp(
+          session.phone,
+
+`✅ PAYMENT RECEIVED! 🎉
+
+📦 Package: ${parsed.combo.label}
+💰 Amount Paid: ₵${paidAmount.toFixed(2)}
+📱 Number: ${session.phone_number}
+
+This MashUp bundle is being applied to your number manually and should land shortly.
+
+For assistance: Whatsapp 0547100951 (@stony11)
+
+SEND: hi / hello / start To buy again.`
+        );
+
+        console.log(
+          "✅ MASHUP CUSTOMER NOTIFIED"
         );
 
         return;
