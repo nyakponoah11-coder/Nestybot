@@ -3032,7 +3032,7 @@ Reply YES to pay or NO to cancel`
 
  await sendWhatsApp(
  from,
- " Checking your email for the Netflix code, one moment..."
+ " Getting you the code now....., one moment....."
  );
 
  const netflixData =
@@ -3713,7 +3713,7 @@ STEP 2
 Once you've done that, reply here with:
 GET CODE
 
-We'll fetch it from the email and send it to you.
+Code will be provided and we bw send to you.
 
 For assistance: Whatsapp 0547100951 (@stony11)`
  );
