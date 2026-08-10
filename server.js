@@ -61,7 +61,7 @@ approve manually.
 
 const NETFLIX_EMAIL = process.env.NETFLIX_EMAIL;
 const NETFLIX_EMAIL_APP_PASSWORD = process.env.NETFLIX_EMAIL_APP_PASSWORD;
-const NETFLIX_PRICE = 1;
+const NETFLIX_PRICE = 30;
 
 /* =========================================================
 PACKAGES
