@@ -35,11 +35,6 @@ const DATAMART_BASE =
 
 /* =========================================================
 AFA REGISTRATION API
-
-Fully automated — after payment, the webhook calls this
-API directly using your API key. Your wallet on
-afaregistration.com is charged your account price (₵10),
-the customer pays ₵20 in the bot, keeping a ₵10 margin.
 ========================================================= */
 
 const AFA_BASE =
@@ -49,16 +44,6 @@ const AFA_PRICE = 20;
 
 /* =========================================================
 NETFLIX SUBSCRIPTION
-
-Fully automated — after payment, the customer signs in on
-Netflix themselves using the shared email below. When they
-reply "GET CODE", the bot logs into that Gmail inbox via
-IMAP, finds the latest Netflix email, and either:
-- sends back the numeric sign-in code, or
-- if Netflix sent an "approve this sign-in" link instead of
-a code, the bot tries to open that link itself; if that
-fails, it flags the link to the admin (233547100951) to
-approve manually.
 ========================================================= */
 
 const NETFLIX_EMAIL = process.env.NETFLIX_EMAIL;
@@ -117,14 +102,6 @@ TELECEL: {
 
 /* =========================================================
 MASHUP OFFERS (MTN)
-
-These are fulfilled MANUALLY by dialing *567*2# on the
-admin's own phone and entering the customer's paid amount
-— there is no API for this, so payment just triggers an
-alert to the admin instead of an automatic DataMart
-purchase. The actual data+minutes mix is whatever MTN's
-system offers for that amount at the time of dialing, so
-the customer just picks an amount, not a specific combo.
 ========================================================= */
 
 const MASHUP_MIN_AMOUNT = 1;
@@ -143,14 +120,6 @@ amount >= MASHUP_MIN_AMOUNT &&
 amount <= MASHUP_MAX_AMOUNT
 );
 }
-
-/*
-⚠️ EDIT ME — each price (₵1 through ₵30) has its own 5
-combo options below. Replace the "label" text for any entry
-once you know the real numbers. Nothing else in the code
-needs to change — the bot always looks up combos by the
-whole-cedi amount the customer typed.
-*/
 
 const MASHUP_KNOWN_COMBOS = {
 
@@ -693,11 +662,6 @@ return value;
 
 /* =========================================================
 AFA FORM-DATA HELPERS
-
-session.bundle for AFA orders holds a JSON blob of the
-form fields as they're collected step by step, e.g.
-{"type":"afa","full_name":"Ama Mensah","phone_number":"0240000000", ...}
-This avoids needing any new Supabase columns.
 ========================================================= */
 
 function getAfaData(session) {
@@ -772,22 +736,6 @@ return `${year}-${mm}-${dd}`;
 
 /* =========================================================
 NETFLIX HELPERS
-
-session.bundle for Netflix orders holds a JSON blob, e.g.
-{"type":"netflix"} before payment, then after payment:
-{
-"type": "netflix",
-"paidAt": "2026-08-10T12:00:00.000Z",
-"refCode": "NF47J0TV",
-"used": false
-}
-
-refCode is a one-time reference the customer must reply
-with to fetch their sign-in code/link. Once a fetch
-succeeds (a code, an approval, or a flagged link), "used"
-flips to true and that reference can never fetch again —
-they'd need to pay again for a new one. This stops the
-same payment being used to sign in on multiple devices.
 ========================================================= */
 
 function generateNetflixRefCode() {
@@ -825,16 +773,6 @@ return data;
 
 return null;
 }
-
-/*
-Logs into the shared Netflix Gmail inbox via IMAP and looks
-at the latest email from Netflix. Returns one of:
-{ type: "code", value: "1234" }
-{ type: "approved", link } — auto-clicked an approval link
-{ type: "link_flagged", link } — link exists, needs admin to click it
-{ type: "none" } — nothing found yet
-{ type: "error" } — could not check email
-*/
 
 async function fetchNetflixSignIn(sinceIso) {
 
