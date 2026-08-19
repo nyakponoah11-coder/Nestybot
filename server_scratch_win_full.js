@@ -35,11 +35,6 @@ const DATAMART_BASE =
 
 /* =========================================================
 AFA REGISTRATION API
-
-Fully automated — after payment, the webhook calls this
-API directly using your API key. Your wallet on
-afaregistration.com is charged your account price (₵10),
-the customer pays ₵20 in the bot, keeping a ₵10 margin.
 ========================================================= */
 
 const AFA_BASE =
@@ -49,16 +44,6 @@ const AFA_PRICE = 20;
 
 /* =========================================================
 NETFLIX SUBSCRIPTION
-
-Fully automated — after payment, the customer signs in on
-Netflix themselves using the shared email below. When they
-reply "GET CODE", the bot logs into that Gmail inbox via
-IMAP, finds the latest Netflix email, and either:
-- sends back the numeric sign-in code, or
-- if Netflix sent an "approve this sign-in" link instead of
-a code, the bot tries to open that link itself; if that
-fails, it flags the link to the admin (233547100951) to
-approve manually.
 ========================================================= */
 
 const NETFLIX_EMAIL = process.env.NETFLIX_EMAIL;
@@ -117,14 +102,6 @@ TELECEL: {
 
 /* =========================================================
 MASHUP OFFERS (MTN)
-
-These are fulfilled MANUALLY by dialing *567*2# on the
-admin's own phone and entering the customer's paid amount
-— there is no API for this, so payment just triggers an
-alert to the admin instead of an automatic DataMart
-purchase. The actual data+minutes mix is whatever MTN's
-system offers for that amount at the time of dialing, so
-the customer just picks an amount, not a specific combo.
 ========================================================= */
 
 const MASHUP_MIN_AMOUNT = 1;
