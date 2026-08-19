@@ -121,13 +121,6 @@ amount <= MASHUP_MAX_AMOUNT
 );
 }
 
-/*
-⚠️ EDIT ME — each price (₵1 through ₵30) has its own 5
-combo options below. Replace the "label" text for any entry
-once you know the real numbers. Nothing else in the code
-needs to change — the bot always looks up combos by the
-whole-cedi amount the customer typed.
-*/
 
 const MASHUP_KNOWN_COMBOS = {
 
@@ -532,11 +525,6 @@ return value;
 
 /* =========================================================
 AFA FORM-DATA HELPERS
-
-session.bundle for AFA orders holds a JSON blob of the
-form fields as they're collected step by step, e.g.
-{"type":"afa","full_name":"Ama Mensah","phone_number":"0240000000", ...}
-This avoids needing any new Supabase columns.
 ========================================================= */
 
 function getAfaData(session) {
@@ -611,22 +599,6 @@ return `${year}-${mm}-${dd}`;
 
 /* =========================================================
 NETFLIX HELPERS
-
-session.bundle for Netflix orders holds a JSON blob, e.g.
-{"type":"netflix"} before payment, then after payment:
-{
-"type": "netflix",
-"paidAt": "2026-08-10T12:00:00.000Z",
-"refCode": "NF47J0TV",
-"used": false
-}
-
-refCode is a one-time reference the customer must reply
-with to fetch their sign-in code/link. Once a fetch
-succeeds (a code, an approval, or a flagged link), "used"
-flips to true and that reference can never fetch again —
-they'd need to pay again for a new one. This stops the
-same payment being used to sign in on multiple devices.
 ========================================================= */
 
 function generateNetflixRefCode() {
@@ -664,16 +636,6 @@ return data;
 
 return null;
 }
-
-/*
-Logs into the shared Netflix Gmail inbox via IMAP and looks
-at the latest email from Netflix. Returns one of:
-{ type: "code", value: "1234" }
-{ type: "approved", link } — auto-clicked an approval link
-{ type: "link_flagged", link } — link exists, needs admin to click it
-{ type: "none" } — nothing found yet
-{ type: "error" } — could not check email
-*/
 
 async function fetchNetflixSignIn(sinceIso) {
 
@@ -1007,13 +969,6 @@ null
 };
 }
 
-/*
-Example from DataMart:
-
-Tracking #1557392 —
-placed at Apr 03, 10:03 AM,
-delivered at Apr 03, 11:51 AM
-*/
 
 const summary =
 lastDelivered.summary || "";
