@@ -33,11 +33,6 @@ const DATAMART_BASE =
 
 /* =========================================================
 AFA REGISTRATION API
-
-Fully automated — after payment, the webhook calls this
-API directly using your API key. Your wallet on
-afaregistration.com is charged your account price (₵10),
-the customer pays ₵20 in the bot, keeping a ₵10 margin.
 ========================================================= */
 
 const AFA_BASE =
@@ -47,16 +42,6 @@ const AFA_PRICE = 20;
 
 /* =========================================================
 NETFLIX SUBSCRIPTION
-
-Fully automated — after payment, the customer signs in on
-Netflix themselves using the shared email below. When they
-reply "GET CODE", the bot logs into that Gmail inbox via
-IMAP, finds the latest Netflix email, and either:
-- sends back the numeric sign-in code, or
-- if Netflix sent an "approve this sign-in" link instead of
-a code, the bot tries to open that link itself; if that
-fails, it flags the link to the admin (233547100951) to
-approve manually.
 ========================================================= */
 
 const NETFLIX_EMAIL = process.env.NETFLIX_EMAIL;
@@ -141,14 +126,6 @@ amount >= MASHUP_MIN_AMOUNT &&
 amount <= MASHUP_MAX_AMOUNT
 );
 }
-
-/*
-⚠️ EDIT ME — each price (₵1 through ₵30) has its own 5
-combo options below. Replace the "label" text for any entry
-once you know the real numbers. Nothing else in the code
-needs to change — the bot always looks up combos by the
-whole-cedi amount the customer typed.
-*/
 
 const MASHUP_KNOWN_COMBOS = {
 
