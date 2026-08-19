@@ -529,11 +529,6 @@ return value;
 
 /* =========================================================
 AFA FORM-DATA HELPERS
-
-session.bundle for AFA orders holds a JSON blob of the
-form fields as they're collected step by step, e.g.
-{"type":"afa","full_name":"Ama Mensah","phone_number":"0240000000", ...}
-This avoids needing any new Supabase columns.
 ========================================================= */
 
 function getAfaData(session) {
