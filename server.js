@@ -48,7 +48,7 @@ NETFLIX SUBSCRIPTION
 
 const NETFLIX_EMAIL = process.env.NETFLIX_EMAIL;
 const NETFLIX_EMAIL_APP_PASSWORD = process.env.NETFLIX_EMAIL_APP_PASSWORD;
-const NETFLIX_PRICE = 0.10;
+const NETFLIX_PRICE = 30;
 
 /* =========================================================
 PACKAGES
