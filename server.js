@@ -1083,8 +1083,19 @@ if (!data) {
 return null;
 }
 
+const fastLane =
+data.fastLane ||
+data.fast_lane ||
+data.fastDelivery ||
+data.fast_delivery ||
+data.deliveryOptions?.fast ||
+data.deliveryLanes?.fast ||
+null;
+
 const lastDelivered =
-data.lastDelivered;
+fastLane?.lastDelivered ||
+fastLane?.latestDelivered ||
+fastLane;
 
 if (!lastDelivered) {
 
@@ -1124,7 +1135,10 @@ summary.match(
 
 let placedText = null;
 let deliveredText = null;
-let estimatedTime = null;
+let estimatedTime =
+fastLane?.estimatedTime ||
+fastLane?.estimate ||
+null;
 
 if (match) {
 
@@ -1152,11 +1166,13 @@ new Date(
 `${deliveredText} ${currentYear}`
 );
 
+if (!estimatedTime) {
 estimatedTime =
 calculateDuration(
 placedDate,
 deliveredDate
 );
+}
 }
 
 return {
