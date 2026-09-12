@@ -1083,19 +1083,8 @@ if (!data) {
 return null;
 }
 
-const fastLane =
-data.fastLane ||
-data.fast_lane ||
-data.fastDelivery ||
-data.fast_delivery ||
-data.deliveryOptions?.fast ||
-data.deliveryLanes?.fast ||
-null;
-
 const lastDelivered =
-fastLane?.lastDelivered ||
-fastLane?.latestDelivered ||
-fastLane;
+data.lastDelivered;
 
 if (!lastDelivered) {
 
@@ -1135,10 +1124,7 @@ summary.match(
 
 let placedText = null;
 let deliveredText = null;
-let estimatedTime =
-fastLane?.estimatedTime ||
-fastLane?.estimate ||
-null;
+let estimatedTime = null;
 
 if (match) {
 
@@ -1166,13 +1152,11 @@ new Date(
 `${deliveredText} ${currentYear}`
 );
 
-if (!estimatedTime) {
 estimatedTime =
 calculateDuration(
 placedDate,
 deliveredDate
 );
-}
 }
 
 return {
@@ -1240,7 +1224,7 @@ return `
 ━━━━━━━━━━━━━━━━
 📦 Last order placed: ${tracker.placedTime}
 ✅ Delivered at: ${tracker.deliveredTime}
-⏱️ Estimated fast-lane delivery time: ${tracker.estimatedTime} `;
+⏱️ Estimated delivery time: ${tracker.estimatedTime} `;
 
 }
 
