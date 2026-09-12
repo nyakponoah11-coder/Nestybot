@@ -1224,7 +1224,7 @@ return `
 ━━━━━━━━━━━━━━━━
 📦 Last order placed: ${tracker.placedTime}
 ✅ Delivered at: ${tracker.deliveredTime}
-⏱️ Estimated delivery time: ${tracker.estimatedTime} `;
+⏱️ Estimated fast-lane delivery time: ${tracker.estimatedTime} `;
 
 }
 
@@ -2233,7 +2233,7 @@ const capacity = String(scratch.prize || "1");
 const prizeLabel = capacity === "2" ? "2GB" : "1GB";
 const networkMap = { MTN: "YELLO", AIRTELTIGO: "YELLO", TELECEL: "YELLO" };
 try {
-const response = await axios.post(`${DATAMART_BASE}/purchase`, { phoneNumber: prizePhone, network: networkMap[session.network] || "YELLO", capacity, gateway: "wallet" }, { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 });
+const response = await axios.post(`${DATAMART_BASE}/purchase`, { phoneNumber: prizePhone, network: networkMap[session.network] || "YELLO", capacity, gateway: "wallet", delivery: "fast" }, { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 });
 const data = response.data?.data || response.data || {};
 const reference = data.reference || data.orderReference || data.order_reference || null;
 await supabase.from("scratch_codes").update({ status: "used", prize_network: session.network, prize_phone: prizePhone, datamart_reference: reference, delivered_at: new Date().toISOString() }).eq("id", scratch.id);
@@ -4039,7 +4039,10 @@ capacity:
 bundle.capacity,
 
 gateway:
-"wallet"
+"wallet",
+
+delivery:
+"fast"
 },
 
 {
