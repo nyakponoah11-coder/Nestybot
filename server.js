@@ -1067,11 +1067,8 @@ try {
 
 const response =
 await axios.get(
-`${DATAMART_BASE}/delivery-tracker`,
+"https://api.datamartgh.shop/api/v1/data/delivery-status",
 {
-headers: {
-"x-api-key": DATA_API_KEY
-},
 timeout: 15000
 }
 );
@@ -1083,10 +1080,19 @@ if (!data) {
 return null;
 }
 
-const lastDelivered =
-data.lastDelivered;
+const fastLane =
+(data.expressActive &&
+data.expressFrontier?.placedAt &&
+data.expressFrontier?.deliveredAt
+? data.expressFrontier
+: null) ||
+(data.unibundleActive &&
+data.unibundleFrontier?.placedAt &&
+data.unibundleFrontier?.deliveredAt
+? data.unibundleFrontier
+: null);
 
-if (!lastDelivered) {
+if (!fastLane) {
 
 return {
 active:
@@ -1106,58 +1112,14 @@ null
 };
 }
 
-/*
-Example from DataMart:
+const placed = formatDateTime(fastLane.placedAt);
+const delivered = formatDateTime(fastLane.deliveredAt);
 
-Tracking #1557392 —
-placed at Apr 03, 10:03 AM,
-delivered at Apr 03, 11:51 AM
-*/
-
-const summary =
-lastDelivered.summary || "";
-
-const match =
-summary.match(
-/placed at (.*?), delivered at (.*)$/i
-);
-
-let placedText = null;
-let deliveredText = null;
-let estimatedTime = null;
-
-if (match) {
-
-placedText =
-match[1].trim();
-
-deliveredText =
-match[2].trim();
-
-/*
-The summary does not include
-the year, so use the current year.
-*/
-
-const currentYear =
-new Date().getFullYear();
-
-const placedDate =
-new Date(
-`${placedText} ${currentYear}`
-);
-
-const deliveredDate =
-new Date(
-`${deliveredText} ${currentYear}`
-);
-
-estimatedTime =
+const estimatedTime =
 calculateDuration(
-placedDate,
-deliveredDate
+fastLane.placedAt,
+fastLane.deliveredAt
 );
-}
 
 return {
 
@@ -1168,16 +1130,17 @@ waiting:
 data.scanner?.waiting || false,
 
 trackingId:
-lastDelivered.trackingId ||
+fastLane.trackingId ||
 null,
 
-summary,
+summary:
+`Fast lane delivery from ${placed.date}, ${placed.time} to ${delivered.date}, ${delivered.time}`,
 
 placedTime:
-placedText,
+`${placed.date}, ${placed.time}`,
 
 deliveredTime:
-deliveredText,
+`${delivered.date}, ${delivered.time}`,
 
 estimatedTime
 };
