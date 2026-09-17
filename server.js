@@ -4288,14 +4288,16 @@ e.message
 START SERVER
 ========================================================= */
 
+app.get("/health", (req, res) => {
+  res.status(200).send("Bot is alive!");
+});
+
 app.listen(
-PORT,
-() => {
-
-console.log(
-"🚀 RUNNING ON",
-PORT
-);
-
-}
+  PORT,
+  () => {
+    console.log(
+      "🚀 RUNNING ON",
+      PORT
+    );
+  }
 );
