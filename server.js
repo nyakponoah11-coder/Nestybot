@@ -939,7 +939,7 @@ await client.logout();
 }
 
 /* =========================================================
-MOMO PROVIDER MAPPING
+MOMO PROVIDER MAPPING & DETECTION
 ========================================================= */
 
 function momoProvider(network) {
@@ -950,6 +950,68 @@ if (network === "TELECEL") return "vod";
 if (network === "MASHUP") return "mtn";
 
 return null;
+}
+
+function getMomoProvider(phone, fallbackNetwork) {
+
+const clean = normalizePhone(phone);
+const prefix = clean.substring(0, 3);
+
+// MTN prefixes: 024, 054, 055, 059, 053, 025
+if (["024", "054", "055", "059", "053", "025"].includes(prefix)) {
+return "mtn";
+}
+
+// Telecel (formerly Vodafone) prefixes: 020, 050
+if (["020", "050"].includes(prefix)) {
+return "vod";
+}
+
+// AirtelTigo (AT) prefixes: 027, 057, 026, 056
+if (["027", "057", "026", "056"].includes(prefix)) {
+return "atl";
+}
+
+return momoProvider(fallbackNetwork) || "mtn";
+}
+
+/* =========================================================
+PAYSTACK CHECKOUT LINK GENERATOR (FALLBACK)
+========================================================= */
+
+async function createPaystackCheckoutLink(from, ref, amountInGhs) {
+
+try {
+
+const res = await axios.post(
+"https://api.paystack.co/transaction/initialize",
+{
+email: `${from}@test.com`,
+amount: Math.round(Number(amountInGhs) * 100),
+currency: "GHS",
+reference: ref,
+channels: ["mobile_money", "card"]
+},
+{
+headers: {
+Authorization: `Bearer ${PAYSTACK_SECRET}`,
+"Content-Type": "application/json"
+},
+timeout: 20000
+}
+);
+
+return res.data?.data?.authorization_url || null;
+
+} catch (err) {
+
+console.error(
+"PAYSTACK INITIALIZE LINK ERROR:",
+err.response?.data || err.message
+);
+
+return null;
+}
 }
 
 /* =========================================================
@@ -1471,7 +1533,8 @@ Please try again.`
 /* =========================================================
 INITIATE DIRECT MOBILE MONEY CHARGE
 Sends a PIN prompt straight to the MOMO number's phone —
-no checkout URL involved. Result arrives via /paystack-webhook.
+with automatic fallback to Paystack payment link and manual
+approval instructions (e.g. *170# for MTN).
 ========================================================= */
 
 async function initiateMomoCharge(
@@ -1484,20 +1547,19 @@ const ref =
 "REF-" + Date.now();
 
 const provider =
-momoProvider(session.network);
+getMomoProvider(session.momo_number, session.network);
 
-if (!provider) {
-
-console.error(
-"MOMO PROVIDER NOT FOUND FOR:",
-session.network
-);
-
-return sendWhatsApp(
+console.log(
+"INITIATING MOMO CHARGE:",
+{
 from,
-"❌ We could not start payment for this network. Please contact support."
-);
+momo_number: session.momo_number,
+network: session.network,
+detected_provider: provider,
+price: bundle.price,
+ref
 }
+);
 
 try {
 
@@ -1542,12 +1604,20 @@ timeout: 30000
 }
 );
 
+const chargeData =
+charge.data?.data || {};
+
 const status =
-charge.data?.data?.status;
+chargeData.status;
+
+const displayText =
+chargeData.display_text;
 
 console.log(
 "MOMO CHARGE STATUS:",
-status
+status,
+"DISPLAY TEXT:",
+displayText
 );
 
 if (status === "send_otp") {
@@ -1563,14 +1633,26 @@ step: 9
 from
 );
 
+if (provider === "vod") {
 return sendWhatsApp(
 from,
+`📲 TELECEL VOUCHER REQUIRED
 
-`📲 An OTP has been sent to ${session.momo_number}.
-
-Please reply with the OTP to complete your payment.`
+1. Dial *110# on ${session.momo_number}
+2. Choose 'Make Payment' and generate a Voucher Code
+3. Reply here with the 6-digit Voucher Code to approve payment of ₵${bundle.price.toFixed(2)}.`
 );
 }
+
+return sendWhatsApp(
+from,
+`📲 An OTP has been sent to ${session.momo_number}.
+
+${displayText ? displayText + "\n\n" : ""}Please reply with the OTP to complete your payment.`
+);
+}
+
+if (status === "pay_offline" || status === "pending" || status === "success") {
 
 await supabase
 .from("sessions")
@@ -1583,14 +1665,65 @@ step: 5
 from
 );
 
+if (status === "success") {
 return sendWhatsApp(
 from,
+`✅ Payment received of ₵${bundle.price.toFixed(2)}! Processing your order now...`
+);
+}
 
-`📲 A payment prompt has been sent to ${session.momo_number}.
+if (provider === "mtn") {
+return sendWhatsApp(
+from,
+`📲 PAYMENT PROMPT SENT (MTN MoMo)
 
-Please check that phone and enter your Mobile Money PIN to complete payment of ₵${bundle.price.toFixed(2)}.
+A payment prompt has been sent to ${session.momo_number} for ₵${bundle.price.toFixed(2)}.
 
-You'll get a message here once it's confirmed.`
+👉 *Prompt didn't pop up?*
+1. Dial *170#
+2. Select 6 (My Wallet)
+3. Select 3 (My Approvals)
+4. Enter your PIN & select 1 to approve!
+
+⏳ Once approved, your order will be delivered automatically.
+
+_Reply LINK if you prefer to pay online._`
+);
+}
+
+if (provider === "vod") {
+return sendWhatsApp(
+from,
+`📲 TELECEL PAYMENT PENDING
+
+A prompt has been initiated for ${session.momo_number} for ₵${bundle.price.toFixed(2)}.
+
+👉 Check your phone for the prompt or dial *110# to approve the pending payment.
+
+⏳ Once approved, your order will be delivered automatically.
+
+_Reply LINK if you prefer to pay online._`
+);
+}
+
+return sendWhatsApp(
+from,
+`📲 PAYMENT PROMPT SENT (AirtelTigo / AT)
+
+A prompt has been sent to ${session.momo_number} for ₵${bundle.price.toFixed(2)}.
+
+👉 *Prompt didn't pop up?* Dial *110# to approve.
+
+⏳ Once approved, your order will be delivered automatically.
+
+_Reply LINK if you prefer to pay online._`
+);
+}
+
+console.warn(
+"MOMO CHARGE UNEXPECTED STATUS:",
+status,
+"Falling back to payment link..."
 );
 
 } catch (e) {
@@ -1600,6 +1733,45 @@ console.error(
 e.response?.data ||
 e.message
 );
+
+}
+
+// Fallback: Generate Paystack Payment Link if direct prompt failed/rejected
+const fallbackRef = "REF-" + Date.now();
+const authUrl = await createPaystackCheckoutLink(
+from,
+fallbackRef,
+bundle.price
+);
+
+if (authUrl) {
+
+await supabase
+.from("sessions")
+.update({
+ref: fallbackRef,
+step: 5
+})
+.eq(
+"phone",
+from
+);
+
+return sendWhatsApp(
+from,
+`💳 COMPLETE YOUR PAYMENT
+
+We could not trigger an automatic prompt to ${session.momo_number}.
+
+👉 Tap the secure link below to pay directly:
+${authUrl}
+
+Amount: ₵${bundle.price.toFixed(2)}
+You can pay with MTN MoMo, Telecel, AirtelTigo, or Card.
+
+⏳ Once paid, your order will be processed automatically!`
+);
+}
 
 await supabase
 .from("sessions")
@@ -1613,16 +1785,14 @@ from
 
 return sendWhatsApp(
 from,
-
 `❌ We could not start payment right now.
 
 Please reply HI to try again.`
 );
 }
-}
 
 /* =========================================================
-SUBMIT MOMO OTP
+SUBMIT MOMO OTP / VOUCHER
 (only needed if the charge above came back "send_otp")
 ========================================================= */
 
@@ -1668,7 +1838,7 @@ from
 
 return sendWhatsApp(
 from,
-"✅ OTP received. Confirming your payment now — you'll get a message here once it's done."
+"✅ Code received. Confirming your payment now — you'll get a message here once it's done."
 );
 
 } catch (e) {
@@ -1681,10 +1851,9 @@ e.message
 
 return sendWhatsApp(
 from,
+`❌ That code did not work.
 
-`❌ That OTP did not work.
-
-Please reply with the OTP again, or reply HI to start over.`
+Please reply with the code again, or reply HI to start over.`
 );
 }
 }
@@ -3378,6 +3547,78 @@ return trackOrders(
 from,
 trackingPhone
 );
+}
+
+/* =====================================================
+STEP 5 - AWAITING PAYMENT CONFIRMATION
+===================================================== */
+
+if (
+session.step === 5
+) {
+
+if (/^(cancel|no|stop)$/i.test(text)) {
+
+await supabase
+.from("sessions")
+.update({
+step: 1
+})
+.eq(
+"phone",
+from
+);
+
+return sendWhatsApp(
+from,
+"❌ Order cancelled.\n\n" + MENU
+);
+}
+
+let amount = null;
+if (session.network === "MASHUP") {
+const parsed = parseMashupSelection(session.bundle);
+amount = parsed?.amount;
+} else if (session.network && session.bundle && PACKAGES[session.network]?.[session.bundle]) {
+amount = PACKAGES[session.network][session.bundle].price;
+} else if (session.network === "AFA" || session.bundle?.includes?.("AFA")) {
+amount = AFA_PRICE;
+} else if (session.bundle?.includes?.("netflix") || session.network === "NETFLIX") {
+amount = NETFLIX_PRICE;
+}
+
+if (/^(link|pay|checkout)$/i.test(text) && amount) {
+const linkRef = "REF-" + Date.now();
+const link = await createPaystackCheckoutLink(from, linkRef, amount);
+if (link) {
+await supabase.from("sessions").update({ ref: linkRef }).eq("phone", from);
+return sendWhatsApp(
+from,
+`💳 PAYMENT LINK
+
+Tap below to pay online:
+${link}
+
+Amount: ₵${Number(amount).toFixed(2)}
+Once paid, your order will be delivered automatically!`
+);
+}
+}
+
+const provider = getMomoProvider(session.momo_number, session.network);
+let helpMsg = `⏳ Awaiting payment confirmation${session.momo_number ? " for " + session.momo_number : ""}.\n\n`;
+
+if (provider === "mtn") {
+helpMsg += `👉 *Prompt didn't pop up on your phone?*\n1. Dial *170#\n2. Select 6 (My Wallet)\n3. Select 3 (My Approvals)\n4. Enter your MoMo PIN & select 1 to approve!\n\n`;
+} else if (provider === "vod") {
+helpMsg += `👉 Dial *110# to approve the pending transaction or generate a voucher.\n\n`;
+} else if (provider === "atl") {
+helpMsg += `👉 Dial *110# to approve the pending transaction.\n\n`;
+}
+
+helpMsg += `Reply *LINK* for a direct payment link.\nReply *CANCEL* to cancel this order, or *HI* for the main menu.`;
+
+return sendWhatsApp(from, helpMsg);
 }
 
 } catch (e) {
