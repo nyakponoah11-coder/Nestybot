@@ -3717,22 +3717,30 @@ ref
 )
 .maybeSingle();
 
-// 2. Fallback: If not found by ref, look up by phone extracted from customer email (e.g. 23324...@test.com)
+// 2. Fallback: If not found by ref, look up by phone extracted from customer email or metadata
 if (!session) {
 const customerEmail = event.data?.customer?.email || "";
 const emailPhone = customerEmail.split("@")[0].replace(/\D/g, "");
 recordWebhookLog("FALLBACK_SEARCH", { ref, customerEmail, emailPhone });
 
 if (emailPhone && emailPhone.length >= 9) {
+const waPhone = emailPhone.startsWith("0") ? "233" + emailPhone.substring(1) : (emailPhone.startsWith("233") ? emailPhone : "233" + emailPhone);
+const localPhone = emailPhone.startsWith("233") ? "0" + emailPhone.substring(3) : (emailPhone.startsWith("0") ? emailPhone : "0" + emailPhone);
+
+// Check phone (WhatsApp JID or local), momo_number, or phone_number
 const { data: fallbackSession } = await supabase
 .from("sessions")
 .select("*")
-.eq("phone", emailPhone)
+.or(`phone.eq.${waPhone},phone.eq.${localPhone},momo_number.eq.${localPhone},phone_number.eq.${localPhone}`)
+.order("id", { ascending: false })
+.limit(1)
 .maybeSingle();
 
 if (fallbackSession) {
-recordWebhookLog("SESSION_FOUND_VIA_EMAIL_PHONE", { emailPhone, sessionPhone: fallbackSession.phone });
+recordWebhookLog("SESSION_FOUND_VIA_FALLBACK", { waPhone, localPhone, sessionPhone: fallbackSession.phone });
 session = fallbackSession;
+if (!session.phone_number) session.phone_number = localPhone;
+if (!session.momo_number) session.momo_number = localPhone;
 }
 }
 }
