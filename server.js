@@ -3634,8 +3634,30 @@ e.message
 );
 
 /* =========================================================
-PAYSTACK WEBHOOK
+PAYSTACK WEBHOOK & DEBUG LOGGER
 ========================================================= */
+
+const recentWebhookLogs = [];
+
+function recordWebhookLog(event, details) {
+const item = {
+time: new Date().toISOString(),
+event,
+details
+};
+console.log(`[WEBHOOK] ${event}:`, typeof details === "object" ? JSON.stringify(details) : details);
+recentWebhookLogs.unshift(item);
+if (recentWebhookLogs.length > 50) recentWebhookLogs.pop();
+}
+
+app.get("/webhook-debug", (req, res) => {
+res.json({
+status: "ok",
+timestamp: new Date().toISOString(),
+count: recentWebhookLogs.length,
+logs: recentWebhookLogs
+});
+});
 
 app.post(
 "/paystack-webhook",
@@ -3645,26 +3667,37 @@ res.sendStatus(200);
 
 try {
 
-console.log(
-"🔥 PAYSTACK WEBHOOK HIT"
-);
-
 const event =
 req.body;
 
+recordWebhookLog("HIT", {
+event_type: event?.event,
+reference: event?.data?.reference,
+amount: event?.data?.amount,
+status: event?.data?.status,
+customer: event?.data?.customer?.email
+});
+
 if (
+!event ||
 event.event !==
 "charge.success"
 ) {
+recordWebhookLog("IGNORED", { reason: "event is not charge.success", event: event?.event });
 return;
 }
 
 const ref =
-event.data.reference;
+event.data?.reference;
+
+if (!ref) {
+recordWebhookLog("ERROR", { reason: "missing reference in event.data" });
+return;
+}
 
 const paidAmount =
 Number(
-event.data.amount
+event.data?.amount || 0
 ) / 100;
 
 console.log(
@@ -3672,7 +3705,8 @@ console.log(
 paidAmount
 );
 
-const {
+// 1. Primary: Look up session by ref
+let {
 data: session
 } = await supabase
 .from("sessions")
@@ -3683,15 +3717,53 @@ ref
 )
 .maybeSingle();
 
+// 2. Fallback: If not found by ref, look up by phone extracted from customer email (e.g. 23324...@test.com)
+if (!session) {
+const customerEmail = event.data?.customer?.email || "";
+const emailPhone = customerEmail.split("@")[0].replace(/\D/g, "");
+recordWebhookLog("FALLBACK_SEARCH", { ref, customerEmail, emailPhone });
+
+if (emailPhone && emailPhone.length >= 9) {
+const { data: fallbackSession } = await supabase
+.from("sessions")
+.select("*")
+.eq("phone", emailPhone)
+.maybeSingle();
+
+if (fallbackSession) {
+recordWebhookLog("SESSION_FOUND_VIA_EMAIL_PHONE", { emailPhone, sessionPhone: fallbackSession.phone });
+session = fallbackSession;
+}
+}
+}
+
 if (!session) {
 
+recordWebhookLog("SESSION_NOT_FOUND", { ref });
 console.error(
 "❌ SESSION NOT FOUND:",
 ref
 );
 
+await sendWhatsApp(
+"233547100951",
+`🔔 PAYSTACK PAYMENT RECEIVED FOR UNKNOWN SESSION
+Reference: ${ref}
+Amount: ₵${paidAmount.toFixed(2)}
+Customer: ${event.data?.customer?.email || "N/A"}
+Please check Supabase and Paystack dashboard!`
+);
+
 return;
 }
+
+recordWebhookLog("SESSION_RESOLVED", {
+phone: session.phone,
+network: session.network,
+bundle: session.bundle,
+phone_number: session.phone_number,
+momo_number: session.momo_number
+});
 
 /* =====================================================
 MASHUP ORDERS — fulfilled MANUALLY, no DataMart call
@@ -3781,11 +3853,6 @@ mashupRef
 );
 
 }
-
-/*
-Alert the admin to go dial *567*2# and
-apply this manually.
-*/
 
 await sendWhatsApp(
 "233547100951",
@@ -4080,7 +4147,7 @@ return;
 /* =====================================================
 NETFLIX ORDERS — customer signs in themselves,
 bot fetches the code/link from Gmail on request
-===================================================== */
+==================================================== */
 
 const netflixData =
 getNetflixData(session);
@@ -4215,8 +4282,14 @@ session.network
 
 if (!bundle) {
 
+recordWebhookLog("BUNDLE_NOT_FOUND", { network: session.network, bundle: session.bundle });
 console.error(
 "❌ BUNDLE NOT FOUND"
+);
+
+await sendWhatsApp(
+session.phone,
+`✅ PAYMENT RECEIVED! 🎉\n\nAmount Paid: ₵${paidAmount.toFixed(2)}\n\nYour order has been recorded and is being processed by our support team.\n\nFor assistance: Whatsapp 0547100951 (@stony11)`
 );
 
 return;
@@ -4224,71 +4297,145 @@ return;
 
 /* =====================================================
 SEND PURCHASE TO DATAMART
-(always uses the DELIVERY number, not the momo number)
+(wrapped in try/catch with fallback to standard delivery)
 ===================================================== */
+
+let datamartSuccess = false;
+let datamartData = {};
+let datamartReference = null;
+let datamartOrderId = null;
+let datamartStatus = "pending";
+let datamartErrorDetail = null;
+
+const purchasePayload = {
+phoneNumber: normalizePhone(session.phone_number),
+network: bundle.apiNetwork || "YELLO",
+capacity: String(bundle.capacity),
+gateway: "wallet"
+};
+
+// 1. Try Fast Lane delivery
+try {
+
+recordWebhookLog("DATAMART_FAST_PURCHASE_ATTEMPT", purchasePayload);
 
 const delivery =
 await axios.post(
-
 `${DATAMART_BASE}/purchase`,
-
 {
-phoneNumber:
-session.phone_number,
-
-network:
-bundle.apiNetwork,
-
-capacity:
-bundle.capacity,
-
-gateway:
-"wallet",
-
-delivery:
-"fast"
+...purchasePayload,
+delivery: "fast"
 },
-
 {
 headers: {
-"x-api-key":
-DATA_API_KEY,
-
-"Content-Type":
-"application/json"
+"x-api-key": DATA_API_KEY,
+"Content-Type": "application/json"
 },
-
-timeout:
-30000
+timeout: 30000
 }
 );
 
-console.log(
-"DELIVERY:",
-delivery.data
-);
-
-const datamartData =
+datamartData =
 delivery.data?.data ||
 delivery.data ||
 {};
 
-const datamartReference =
+datamartReference =
 datamartData.reference ||
 datamartData.orderReference ||
-datamartData.order_reference;
+datamartData.order_reference ||
+null;
 
-const datamartOrderId =
+datamartOrderId =
 datamartData.orderId ||
 datamartData.order_id ||
 null;
 
-const datamartStatus =
+datamartStatus =
 datamartData.orderStatus ||
 datamartData.status ||
 "pending";
 
-if (datamartReference) {
+datamartSuccess = true;
+recordWebhookLog("DATAMART_FAST_PURCHASE_SUCCESS", datamartData);
+
+} catch (fastErr) {
+
+datamartErrorDetail =
+fastErr.response?.data ||
+fastErr.message;
+
+recordWebhookLog("DATAMART_FAST_FAILED_RETRYING_STANDARD", { error: datamartErrorDetail });
+console.warn(
+"⚠️ DATAMART FAST PURCHASE FAILED, RETRYING STANDARD:",
+datamartErrorDetail
+);
+
+// 2. Retry with Standard delivery
+try {
+
+const deliveryStd =
+await axios.post(
+`${DATAMART_BASE}/purchase`,
+purchasePayload,
+{
+headers: {
+"x-api-key": DATA_API_KEY,
+"Content-Type": "application/json"
+},
+timeout: 30000
+}
+);
+
+datamartData =
+deliveryStd.data?.data ||
+deliveryStd.data ||
+{};
+
+datamartReference =
+datamartData.reference ||
+datamartData.orderReference ||
+datamartData.order_reference ||
+null;
+
+datamartOrderId =
+datamartData.orderId ||
+datamartData.order_id ||
+null;
+
+datamartStatus =
+datamartData.orderStatus ||
+datamartData.status ||
+"pending";
+
+datamartSuccess = true;
+recordWebhookLog("DATAMART_STANDARD_PURCHASE_SUCCESS", datamartData);
+
+} catch (stdErr) {
+
+datamartErrorDetail =
+stdErr.response?.data ||
+stdErr.message;
+
+recordWebhookLog("DATAMART_PURCHASE_ALL_FAILED", { error: datamartErrorDetail });
+console.error(
+"❌ DATAMART PURCHASE FAILED:",
+datamartErrorDetail
+);
+
+}
+
+}
+
+const orderReference =
+datamartReference ||
+ref;
+
+const finalOrderStatus =
+datamartSuccess ? datamartStatus : "pending_manual";
+
+// Save order history in Supabase
+try {
 
 const {
 error: orderError
@@ -4312,7 +4459,7 @@ session.phone_number
 ),
 
 ref:
-datamartReference,
+orderReference,
 
 network:
 session.network,
@@ -4327,7 +4474,7 @@ amount:
 paidAmount,
 
 status:
-datamartStatus,
+finalOrderStatus,
 
 created_at:
 datamartData.createdAt ||
@@ -4344,21 +4491,14 @@ session.scratch_order_opt_in ? session.scratch_code : null
 ]);
 
 if (orderError) {
-
-console.error(
-"❌ ORDER SAVE ERROR:",
-orderError
-);
-
+console.error("❌ ORDER SAVE ERROR:", orderError);
+recordWebhookLog("ORDER_SAVE_ERROR", { error: orderError.message });
 } else {
+console.log("✅ ORDER HISTORY SAVED:", orderReference);
+recordWebhookLog("ORDER_SAVED", { orderReference, status: finalOrderStatus });
 
-console.log(
-"✅ ORDER HISTORY SAVED:",
-datamartReference
-);
-
-if (session.scratch_order_opt_in && session.scratch_code) {
-const scratchResult = await countScratchPaidOrder(session.phone, session.scratch_code, datamartReference);
+if (datamartSuccess && session.scratch_order_opt_in && session.scratch_code) {
+const scratchResult = await countScratchPaidOrder(session.phone, session.scratch_code, orderReference);
 if (scratchResult) {
 if (scratchResult.unlocked) {
 await sendWhatsApp(session.phone, `🎉 CONGRATULATIONS!\n\nYour Scratch Code *${scratchResult.code}* has reached 5/5 PAID data orders!\n\n🎟️ YOUR SCRATCH CARD IS NOW UNLOCKED!\n\nReply *SCRATCH* to play and win 1GB or 2GB. 🎁`);
@@ -4367,11 +4507,14 @@ await sendWhatsApp(session.phone, `🎟️ SCRATCH & WIN PROGRESS\n\nCode: ${scr
 }
 }
 }
-
 }
 
+} catch (dbErr) {
+console.error("❌ SUPABASE ORDER INSERT EXCEPTION:", dbErr.message);
+recordWebhookLog("SUPABASE_EXCEPTION", { error: dbErr.message });
 }
 
+// Deliver customer message and admin notification
 const tracker =
 await getDeliveryEstimate();
 
@@ -4380,10 +4523,12 @@ buildDeliveryEstimateMessage(
 tracker
 );
 
+if (datamartSuccess) {
+
 let successMessage =
 `✅ ORDER PLACED SUCCESSFULLY! 🎉
 
-🆔 Order Reference: ${datamartReference || ref}
+🆔 Order Reference: ${orderReference}
 📦 Data: ${bundle.capacity}GB
 📶 Network: ${session.network}
 📱 Number: ${session.phone_number}
@@ -4401,22 +4546,62 @@ session.phone,
 successMessage
 );
 
-console.log(
-"✅ CUSTOMER NOTIFIED"
+recordWebhookLog("CUSTOMER_NOTIFIED_SUCCESS", { phone: session.phone });
+console.log("✅ CUSTOMER NOTIFIED OF SUCCESS");
+
+} else {
+
+// Datamart failed (e.g. low wallet balance, API temporary error)
+// The customer is still notified so they know payment succeeded!
+let pendingMessage =
+`✅ PAYMENT RECEIVED! 🎉
+
+🆔 Order Reference: ${orderReference}
+📦 Data: ${bundle.capacity}GB
+📶 Network: ${session.network}
+📱 Data goes to: ${session.phone_number}
+💰 Amount Paid: ₵${paidAmount.toFixed(2)}
+
+Your payment has been received and your data order is currently being processed. It will be delivered to your number shortly!
+
+For assistance: Whatsapp 0547100951 (@stony11)
+
+SEND: hi / hello / start To return to main menu.`;
+
+await sendWhatsApp(
+session.phone,
+pendingMessage
 );
 
-console.log(
-"DATAMART ORDER ID:",
-datamartOrderId
+recordWebhookLog("CUSTOMER_NOTIFIED_PENDING", { phone: session.phone });
+
+// Alert admin immediately with full error details
+const errorString = typeof datamartErrorDetail === "object" ? JSON.stringify(datamartErrorDetail) : String(datamartErrorDetail || "Unknown API error");
+
+await sendWhatsApp(
+"233547100951",
+`🚨 DATAMART FAILED — MANUAL DELIVERY NEEDED!
+
+Customer paid, but DataMart API purchase failed:
+❌ Error: ${errorString}
+
+📦 Bundle: ${bundle.capacity}GB (${session.network})
+📱 Recipient: ${session.phone_number}
+💳 Paid from MoMo: ${session.momo_number || session.phone_number}
+💰 Amount: ₵${paidAmount.toFixed(2)}
+🆔 Ref: ${orderReference}
+
+Please deliver this order manually or check your DataMart wallet balance!`
 );
 
-console.log(
-"DATAMART REFERENCE:",
-datamartReference
-);
+recordWebhookLog("ADMIN_ALERTED_DATAMART_FAILURE", { error: errorString });
+console.log("🚨 ADMIN ALERTED OF DATAMART FAILURE");
+
+}
 
 } catch (e) {
 
+recordWebhookLog("WEBHOOK_FATAL_ERROR", { error: e.response?.data || e.message });
 console.error(
 "WEBHOOK ERROR:",
 e.response?.data ||
