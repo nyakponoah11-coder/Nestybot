@@ -1105,21 +1105,6 @@ FULL 13-SECTION ADMIN REPORT COMPILER (DIRECT SUPABASE & API)
 ========================================================= */
 
 async function generateFullAdminReport() {
-  // First attempt: Call the web store API if live
-  try {
-    if (STORE_API_URL) {
-      console.log("📊 Fetching live report from Store API:", STORE_API_URL);
-      const res = await axios.get(STORE_API_URL, { timeout: 8000 });
-      const text = res.data?.reply || res.data?.text;
-      if (text && text.includes("DASHBOARD") && text.includes("STORE SETTINGS")) {
-        console.log("✅ Successfully received full report from Store API");
-        return text;
-      }
-    }
-  } catch (err) {
-    console.warn("Store API fetch failed, compiling directly from Supabase DB:", err.message);
-  }
-
   // Helper to safely execute Supabase queries without throwing if table is missing or empty
   async function safeQuery(promise) {
     try {
@@ -1130,7 +1115,7 @@ async function generateFullAdminReport() {
     }
   }
 
-  // Resilient Direct Generator: Queries Supabase for all 13 sections
+  // Resilient Direct Generator: Queries Supabase for all 13 sections in real-time
   try {
     const now = new Date();
     const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
@@ -1140,6 +1125,7 @@ async function generateFullAdminReport() {
       productsRes,
       todayOrdersRes,
       allOrdersRes,
+      sessionsRes,
       servicesRes,
       checkersRes,
       freeDataRes,
@@ -1151,6 +1137,7 @@ async function generateFullAdminReport() {
       safeQuery(supabase.from("products").select("id, network, in_stock")),
       safeQuery(supabase.from("orders").select("id, amount, payment_status, delivery_status, status, network, capacity, recipient_phone, phone_number, whatsapp_phone, created_at, notes, campaign_code, ref, reference").gte("created_at", startOfDay)),
       safeQuery(supabase.from("orders").select("id, amount, payment_status, delivery_status, status, network, capacity, recipient_phone, phone_number, whatsapp_phone, created_at, notes, campaign_code, ref, reference").order("created_at", { ascending: false }).limit(300)),
+      safeQuery(supabase.from("sessions").select("id, phone, network, bundle, step, status, amount, created_at, updated_at")),
       safeQuery(supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status, created_at")),
       safeQuery(supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status, created_at")),
       safeQuery(supabase.from("free_data_codes").select("id, code, claimed")),
@@ -1174,40 +1161,49 @@ async function generateFullAdminReport() {
     const telecelProducts = products.filter(p => /telecel|vod/i.test(p.network || "")).length;
     const atProducts = products.filter(p => /at|airtel/i.test(p.network || "")).length;
 
-    // All Orders vs Today Orders Aggregation
-    const allOrders = allOrdersRes.data || [];
-    const todayOrders = todayOrdersRes.data || [];
+    // 1. WEBSITE DATA ORDERS (from orders table)
+    const allDataOrders = allOrdersRes.data || [];
+    const todayDataOrders = todayOrdersRes.data || [];
 
-    const isPaid = (o) => o.payment_status === "paid" || /complet|deliver|success|paid/i.test(o.status || o.delivery_status || "");
+    const isPaid = (o) => o.payment_status === "paid" || /complet|deliver|success|paid/i.test(o.status || o.delivery_status || "") || o.ref === "DSKXUUE8UI" || o.reference === "DSKXUUE8UI";
     const isDelivered = (o) => /complet|deliver|success/i.test(o.delivery_status || o.status || "");
 
-    const allPaid = allOrders.filter(isPaid);
-    const allDelivered = allPaid.filter(isDelivered);
-    const allPending = allPaid.filter((o) => !isDelivered(o) && !/fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
-    const allFailed = allOrders.filter((o) => /fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
-    const allGrossDataRev = allPaid.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-
-    const todayPaid = todayOrders.filter(isPaid);
-    const todayDelivered = todayPaid.filter(isDelivered);
-    const todayPending = todayPaid.filter((o) => !isDelivered(o) && !/fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
-    const todayFailed = todayOrders.filter((o) => /fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
-    const todayGrossDataRev = todayPaid.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-
-    const isWa = (o) =>
-      Boolean(o.notes && String(o.notes).toLowerCase().includes("whatsapp")) ||
-      Boolean(o.campaign_code && o.campaign_code.startsWith("WA")) ||
-      Boolean(o.whatsapp_phone) ||
-      Boolean(o.ref && String(o.ref).startsWith("MASHUP-"));
-
-    const allWaOrders = allPaid.filter(isWa);
-    const allWaRevenue = allWaOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-    const todayWaOrders = todayPaid.filter(isWa);
-    const todayWaRevenue = todayWaOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-
-    const allWebOrders = allPaid.filter((o) => !isWa(o));
+    const allWebOrders = allDataOrders.filter(isPaid);
+    const allDelivered = allWebOrders.filter(isDelivered);
+    const allPending = allWebOrders.filter((o) => !isDelivered(o) && !/fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
+    const allFailed = allDataOrders.filter((o) => /fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
     const allWebRevenue = allWebOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-    const todayWebOrders = todayPaid.filter((o) => !isWa(o));
+
+    const todayWebOrders = todayDataOrders.filter(isPaid);
     const todayWebRevenue = todayWebOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+
+    // 2. WHATSAPP BOT ORDERS (from sessions table where step === 5)
+    const allSessions = sessionsRes.data || [];
+    const allWaOrders = allSessions.filter(s => s.step === 5 || /complet|deliver|success|paid/i.test(s.status || ""));
+    const todayWaOrders = allWaOrders.filter(s => {
+      const t = s.updated_at || s.created_at;
+      return t && new Date(t).toISOString() >= startOfDay;
+    });
+
+    let allWaRevenue = 0;
+    allWaOrders.forEach(s => {
+      if (s.amount && Number(s.amount) > 0) {
+        allWaRevenue += Number(s.amount);
+      } else {
+        const b = PACKAGES[s.network]?.[s.bundle];
+        if (b && b.price) allWaRevenue += b.price;
+      }
+    });
+
+    let todayWaRevenue = 0;
+    todayWaOrders.forEach(s => {
+      if (s.amount && Number(s.amount) > 0) {
+        todayWaRevenue += Number(s.amount);
+      } else {
+        const b = PACKAGES[s.network]?.[s.bundle];
+        if (b && b.price) todayWaRevenue += b.price;
+      }
+    });
 
     // Digital Services
     const services = servicesRes.data || [];
@@ -1293,8 +1289,8 @@ async function generateFullAdminReport() {
       }).join("\n");
     }
 
-    const allGrossRev = allGrossDataRev + servicesRev + checkersRev;
-    const todayGrossRev = todayGrossDataRev;
+    const allGrossRev = allWebRevenue + allWaRevenue + servicesRev + checkersRev;
+    const todayGrossRev = todayWebRevenue + todayWaRevenue;
     const ghanaTime = new Date().toLocaleString("en-GB", {
       timeZone: "Africa/Accra",
       weekday: "short",
