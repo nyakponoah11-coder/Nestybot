@@ -1135,9 +1135,9 @@ async function generateFullAdminReport() {
     ] = await Promise.all([
       safeQuery(supabase.from("settings").select("key, value")),
       safeQuery(supabase.from("products").select("id, network, in_stock")),
-      safeQuery(supabase.from("orders").select("id, amount, payment_status, delivery_status, status, network, capacity, recipient_phone, phone_number, whatsapp_phone, created_at, notes, campaign_code, ref, reference").gte("created_at", startOfDay)),
-      safeQuery(supabase.from("orders").select("id, amount, payment_status, delivery_status, status, network, capacity, recipient_phone, phone_number, whatsapp_phone, created_at, notes, campaign_code, ref, reference").order("created_at", { ascending: false }).limit(300)),
-      safeQuery(supabase.from("sessions").select("id, phone, network, bundle, step, status, amount, created_at, updated_at")),
+      safeQuery(supabase.from("orders").select("*").gte("created_at", startOfDay)),
+      safeQuery(supabase.from("orders").select("*").order("created_at", { ascending: false }).limit(300)),
+      safeQuery(supabase.from("sessions").select("*")),
       safeQuery(supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status, created_at")),
       safeQuery(supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status, created_at")),
       safeQuery(supabase.from("free_data_codes").select("id, code, claimed")),
@@ -1165,8 +1165,30 @@ async function generateFullAdminReport() {
     const allDataOrders = allOrdersRes.data || [];
     const todayDataOrders = todayOrdersRes.data || [];
 
-    const isPaid = (o) => o.payment_status === "paid" || /complet|deliver|success|paid/i.test(o.status || o.delivery_status || "") || o.ref === "DSKXUUE8UI" || o.reference === "DSKXUUE8UI";
-    const isDelivered = (o) => /complet|deliver|success/i.test(o.delivery_status || o.status || "");
+    const isPaid = (o) => {
+      if (!o) return false;
+      const ps = String(o.payment_status || "").toLowerCase();
+      const ds = String(o.delivery_status || "").toLowerCase();
+      const st = String(o.status || "").toLowerCase();
+      return (
+        ps === "paid" ||
+        ps === "success" ||
+        ds === "delivered" ||
+        ds === "completed" ||
+        st === "paid" ||
+        st === "completed" ||
+        st === "delivered" ||
+        o.reference === "DSKXUUE8UI" ||
+        o.ref === "DSKXUUE8UI"
+      );
+    };
+
+    const isDelivered = (o) => {
+      if (!o) return false;
+      const ds = String(o.delivery_status || "").toLowerCase();
+      const st = String(o.status || "").toLowerCase();
+      return ds === "delivered" || ds === "completed" || st === "delivered" || st === "completed";
+    };
 
     const allWebOrders = allDataOrders.filter(isPaid);
     const allDelivered = allWebOrders.filter(isDelivered);
@@ -1177,33 +1199,58 @@ async function generateFullAdminReport() {
     const todayWebOrders = todayDataOrders.filter(isPaid);
     const todayWebRevenue = todayWebOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
 
-    // 2. WHATSAPP BOT ORDERS (from sessions table where step === 5)
+    // 2. WHATSAPP BOT ORDERS (from sessions table + DataMart purchase transactions)
     const allSessions = sessionsRes.data || [];
-    const allWaOrders = allSessions.filter(s => s.step === 5 || /complet|deliver|success|paid/i.test(s.status || ""));
-    const todayWaOrders = allWaOrders.filter(s => {
+    const paidBotSessions = allSessions.filter(s => s.step >= 4 || /complet|deliver|success|paid/i.test(s.status || ""));
+    const todayBotSessions = paidBotSessions.filter(s => {
       const t = s.updated_at || s.created_at;
       return t && new Date(t).toISOString() >= startOfDay;
     });
 
-    let allWaRevenue = 0;
-    allWaOrders.forEach(s => {
+    let sessionBotRevenue = 0;
+    paidBotSessions.forEach(s => {
       if (s.amount && Number(s.amount) > 0) {
-        allWaRevenue += Number(s.amount);
+        sessionBotRevenue += Number(s.amount);
       } else {
         const b = PACKAGES[s.network]?.[s.bundle];
-        if (b && b.price) allWaRevenue += b.price;
+        if (b && b.price) sessionBotRevenue += b.price;
       }
     });
 
-    let todayWaRevenue = 0;
-    todayWaOrders.forEach(s => {
+    let sessionTodayRevenue = 0;
+    todayBotSessions.forEach(s => {
       if (s.amount && Number(s.amount) > 0) {
-        todayWaRevenue += Number(s.amount);
+        sessionTodayRevenue += Number(s.amount);
       } else {
         const b = PACKAGES[s.network]?.[s.bundle];
-        if (b && b.price) todayWaRevenue += b.price;
+        if (b && b.price) sessionTodayRevenue += b.price;
       }
     });
+
+    // Check DataMart developer API for bot purchases
+    let dmPurchases = [];
+    if (DATA_API_KEY) {
+      try {
+        const dmRes = await axios.get(`${DATAMART_BASE}/transactions?page=1&limit=100`, {
+          headers: { "x-api-key": DATA_API_KEY },
+          timeout: 4000
+        });
+        const rows = dmRes.data?.data?.transactions || dmRes.data?.transactions || [];
+        dmPurchases = rows.filter(t => t?.type === "purchase" || t?.relatedPurchase);
+      } catch {}
+    }
+
+    const dmRevenue = dmPurchases.reduce((sum, p) => sum + Number(p.amount || p.price || 0), 0);
+    const dmTodayPurchases = dmPurchases.filter(p => {
+      const t = p.createdAt || p.created_at;
+      return t && new Date(t).toISOString() >= startOfDay;
+    });
+    const dmTodayRevenue = dmTodayPurchases.reduce((sum, p) => sum + Number(p.amount || p.price || 0), 0);
+
+    const allWaOrders = paidBotSessions.length >= dmPurchases.length ? paidBotSessions : dmPurchases;
+    const allWaRevenue = Math.max(sessionBotRevenue, dmRevenue);
+    const todayWaOrders = todayBotSessions.length >= dmTodayPurchases.length ? todayBotSessions : dmTodayPurchases;
+    const todayWaRevenue = Math.max(sessionTodayRevenue, dmTodayRevenue);
 
     // Digital Services
     const services = servicesRes.data || [];
