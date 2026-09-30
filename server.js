@@ -1235,9 +1235,9 @@ async function generateFullAdminReport() {
     const availableVouchers = freeData.length - claimedVouchers;
 
     // Analytics
-    const mtnPaidOrders = todayPaid.filter(o => /mtn|yello/i.test(o.network || "")).length;
-    const telecelPaidOrders = todayPaid.filter(o => /telecel|vod/i.test(o.network || "")).length;
-    const atPaidOrders = todayPaid.filter(o => /at|airtel/i.test(o.network || "")).length;
+    const mtnPaidOrders = allWebOrders.filter(o => /mtn|yello/i.test(o.network || "")).length;
+    const telecelPaidOrders = allWebOrders.filter(o => /telecel|vod/i.test(o.network || "")).length;
+    const atPaidOrders = allWebOrders.filter(o => /at|airtel/i.test(o.network || "")).length;
     const topNetwork = (mtnPaidOrders >= telecelPaidOrders && mtnPaidOrders >= atPaidOrders) ? "MTN" : (telecelPaidOrders >= atPaidOrders ? "Telecel" : "AT");
 
     // Support
@@ -1362,7 +1362,7 @@ async function generateFullAdminReport() {
       `1️⃣1️⃣ *SALES ANALYTICS*`,
       `• Top Ordered Network: *${topNetwork}*`,
       `• Network Orders: *MTN (${mtnPaidOrders})*, *Telecel (${telecelPaidOrders})*, *AT (${atPaidOrders})*`,
-      `• Total Day Volume: *${todayPaid.length + paidServices.length + paidCheckers.length} Transactions*`,
+      `• Total Day Volume: *${todayWebOrders.length + todayWaOrders.length + paidServices.length + paidCheckers.length} Transactions*`,
       ``,
       `1️⃣2️⃣ *CUSTOMER SUPPORT & AI*`,
       `• Open Chat Sessions: *${openChats.length} Active*`,
