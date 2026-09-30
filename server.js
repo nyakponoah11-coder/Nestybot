@@ -1120,6 +1120,16 @@ async function generateFullAdminReport() {
     console.warn("Store API fetch failed, compiling directly from Supabase DB:", err.message);
   }
 
+  // Helper to safely execute Supabase queries without throwing if table is missing or empty
+  async function safeQuery(promise) {
+    try {
+      const res = await promise;
+      return res || { data: [] };
+    } catch {
+      return { data: [] };
+    }
+  }
+
   // Resilient Direct Generator: Queries Supabase for all 13 sections
   try {
     const now = new Date();
@@ -1137,16 +1147,16 @@ async function generateFullAdminReport() {
       referralsRes,
       chatsRes
     ] = await Promise.all([
-      supabase.from("settings").select("key, value").catch(() => ({ data: [] })),
-      supabase.from("products").select("id, network, in_stock").catch(() => ({ data: [] })),
-      supabase.from("orders").select("id, amount, payment_status, delivery_status, status, network, capacity, recipient_phone, phone_number, created_at, notes, campaign_code").gte("created_at", startOfDay).catch(() => ({ data: [] })),
-      supabase.from("orders").select("id, reference, ref, recipient_phone, phone_number, network, capacity, amount, payment_status, delivery_status, status, created_at").order("created_at", { ascending: false }).limit(5).catch(() => ({ data: [] })),
-      supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status, created_at").catch(() => ({ data: [] })),
-      supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status, created_at").catch(() => ({ data: [] })),
-      supabase.from("free_data_codes").select("id, code, claimed").catch(() => ({ data: [] })),
-      supabase.from("scratch_codes").select("id, code, status, orders_completed, unlocked, scratched, prize").catch(() => ({ data: [] })),
-      supabase.from("referrals").select("id, code, total_clicks, total_earnings").catch(() => ({ data: [] })),
-      supabase.from("chat_conversations").select("id, status, unread_for_support").eq("status", "open").catch(() => ({ data: [] }))
+      safeQuery(supabase.from("settings").select("key, value")),
+      safeQuery(supabase.from("products").select("id, network, in_stock")),
+      safeQuery(supabase.from("orders").select("id, amount, payment_status, delivery_status, status, network, capacity, recipient_phone, phone_number, created_at, notes, campaign_code").gte("created_at", startOfDay)),
+      safeQuery(supabase.from("orders").select("id, reference, ref, recipient_phone, phone_number, network, capacity, amount, payment_status, delivery_status, status, created_at").order("created_at", { ascending: false }).limit(5)),
+      safeQuery(supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status, created_at")),
+      safeQuery(supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status, created_at")),
+      safeQuery(supabase.from("free_data_codes").select("id, code, claimed")),
+      safeQuery(supabase.from("scratch_codes").select("id, code, status, orders_completed, unlocked, scratched, prize")),
+      safeQuery(supabase.from("referrals").select("id, code, total_clicks, total_earnings")),
+      safeQuery(supabase.from("chat_conversations").select("id, status, unread_for_support").eq("status", "open"))
     ]);
 
     const settingsMap = {};
