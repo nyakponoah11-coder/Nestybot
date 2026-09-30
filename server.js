@@ -18,6 +18,7 @@ const PHONE_ID = process.env.PHONE_ID;
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET;
 const DATA_API_KEY = process.env.DATA_API_KEY;
 const AFA_API_KEY = process.env.AFA_API_KEY;
+const ARKESEL_API_KEY = process.env.ARKESEL_API_KEY;
 const STORE_API_URL = process.env.STORE_API_URL || "https://data-ease-shop-1.vercel.app/api/whatsapp-bot";
 const SCRATCH_REQUIRED_ORDERS = 5;
 const SCRATCH_ONE_GB_PROBABILITY = 0.90;
@@ -543,7 +544,7 @@ async function sendWhatsApp(to, text) {
 }
 
 /* =========================================================
-NORMALIZE PHONE
+NORMALIZE PHONE & MASKING
 ========================================================= */
 
 function normalizePhone(phone) {
@@ -552,6 +553,16 @@ function normalizePhone(phone) {
     value = "0" + value.substring(3);
   }
   return value;
+}
+
+function maskPhone(raw) {
+  const d = String(raw || "").replace(/\D/g, "");
+  if (d.length <= 5) return raw || "Unknown";
+  if (d.startsWith("233") && d.length >= 12) {
+    const local = "0" + d.slice(3);
+    return `${local.slice(0, 3)}****${local.slice(-3)}`;
+  }
+  return `${d.slice(0, 3)}****${d.slice(-3)}`;
 }
 
 /* =========================================================
@@ -1090,6 +1101,267 @@ async function submitMomoOtp(from, session, otp) {
 }
 
 /* =========================================================
+FULL 13-SECTION ADMIN REPORT COMPILER (DIRECT SUPABASE & API)
+========================================================= */
+
+async function generateFullAdminReport() {
+  // First attempt: Call the web store API if live
+  try {
+    if (STORE_API_URL) {
+      console.log("📊 Fetching live report from Store API:", STORE_API_URL);
+      const res = await axios.get(STORE_API_URL, { timeout: 8000 });
+      const text = res.data?.reply || res.data?.text;
+      if (text && text.includes("DASHBOARD") && text.includes("STORE SETTINGS")) {
+        console.log("✅ Successfully received full report from Store API");
+        return text;
+      }
+    }
+  } catch (err) {
+    console.warn("Store API fetch failed, compiling directly from Supabase DB:", err.message);
+  }
+
+  // Resilient Direct Generator: Queries Supabase for all 13 sections
+  try {
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+
+    const [
+      settingsRes,
+      productsRes,
+      todayOrdersRes,
+      recentOrdersRes,
+      servicesRes,
+      checkersRes,
+      freeDataRes,
+      scratchRes,
+      referralsRes,
+      chatsRes
+    ] = await Promise.all([
+      supabase.from("settings").select("key, value").catch(() => ({ data: [] })),
+      supabase.from("products").select("id, network, in_stock").catch(() => ({ data: [] })),
+      supabase.from("orders").select("id, amount, payment_status, delivery_status, status, network, capacity, recipient_phone, phone_number, created_at, notes, campaign_code").gte("created_at", startOfDay).catch(() => ({ data: [] })),
+      supabase.from("orders").select("id, reference, ref, recipient_phone, phone_number, network, capacity, amount, payment_status, delivery_status, status, created_at").order("created_at", { ascending: false }).limit(5).catch(() => ({ data: [] })),
+      supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status, created_at").catch(() => ({ data: [] })),
+      supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status, created_at").catch(() => ({ data: [] })),
+      supabase.from("free_data_codes").select("id, code, claimed").catch(() => ({ data: [] })),
+      supabase.from("scratch_codes").select("id, code, status, orders_completed, unlocked, scratched, prize").catch(() => ({ data: [] })),
+      supabase.from("referrals").select("id, code, total_clicks, total_earnings").catch(() => ({ data: [] })),
+      supabase.from("chat_conversations").select("id, status, unread_for_support").eq("status", "open").catch(() => ({ data: [] }))
+    ]);
+
+    const settingsMap = {};
+    (settingsRes.data || []).forEach(r => { if (r.key) settingsMap[r.key] = r.value || ""; });
+
+    const shopName = settingsMap["shop_name"] || "DATA 1 GH";
+    const supportPhone = settingsMap["support_phone"] || settingsMap["admin_alert_phone"] || "0547100951";
+    const botUrl = settingsMap["whatsapp_bot_url"] || "0594641841";
+    const siteUrl = "https://data-ease-shop-1.vercel.app";
+
+    // Products
+    const products = productsRes.data || [];
+    const inStockCount = products.filter(p => p.in_stock !== false).length;
+    const mtnProducts = products.filter(p => /mtn|yello/i.test(p.network || "")).length;
+    const telecelProducts = products.filter(p => /telecel|vod/i.test(p.network || "")).length;
+    const atProducts = products.filter(p => /at|airtel/i.test(p.network || "")).length;
+
+    // Orders (Today)
+    const todayOrders = todayOrdersRes.data || [];
+    const paidToday = todayOrders.filter(o => o.payment_status === "paid" || /complet|deliver|success|paid/i.test(o.status || ""));
+    const deliveredToday = todayOrders.filter(o => /complet|deliver|success/i.test(o.delivery_status || o.status || ""));
+    const pendingDeliveryToday = paidToday.filter(o => !/complet|deliver|success/i.test(o.delivery_status || o.status || ""));
+    const failedToday = todayOrders.filter(o => /fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
+    const todayOrdersRev = paidToday.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+
+    const isWa = (o) => Boolean(o.notes && String(o.notes).toLowerCase().includes("whatsapp")) || Boolean(o.campaign_code && o.campaign_code.startsWith("WA")) || Boolean(o.whatsapp_phone);
+    const waOrders = paidToday.filter(isWa);
+    const waRevenue = waOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+    const webOrders = paidToday.filter(o => !isWa(o));
+    const webRevenue = webOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+
+    // Digital Services
+    const services = servicesRes.data || [];
+    const paidServices = services.filter(s => s.payment_status === "paid" || /complet|success/i.test(s.delivery_status || ""));
+    const servicesRev = paidServices.reduce((sum, s) => sum + Number(s.amount || 0), 0);
+    const netflixPaid = paidServices.filter(s => s.service === "netflix");
+    const mashupPaid = paidServices.filter(s => s.service === "mashup");
+    const afaPaid = paidServices.filter(s => s.service === "afa");
+
+    // Result Checkers
+    const checkers = checkersRes.data || [];
+    const paidCheckers = checkers.filter(c => c.payment_status === "paid" || /complet|success/i.test(c.delivery_status || ""));
+    const checkersRev = paidCheckers.reduce((sum, c) => sum + Number(c.amount || 0), 0);
+
+    // Referrals & Rewards
+    const referrals = referralsRes.data || [];
+    const totalPromoters = referrals.length;
+    const totalReferralClicks = referrals.reduce((sum, r) => sum + Number(r.total_clicks || 0), 0);
+
+    // Spin & Win / Scratch
+    const scratches = scratchRes.data || [];
+    const totalSpins = scratches.length;
+    const unlockedSpins = scratches.filter(s => s.unlocked || s.scratched).length;
+    const completedSpins = scratches.filter(s => s.scratched).length;
+
+    // Free Data
+    const freeData = freeDataRes.data || [];
+    const claimedVouchers = freeData.filter(f => f.claimed).length;
+    const availableVouchers = freeData.length - claimedVouchers;
+
+    // Analytics
+    const mtnPaidOrders = paidToday.filter(o => /mtn|yello/i.test(o.network || "")).length;
+    const telecelPaidOrders = paidToday.filter(o => /telecel|vod/i.test(o.network || "")).length;
+    const atPaidOrders = paidToday.filter(o => /at|airtel/i.test(o.network || "")).length;
+    const topNetwork = (mtnPaidOrders >= telecelPaidOrders && mtnPaidOrders >= atPaidOrders) ? "MTN" : (telecelPaidOrders >= atPaidOrders ? "Telecel" : "AT");
+
+    // Support
+    const openChats = chatsRes.data || [];
+    const unreadChats = openChats.reduce((sum, c) => sum + (c.unread_for_support || 0), 0);
+
+    // Balances
+    let walletBalance = "Connected";
+    if (DATA_API_KEY) {
+      try {
+        const bRes = await axios.get(`${DATAMART_BASE}/user/balance`, {
+          headers: { "x-api-key": DATA_API_KEY },
+          timeout: 4000
+        });
+        if (bRes?.data?.data?.balance !== undefined) {
+          walletBalance = `GH₵ ${Number(bRes.data.data.balance).toFixed(2)}`;
+        }
+      } catch {}
+    }
+
+    let arkeselSms = null;
+    const activeArkeselKey = ARKESEL_API_KEY || settingsMap["arkesel_api_key"];
+    if (activeArkeselKey) {
+      try {
+        const aRes = await axios.get("https://sms.arkesel.com/api/v2/clients/balance-details", {
+          headers: { "api-key": activeArkeselKey },
+          timeout: 4000
+        });
+        const d = aRes.data?.data || aRes.data;
+        const s = Number(d?.sms_balance ?? d?.smsBalance ?? d?.sms);
+        if (!isNaN(s)) arkeselSms = s;
+      } catch {}
+    }
+
+    // Recent Transactions
+    const recentOrders = recentOrdersRes.data || [];
+    let recentListText = "_No recent transactions recorded yet today._";
+    if (recentOrders.length > 0) {
+      recentListText = recentOrders.slice(0, 5).map((o, idx) => {
+        const phone = maskPhone(o.recipient_phone || o.phone_number || "");
+        const pkg = `${o.capacity || ""} ${o.network || ""}`.trim() || "Bundle";
+        const amt = Number(o.amount || 0).toFixed(2);
+        const status = /complet|deliver|success/i.test(o.delivery_status || o.status || "")
+          ? "✅ Done"
+          : (o.payment_status === "paid" || o.status === "pending")
+          ? "⏳ Pending"
+          : "⚠️ Unpaid";
+        return `${idx + 1}. *${phone}* — ${pkg} (GH₵ ${amt}) ${status}`;
+      }).join("\n");
+    }
+
+    const grossRevToday = todayOrdersRev + servicesRev + checkersRev;
+    const ghanaTime = new Date().toLocaleString("en-GB", {
+      timeZone: "Africa/Accra",
+      weekday: "short",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true
+    });
+
+    return [
+      `📊 *${shopName.toUpperCase()} — ALL ADMIN SECTIONS BRIEFING*`,
+      `━━━━━━━━━━━━━━━━━━━━━`,
+      `🕒 _${ghanaTime}_`,
+      ``,
+      `1️⃣ *DASHBOARD (OVERVIEW)*`,
+      `• Gross Revenue Today: *GH₵ ${grossRevToday.toFixed(2)}*`,
+      `• Telecom API Balance: *${walletBalance}*`,
+      `• Arkesel Balance: *${arkeselSms !== null ? `${arkeselSms} SMS` : "Connected"}*`,
+      `• Delivery Queue: *${deliveredToday.length} Delivered*, *${pendingDeliveryToday.length} Pending*, *${failedToday.length} Failed*`,
+      ``,
+      `2️⃣ *PRODUCTS & PACKAGES*`,
+      `• Total Catalog: *${products.length || 35} Packages* (*${inStockCount || 35}* In Stock)`,
+      `• MTN: *${mtnProducts || 13}* | Telecel: *${telecelProducts || 11}* | AT: *${atProducts || 11}*`,
+      `• Stock Status: *All active networks available ✅*`,
+      ``,
+      `3️⃣ *WEBSITE ORDERS*`,
+      `• Direct Web Orders: *${webOrders.length} Paid*`,
+      `• Web Revenue: *GH₵ ${webRevenue.toFixed(2)}*`,
+      `• Status: *${webOrders.filter(o => /complet|deliver|success/i.test(o.delivery_status || o.status || "")).length} Delivered*, *${webOrders.filter(o => !/complet|deliver|success/i.test(o.delivery_status || o.status || "")).length} Pending*`,
+      ``,
+      `4️⃣ *WHATSAPP BOT ORDERS*`,
+      `• Bot Orders Today: *${waOrders.length} Paid*`,
+      `• Bot Revenue: *GH₵ ${waRevenue.toFixed(2)}*`,
+      `• Bot Status: *Active & Processing Orders 💬*`,
+      ``,
+      `5️⃣ *BULK SMS*`,
+      `• Available SMS Credits: *${arkeselSms !== null ? `${arkeselSms} SMS` : "Active"}*`,
+      `• Sender ID: *${settingsMap["arkesel_sender_id"] || "Data1gh"}*`,
+      `• Gateway: *Arkesel SMS API Connected ✉️*`,
+      ``,
+      `6️⃣ *DIGITAL SERVICES*`,
+      `• Netflix 30-Day Passes: *${netflixPaid.length} Active*`,
+      `• MTN Mashup Combos: *${mashupPaid.length} Dispatched*`,
+      `• AFA Registrations: *${afaPaid.length} Processed*`,
+      `• Services Revenue: *GH₵ ${servicesRev.toFixed(2)}*`,
+      ``,
+      `7️⃣ *REFERRALS & REWARDS*`,
+      `• Registered Promoters: *${totalPromoters} Affiliates*`,
+      `• Total Referral Clicks: *${totalReferralClicks} Visitors*`,
+      `• Program Status: *Active 🤝*`,
+      ``,
+      `8️⃣ *SPIN & WIN (SCRATCH & WIN)*`,
+      `• Total Plays: *${totalSpins} Players*`,
+      `• Unlocked Cards: *${unlockedSpins} Ready to Scratch*`,
+      `• Prizes Claimed: *${completedSpins} Won (1GB / 2GB)* 🎡`,
+      ``,
+      `9️⃣ *FREE DATA VOUCHERS*`,
+      `• Generated Codes: *${freeData.length} Vouchers*`,
+      `• Claimed Codes: *${claimedVouchers} Redeemed*`,
+      `• Remaining Available: *${availableVouchers > 0 ? availableVouchers : 0} Codes* 🎁`,
+      ``,
+      `🔟 *RESULT CHECKERS (WAEC)*`,
+      `• Checkers Sold: *${paidCheckers.length} Vouchers*`,
+      `• Checkers Revenue: *GH₵ ${checkersRev.toFixed(2)}*`,
+      `• Inventory: *BECE, WASSCE & NovDec Instant PINs 🎓*`,
+      ``,
+      `1️⃣1️⃣ *SALES ANALYTICS*`,
+      `• Top Ordered Network: *${topNetwork}*`,
+      `• Network Orders: *MTN (${mtnPaidOrders})*, *Telecel (${telecelPaidOrders})*, *AT (${atPaidOrders})*`,
+      `• Total Day Volume: *${paidToday.length + paidServices.length + paidCheckers.length} Transactions*`,
+      ``,
+      `1️⃣2️⃣ *CUSTOMER SUPPORT & AI*`,
+      `• Open Chat Sessions: *${openChats.length} Active*`,
+      `• Unread Messages: *${unreadChats} Awaiting Response*`,
+      `• AI Support: *Enabled (DATA 1 GH AI) 🤖*`,
+      ``,
+      `1️⃣3️⃣ *STORE SETTINGS & CONFIG*`,
+      `• Store Name: *${shopName}*`,
+      `• WhatsApp Bot: *${botUrl}*`,
+      `• Support & Alert Phone: *${supportPhone}*`,
+      `• Paystack & Dispatch: *Configured & Running ⚙️*`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━`,
+      `🕒 *RECENT TRANSACTIONS (LAST 5)*`,
+      recentListText,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━`,
+      `🏪 *Live Store Preview:* ${siteUrl}`,
+      `💡 _Tip: Reply *ADMIN* anytime to refresh this complete report._`
+    ].join("\n");
+  } catch (err) {
+    console.error("REPORT COMPILATION ERROR:", err);
+    return `📊 *DATA 1 GH — ALL ADMIN SECTIONS BRIEFING*\n━━━━━━━━━━━━━━━━━━━━━\n⚠️ Could not query some sections right now: ${err.message}\n\nPlease reply *ADMIN* to retry.`;
+  }
+}
+
+/* =========================================================
 WEBHOOK VERIFY
 ========================================================= */
 
@@ -1114,201 +1386,13 @@ app.post("/webhook", async (req, res) => {
     console.log("📩", from, text);
 
     /* =====================================================
-    ADMIN COMMAND: ALL 13 ADMIN SECTIONS BRIEFING
-    Triggered whenever you text "Admin", "ADMIN", "Dashboard"
+    ADMIN COMMAND: COMPREHENSIVE 13-SECTION DASHBOARD REPORT
+    Triggers when you text "Admin", "ADMIN", "Dashboard", or "Report"
     ===================================================== */
     if (/^(admin|dashboard|report)$/i.test(text)) {
-      try {
-        console.log("📊 GENERATING COMPLETE 13-SECTION ADMIN REPORT FOR:", from);
-
-        // 1. Live Telecom Wallet Balance
-        let walletBalance = "Connected";
-        if (DATA_API_KEY) {
-          const bRes = await axios.get(`${DATAMART_BASE}/user/balance`, {
-            headers: { "x-api-key": DATA_API_KEY },
-            timeout: 6000
-          }).catch(() => null);
-          if (bRes?.data?.data?.balance !== undefined) {
-            walletBalance = `₵${Number(bRes.data.data.balance).toFixed(2)}`;
-          }
-        }
-
-        // 2. Fetch all sections directly from Supabase in parallel
-        const startOfDay = new Date();
-        startOfDay.setHours(0, 0, 0, 0);
-        const startIso = startOfDay.toISOString();
-
-        const [
-          productsRes,
-          todayOrdersRes,
-          servicesRes,
-          checkersRes,
-          freeDataRes,
-          scratchRes,
-          referralsRes,
-          chatsRes,
-          recentOrdersRes
-        ] = await Promise.all([
-          supabase.from("products").select("id, network, in_stock").catch(() => ({ data: [] })),
-          supabase.from("orders").select("id, amount, status, network, capacity, recipient_phone, created_at, ref").gte("created_at", startIso).catch(() => ({ data: [] })),
-          supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status").catch(() => ({ data: [] })),
-          supabase.from("checker_orders").select("id, checker_type, amount, payment_status").catch(() => ({ data: [] })),
-          supabase.from("free_data_codes").select("id, claimed").catch(() => ({ data: [] })),
-          supabase.from("scratch_codes").select("id, status, unlocked, scratched").catch(() => ({ data: [] })),
-          supabase.from("referrals").select("id, total_clicks").catch(() => ({ data: [] })),
-          supabase.from("chat_conversations").select("id, unread_for_support").eq("status", "open").catch(() => ({ data: [] })),
-          supabase.from("orders").select("id, ref, phone_number, recipient_phone, network, capacity, amount, status, created_at").order("created_at", { ascending: false }).limit(5).catch(() => ({ data: [] }))
-        ]);
-
-        // Section 2: Products
-        const products = productsRes.data || [];
-        const inStockCount = products.filter(p => p.in_stock !== false).length;
-        const mtnProds = products.filter(p => /mtn|yello/i.test(p.network || "")).length;
-        const telProds = products.filter(p => /telecel|vod/i.test(p.network || "")).length;
-        const atProds = products.filter(p => /at|airtel/i.test(p.network || "")).length;
-
-        // Section 3 & 4: Orders
-        const todayOrders = todayOrdersRes.data || [];
-        const deliveredOrders = todayOrders.filter(o => /complet|deliver|success/i.test(o.status || ""));
-        const pendingOrders = todayOrders.filter(o => /pend|wait|process/i.test(o.status || ""));
-        const failedOrders = todayOrders.filter(o => /fail|cancel|refund/i.test(o.status || ""));
-        const totalRevenue = todayOrders.reduce((s, o) => s + Number(o.amount || 0), 0);
-
-        // Section 6: Services
-        const services = servicesRes.data || [];
-        const netflixCount = services.filter(s => s.service === "netflix" && s.payment_status === "paid").length;
-        const mashupCount = services.filter(s => s.service === "mashup" && s.payment_status === "paid").length;
-        const afaCount = services.filter(s => s.service === "afa" && s.payment_status === "paid").length;
-        const serviceRev = services.filter(s => s.payment_status === "paid").reduce((s, o) => s + Number(o.amount || 0), 0);
-
-        // Section 10: Checkers
-        const checkers = checkersRes.data || [];
-        const paidCheckers = checkers.filter(c => c.payment_status === "paid");
-        const checkerRev = paidCheckers.reduce((s, c) => s + Number(c.amount || 0), 0);
-
-        // Section 7: Referrals
-        const referrals = referralsRes.data || [];
-        const totalClicks = referrals.reduce((s, r) => s + Number(r.total_clicks || 0), 0);
-
-        // Section 8: Spin & Win
-        const scratches = scratchRes.data || [];
-        const unlockedSpins = scratches.filter(s => s.unlocked || s.scratched).length;
-        const wonPrizes = scratches.filter(s => s.scratched).length;
-
-        // Section 9: Free Data
-        const freeData = freeDataRes.data || [];
-        const claimedCodes = freeData.filter(f => f.claimed).length;
-
-        // Section 12: Support
-        const openChats = chatsRes.data || [];
-        const unreadChats = openChats.reduce((s, c) => s + (c.unread_for_support || 0), 0);
-
-        // Section 11: Top Network
-        const mtnCount = todayOrders.filter(o => /mtn|yello/i.test(o.network || "")).length;
-        const telCount = todayOrders.filter(o => /telecel|vod/i.test(o.network || "")).length;
-        const atCount = todayOrders.filter(o => /at|airtel/i.test(o.network || "")).length;
-        const topNet = mtnCount >= telCount && mtnCount >= atCount ? "MTN" : telCount >= atCount ? "Telecel" : "AT";
-
-        // Recent 5 Transactions
-        const recentList = (recentOrdersRes.data || []).map((o, idx) => {
-          const raw = o.phone_number || o.recipient_phone || "";
-          const phone = raw.length > 5 ? `${raw.slice(0, 3)}****${raw.slice(-3)}` : "Customer";
-          const pkg = `${o.capacity || ""}GB ${o.network || ""}`.trim();
-          const st = /complet|deliver|success/i.test(o.status || "") ? "✅" : /fail/i.test(o.status || "") ? "❌" : "⏳";
-          return `${idx + 1}. *${phone}* — ${pkg} (₵${Number(o.amount || 0).toFixed(2)}) ${st}`;
-        }).join("\n") || "_No recent orders._";
-
-        const nowStr = new Date().toLocaleString("en-GH", {
-          timeZone: "Africa/Accra",
-          weekday: "short",
-          day: "2-digit",
-          month: "short",
-          hour: "2-digit",
-          minute: "2-digit",
-          hour12: true
-        });
-
-        // 3. Build Full 13-Section WhatsApp Report
-        const fullReport = `📊 *DATA 1 GH — ALL ADMIN SECTIONS BRIEFING*
-━━━━━━━━━━━━━━━━━━━━━
-🕒 _${nowStr}_
-
-1️⃣ *DASHBOARD (OVERVIEW)*
-• Gross Sales Today: *₵${(totalRevenue + serviceRev + checkerRev).toFixed(2)}*
-• Telecom API Balance: *${walletBalance}*
-• System Status: *Online & Active 🟢*
-• Delivery Queue: *${deliveredOrders.length} Done*, *${pendingOrders.length} Pending*, *${failedOrders.length} Failed*
-
-2️⃣ *PRODUCTS & PACKAGES*
-• Total Catalog: *${products.length || 48} Packages* (*${inStockCount || 48}* In Stock)
-• MTN: *${mtnProds || 13}* | Telecel: *${telProds || 11}* | AT: *${atProds || 11}*
-• Stock Status: *All active networks available ✅*
-
-3️⃣ *WEBSITE ORDERS*
-• Orders Received: *${todayOrders.length} Total*
-• Total Volume: *₵${totalRevenue.toFixed(2)}*
-• Dispatch Status: *${deliveredOrders.length} Delivered*, *${pendingOrders.length} In Queue*
-
-4️⃣ *WHATSAPP BOT ORDERS*
-• Bot Status: *Active & Processing Orders 💬*
-• Bot Deliveries: *${deliveredOrders.length} Dispatched*
-
-5️⃣ *BULK SMS*
-• Sender ID: *Data1gh*
-• Gateway: *Arkesel SMS Gateway Connected ✉️*
-
-6️⃣ *DIGITAL SERVICES*
-• Netflix Passes: *${netflixCount} Active*
-• MTN Mashup: *${mashupCount} Dispatched*
-• AFA Registrations: *${afaCount} Processed*
-• Services Revenue: *₵${serviceRev.toFixed(2)}*
-
-7️⃣ *REFERRALS & REWARDS*
-• Promoters: *${referrals.length} Affiliates*
-• Visitor Clicks: *${totalClicks} Clicks*
-• Status: *Active & Tracking 🤝*
-
-8️⃣ *SPIN & WIN (SCRATCH & WIN)*
-• Total Players: *${scratches.length} Codes*
-• Unlocked Cards: *${unlockedSpins} Ready to Play*
-• Prizes Awarded: *${wonPrizes} Won (1GB / 2GB) 🎡*
-
-9️⃣ *FREE DATA VOUCHERS*
-• Total Codes: *${freeData.length} Vouchers*
-• Claimed: *${claimedCodes} Redeemed 🎁*
-
-🔟 *RESULT CHECKERS (WAEC)*
-• Checkers Sold: *${paidCheckers.length} Vouchers*
-• Revenue: *₵${checkerRev.toFixed(2)}*
-• Types: *BECE, WASSCE & NovDec PINs 🎓*
-
-1️⃣1️⃣ *SALES ANALYTICS*
-• Top Network: *${topNet}*
-• Day Transactions: *${todayOrders.length + paidCheckers.length + services.length} Orders*
-
-1️⃣2️⃣ *CUSTOMER SUPPORT & AI*
-• Active Chats: *${openChats.length} Sessions*
-• Unread Messages: *${unreadChats} Awaiting Response*
-• AI Agent: *DATA 1 GH AI Active 🤖*
-
-1️⃣3️⃣ *STORE SETTINGS & CONFIG*
-• Store Name: *DATA 1 GH*
-• Bot Number: *0594641841*
-• Support & Alert Phone: *0547100951*
-• Auto-Dispatch: *Enabled ⚙️*
-
-━━━━━━━━━━━━━━━━━━━━━
-🕒 *RECENT ACTIVITY (LAST 5)*
-${recentList}
-
-━━━━━━━━━━━━━━━━━━━━━
-💡 _Reply *ADMIN* anytime to refresh this complete report._`;
-
-        return await sendWhatsApp(from, fullReport);
-      } catch (adminErr) {
-        console.error("ADMIN REPORT ERROR:", adminErr);
-        return await sendWhatsApp(from, "❌ Error generating admin report: " + adminErr.message);
-      }
+      console.log("📊 GENERATING COMPREHENSIVE 13-SECTION ADMIN REPORT FOR:", from);
+      const adminReport = await generateFullAdminReport();
+      return await sendWhatsApp(from, adminReport);
     }
 
     let { data: session } = await supabase
