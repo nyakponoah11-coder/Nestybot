@@ -1357,7 +1357,7 @@ async function generateFullAdminReport() {
       `1️⃣ *DASHBOARD (OVERVIEW)*`,
       `• Total Gross Sales: *GH₵ ${allGrossRev.toFixed(2)}* (Today: *GH₵ ${todayGrossRev.toFixed(2)}*)`,
       `• Telecom API Balance: *${walletBalance}*`,
-      `• Arkesel Balance: *${arkeselSms !== null ? `${arkeselSms} SMS` : "Connected"}*`,
+      `• Arkesel Balance: *${arkeselSms !== null ? `${arkeselSms} SMS` : "0 SMS"}*`,
       `• Delivery Queue: *${allDelivered.length} Delivered*, *${allPending.length} In Queue*, *${allFailed.length} Failed*`,
       ``,
       `2️⃣ *PRODUCTS & PACKAGES*`,
@@ -1376,7 +1376,7 @@ async function generateFullAdminReport() {
       `• Bot Status: *Active & Processing Orders 💬*`,
       ``,
       `5️⃣ *BULK SMS*`,
-      `• Available SMS Credits: *${arkeselSms !== null ? `${arkeselSms} SMS` : "Active"}*`,
+      `• Available SMS Credits: *${arkeselSms !== null ? `${arkeselSms} SMS` : "0 SMS"}*`,
       `• Sender ID: *${settingsMap["arkesel_sender_id"] || "Data1gh"}*`,
       `• Gateway: *Arkesel SMS API Connected ✉️*`,
       ``,
@@ -2275,43 +2275,15 @@ app.post("/paystack-webhook", async (req, res) => {
     const paidAmount = Number(event.data?.amount || 0) / 100;
     console.log("💰 ACTUAL AMOUNT PAID:", paidAmount);
 
-    // 1. Primary: Look up session by ref
+    // 1. Primary: Look up session by exact ref
     let { data: session } = await supabase
       .from("sessions")
       .select("*")
       .eq("ref", ref)
       .maybeSingle();
 
-    // 2. Fallback: Search by phone if not found by ref
+    // 2. Check Website Data Orders by exact reference
     if (!session) {
-      const customerEmail = event.data?.customer?.email || "";
-      const emailPhone = customerEmail.split("@")[0].replace(/\D/g, "");
-      recordWebhookLog("FALLBACK_SEARCH", { ref, customerEmail, emailPhone });
-
-      if (emailPhone && emailPhone.length >= 9) {
-        const waPhone = emailPhone.startsWith("0") ? "233" + emailPhone.substring(1) : (emailPhone.startsWith("233") ? emailPhone : "233" + emailPhone);
-        const localPhone = emailPhone.startsWith("233") ? "0" + emailPhone.substring(3) : (emailPhone.startsWith("0") ? emailPhone : "0" + emailPhone);
-
-        const { data: fallbackSession } = await supabase
-          .from("sessions")
-          .select("*")
-          .or(`phone.eq.${waPhone},phone.eq.${localPhone},momo_number.eq.${localPhone},phone_number.eq.${localPhone}`)
-          .order("id", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (fallbackSession) {
-          recordWebhookLog("SESSION_FOUND_VIA_FALLBACK", { waPhone, localPhone, sessionPhone: fallbackSession.phone });
-          session = fallbackSession;
-          if (!session.phone_number) session.phone_number = localPhone;
-          if (!session.momo_number) session.momo_number = localPhone;
-        }
-      }
-    }
-
-    // 3. Fallback: Check if this is a Website Order (Data bundle, Netflix, AFA, Result Checker)
-    if (!session) {
-      // Check Website Data Orders
       const { data: webOrder } = await supabase
         .from("orders")
         .select("*")
@@ -2374,8 +2346,10 @@ app.post("/paystack-webhook", async (req, res) => {
         );
         return;
       }
+    }
 
-      // Check Digital Services (Netflix, Mashup, AFA)
+    // 3. Check Website Digital Services (Netflix, Mashup, AFA) by exact reference
+    if (!session) {
       const { data: webService } = await supabase
         .from("service_orders")
         .select("*")
@@ -2388,18 +2362,22 @@ app.post("/paystack-webhook", async (req, res) => {
           .from("service_orders")
           .update({
             payment_status: "paid",
+            delivery_status: webService.service === "netflix" ? "active" : "pending",
             updated_at: new Date().toISOString()
           })
           .or(`reference.eq.${ref},ref.eq.${ref}`);
 
+        const serviceName = webService.service === "netflix" ? "🎬 NETFLIX 30-DAY ACCESS" : webService.service === "mashup" ? "📦 MASHUP BUNDLE" : "✨ AFA REGISTRATION";
         await sendWhatsApp(
           "233547100951",
-          `✨ NEW WEBSITE SERVICE ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📦 Service: ${webService.service}\n📱 Phone: ${webService.customer_phone || "N/A"}\n💰 Amount: ₵${paidAmount.toFixed(2)}`
+          `🎉 NEW WEBSITE ${serviceName} PAID!\n\n🆔 Reference: ${ref}\n📱 Phone: ${webService.customer_phone || "N/A"}\n💰 Amount: ₵${paidAmount.toFixed(2)}`
         );
         return;
       }
+    }
 
-      // Check Result Checkers (WAEC)
+    // 4. Check Website Result Checkers (WAEC, BECE) by exact reference
+    if (!session) {
       const { data: webChecker } = await supabase
         .from("checker_orders")
         .select("*")
@@ -2418,18 +2396,50 @@ app.post("/paystack-webhook", async (req, res) => {
 
         await sendWhatsApp(
           "233547100951",
-          `🎓 NEW RESULT CHECKER ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📦 Exam: ${webChecker.checker_type}\n📱 Phone: ${webChecker.customer_phone || "N/A"}\n💰 Amount: ₵${paidAmount.toFixed(2)}`
+          `🎓 NEW ${webChecker.checker_type || "WAEC"} RESULT CHECKER ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📱 Phone: ${webChecker.customer_phone || "N/A"}\n💰 Amount: ₵${paidAmount.toFixed(2)}`
         );
         return;
       }
+    }
 
-      recordWebhookLog("SESSION_NOT_FOUND", { ref });
-      console.error("❌ SESSION NOT FOUND:", ref);
-      await sendWhatsApp(
-        "233547100951",
-        `🔔 PAYSTACK PAYMENT RECEIVED FOR UNKNOWN SESSION\nReference: ${ref}\nAmount: ₵${paidAmount.toFixed(2)}\nCustomer: ${event.data?.customer?.email || "N/A"}\nPlease check Supabase and Paystack dashboard!`
-      );
-      return;
+    // 5. Fallback for WhatsApp chat bot sessions ONLY if not a website order
+    if (!session) {
+      const isKnownWebRef = /^(CK|SRV|NFLX|MSH|AFA|D1|ORD|CHK)/i.test(ref);
+      if (!isKnownWebRef) {
+        const customerEmail = event.data?.customer?.email || "";
+        const emailPhone = customerEmail.split("@")[0].replace(/\D/g, "");
+        recordWebhookLog("FALLBACK_SEARCH", { ref, customerEmail, emailPhone });
+
+        if (emailPhone && emailPhone.length >= 9) {
+          const waPhone = emailPhone.startsWith("0") ? "233" + emailPhone.substring(1) : (emailPhone.startsWith("233") ? emailPhone : "233" + emailPhone);
+          const localPhone = emailPhone.startsWith("233") ? "0" + emailPhone.substring(3) : (emailPhone.startsWith("0") ? emailPhone : "0" + emailPhone);
+
+          const { data: fallbackSession } = await supabase
+            .from("sessions")
+            .select("*")
+            .or(`phone.eq.${waPhone},phone.eq.${localPhone},momo_number.eq.${localPhone},phone_number.eq.${localPhone}`)
+            .order("id", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (fallbackSession) {
+            recordWebhookLog("SESSION_FOUND_VIA_FALLBACK", { waPhone, localPhone, sessionPhone: fallbackSession.phone });
+            session = fallbackSession;
+            if (!session.phone_number) session.phone_number = localPhone;
+            if (!session.momo_number) session.momo_number = localPhone;
+          }
+        }
+      }
+
+      if (!session) {
+        recordWebhookLog("SESSION_NOT_FOUND", { ref });
+        console.error("❌ SESSION NOT FOUND:", ref);
+        await sendWhatsApp(
+          "233547100951",
+          `🔔 PAYSTACK PAYMENT RECEIVED FOR UNKNOWN SESSION\nReference: ${ref}\nAmount: ₵${paidAmount.toFixed(2)}\nCustomer: ${event.data?.customer?.email || "N/A"}\nPlease check Supabase and Paystack dashboard!`
+        );
+        return;
+      }
     }
 
     recordWebhookLog("SESSION_RESOLVED", {
