@@ -573,7 +573,7 @@ function getAfaData(session) {
   try {
     const data = JSON.parse(session.bundle);
     if (data && data.type === "afa") return data;
-  } catch (e) {}
+  } catch (e) { }
   return null;
 }
 
@@ -582,7 +582,7 @@ function mergeAfaField(session, field, value) {
   try {
     const existing = JSON.parse(session.bundle);
     if (existing) data = existing;
-  } catch (e) {}
+  } catch (e) { }
   data.type = "afa";
   data[field] = value;
   return JSON.stringify(data);
@@ -619,7 +619,7 @@ function getNetflixData(session) {
   try {
     const data = JSON.parse(session.bundle);
     if (data && data.type === "netflix") return data;
-  } catch (e) {}
+  } catch (e) { }
   return null;
 }
 
@@ -693,7 +693,7 @@ async function fetchNetflixSignIn(sinceIso) {
   } finally {
     try {
       await client.logout();
-    } catch (e) {}
+    } catch (e) { }
   }
 }
 
@@ -1237,7 +1237,7 @@ async function generateFullAdminReport() {
         });
         const rows = dmRes.data?.data?.transactions || dmRes.data?.transactions || [];
         dmPurchases = rows.filter(t => t?.type === "purchase" || t?.relatedPurchase);
-      } catch {}
+      } catch { }
     }
 
     const dmRevenue = dmPurchases.reduce((sum, p) => sum + Number(p.amount || p.price || 0), 0);
@@ -1302,7 +1302,7 @@ async function generateFullAdminReport() {
         if (bRes?.data?.data?.balance !== undefined) {
           walletBalance = `GH₵ ${Number(bRes.data.data.balance).toFixed(2)}`;
         }
-      } catch {}
+      } catch { }
     }
 
     let arkeselSms = null;
@@ -1316,7 +1316,7 @@ async function generateFullAdminReport() {
         const d = aRes.data?.data || aRes.data;
         const s = Number(d?.sms_balance ?? d?.smsBalance ?? d?.sms);
         if (!isNaN(s)) arkeselSms = s;
-      } catch {}
+      } catch { }
     }
 
     // Recent Transactions
@@ -1330,8 +1330,8 @@ async function generateFullAdminReport() {
         const status = /complet|deliver|success/i.test(o.delivery_status || o.status || "")
           ? "✅ Done"
           : (o.payment_status === "paid" || o.status === "pending")
-          ? "⏳ Pending"
-          : "⚠️ Unpaid";
+            ? "⏳ Pending"
+            : "⚠️ Unpaid";
         return `${idx + 1}. *${phone}* — ${pkg} (GH₵ ${amt}) ${status}`;
       }).join("\n");
     }
@@ -1465,9 +1465,32 @@ app.post("/webhook", async (req, res) => {
     Triggers when you text "Admin", "ADMIN", "Dashboard", or "Report"
     ===================================================== */
     if (/^(admin|dashboard|report)$/i.test(text)) {
-      console.log("📊 GENERATING COMPREHENSIVE 13-SECTION ADMIN REPORT FOR:", from);
-      const adminReport = await generateFullAdminReport();
-      return await sendWhatsApp(from, adminReport);
+      const normFrom = String(from || "").replace(/\D/g, "");
+      const isAuthorizedAdmin =
+        normFrom === "233547100951" ||
+        normFrom === "0547100951" ||
+        normFrom.endsWith("547100951");
+
+      if (isAuthorizedAdmin) {
+        console.log("📊 GENERATING COMPREHENSIVE 13-SECTION ADMIN REPORT FOR ADMIN:", from);
+        const adminReport = await generateFullAdminReport();
+        return await sendWhatsApp(from, adminReport);
+      } else {
+        console.warn("🚨 UNAUTHORIZED ADMIN ATTEMPT ON WHATSAPP FROM:", from);
+        // 1. Reply to intruder with access denied
+        await sendWhatsApp(
+          from,
+          "⚠️ *ACCESS DENIED*\n\nThis command is restricted to DATA 1 GH Administrators only.\n\nReply with *hi* to view customer data bundles and services."
+        );
+
+        // 2. Alert Admin WhatsApp instantly!
+        const timeStr = new Date().toLocaleString("en-GB", { timeZone: "Africa/Accra" });
+        await sendWhatsApp(
+          "233547100951",
+          `🚨 *DATA 1 GH — SECURITY INTRUSION ALERT* 🚨\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ *Someone tried to access your Admin Dashboard on WhatsApp!*\n\n• *Intruder Phone:* +${from}\n• *Command Used:* "${text}"\n• *Time:* ${timeStr}\n• *Status:* 🛑 BLOCKED (Admin report was withheld)\n\n👉 *What to do / How to stop them:*\n1. The intruder was blocked and saw NO store data.\n2. You can block their WhatsApp number (+${from}) if they persist.\n3. Search their phone number in Orders to identify who they are.`
+        );
+        return;
+      }
     }
 
     let { data: session } = await supabase
@@ -2750,6 +2773,11 @@ ADMIN PAGE
 ========================================================= */
 
 app.get("/admin", (req, res) => {
+  const key = req.query.key || req.headers["x-admin-key"];
+  const expectedKey = process.env.ADMIN_API_KEY || "data1gh-secure-admin";
+  if (key !== expectedKey) {
+    return res.status(401).send("Unauthorized. Access restricted to administrator.");
+  }
   res.sendFile(__dirname + "/admin.html");
 });
 
@@ -2758,6 +2786,17 @@ ADMIN DATA
 ========================================================= */
 
 app.get("/admin-data", async (req, res) => {
+  const key = req.query.key || req.headers["x-admin-key"];
+  const expectedKey = process.env.ADMIN_API_KEY || "data1gh-secure-admin";
+  if (key !== expectedKey) {
+    const ip = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "Unknown";
+    await sendWhatsApp(
+      "233547100951",
+      `🚨 *DATA 1 GH — SECURITY INTRUSION ALERT* 🚨\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ *Unauthorized Attempt to Access Web Admin Data!*\n\n• *Target:* GET /admin-data\n• *Attacker IP:* ${ip}\n• *Time:* ${new Date().toLocaleString("en-GB", { timeZone: "Africa/Accra" })}\n• *Status:* 🛑 BLOCKED with 401 Unauthorized\n\n👉 *Action:* No financial or customer data was shown. You can block this IP on your hosting dashboard.`
+    ).catch(() => { });
+    return res.status(401).json({ error: "Unauthorized access blocked." });
+  }
+
   try {
     const { data } = await supabase.from("sessions").select("*");
     const sessions = data || [];
