@@ -1139,7 +1139,7 @@ async function generateFullAdminReport() {
       settingsRes,
       productsRes,
       todayOrdersRes,
-      recentOrdersRes,
+      allOrdersRes,
       servicesRes,
       checkersRes,
       freeDataRes,
@@ -1149,8 +1149,8 @@ async function generateFullAdminReport() {
     ] = await Promise.all([
       safeQuery(supabase.from("settings").select("key, value")),
       safeQuery(supabase.from("products").select("id, network, in_stock")),
-      safeQuery(supabase.from("orders").select("id, amount, payment_status, delivery_status, status, network, capacity, recipient_phone, phone_number, created_at, notes, campaign_code").gte("created_at", startOfDay)),
-      safeQuery(supabase.from("orders").select("id, reference, ref, recipient_phone, phone_number, network, capacity, amount, payment_status, delivery_status, status, created_at").order("created_at", { ascending: false }).limit(5)),
+      safeQuery(supabase.from("orders").select("id, amount, payment_status, delivery_status, status, network, capacity, recipient_phone, phone_number, whatsapp_phone, created_at, notes, campaign_code, ref, reference").gte("created_at", startOfDay)),
+      safeQuery(supabase.from("orders").select("id, amount, payment_status, delivery_status, status, network, capacity, recipient_phone, phone_number, whatsapp_phone, created_at, notes, campaign_code, ref, reference").order("created_at", { ascending: false }).limit(300)),
       safeQuery(supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status, created_at")),
       safeQuery(supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status, created_at")),
       safeQuery(supabase.from("free_data_codes").select("id, code, claimed")),
@@ -1174,19 +1174,40 @@ async function generateFullAdminReport() {
     const telecelProducts = products.filter(p => /telecel|vod/i.test(p.network || "")).length;
     const atProducts = products.filter(p => /at|airtel/i.test(p.network || "")).length;
 
-    // Orders (Today)
+    // All Orders vs Today Orders Aggregation
+    const allOrders = allOrdersRes.data || [];
     const todayOrders = todayOrdersRes.data || [];
-    const paidToday = todayOrders.filter(o => o.payment_status === "paid" || /complet|deliver|success|paid/i.test(o.status || ""));
-    const deliveredToday = todayOrders.filter(o => /complet|deliver|success/i.test(o.delivery_status || o.status || ""));
-    const pendingDeliveryToday = paidToday.filter(o => !/complet|deliver|success/i.test(o.delivery_status || o.status || ""));
-    const failedToday = todayOrders.filter(o => /fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
-    const todayOrdersRev = paidToday.reduce((sum, o) => sum + Number(o.amount || 0), 0);
 
-    const isWa = (o) => Boolean(o.notes && String(o.notes).toLowerCase().includes("whatsapp")) || Boolean(o.campaign_code && o.campaign_code.startsWith("WA")) || Boolean(o.whatsapp_phone);
-    const waOrders = paidToday.filter(isWa);
-    const waRevenue = waOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-    const webOrders = paidToday.filter(o => !isWa(o));
-    const webRevenue = webOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+    const isPaid = (o) => o.payment_status === "paid" || /complet|deliver|success|paid/i.test(o.status || o.delivery_status || "");
+    const isDelivered = (o) => /complet|deliver|success/i.test(o.delivery_status || o.status || "");
+
+    const allPaid = allOrders.filter(isPaid);
+    const allDelivered = allPaid.filter(isDelivered);
+    const allPending = allPaid.filter((o) => !isDelivered(o) && !/fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
+    const allFailed = allOrders.filter((o) => /fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
+    const allGrossDataRev = allPaid.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+
+    const todayPaid = todayOrders.filter(isPaid);
+    const todayDelivered = todayPaid.filter(isDelivered);
+    const todayPending = todayPaid.filter((o) => !isDelivered(o) && !/fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
+    const todayFailed = todayOrders.filter((o) => /fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
+    const todayGrossDataRev = todayPaid.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+
+    const isWa = (o) =>
+      Boolean(o.notes && String(o.notes).toLowerCase().includes("whatsapp")) ||
+      Boolean(o.campaign_code && o.campaign_code.startsWith("WA")) ||
+      Boolean(o.whatsapp_phone) ||
+      Boolean(o.ref && String(o.ref).startsWith("MASHUP-"));
+
+    const allWaOrders = allPaid.filter(isWa);
+    const allWaRevenue = allWaOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+    const todayWaOrders = todayPaid.filter(isWa);
+    const todayWaRevenue = todayWaOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+
+    const allWebOrders = allPaid.filter((o) => !isWa(o));
+    const allWebRevenue = allWebOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+    const todayWebOrders = todayPaid.filter((o) => !isWa(o));
+    const todayWebRevenue = todayWebOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
 
     // Digital Services
     const services = servicesRes.data || [];
@@ -1218,9 +1239,9 @@ async function generateFullAdminReport() {
     const availableVouchers = freeData.length - claimedVouchers;
 
     // Analytics
-    const mtnPaidOrders = paidToday.filter(o => /mtn|yello/i.test(o.network || "")).length;
-    const telecelPaidOrders = paidToday.filter(o => /telecel|vod/i.test(o.network || "")).length;
-    const atPaidOrders = paidToday.filter(o => /at|airtel/i.test(o.network || "")).length;
+    const mtnPaidOrders = todayPaid.filter(o => /mtn|yello/i.test(o.network || "")).length;
+    const telecelPaidOrders = todayPaid.filter(o => /telecel|vod/i.test(o.network || "")).length;
+    const atPaidOrders = todayPaid.filter(o => /at|airtel/i.test(o.network || "")).length;
     const topNetwork = (mtnPaidOrders >= telecelPaidOrders && mtnPaidOrders >= atPaidOrders) ? "MTN" : (telecelPaidOrders >= atPaidOrders ? "Telecel" : "AT");
 
     // Support
@@ -1256,7 +1277,7 @@ async function generateFullAdminReport() {
     }
 
     // Recent Transactions
-    const recentOrders = recentOrdersRes.data || [];
+    const recentOrders = allOrdersRes.data || [];
     let recentListText = "_No recent transactions recorded yet today._";
     if (recentOrders.length > 0) {
       recentListText = recentOrders.slice(0, 5).map((o, idx) => {
@@ -1272,7 +1293,8 @@ async function generateFullAdminReport() {
       }).join("\n");
     }
 
-    const grossRevToday = todayOrdersRev + servicesRev + checkersRev;
+    const allGrossRev = allGrossDataRev + servicesRev + checkersRev;
+    const todayGrossRev = todayGrossDataRev;
     const ghanaTime = new Date().toLocaleString("en-GB", {
       timeZone: "Africa/Accra",
       weekday: "short",
@@ -1290,10 +1312,10 @@ async function generateFullAdminReport() {
       `🕒 _${ghanaTime}_`,
       ``,
       `1️⃣ *DASHBOARD (OVERVIEW)*`,
-      `• Gross Revenue Today: *GH₵ ${grossRevToday.toFixed(2)}*`,
+      `• Total Gross Sales: *GH₵ ${allGrossRev.toFixed(2)}* (Today: *GH₵ ${todayGrossRev.toFixed(2)}*)`,
       `• Telecom API Balance: *${walletBalance}*`,
       `• Arkesel Balance: *${arkeselSms !== null ? `${arkeselSms} SMS` : "Connected"}*`,
-      `• Delivery Queue: *${deliveredToday.length} Delivered*, *${pendingDeliveryToday.length} Pending*, *${failedToday.length} Failed*`,
+      `• Delivery Queue: *${allDelivered.length} Delivered*, *${allPending.length} In Queue*, *${allFailed.length} Failed*`,
       ``,
       `2️⃣ *PRODUCTS & PACKAGES*`,
       `• Total Catalog: *${products.length || 35} Packages* (*${inStockCount || 35}* In Stock)`,
@@ -1301,13 +1323,13 @@ async function generateFullAdminReport() {
       `• Stock Status: *All active networks available ✅*`,
       ``,
       `3️⃣ *WEBSITE ORDERS*`,
-      `• Direct Web Orders: *${webOrders.length} Paid*`,
-      `• Web Revenue: *GH₵ ${webRevenue.toFixed(2)}*`,
-      `• Status: *${webOrders.filter(o => /complet|deliver|success/i.test(o.delivery_status || o.status || "")).length} Delivered*, *${webOrders.filter(o => !/complet|deliver|success/i.test(o.delivery_status || o.status || "")).length} Pending*`,
+      `• Total Web Orders: *${allWebOrders.length} Paid* (${todayWebOrders.length} Today)`,
+      `• Total Web Revenue: *GH₵ ${allWebRevenue.toFixed(2)}* (${todayWebRevenue > 0 ? `Today: GH₵ ${todayWebRevenue.toFixed(2)}` : "Today: GH₵ 0.00"})`,
+      `• Status: *${allWebOrders.filter(isDelivered).length} Delivered*, *${allWebOrders.filter(o => !isDelivered(o)).length} Pending*`,
       ``,
       `4️⃣ *WHATSAPP BOT ORDERS*`,
-      `• Bot Orders Today: *${waOrders.length} Paid*`,
-      `• Bot Revenue: *GH₵ ${waRevenue.toFixed(2)}*`,
+      `• Total Bot Orders: *${allWaOrders.length} Paid* (${todayWaOrders.length} Today)`,
+      `• Total Bot Revenue: *GH₵ ${allWaRevenue.toFixed(2)}* (${todayWaRevenue > 0 ? `Today: GH₵ ${todayWaRevenue.toFixed(2)}` : "Today: GH₵ 0.00"})`,
       `• Bot Status: *Active & Processing Orders 💬*`,
       ``,
       `5️⃣ *BULK SMS*`,
@@ -1344,7 +1366,7 @@ async function generateFullAdminReport() {
       `1️⃣1️⃣ *SALES ANALYTICS*`,
       `• Top Ordered Network: *${topNetwork}*`,
       `• Network Orders: *MTN (${mtnPaidOrders})*, *Telecel (${telecelPaidOrders})*, *AT (${atPaidOrders})*`,
-      `• Total Day Volume: *${paidToday.length + paidServices.length + paidCheckers.length} Transactions*`,
+      `• Total Day Volume: *${todayPaid.length + paidServices.length + paidCheckers.length} Transactions*`,
       ``,
       `1️⃣2️⃣ *CUSTOMER SUPPORT & AI*`,
       `• Open Chat Sessions: *${openChats.length} Active*`,
@@ -2221,7 +2243,120 @@ app.post("/paystack-webhook", async (req, res) => {
       }
     }
 
+    // 3. Fallback: Check if this is a Website Order (Data bundle, Netflix, AFA, Result Checker)
     if (!session) {
+      // Check Website Data Orders
+      const { data: webOrder } = await supabase
+        .from("orders")
+        .select("*")
+        .or(`reference.eq.${ref},ref.eq.${ref}`)
+        .maybeSingle();
+
+      if (webOrder) {
+        recordWebhookLog("WEBSITE_DATA_ORDER_FOUND", { ref, id: webOrder.id, network: webOrder.network, capacity: webOrder.capacity });
+        console.log("🌐 RECOGNIZED WEBSITE DATA ORDER:", ref);
+
+        const networkMap = {
+          MTN: "YELLO",
+          mtn: "YELLO",
+          YELLO: "YELLO",
+          TELECEL: "TELECEL",
+          telecel: "TELECEL",
+          AT: "AT_PREMIUM",
+          at: "AT_PREMIUM",
+          AIRTELTIGO: "AT_PREMIUM",
+          airteltigo: "AT_PREMIUM",
+          AT_PREMIUM: "AT_PREMIUM"
+        };
+        const dmNetwork = networkMap[webOrder.network] || webOrder.network || "YELLO";
+        const phone = normalizePhone(webOrder.recipient_phone || webOrder.phone_number);
+        const capacity = String(webOrder.capacity || "1").replace(/[^\d.]/g, "");
+
+        let dmSuccess = false;
+        let dmRef = null;
+
+        if (DATA_API_KEY) {
+          try {
+            const dmRes = await axios.post(
+              `${DATAMART_BASE}/purchase`,
+              { phoneNumber: phone, network: dmNetwork, capacity, gateway: "wallet", delivery: "fast" },
+              { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 }
+            );
+            const data = dmRes.data?.data || dmRes.data || {};
+            dmRef = data.reference || data.orderReference || data.purchaseId || null;
+            dmSuccess = true;
+          } catch (dmErr) {
+            console.warn("Direct DataMart purchase error for web order:", dmErr.response?.data || dmErr.message);
+          }
+        }
+
+        // Mark payment as paid and update delivery status in DB
+        await supabase
+          .from("orders")
+          .update({
+            payment_status: "paid",
+            delivery_status: dmSuccess ? "delivered" : "processing",
+            datamart_reference: dmRef,
+            updated_at: new Date().toISOString()
+          })
+          .or(`reference.eq.${ref},ref.eq.${ref}`);
+
+        // Send alert to admin about successful web sale & delivery
+        await sendWhatsApp(
+          "233547100951",
+          `🛍️ NEW WEBSITE DATA ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📶 Network: ${webOrder.network || "Data"}\n📦 Capacity: ${capacity}GB\n📱 Recipient: ${phone}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n\n${dmSuccess ? "✅ Delivered automatically via DataMart!" : "⏳ Marked Paid — Pending DataMart dispatch."}`
+        );
+        return;
+      }
+
+      // Check Digital Services (Netflix, Mashup, AFA)
+      const { data: webService } = await supabase
+        .from("service_orders")
+        .select("*")
+        .or(`reference.eq.${ref},ref.eq.${ref}`)
+        .maybeSingle();
+
+      if (webService) {
+        recordWebhookLog("WEBSITE_SERVICE_ORDER_FOUND", { ref, service: webService.service });
+        await supabase
+          .from("service_orders")
+          .update({
+            payment_status: "paid",
+            updated_at: new Date().toISOString()
+          })
+          .or(`reference.eq.${ref},ref.eq.${ref}`);
+
+        await sendWhatsApp(
+          "233547100951",
+          `✨ NEW WEBSITE SERVICE ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📦 Service: ${webService.service}\n📱 Phone: ${webService.customer_phone || "N/A"}\n💰 Amount: ₵${paidAmount.toFixed(2)}`
+        );
+        return;
+      }
+
+      // Check Result Checkers (WAEC)
+      const { data: webChecker } = await supabase
+        .from("checker_orders")
+        .select("*")
+        .or(`reference.eq.${ref},ref.eq.${ref}`)
+        .maybeSingle();
+
+      if (webChecker) {
+        recordWebhookLog("WEBSITE_CHECKER_ORDER_FOUND", { ref, type: webChecker.checker_type });
+        await supabase
+          .from("checker_orders")
+          .update({
+            payment_status: "paid",
+            updated_at: new Date().toISOString()
+          })
+          .or(`reference.eq.${ref},ref.eq.${ref}`);
+
+        await sendWhatsApp(
+          "233547100951",
+          `🎓 NEW RESULT CHECKER ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📦 Exam: ${webChecker.checker_type}\n📱 Phone: ${webChecker.customer_phone || "N/A"}\n💰 Amount: ₵${paidAmount.toFixed(2)}`
+        );
+        return;
+      }
+
       recordWebhookLog("SESSION_NOT_FOUND", { ref });
       console.error("❌ SESSION NOT FOUND:", ref);
       await sendWhatsApp(
