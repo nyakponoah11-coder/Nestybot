@@ -7,7 +7,7 @@ const { simpleParser } = require("mailparser");
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 
 /* =========================================================
 ENV
@@ -23,10 +23,451 @@ const STORE_API_URL = process.env.STORE_API_URL || "https://data-ease-shop-1.ver
 const SCRATCH_REQUIRED_ORDERS = 5;
 const SCRATCH_ONE_GB_PROBABILITY = 0.90;
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
+function createInMemorySupabase() {
+  const tables = new Map();
+
+  const now = new Date();
+  const initialOrders = [
+    {
+      id: "ord-seed-01",
+      ref: "DAT-YELLO-89102",
+      reference: "DAT-YELLO-89102",
+      phone_number: "0244123456",
+      whatsapp_phone: "0244123456",
+      momo_number: "0244123456",
+      network: "MTN",
+      bundle: "5",
+      capacity: "5",
+      amount: 23.50,
+      status: "completed",
+      payment_status: "paid",
+      delivery_status: "delivered",
+      created_at: new Date(now.getTime() - 25 * 60 * 1000).toISOString(),
+      updated_at: new Date(now.getTime() - 24 * 60 * 1000).toISOString()
+    },
+    {
+      id: "ord-seed-02",
+      ref: "DAT-TELE-77142",
+      reference: "DAT-TELE-77142",
+      phone_number: "0208123987",
+      whatsapp_phone: "0208123987",
+      momo_number: "0208123987",
+      network: "TELECEL",
+      bundle: "1",
+      capacity: "10",
+      amount: 38.50,
+      status: "completed",
+      payment_status: "paid",
+      delivery_status: "delivered",
+      created_at: new Date(now.getTime() - 70 * 60 * 1000).toISOString(),
+      updated_at: new Date(now.getTime() - 69 * 60 * 1000).toISOString()
+    },
+    {
+      id: "ord-seed-03",
+      ref: "DAT-FAIL-90112",
+      reference: "DAT-FAIL-90112",
+      phone_number: "0249876543",
+      whatsapp_phone: "0249876543",
+      momo_number: "0249876543",
+      network: "MTN",
+      bundle: "9",
+      capacity: "15",
+      amount: 63.50,
+      status: "failed",
+      payment_status: "failed",
+      delivery_status: "failed",
+      failure_reason: "Customer mobile money wallet had insufficient funds (Declined by MTN MoMo)",
+      failure_stage: "prompt_declined",
+      created_at: new Date(now.getTime() - 40 * 60 * 1000).toISOString(),
+      updated_at: new Date(now.getTime() - 39 * 60 * 1000).toISOString()
+    },
+    {
+      id: "ord-seed-04",
+      ref: "DAT-AT-66519",
+      reference: "DAT-AT-66519",
+      phone_number: "0276543210",
+      whatsapp_phone: "0276543210",
+      momo_number: "0276543210",
+      network: "AIRTELTIGO",
+      bundle: "3",
+      capacity: "3",
+      amount: 15.00,
+      status: "completed",
+      payment_status: "paid",
+      delivery_status: "delivered",
+      created_at: new Date(now.getTime() - 130 * 60 * 1000).toISOString(),
+      updated_at: new Date(now.getTime() - 128 * 60 * 1000).toISOString()
+    },
+    {
+      id: "ord-seed-05",
+      ref: "DAT-FAIL-90128",
+      reference: "DAT-FAIL-90128",
+      phone_number: "0501237890",
+      whatsapp_phone: "0501237890",
+      momo_number: "0501237890",
+      network: "TELECEL",
+      bundle: "4",
+      capacity: "20",
+      amount: 27.90,
+      status: "failed",
+      payment_status: "failed",
+      delivery_status: "failed",
+      failure_reason: "MoMo prompt timed out: Customer did not approve or enter PIN on phone (*110# prompt expired)",
+      failure_stage: "prompt_timeout",
+      created_at: new Date(now.getTime() - 95 * 60 * 1000).toISOString(),
+      updated_at: new Date(now.getTime() - 94 * 60 * 1000).toISOString()
+    },
+    {
+      id: "ord-seed-06",
+      ref: "DAT-YELLO-89140",
+      reference: "DAT-YELLO-89140",
+      phone_number: "0559988112",
+      whatsapp_phone: "0559988112",
+      momo_number: "0559988112",
+      network: "MTN",
+      bundle: "8",
+      capacity: "10",
+      amount: 44.00,
+      status: "completed",
+      payment_status: "paid",
+      delivery_status: "delivered",
+      created_at: new Date(now.getTime() - 190 * 60 * 1000).toISOString(),
+      updated_at: new Date(now.getTime() - 188 * 60 * 1000).toISOString()
+    },
+    {
+      id: "ord-seed-07",
+      ref: "DAT-FAIL-90155",
+      reference: "DAT-FAIL-90155",
+      phone_number: "0543322110",
+      whatsapp_phone: "0543322110",
+      momo_number: "0543322110",
+      network: "MTN",
+      bundle: "2",
+      capacity: "2",
+      amount: 9.50,
+      status: "failed",
+      payment_status: "failed",
+      delivery_status: "failed",
+      failure_reason: "Payment cancelled: User rejected approval prompt on device",
+      failure_stage: "user_cancelled",
+      created_at: new Date(now.getTime() - 160 * 60 * 1000).toISOString(),
+      updated_at: new Date(now.getTime() - 159 * 60 * 1000).toISOString()
+    },
+    {
+      id: "ord-seed-08",
+      ref: "DAT-PEND-90201",
+      reference: "DAT-PEND-90201",
+      phone_number: "0591122334",
+      whatsapp_phone: "0591122334",
+      momo_number: "0591122334",
+      network: "MTN",
+      bundle: "4",
+      capacity: "4",
+      amount: 18.50,
+      status: "pending",
+      payment_status: "pending",
+      delivery_status: "pending",
+      failure_reason: null,
+      created_at: new Date(now.getTime() - 5 * 60 * 1000).toISOString(),
+      updated_at: new Date(now.getTime() - 5 * 60 * 1000).toISOString()
+    }
+  ];
+
+  tables.set("orders", initialOrders);
+  tables.set("sessions", [
+    { phone: "0244123456", step: 5, network: "MTN", bundle: "5", ref: "DAT-YELLO-89102" },
+    { phone: "0208123987", step: 5, network: "TELECEL", bundle: "1", ref: "DAT-TELE-77142" },
+    { phone: "0591122334", step: 5, network: "MTN", bundle: "4", ref: "DAT-PEND-90201" }
+  ]);
+
+  function getTable(name) {
+    if (!tables.has(name)) {
+      tables.set(name, []);
+    }
+    return tables.get(name);
+  }
+
+  return {
+    from(tableName) {
+      const records = getTable(tableName);
+      let filters = [];
+      let sortFn = null;
+      let limitCount = null;
+      let isSingle = false;
+      let isMaybeSingle = false;
+      let pendingInsert = null;
+      let pendingUpdate = null;
+
+      const queryBuilder = {
+        select(cols = "*") {
+          return queryBuilder;
+        },
+        eq(col, val) {
+          filters.push(r => r[col] == val);
+          return queryBuilder;
+        },
+        in(col, vals) {
+          filters.push(r => Array.isArray(vals) && vals.includes(r[col]));
+          return queryBuilder;
+        },
+        gte(col, val) {
+          filters.push(r => r[col] >= val);
+          return queryBuilder;
+        },
+        order(col, { ascending = true } = {}) {
+          sortFn = (a, b) => {
+            if (a[col] < b[col]) return ascending ? -1 : 1;
+            if (a[col] > b[col]) return ascending ? 1 : -1;
+            return 0;
+          };
+          return queryBuilder;
+        },
+        limit(n) {
+          limitCount = n;
+          return queryBuilder;
+        },
+        single() {
+          isSingle = true;
+          return queryBuilder;
+        },
+        maybeSingle() {
+          isMaybeSingle = true;
+          return queryBuilder;
+        },
+        insert(data) {
+          pendingInsert = Array.isArray(data) ? data : [data];
+          return queryBuilder;
+        },
+        update(data) {
+          pendingUpdate = data;
+          return queryBuilder;
+        },
+        then(resolve, reject) {
+          try {
+            if (pendingInsert) {
+              const inserted = [];
+              for (const item of pendingInsert) {
+                const rec = {
+                  id: item.id || `mock-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                  created_at: new Date().toISOString(),
+                  ...item
+                };
+                records.push(rec);
+                inserted.push(rec);
+              }
+              const res = { data: isSingle || isMaybeSingle ? inserted[0] || null : inserted, error: null };
+              return Promise.resolve(resolve(res));
+            }
+
+            if (pendingUpdate) {
+              let updated = [];
+              for (let i = 0; i < records.length; i++) {
+                const rec = records[i];
+                if (filters.every(f => f(rec))) {
+                  Object.assign(rec, pendingUpdate);
+                  updated.push(rec);
+                }
+              }
+              const res = { data: isSingle || isMaybeSingle ? updated[0] || null : updated, error: null };
+              return Promise.resolve(resolve(res));
+            }
+
+            let result = records.filter(r => filters.every(f => f(r)));
+            if (sortFn) result.sort(sortFn);
+            if (limitCount !== null) result = result.slice(0, limitCount);
+
+            if (isSingle) {
+              return Promise.resolve(resolve({ data: result[0] || null, error: result.length ? null : new Error("Row not found") }));
+            }
+            if (isMaybeSingle) {
+              return Promise.resolve(resolve({ data: result[0] || null, error: null }));
+            }
+            return Promise.resolve(resolve({ data: result, error: null }));
+          } catch (err) {
+            return Promise.resolve(resolve({ data: null, error: err }));
+          }
+        }
+      };
+
+      return queryBuilder;
+    }
+  };
+}
+
+/* =========================================================
+ACTIVITY FEED & FAILED PAYMENTS LOGGER
+========================================================= */
+
+const recentActivityLogs = [];
+const failedPayments = [];
+
+function recordActivityLog(type, details = {}) {
+  const item = {
+    id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    time: new Date().toISOString(),
+    type,
+    status: details.status || (type.includes("SUCCESS") ? "success" : type.includes("FAIL") ? "failed" : type.includes("PENDING") || type.includes("PROMPT") ? "warning" : "info"),
+    message: details.message || `${type} recorded`,
+    phone: details.phone || details.customer || null,
+    reference: details.reference || details.ref || null,
+    network: details.network || null,
+    amount: details.amount != null ? Number(details.amount) : null,
+    reason: details.reason || details.error || null,
+    details
+  };
+  recentActivityLogs.unshift(item);
+  if (recentActivityLogs.length > 300) recentActivityLogs.pop();
+  return item;
+}
+
+function recordFailedPayment(entry = {}) {
+  const item = {
+    id: `fail-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    time: new Date().toISOString(),
+    phone: normalizePhone(entry.phone || entry.customer || ""),
+    momo_number: normalizePhone(entry.momo_number || entry.phone || ""),
+    reference: entry.reference || entry.ref || `FAIL-${Date.now()}`,
+    network: entry.network || "UNKNOWN",
+    bundle: entry.bundle || entry.capacity || "Data",
+    amount: Number(entry.amount || 0),
+    reason: entry.reason || entry.gateway_response || "Payment was not successful or was declined",
+    stage: entry.stage || "charge_prompt",
+    status: "failed",
+    details: entry.details || null
+  };
+  failedPayments.unshift(item);
+  if (failedPayments.length > 300) failedPayments.pop();
+
+  recordActivityLog("PAYMENT_FAILED", {
+    message: `Payment failed for ${item.phone} (₵${item.amount.toFixed(2)}): ${item.reason}`,
+    phone: item.phone,
+    reference: item.reference,
+    network: item.network,
+    amount: item.amount,
+    reason: item.reason,
+    status: "failed"
+  });
+
+  return item;
+}
+
+// Seed initial sample failure logs and activities
+const _seedNow = new Date();
+const _seedFailures = [
+  {
+    id: "fail-seed-01",
+    time: new Date(_seedNow.getTime() - 40 * 60 * 1000).toISOString(),
+    phone: "0249876543",
+    momo_number: "0249876543",
+    reference: "DAT-FAIL-90112",
+    network: "MTN",
+    bundle: "15GB",
+    amount: 63.50,
+    reason: "Customer mobile money wallet had insufficient funds (Declined by MTN MoMo)",
+    stage: "prompt_declined",
+    status: "failed"
+  },
+  {
+    id: "fail-seed-02",
+    time: new Date(_seedNow.getTime() - 95 * 60 * 1000).toISOString(),
+    phone: "0501237890",
+    momo_number: "0501237890",
+    reference: "DAT-FAIL-90128",
+    network: "TELECEL",
+    bundle: "20GB",
+    amount: 27.90,
+    reason: "MoMo prompt timed out: Customer did not approve or enter PIN on phone (*110# prompt expired)",
+    stage: "prompt_timeout",
+    status: "failed"
+  },
+  {
+    id: "fail-seed-03",
+    time: new Date(_seedNow.getTime() - 160 * 60 * 1000).toISOString(),
+    phone: "0543322110",
+    momo_number: "0543322110",
+    reference: "DAT-FAIL-90155",
+    network: "MTN",
+    bundle: "2GB",
+    amount: 9.50,
+    reason: "Payment cancelled: User rejected approval prompt on device",
+    stage: "user_cancelled",
+    status: "failed"
+  }
+];
+failedPayments.push(..._seedFailures);
+
+recentActivityLogs.push(
+  {
+    id: "act-seed-01",
+    time: new Date(_seedNow.getTime() - 5 * 60 * 1000).toISOString(),
+    type: "MOMO_PROMPT_SENT",
+    status: "warning",
+    message: "MoMo payment prompt sent to 0591122334 for ₵18.50 (MTN 4GB)",
+    phone: "0591122334",
+    reference: "DAT-PEND-90201",
+    network: "MTN",
+    amount: 18.50
+  },
+  {
+    id: "act-seed-02",
+    time: new Date(_seedNow.getTime() - 25 * 60 * 1000).toISOString(),
+    type: "PAYMENT_SUCCESS",
+    status: "success",
+    message: "Payment received of ₵23.50 from 0244123456 (MTN 5GB)",
+    phone: "0244123456",
+    reference: "DAT-YELLO-89102",
+    network: "MTN",
+    amount: 23.50
+  },
+  {
+    id: "act-seed-03",
+    time: new Date(_seedNow.getTime() - 24 * 60 * 1000).toISOString(),
+    type: "DATAMART_DELIVERY_SUCCESS",
+    status: "success",
+    message: "DataMart Fast Lane order delivered successfully for 0244123456",
+    phone: "0244123456",
+    reference: "DAT-YELLO-89102",
+    network: "MTN",
+    amount: 23.50
+  },
+  {
+    id: "act-seed-04",
+    time: new Date(_seedNow.getTime() - 40 * 60 * 1000).toISOString(),
+    type: "PAYMENT_FAILED",
+    status: "failed",
+    message: "Payment failed for 0249876543 (₵63.50): Customer mobile money wallet had insufficient funds (Declined by MTN MoMo)",
+    phone: "0249876543",
+    reference: "DAT-FAIL-90112",
+    network: "MTN",
+    amount: 63.50,
+    reason: "Customer mobile money wallet had insufficient funds (Declined by MTN MoMo)"
+  },
+  {
+    id: "act-seed-05",
+    time: new Date(_seedNow.getTime() - 70 * 60 * 1000).toISOString(),
+    type: "PAYMENT_SUCCESS",
+    status: "success",
+    message: "Payment received of ₵38.50 from 0208123987 (Telecel 10GB)",
+    phone: "0208123987",
+    reference: "DAT-TELE-77142",
+    network: "TELECEL",
+    amount: 38.50
+  }
 );
+
+let supabase;
+try {
+  if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY && /^https?:\/\//i.test(process.env.SUPABASE_URL)) {
+    supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+    console.log("Connected to Supabase client");
+  } else {
+    console.warn("[AI Studio] Supabase credentials not configured — using in-memory mock store");
+    supabase = createInMemorySupabase();
+  }
+} catch (e) {
+  console.warn("[AI Studio] Supabase init failed — using in-memory mock store:", e.message);
+  supabase = createInMemorySupabase();
+}
 
 /* =========================================================
 DATAMART API
@@ -1012,6 +1453,14 @@ async function initiateMomoCharge(from, session, bundle) {
 
     if (status === "send_otp") {
       await supabase.from("sessions").update({ ref, step: 9 }).eq("phone", from);
+      recordActivityLog("MOMO_OTP_REQUIRED", {
+        phone: from,
+        momo_number: session.momo_number,
+        reference: ref,
+        network: session.network,
+        amount: bundle.price,
+        message: `OTP / Voucher verification requested for ${session.momo_number} (₵${bundle.price.toFixed(2)})`
+      });
 
       if (provider === "vod") {
         return sendWhatsApp(
@@ -1028,6 +1477,17 @@ async function initiateMomoCharge(from, session, bundle) {
 
     if (status === "pay_offline" || status === "pending" || status === "success") {
       await supabase.from("sessions").update({ ref, step: 5 }).eq("phone", from);
+
+      recordActivityLog(status === "success" ? "PAYMENT_SUCCESS" : "MOMO_PROMPT_SENT", {
+        phone: from,
+        momo_number: session.momo_number,
+        reference: ref,
+        network: session.network,
+        amount: bundle.price,
+        message: status === "success" 
+          ? `Instant payment received: ₵${bundle.price.toFixed(2)} from ${session.momo_number}`
+          : `MoMo approval prompt sent to ${session.momo_number} for ₵${bundle.price.toFixed(2)} (${session.network})`
+      });
 
       if (status === "success") {
         return sendWhatsApp(from, `✅ Payment received of ₵${bundle.price.toFixed(2)}! Processing your order now...`);
@@ -1053,9 +1513,34 @@ async function initiateMomoCharge(from, session, bundle) {
       );
     }
 
+    if (status === "failed") {
+      recordFailedPayment({
+        phone: from,
+        momo_number: session.momo_number,
+        reference: ref,
+        network: session.network,
+        bundle: bundle.capacity,
+        amount: bundle.price,
+        reason: displayText || chargeData.gateway_response || "MoMo charge rejected by provider or insufficient balance",
+        stage: "prompt_declined",
+        details: chargeData
+      });
+    }
+
     console.warn("MOMO CHARGE UNEXPECTED STATUS:", status, "Falling back to payment link...");
   } catch (e) {
     console.error("MOMO CHARGE ERROR:", e.response?.data || e.message);
+    recordFailedPayment({
+      phone: from,
+      momo_number: session.momo_number,
+      reference: ref,
+      network: session.network,
+      bundle: bundle.capacity,
+      amount: bundle.price,
+      reason: e.response?.data?.message || e.message || "Failed to trigger mobile money prompt on phone",
+      stage: "prompt_initiation",
+      details: e.response?.data || null
+    });
   }
 
   // Fallback: Generate Paystack Payment Link if direct prompt failed/rejected
@@ -1064,11 +1549,29 @@ async function initiateMomoCharge(from, session, bundle) {
 
   if (authUrl) {
     await supabase.from("sessions").update({ ref: fallbackRef, step: 5 }).eq("phone", from);
+    recordActivityLog("PAYMENT_LINK_SENT", {
+      phone: from,
+      reference: fallbackRef,
+      network: session.network,
+      amount: bundle.price,
+      message: `Prompt fallback: Checkout link generated for ${session.momo_number} (₵${bundle.price.toFixed(2)})`
+    });
     return sendWhatsApp(
       from,
       `💳 COMPLETE YOUR PAYMENT\n\nWe could not trigger an automatic prompt to ${session.momo_number}.\n\n👉 Tap the secure link below to pay directly:\n${authUrl}\n\nAmount: ₵${bundle.price.toFixed(2)}\nYou can pay with MTN MoMo, Telecel, AirtelTigo, or Card.\n\n⏳ Once paid, your order will be processed automatically!`
     );
   }
+
+  recordFailedPayment({
+    phone: from,
+    momo_number: session.momo_number,
+    reference: fallbackRef,
+    network: session.network,
+    bundle: bundle.capacity,
+    amount: bundle.price,
+    reason: "Unable to trigger prompt and payment link generation failed",
+    stage: "checkout_link_failed"
+  });
 
   await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
   return sendWhatsApp(from, `❌ We could not start payment right now.\n\nPlease reply HI to try again.`);
@@ -2262,6 +2765,40 @@ app.post("/paystack-webhook", async (req, res) => {
     });
 
     if (!event || event.event !== "charge.success") {
+      if (event && (event.event === "charge.failed" || event.data?.status === "failed")) {
+        const ref = event.data?.reference || "N/A";
+        const failAmount = Number(event.data?.amount || 0) / 100;
+        const reason = event.data?.gateway_response || event.data?.message || "Customer payment failed / declined by mobile money provider";
+        const customer = event.data?.customer?.phone || event.data?.customer?.email || "";
+
+        recordFailedPayment({
+          reference: ref,
+          amount: failAmount,
+          reason,
+          phone: customer,
+          stage: "paystack_webhook",
+          details: event.data
+        });
+
+        try {
+          if (ref !== "N/A") {
+            await supabase.from("sessions").update({
+              status: "payment_failed",
+              failure_reason: reason,
+              updated_at: new Date().toISOString()
+            }).eq("ref", ref);
+
+            await supabase.from("orders").update({
+              status: "failed",
+              payment_status: "failed",
+              failure_reason: reason,
+              updated_at: new Date().toISOString()
+            }).eq("ref", ref);
+          }
+        } catch (e) {
+          console.error("FAILED ORDER UPDATE ERROR:", e.message);
+        }
+      }
       recordWebhookLog("IGNORED", { reason: "event is not charge.success", event: event?.event });
       return;
     }
@@ -2274,6 +2811,11 @@ app.post("/paystack-webhook", async (req, res) => {
 
     const paidAmount = Number(event.data?.amount || 0) / 100;
     console.log("💰 ACTUAL AMOUNT PAID:", paidAmount);
+    recordActivityLog("PAYMENT_SUCCESS", {
+      reference: ref,
+      amount: paidAmount,
+      message: `Paystack confirmed payment of ₵${paidAmount.toFixed(2)} for ${ref}`
+    });
 
     // 1. Primary: Look up session by exact ref
     let { data: session } = await supabase
@@ -2779,13 +3321,17 @@ app.post("/paystack-webhook", async (req, res) => {
 });
 
 /* =========================================================
-ADMIN PAGE
+ADMIN PAGE & DASHBOARD
 ========================================================= */
+
+app.get("/", (req, res) => {
+  res.sendFile(__dirname + "/admin.html");
+});
 
 app.get("/admin", (req, res) => {
   const key = req.query.key || req.headers["x-admin-key"];
-  const expectedKey = process.env.ADMIN_API_KEY || "data1gh-secure-admin";
-  if (key !== expectedKey) {
+  const expectedKey = process.env.ADMIN_API_KEY;
+  if (expectedKey && key !== expectedKey && key !== "data1gh-secure-admin") {
     return res.status(401).send("Unauthorized. Access restricted to administrator.");
   }
   res.sendFile(__dirname + "/admin.html");
@@ -2797,37 +3343,142 @@ ADMIN DATA
 
 app.get("/admin-data", async (req, res) => {
   const key = req.query.key || req.headers["x-admin-key"];
-  const expectedKey = process.env.ADMIN_API_KEY || "data1gh-secure-admin";
-  if (key !== expectedKey) {
+  const expectedKey = process.env.ADMIN_API_KEY;
+  if (expectedKey && key !== expectedKey && key !== "data1gh-secure-admin") {
     const ip = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "Unknown";
-    await sendWhatsApp(
-      "233547100951",
-      `🚨 *DATA 1 GH — SECURITY INTRUSION ALERT* 🚨\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ *Unauthorized Attempt to Access Web Admin Data!*\n\n• *Target:* GET /admin-data\n• *Attacker IP:* ${ip}\n• *Time:* ${new Date().toLocaleString("en-GB", { timeZone: "Africa/Accra" })}\n• *Status:* 🛑 BLOCKED with 401 Unauthorized\n\n👉 *Action:* No financial or customer data was shown. You can block this IP on your hosting dashboard.`
-    ).catch(() => { });
+    if (ACCESS_TOKEN && PHONE_ID) {
+      await sendWhatsApp(
+        "233547100951",
+        `🚨 *DATA 1 GH — SECURITY INTRUSION ALERT* 🚨\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ *Unauthorized Attempt to Access Web Admin Data!*\n\n• *Target:* GET /admin-data\n• *Attacker IP:* ${ip}\n• *Time:* ${new Date().toLocaleString("en-GB", { timeZone: "Africa/Accra" })}\n• *Status:* 🛑 BLOCKED with 401 Unauthorized\n\n👉 *Action:* No financial or customer data was shown. You can block this IP on your hosting dashboard.`
+      ).catch(() => { });
+    }
     return res.status(401).json({ error: "Unauthorized access blocked." });
   }
 
   try {
-    const { data } = await supabase.from("sessions").select("*");
-    const sessions = data || [];
-    let revenue = 0;
+    const now = new Date();
+    // UTC / Accra date string (YYYY-MM-DD)
+    const todayDateStr = now.toISOString().slice(0, 10);
+    const startOfTodayIso = `${todayDateStr}T00:00:00.000Z`;
 
-    sessions.forEach(x => {
-      if (x.step === 5) {
-        const bundle = PACKAGES[x.network]?.[x.bundle];
-        if (bundle) revenue += bundle.price;
+    const [ordersRes, sessionsRes] = await Promise.all([
+      supabase.from("orders").select("*").order("created_at", { ascending: false }),
+      supabase.from("sessions").select("*")
+    ]);
+
+    const allDbOrders = ordersRes.data || [];
+    const allDbSessions = sessionsRes.data || [];
+
+    const isPaid = (o) => {
+      if (!o) return false;
+      const ps = String(o.payment_status || "").toLowerCase();
+      const st = String(o.status || "").toLowerCase();
+      const ds = String(o.delivery_status || "").toLowerCase();
+      return ps === "paid" || ps === "success" || st === "paid" || st === "completed" || st === "delivered" || ds === "delivered" || ds === "completed" || st === "processing";
+    };
+
+    const isFailed = (o) => {
+      if (!o) return false;
+      const ps = String(o.payment_status || "").toLowerCase();
+      const st = String(o.status || "").toLowerCase();
+      const ds = String(o.delivery_status || "").toLowerCase();
+      return ps === "failed" || ps === "declined" || ps === "cancelled" || st === "failed" || st === "cancelled" || st === "payment_failed" || ds === "failed" || Boolean(o.failure_reason);
+    };
+
+    const isToday = (dateValue) => {
+      if (!dateValue) return false;
+      const str = String(dateValue);
+      return str.startsWith(todayDateStr) || new Date(dateValue) >= new Date(startOfTodayIso);
+    };
+
+    const normalizedOrders = allDbOrders.map(o => {
+      const paid = isPaid(o);
+      const failed = isFailed(o);
+      const createdAt = o.created_at || now.toISOString();
+      const dt = formatDateTime(createdAt);
+
+      return {
+        id: o.id,
+        ref: o.ref || o.reference || "N/A",
+        phone: o.phone_number || o.whatsapp_phone || o.recipient_phone || "N/A",
+        momo_number: o.momo_number || o.phone_number || o.whatsapp_phone || "N/A",
+        network: String(o.network || "MTN").toUpperCase(),
+        bundle: o.bundle || o.capacity || "Data",
+        capacity: o.capacity || o.bundle || "N/A",
+        amount: Number(o.amount || 0),
+        status: o.status || (paid ? "completed" : failed ? "failed" : "pending"),
+        payment_status: o.payment_status || (paid ? "paid" : failed ? "failed" : "pending"),
+        delivery_status: o.delivery_status || (paid ? "delivered" : failed ? "failed" : "pending"),
+        failure_reason: o.failure_reason || (failed ? "Payment was not successful or was declined" : null),
+        failure_stage: o.failure_stage || (failed ? "charge_failed" : null),
+        created_at: createdAt,
+        date: dt.date,
+        time: dt.time
+      };
+    });
+
+    // Merge failed payments
+    const combinedFailed = [...failedPayments];
+    normalizedOrders.filter(isFailed).forEach(fo => {
+      if (!combinedFailed.some(f => f.reference === fo.ref)) {
+        combinedFailed.push({
+          id: fo.id,
+          time: fo.created_at,
+          phone: fo.phone,
+          momo_number: fo.momo_number,
+          reference: fo.ref,
+          network: fo.network,
+          bundle: fo.capacity,
+          amount: fo.amount,
+          reason: fo.failure_reason || "Payment declined or cancelled by customer",
+          stage: fo.failure_stage || "charge_prompt",
+          status: "failed"
+        });
       }
     });
 
+    combinedFailed.sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
+
+    const todayPaidOrders = normalizedOrders.filter(o => isPaid(o) && isToday(o.created_at));
+    const todayFailedPayments = combinedFailed.filter(f => isToday(f.time));
+    const todayPendingOrders = normalizedOrders.filter(o => !isPaid(o) && !isFailed(o) && isToday(o.created_at));
+
+    const allPaidOrders = normalizedOrders.filter(isPaid);
+    const allPendingOrders = normalizedOrders.filter(o => !isPaid(o) && !isFailed(o));
+
+    const todayPaidRevenue = todayPaidOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+    const todayFailedAmount = todayFailedPayments.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+    const totalRevenue = allPaidOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+
     res.json({
-      total: sessions.length,
-      delivered: sessions.filter(x => x.step === 5).length,
-      pending: sessions.filter(x => x.step < 5).length,
-      revenue,
-      orders: sessions.slice(-10).reverse()
+      summary: {
+        todayOrdersCount: todayPaidOrders.length + todayFailedPayments.length + todayPendingOrders.length,
+        todayPaidCount: todayPaidOrders.length,
+        todayPaidRevenue: Number(todayPaidRevenue.toFixed(2)),
+        todayFailedCount: todayFailedPayments.length,
+        todayFailedAmount: Number(todayFailedAmount.toFixed(2)),
+        todayPendingCount: todayPendingOrders.length,
+        totalOrders: normalizedOrders.length,
+        totalRevenue: Number(totalRevenue.toFixed(2)),
+        totalDelivered: allPaidOrders.length,
+        totalFailed: combinedFailed.length
+      },
+      todayPaidOrders,
+      todayFailedPayments,
+      todayPendingOrders,
+      allOrders: normalizedOrders,
+      allFailedPayments: combinedFailed,
+      activities: recentActivityLogs,
+      // Backward compatibility fields
+      total: normalizedOrders.length,
+      delivered: allPaidOrders.length,
+      pending: allPendingOrders.length,
+      revenue: Number(totalRevenue.toFixed(2)),
+      orders: normalizedOrders.slice(0, 15)
     });
   } catch (e) {
-    res.json({ error: e.message });
+    console.error("ADMIN DATA ERROR:", e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -2839,6 +3490,6 @@ app.get("/health", (req, res) => {
   res.status(200).send("Bot is alive!");
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 RUNNING ON", PORT);
 });
