@@ -1,114 +1,1164 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Nesty Dashboard</title>
+  <meta name="description" content="WhatsApp data & airtime bot and admin dashboard for NestyDatagh">
+  <meta property="og:title" content="Nesty Dashboard">
+  <meta property="og:description" content="WhatsApp data & airtime bot and admin dashboard for NestyDatagh">
   <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
     body {
-      font-family: Arial, sans-serif;
-      background: #0f172a;
-      color: #fff;
-      padding: 20px;
-      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #090d16;
+      color: #f1f5f9;
+      min-height: 100vh;
+      padding: 24px;
     }
 
-    h1 {
-      text-align: center;
+    .container {
+      max-width: 1300px;
+      margin: 0 auto;
+    }
+
+    /* HEADER */
+    .header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid #1e293b;
+      margin-bottom: 24px;
+    }
+
+    .brand-title {
+      font-size: 24px;
+      font-weight: 700;
       color: #38bdf8;
-      margin-bottom: 30px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
 
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 15px;
-      margin-bottom: 30px;
+    .brand-sub {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-top: 4px;
     }
 
-    .card {
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .live-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      padding: 6px 12px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      background: #10b981;
+      border-radius: 50%;
+      box-shadow: 0 0 8px #10b981;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(1.2); }
+    }
+
+    .btn {
       background: #1e293b;
-      padding: 20px;
-      border-radius: 10px;
-      text-align: center;
-      box-shadow: 0 0 10px rgba(0,0,0,0.3);
+      color: #f8fafc;
+      border: 1px solid #334155;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
     }
 
-    .card h2 {
-      margin: 0;
-      font-size: 18px;
+    .btn:hover {
+      background: #334155;
+      border-color: #475569;
+    }
+
+    .btn-primary {
+      background: #0284c7;
+      border-color: #0369a1;
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: #0369a1;
+    }
+
+    /* METRIC CARDS */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .stat-card {
+      background: #111827;
+      border: 1px solid #1f2937;
+      border-radius: 12px;
+      padding: 18px 20px;
+      position: relative;
+      cursor: pointer;
+      transition: transform 0.15s ease, border-color 0.15s ease;
+    }
+
+    .stat-card:hover {
+      transform: translateY(-2px);
+      border-color: #374151;
+    }
+
+    .stat-card.active-filter {
+      border-color: #38bdf8;
+      box-shadow: 0 0 15px rgba(56, 189, 248, 0.15);
+    }
+
+    .stat-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .stat-title {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
       color: #94a3b8;
     }
 
-    .card p {
-      font-size: 22px;
-      margin-top: 10px;
-      color: #38bdf8;
-      font-weight: bold;
+    .stat-icon {
+      font-size: 18px;
     }
 
-    .orders {
+    .stat-value {
+      font-size: 26px;
+      font-weight: 700;
+      margin-bottom: 4px;
+      color: #f8fafc;
+    }
+
+    .stat-sub {
+      font-size: 12px;
+      color: #64748b;
+    }
+
+    .stat-paid .stat-value { color: #34d399; }
+    .stat-failed .stat-value { color: #f87171; }
+    .stat-pending .stat-value { color: #fbbf24; }
+    .stat-total .stat-value { color: #38bdf8; }
+
+    /* CONTROLS & TABS */
+    .controls-panel {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      background: #111827;
+      border: 1px solid #1f2937;
+      padding: 12px 16px;
+      border-radius: 12px;
+      margin-bottom: 20px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .tab-btn {
+      background: transparent;
+      color: #94a3b8;
+      border: 1px solid transparent;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .tab-btn:hover {
+      color: #f8fafc;
       background: #1e293b;
-      padding: 15px;
-      border-radius: 10px;
     }
 
-    .order {
-      padding: 10px;
-      border-bottom: 1px solid #334155;
+    .tab-btn.active {
+      color: #38bdf8;
+      background: rgba(56, 189, 248, 0.12);
+      border-color: rgba(56, 189, 248, 0.3);
+      font-weight: 600;
     }
 
-    .order:last-child {
+    .tab-btn.active.tab-failed {
+      color: #f87171;
+      background: rgba(248, 113, 113, 0.12);
+      border-color: rgba(248, 113, 113, 0.3);
+    }
+
+    .tab-badge {
+      padding: 2px 7px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 700;
+      background: #1e293b;
+      color: #94a3b8;
+    }
+
+    .tab-btn.active .tab-badge {
+      background: rgba(56, 189, 248, 0.25);
+      color: #38bdf8;
+    }
+
+    .tab-btn.active.tab-failed .tab-badge {
+      background: rgba(248, 113, 113, 0.25);
+      color: #f87171;
+    }
+
+    .search-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-grow: 1;
+      max-width: 400px;
+    }
+
+    .search-input {
+      width: 100%;
+      background: #090d16;
+      border: 1px solid #334155;
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      outline: none;
+    }
+
+    .search-input:focus {
+      border-color: #38bdf8;
+    }
+
+    .select-network {
+      background: #090d16;
+      border: 1px solid #334155;
+      color: #fff;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      outline: none;
+    }
+
+    /* MAIN CONTENT VIEW */
+    .content-card {
+      background: #111827;
+      border: 1px solid #1f2937;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .view-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid #1f2937;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .view-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #f8fafc;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .view-desc {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-top: 2px;
+    }
+
+    /* TABLES & LISTS */
+    .table-responsive {
+      overflow-x: auto;
+      width: 100%;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 13px;
+    }
+
+    th {
+      background: #0d131f;
+      color: #94a3b8;
+      font-weight: 600;
+      padding: 12px 16px;
+      border-bottom: 1px solid #1f2937;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+    }
+
+    td {
+      padding: 14px 16px;
+      border-bottom: 1px solid #1f2937;
+      color: #cbd5e1;
+      vertical-align: middle;
+    }
+
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    /* BADGES */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .badge-mtn { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-telecel { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .badge-airteltigo { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .badge-other { background: rgba(148, 163, 184, 0.15); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.3); }
+
+    .status-paid { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .status-failed { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .status-pending { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .status-processing { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
+
+    /* FAILED ITEM SPECIFIC CARD */
+    .failed-item-card {
+      background: #161b26;
+      border: 1px solid #2d1a24;
+      border-left: 4px solid #ef4444;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin: 12px 16px;
+    }
+
+    .failed-item-card:hover {
+      background: #1a1e2b;
+    }
+
+    .failed-top-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .failed-phone {
+      font-weight: 700;
+      color: #f8fafc;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .failed-reason-box {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.2);
+      border-radius: 6px;
+      padding: 8px 12px;
+      margin-top: 8px;
+      font-size: 13px;
+      color: #fca5a5;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .failed-meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      font-size: 12px;
+      color: #94a3b8;
+      margin-top: 10px;
+    }
+
+    /* ACTIVITY STREAM */
+    .activity-timeline {
+      padding: 16px 20px;
+    }
+
+    .activity-row {
+      display: flex;
+      gap: 16px;
+      padding: 12px 0;
+      border-bottom: 1px solid #1e293b;
+      position: relative;
+    }
+
+    .activity-row:last-child {
       border-bottom: none;
+    }
+
+    .activity-icon-col {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+
+    .activity-body {
+      flex-grow: 1;
+    }
+
+    .activity-msg {
+      font-size: 13px;
+      color: #f1f5f9;
+      margin-bottom: 4px;
+    }
+
+    .activity-meta {
+      font-size: 11px;
+      color: #64748b;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    /* EMPTY STATE */
+    .empty-state {
+      padding: 48px 24px;
+      text-align: center;
+      color: #64748b;
+    }
+
+    .empty-icon {
+      font-size: 36px;
+      margin-bottom: 12px;
+      opacity: 0.6;
+    }
+
+    /* MODAL */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(4px);
+      z-index: 1000;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+
+    .modal-card {
+      background: #111827;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      width: 100%;
+      max-width: 600px;
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    }
+
+    .modal-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid #1f2937;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-body {
+      padding: 20px;
+    }
+
+    pre.json-box {
+      background: #090d16;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 12px;
+      color: #38bdf8;
+      overflow-x: auto;
+      margin-top: 12px;
+    }
+
+    .copy-btn {
+      background: transparent;
+      border: none;
+      color: #38bdf8;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px 4px;
+    }
+
+    .copy-btn:hover {
+      text-decoration: underline;
     }
   </style>
 </head>
 <body>
 
-<h1>📊 NestyDatagh💙 Dashboard</h1>
+<div class="container">
+  <!-- HEADER -->
+  <header class="header">
+    <div>
+      <h1 class="brand-title">📊 NestyDatagh🇬🇭 Live Hub</h1>
+      <p class="brand-sub">Real-Time WhatsApp Bot & Web Orders Monitor · Ghana (GMT)</p>
+    </div>
+    <div class="header-actions">
+      <div class="live-badge">
+        <span class="live-dot"></span>
+        <span id="liveStatusText">Live Feed Active</span>
+      </div>
+      <button class="btn" onclick="toggleAutoRefresh()" id="autoRefreshBtn">
+        ⏱️ Auto-refresh: <span id="countdown">10s</span>
+      </button>
+      <button class="btn btn-primary" onclick="loadData()">
+        🔄 Refresh Now
+      </button>
+    </div>
+  </header>
 
-<div class="stats">
-  <div class="card">
-    <h2>Total Orders</h2>
-    <p id="orders">0</p>
+  <!-- METRIC CARDS -->
+  <div class="stats-grid">
+    <div class="stat-card stat-paid" onclick="switchTab('paid')">
+      <div class="stat-header">
+        <span class="stat-title">Paid Orders Today</span>
+        <span class="stat-icon">💰</span>
+      </div>
+      <div class="stat-value" id="todayPaidRevenue">₵0.00</div>
+      <div class="stat-sub"><strong id="todayPaidCount">0</strong> successful orders today</div>
+    </div>
+
+    <div class="stat-card stat-failed" onclick="switchTab('failed')">
+      <div class="stat-header">
+        <span class="stat-title">Unsuccessful Payments</span>
+        <span class="stat-icon">⚠️</span>
+      </div>
+      <div class="stat-value" id="todayFailedCount">0</div>
+      <div class="stat-sub">₵<span id="todayFailedAmount">0.00</span> attempted · Click to see why</div>
+    </div>
+
+    <div class="stat-card stat-pending" onclick="switchTab('pending')">
+      <div class="stat-header">
+        <span class="stat-title">Awaiting Approval</span>
+        <span class="stat-icon">⏳</span>
+      </div>
+      <div class="stat-value" id="todayPendingCount">0</div>
+      <div class="stat-sub">Waiting for customer MoMo PIN (*170#/*110#)</div>
+    </div>
+
+    <div class="stat-card stat-total" onclick="switchTab('all')">
+      <div class="stat-header">
+        <span class="stat-title">All-Time Volume</span>
+        <span class="stat-icon">📦</span>
+      </div>
+      <div class="stat-value" id="totalDelivered">0</div>
+      <div class="stat-sub">Total revenue: ₵<span id="totalRevenue">0.00</span></div>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>Revenue</h2>
-    <p>₵<span id="revenue">0</span></p>
+  <!-- CONTROLS & TABS -->
+  <div class="controls-panel">
+    <div class="tabs">
+      <button class="tab-btn active" id="tabBtn-paid" onclick="switchTab('paid')">
+        🌟 Today's Paid <span class="tab-badge" id="badgePaid">0</span>
+      </button>
+      <button class="tab-btn tab-failed" id="tabBtn-failed" onclick="switchTab('failed')">
+        ⚠️ Failed / Unsuccessful <span class="tab-badge" id="badgeFailed">0</span>
+      </button>
+      <button class="tab-btn" id="tabBtn-pending" onclick="switchTab('pending')">
+        ⏳ Pending Approval <span class="tab-badge" id="badgePending">0</span>
+      </button>
+      <button class="tab-btn" id="tabBtn-all" onclick="switchTab('all')">
+        📜 All Orders <span class="tab-badge" id="badgeAll">0</span>
+      </button>
+      <button class="tab-btn" id="tabBtn-activities" onclick="switchTab('activities')">
+        ⚡ Live Activities <span class="tab-badge" id="badgeActivities">0</span>
+      </button>
+    </div>
+
+    <div class="search-group">
+      <input type="text" id="searchInput" class="search-input" placeholder="Search phone, reference, or reason..." oninput="handleSearch()">
+      <select id="networkSelect" class="select-network" onchange="handleSearch()">
+        <option value="">All Networks</option>
+        <option value="MTN">MTN</option>
+        <option value="TELECEL">Telecel</option>
+        <option value="AIRTELTIGO">AirtelTigo</option>
+      </select>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>Delivered</h2>
-    <p id="delivered">0</p>
+  <!-- MAIN CONTENT CONTAINER -->
+  <div class="content-card">
+    <div class="view-header">
+      <div>
+        <h2 class="view-title" id="viewTitle">Today's Paid Orders</h2>
+        <p class="view-desc" id="viewDesc">Orders successfully paid and verified today.</p>
+      </div>
+      <div id="viewStatsBadge" class="badge status-paid">0 Orders</div>
+    </div>
+
+    <!-- VIEW: TABLE (Used for Paid, Pending, All) -->
+    <div id="tableViewContainer" class="table-responsive">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Customer Phone</th>
+            <th>Network</th>
+            <th>Package</th>
+            <th>Amount</th>
+            <th>Reference</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody">
+          <!-- Injected via JavaScript -->
+        </tbody>
+      </table>
+    </div>
+
+    <!-- VIEW: FAILED PAYMENTS CARDS -->
+    <div id="failedViewContainer" style="display: none;">
+      <div id="failedList">
+        <!-- Injected via JavaScript -->
+      </div>
+    </div>
+
+    <!-- VIEW: ACTIVITY STREAM -->
+    <div id="activityViewContainer" style="display: none;">
+      <div class="activity-timeline" id="activityList">
+        <!-- Injected via JavaScript -->
+      </div>
+    </div>
+
+    <!-- EMPTY CONTAINER -->
+    <div id="emptyContainer" class="empty-state" style="display: none;">
+      <div class="empty-icon">📭</div>
+      <p id="emptyMessage">No orders match your filter criteria.</p>
+    </div>
   </div>
 </div>
 
-<div class="orders">
-  <h2>Recent Orders</h2>
-  <div id="list"></div>
+<!-- INSPECTION MODAL -->
+<div class="modal-backdrop" id="inspectModal" onclick="closeModal(event)">
+  <div class="modal-card" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3 style="color: #38bdf8; font-size: 16px;">🔍 Order & Activity Inspector</h3>
+      <button class="btn" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="modalDetails"></div>
+      <h4 style="margin-top: 16px; font-size: 13px; color: #94a3b8;">Raw Technical Payload:</h4>
+      <pre class="json-box" id="modalRawJson"></pre>
+    </div>
+  </div>
 </div>
 
 <script>
-async function load() {
-  const res = await fetch("/admin-data");
-  const data = await res.json();
+let currentTab = "paid";
+let appData = {
+  summary: {},
+  todayPaidOrders: [],
+  todayFailedPayments: [],
+  todayPendingOrders: [],
+  allOrders: [],
+  allFailedPayments: [],
+  activities: []
+};
+let autoRefreshTimer = null;
+let countdownSeconds = 10;
+let isAutoRefreshActive = true;
 
-  document.getElementById("orders").innerText = data.total;
-  document.getElementById("revenue").innerText = data.revenue;
-  document.getElementById("delivered").innerText = data.delivered;
+function getNetworkBadge(network) {
+  const net = String(network || "").toUpperCase();
+  if (net.includes("MTN") || net.includes("YELLO")) return `<span class="badge badge-mtn">📶 MTN</span>`;
+  if (net.includes("TELECEL") || net.includes("VOD")) return `<span class="badge badge-telecel">📶 Telecel</span>`;
+  if (net.includes("AIRTEL") || net.includes("AT")) return `<span class="badge badge-airteltigo">📶 AirtelTigo</span>`;
+  return `<span class="badge badge-other">📶 ${net || "Other"}</span>`;
+}
 
-  const list = document.getElementById("list");
-  list.innerHTML = "";
+function getStatusBadge(status, reason) {
+  const st = String(status || "").toLowerCase();
+  if (st === "completed" || st === "paid" || st === "delivered") {
+    return `<span class="badge status-paid">✅ Paid & Delivered</span>`;
+  }
+  if (st === "failed" || st === "payment_failed" || st === "cancelled" || reason) {
+    return `<span class="badge status-failed">❌ Payment Failed</span>`;
+  }
+  if (st === "processing") {
+    return `<span class="badge status-processing">🔄 Processing</span>`;
+  }
+  return `<span class="badge status-pending">⏳ Awaiting PIN</span>`;
+}
 
-  data.orders.forEach(o => {
-    list.innerHTML += `
-      <div class="order">
-        📱 ${o.phone} | 🌐 ${o.network} | 💾 ${o.bundle}GB | 💰 ₵${o.amount}
-      </div>
-    `;
+function formatRelativeTime(dateString) {
+  if (!dateString) return "N/A";
+  const date = new Date(dateString);
+  if (isNaN(date.getTime())) return dateString;
+  const now = new Date();
+  const diffSec = Math.floor((now - date) / 1000);
+
+  if (diffSec < 60) return "Just now";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return date.toLocaleDateString("en-GH", { month: "short", day: "numeric", timeZone: "Africa/Accra" });
+}
+
+function formatAccraTime(dateString) {
+  if (!dateString) return "N/A";
+  const date = new Date(dateString);
+  if (isNaN(date.getTime())) return dateString;
+  return date.toLocaleTimeString("en-GH", { hour: "2-digit", minute: "2-digit", hour12: true, timeZone: "Africa/Accra" });
+}
+
+async function loadData() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const key = params.get("key");
+    const url = "/admin-data" + (key ? `?key=${encodeURIComponent(key)}` : "");
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+
+    const data = await res.json();
+    appData = data;
+    renderDashboard();
+  } catch (err) {
+    console.error("Dashboard fetch error:", err);
+    document.getElementById("liveStatusText").innerText = "Connection Error";
+  }
+}
+
+function renderDashboard() {
+  const sum = appData.summary || {};
+
+  // Update summary numbers
+  document.getElementById("todayPaidRevenue").innerText = `₵${(sum.todayPaidRevenue || 0).toFixed(2)}`;
+  document.getElementById("todayPaidCount").innerText = sum.todayPaidCount || 0;
+
+  document.getElementById("todayFailedCount").innerText = sum.todayFailedCount || 0;
+  document.getElementById("todayFailedAmount").innerText = (sum.todayFailedAmount || 0).toFixed(2);
+
+  document.getElementById("todayPendingCount").innerText = sum.todayPendingCount || 0;
+
+  document.getElementById("totalDelivered").innerText = sum.totalDelivered || sum.delivered || 0;
+  document.getElementById("totalRevenue").innerText = (sum.totalRevenue || sum.revenue || 0).toFixed(2);
+
+  // Update tab badges
+  document.getElementById("badgePaid").innerText = (appData.todayPaidOrders || []).length;
+  document.getElementById("badgeFailed").innerText = (appData.todayFailedPayments || []).length;
+  document.getElementById("badgePending").innerText = (appData.todayPendingOrders || []).length;
+  document.getElementById("badgeAll").innerText = (appData.allOrders || []).length;
+  document.getElementById("badgeActivities").innerText = (appData.activities || []).length;
+
+  renderActiveTab();
+}
+
+function switchTab(tabName) {
+  currentTab = tabName;
+
+  document.querySelectorAll(".tab-btn").forEach(btn => btn.classList.remove("active"));
+  const activeBtn = document.getElementById(`tabBtn-${tabName}`);
+  if (activeBtn) activeBtn.classList.add("active");
+
+  renderActiveTab();
+}
+
+function handleSearch() {
+  renderActiveTab();
+}
+
+function filterRecords(records, searchFields) {
+  const query = (document.getElementById("searchInput").value || "").trim().toLowerCase();
+  const netFilter = (document.getElementById("networkSelect").value || "").trim().toUpperCase();
+
+  return records.filter(item => {
+    if (netFilter && String(item.network || "").toUpperCase() !== netFilter) {
+      return false;
+    }
+    if (!query) return true;
+
+    return searchFields.some(field => {
+      const val = String(item[field] || "").toLowerCase();
+      return val.includes(query);
+    });
   });
 }
 
-load();
+function renderActiveTab() {
+  const tableContainer = document.getElementById("tableViewContainer");
+  const failedContainer = document.getElementById("failedViewContainer");
+  const activityContainer = document.getElementById("activityViewContainer");
+  const emptyContainer = document.getElementById("emptyContainer");
+
+  tableContainer.style.display = "none";
+  failedContainer.style.display = "none";
+  activityContainer.style.display = "none";
+  emptyContainer.style.display = "none";
+
+  const viewTitle = document.getElementById("viewTitle");
+  const viewDesc = document.getElementById("viewDesc");
+  const viewBadge = document.getElementById("viewStatsBadge");
+
+  if (currentTab === "paid") {
+    viewTitle.innerHTML = "🌟 Today's Paid Orders";
+    viewDesc.innerText = "All orders successfully paid and processed today.";
+    viewBadge.className = "badge status-paid";
+
+    const filtered = filterRecords(appData.todayPaidOrders || [], ["phone", "ref", "network", "capacity"]);
+    viewBadge.innerText = `${filtered.length} Paid`;
+
+    if (filtered.length === 0) {
+      emptyContainer.style.display = "block";
+      document.getElementById("emptyMessage").innerText = "No paid orders recorded for today yet.";
+      return;
+    }
+
+    tableContainer.style.display = "block";
+    renderTableRows(filtered);
+  } 
+  else if (currentTab === "failed") {
+    viewTitle.innerHTML = "⚠️ Unsuccessful / Failed Payments Today";
+    viewDesc.innerText = "Detailed diagnostics on what happened when payment was not successful.";
+    viewBadge.className = "badge status-failed";
+
+    const filtered = filterRecords(appData.todayFailedPayments || [], ["phone", "reference", "reason", "stage", "network"]);
+    viewBadge.innerText = `${filtered.length} Failed`;
+
+    if (filtered.length === 0) {
+      emptyContainer.style.display = "block";
+      document.getElementById("emptyMessage").innerText = "No failed payments recorded today! All payment attempts succeeded.";
+      return;
+    }
+
+    failedContainer.style.display = "block";
+    renderFailedCards(filtered);
+  }
+  else if (currentTab === "pending") {
+    viewTitle.innerHTML = "⏳ In-Flight / Pending Today";
+    viewDesc.innerText = "Orders initiated today awaiting customer MoMo approval (*170# or *110#).";
+    viewBadge.className = "badge status-pending";
+
+    const filtered = filterRecords(appData.todayPendingOrders || [], ["phone", "ref", "network"]);
+    viewBadge.innerText = `${filtered.length} Pending`;
+
+    if (filtered.length === 0) {
+      emptyContainer.style.display = "block";
+      document.getElementById("emptyMessage").innerText = "No pending approvals currently in queue.";
+      return;
+    }
+
+    tableContainer.style.display = "block";
+    renderTableRows(filtered);
+  }
+  else if (currentTab === "all") {
+    viewTitle.innerHTML = "📜 All Order History";
+    viewDesc.innerText = "Complete order log across all statuses.";
+    viewBadge.className = "badge badge-other";
+
+    const filtered = filterRecords(appData.allOrders || [], ["phone", "ref", "network", "capacity", "failure_reason"]);
+    viewBadge.innerText = `${filtered.length} Total`;
+
+    if (filtered.length === 0) {
+      emptyContainer.style.display = "block";
+      document.getElementById("emptyMessage").innerText = "No orders found.";
+      return;
+    }
+
+    tableContainer.style.display = "block";
+    renderTableRows(filtered);
+  }
+  else if (currentTab === "activities") {
+    viewTitle.innerHTML = "⚡ Live Activities & Webhook Feed";
+    viewDesc.innerText = "Chronological stream of system events, payments, and delivery statuses.";
+    viewBadge.className = "badge status-processing";
+
+    const filtered = filterRecords(appData.activities || [], ["message", "phone", "reference", "type", "reason"]);
+    viewBadge.innerText = `${filtered.length} Events`;
+
+    if (filtered.length === 0) {
+      emptyContainer.style.display = "block";
+      document.getElementById("emptyMessage").innerText = "No activity logs recorded yet.";
+      return;
+    }
+
+    activityContainer.style.display = "block";
+    renderActivities(filtered);
+  }
+}
+
+function renderTableRows(records) {
+  const tbody = document.getElementById("tableBody");
+  tbody.innerHTML = "";
+
+  records.forEach(o => {
+    const timeFormatted = formatAccraTime(o.created_at || o.time);
+    const relTime = formatRelativeTime(o.created_at || o.time);
+    const phone = o.phone || o.phone_number || "N/A";
+    const ref = o.ref || o.reference || "N/A";
+    const amount = Number(o.amount || 0).toFixed(2);
+    const capacity = o.capacity || o.bundle || "Data";
+
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>
+        <div style="font-weight: 600; color: #f8fafc;">${timeFormatted}</div>
+        <div style="font-size: 11px; color: #64748b;">${relTime}</div>
+      </td>
+      <td>
+        <div style="font-weight: 600; color: #f8fafc;">📱 ${phone}</div>
+        <div style="font-size: 11px; color: #64748b;">
+          <a href="https://wa.me/233${phone.replace(/^0/, '')}" target="_blank" style="color: #38bdf8; text-decoration: none;">WhatsApp Customer</a>
+        </div>
+      </td>
+      <td>${getNetworkBadge(o.network)}</td>
+      <td><strong style="color: #e2e8f0;">${capacity}GB</strong></td>
+      <td><strong style="color: #34d399;">₵${amount}</strong></td>
+      <td>
+        <span style="font-family: monospace; font-size: 12px; color: #94a3b8;">${ref}</span>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('${ref}')">📋</button>
+      </td>
+      <td>${getStatusBadge(o.status || o.delivery_status, o.failure_reason)}</td>
+      <td>
+        <button class="btn" style="padding: 4px 8px; font-size: 11px;" onclick="inspectItem(${JSON.stringify(o).replace(/"/g, '&quot;')})">
+          🔍 Inspect
+        </button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderFailedCards(records) {
+  const list = document.getElementById("failedList");
+  list.innerHTML = "";
+
+  records.forEach(f => {
+    const timeFormatted = formatAccraTime(f.time || f.created_at);
+    const relTime = formatRelativeTime(f.time || f.created_at);
+    const phone = f.phone || f.customer || "N/A";
+    const ref = f.reference || f.ref || "N/A";
+    const amount = Number(f.amount || 0).toFixed(2);
+    const reason = f.reason || f.gateway_response || "Transaction was rejected or declined by mobile money";
+    const stage = f.stage || "charge_prompt";
+
+    // Troubleshooting advice based on reason
+    let advice = "Contact customer on WhatsApp to verify wallet status.";
+    if (/insufficient/i.test(reason)) {
+      advice = "MoMo wallet lacked enough balance. Advise customer to top up their account and try again.";
+    } else if (/timeout|timed out/i.test(reason)) {
+      advice = "Customer did not enter PIN on prompt. Tell them to dial *170# (MTN) or *110# (Telecel) to approve.";
+    } else if (/cancel|reject/i.test(reason)) {
+      advice = "Customer clicked cancel on the prompt. Offer them a direct Paystack online checkout link.";
+    } else if (/otp|voucher/i.test(reason)) {
+      advice = "Incorrect voucher code entered. Ask for fresh *110# voucher code.";
+    }
+
+    const card = document.createElement("div");
+    card.className = "failed-item-card";
+    card.innerHTML = `
+      <div class="failed-top-row">
+        <div class="failed-phone">
+          📱 <span>${phone}</span>
+          ${getNetworkBadge(f.network)}
+          <span class="badge status-failed">FAILED</span>
+        </div>
+        <div style="font-size: 12px; color: #94a3b8;">
+          🕒 ${timeFormatted} (${relTime}) · <strong>₵${amount}</strong> (${f.bundle || "Data"})
+        </div>
+      </div>
+
+      <div class="failed-reason-box">
+        <span style="font-size: 16px;">❌</span>
+        <div>
+          <strong style="color: #f87171;">Reason:</strong> ${reason}
+          <div style="font-size: 12px; color: #cbd5e1; margin-top: 4px;">
+            💡 <strong>Action:</strong> ${advice}
+          </div>
+        </div>
+      </div>
+
+      <div class="failed-meta-row">
+        <div><strong>Reference:</strong> <span style="font-family: monospace;">${ref}</span> <button class="copy-btn" onclick="navigator.clipboard.writeText('${ref}')">📋</button></div>
+        <div><strong>Stage:</strong> <span style="color: #fbbf24;">${stage}</span></div>
+        <div style="margin-left: auto; display: flex; gap: 8px;">
+          <a class="btn" style="padding: 4px 10px; font-size: 12px; text-decoration: none; color: #34d399;" href="https://wa.me/233${phone.replace(/^0/, '')}" target="_blank">
+            💬 WhatsApp Customer
+          </a>
+          <button class="btn" style="padding: 4px 10px; font-size: 12px;" onclick="inspectItem(${JSON.stringify(f).replace(/"/g, '&quot;')})">
+            🔍 Inspect Diagnostics
+          </button>
+        </div>
+      </div>
+    `;
+    list.appendChild(card);
+  });
+}
+
+function renderActivities(records) {
+  const container = document.getElementById("activityList");
+  container.innerHTML = "";
+
+  records.forEach(act => {
+    const timeFormatted = formatAccraTime(act.time);
+    const relTime = formatRelativeTime(act.time);
+    let icon = "⚡";
+    let iconBg = "rgba(56, 189, 248, 0.15)";
+    let iconColor = "#38bdf8";
+
+    if (act.type.includes("SUCCESS")) {
+      icon = "💰";
+      iconBg = "rgba(16, 185, 129, 0.15)";
+      iconColor = "#34d399";
+    } else if (act.type.includes("FAIL")) {
+      icon = "❌";
+      iconBg = "rgba(239, 68, 68, 0.15)";
+      iconColor = "#f87171";
+    } else if (act.type.includes("PROMPT") || act.type.includes("PENDING")) {
+      icon = "📲";
+      iconBg = "rgba(245, 158, 11, 0.15)";
+      iconColor = "#fbbf24";
+    } else if (act.type.includes("DELIVERY")) {
+      icon = "🚚";
+      iconBg = "rgba(168, 85, 247, 0.15)";
+      iconColor = "#c084fc";
+    }
+
+    const row = document.createElement("div");
+    row.className = "activity-row";
+    row.innerHTML = `
+      <div class="activity-icon-col" style="background: ${iconBg}; color: ${iconColor};">
+        ${icon}
+      </div>
+      <div class="activity-body">
+        <div class="activity-msg">${act.message || act.type}</div>
+        <div class="activity-meta">
+          <span>🕒 ${timeFormatted} (${relTime})</span>
+          ${act.phone ? `<span>📱 ${act.phone}</span>` : ""}
+          ${act.reference ? `<span>🆔 ${act.reference}</span>` : ""}
+          ${act.amount ? `<span>💰 ₵${Number(act.amount).toFixed(2)}</span>` : ""}
+          ${act.reason ? `<span style="color: #f87171;">Reason: ${act.reason}</span>` : ""}
+          <button class="copy-btn" onclick="inspectItem(${JSON.stringify(act).replace(/"/g, '&quot;')})">Details</button>
+        </div>
+      </div>
+    `;
+    container.appendChild(row);
+  });
+}
+
+function inspectItem(item) {
+  const modal = document.getElementById("inspectModal");
+  const details = document.getElementById("modalDetails");
+  const raw = document.getElementById("modalRawJson");
+
+  details.innerHTML = `
+    <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; font-size: 13px;">
+      <div><span style="color: #94a3b8;">Phone:</span> <strong style="color: #f8fafc;">${item.phone || item.phone_number || "N/A"}</strong></div>
+      <div><span style="color: #94a3b8;">Reference:</span> <strong style="color: #38bdf8;">${item.reference || item.ref || "N/A"}</strong></div>
+      <div><span style="color: #94a3b8;">Network:</span> <strong>${item.network || "N/A"}</strong></div>
+      <div><span style="color: #94a3b8;">Amount:</span> <strong style="color: #34d399;">₵${Number(item.amount || 0).toFixed(2)}</strong></div>
+      <div><span style="color: #94a3b8;">Status:</span> <strong>${item.status || "N/A"}</strong></div>
+      <div><span style="color: #94a3b8;">Stage:</span> <strong>${item.stage || item.failure_stage || "N/A"}</strong></div>
+    </div>
+    ${item.reason || item.failure_reason ? `
+      <div class="failed-reason-box" style="margin-top: 14px;">
+        <div><strong>Failure Reason:</strong> ${item.reason || item.failure_reason}</div>
+      </div>
+    ` : ""}
+  `;
+
+  raw.innerText = JSON.stringify(item, null, 2);
+  modal.style.display = "flex";
+}
+
+function closeModal() {
+  document.getElementById("inspectModal").style.display = "none";
+}
+
+function toggleAutoRefresh() {
+  isAutoRefreshActive = !isAutoRefreshActive;
+  const btn = document.getElementById("autoRefreshBtn");
+  if (isAutoRefreshActive) {
+    btn.style.borderColor = "#334155";
+    btn.innerHTML = `⏱️ Auto-refresh: <span id="countdown">${countdownSeconds}s</span>`;
+  } else {
+    btn.style.borderColor = "#ef4444";
+    btn.innerHTML = `⏸️ Auto-refresh Paused`;
+  }
+}
+
+// Auto-refresh timer loop
+setInterval(() => {
+  if (!isAutoRefreshActive) return;
+  countdownSeconds--;
+  const el = document.getElementById("countdown");
+  if (el) el.innerText = `${countdownSeconds}s`;
+
+  if (countdownSeconds <= 0) {
+    countdownSeconds = 10;
+    loadData();
+  }
+}, 1000);
+
+// Initial Load
+loadData();
 </script>
 
 </body>
