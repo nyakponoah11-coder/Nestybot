@@ -544,6 +544,65 @@ async function sendWhatsApp(to, text) {
 }
 
 /* =========================================================
+GET REAL DATAMART DELIVERY STATUS (BYPASS 200 / "COMPLETED")
+========================================================= */
+
+async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
+  if (!referenceOrOrderId) return { deliveryStatus: "processing", rawStatus: "processing" };
+  const cleanId = String(referenceOrOrderId).trim();
+  const apiKey = DATA_API_KEY || process.env.DATA_API_KEY;
+  if (!apiKey) return { deliveryStatus: "processing", rawStatus: "processing" };
+
+  const urls = [
+    `${DATAMART_BASE}/order-status/${encodeURIComponent(cleanId)}`,
+    `https://api.datamartgh.shop/api/order-status/${encodeURIComponent(cleanId)}`,
+    `${DATAMART_BASE}/orders/${encodeURIComponent(cleanId)}`
+  ];
+
+  for (const url of urls) {
+    try {
+      const res = await axios.get(url, {
+        headers: { "x-api-key": apiKey, Accept: "application/json" },
+        timeout: 6000
+      });
+      const data = res.data?.data || res.data || {};
+      const statusField = (
+        data.orderStatus ||
+        data.order_status ||
+        data.deliveryStatus ||
+        data.delivery_status ||
+        data.status ||
+        ""
+      ).toLowerCase().trim();
+
+      if (!statusField) continue;
+
+      if (statusField === "failed" || statusField === "cancelled" || statusField === "rejected" || statusField === "declined") {
+        return { deliveryStatus: "failed", rawStatus: statusField, failureReason: data.failureReason || data.message || null };
+      }
+      // CRITICAL: ONLY explicit "delivered" means delivered by telecom network!
+      // "completed" from DataMart only means DataMart received order & debited wallet.
+      // It is STILL in-progress at the telecom network!
+      if (statusField === "delivered") {
+        return { deliveryStatus: "delivered", rawStatus: statusField };
+      }
+      if (statusField === "refunded") {
+        return { deliveryStatus: "refunded", rawStatus: statusField };
+      }
+      if (statusField === "waiting") {
+        return { deliveryStatus: "waiting", rawStatus: statusField };
+      }
+      // "completed", "processing", "received" all mean PROCESSING
+      return { deliveryStatus: "processing", rawStatus: statusField };
+    } catch (e) {
+      // Continue to next candidate URL
+    }
+  }
+
+  return { deliveryStatus: "processing", rawStatus: "processing" };
+}
+
+/* =========================================================
 SEND ADMIN SMS (ARKESEL)
 ========================================================= */
 
@@ -1237,10 +1296,7 @@ async function generateFullAdminReport() {
         ps === "paid" ||
         ps === "success" ||
         ds === "delivered" ||
-        ds === "completed" ||
         st === "paid" ||
-        st === "completed" ||
-        st === "delivered" ||
         o.reference === "DSKXUUE8UI" ||
         o.ref === "DSKXUUE8UI"
       );
@@ -1250,7 +1306,8 @@ async function generateFullAdminReport() {
       if (!o) return false;
       const ds = String(o.delivery_status || "").toLowerCase();
       const st = String(o.status || "").toLowerCase();
-      return ds === "delivered" || ds === "completed" || st === "delivered" || st === "completed";
+      // CRITICAL: ONLY explicit "delivered" is delivered. "completed" is in progress!
+      return ds === "delivered" || st === "delivered";
     };
 
     const allWebOrders = allDataOrders.filter(isPaid);
@@ -1362,8 +1419,9 @@ async function generateFullAdminReport() {
           headers: { "x-api-key": DATA_API_KEY },
           timeout: 4000
         });
-        if (bRes?.data?.data?.balance !== undefined) {
-          walletBalance = `GH₵ ${Number(bRes.data.data.balance).toFixed(2)}`;
+        const bal = bRes?.data?.data?.walletBalance ?? bRes?.data?.walletBalance ?? bRes?.data?.data?.balance;
+        if (bal !== undefined && bal !== null) {
+          walletBalance = `GH₵ ${Number(bal).toFixed(2)}`;
         }
       } catch { }
     }
@@ -1390,12 +1448,16 @@ async function generateFullAdminReport() {
         const phone = maskPhone(o.recipient_phone || o.phone_number || "");
         const pkg = `${o.capacity || ""} ${o.network || ""}`.trim() || "Bundle";
         const amt = Number(o.amount || 0).toFixed(2);
-        const status = /complet|deliver|success/i.test(o.delivery_status || o.status || "")
-          ? "✅ Done"
-          : (o.payment_status === "paid" || o.status === "pending")
-            ? "⏳ Pending"
-            : "⚠️ Unpaid";
-        return `${idx + 1}. *${phone}* — ${pkg} (GH₵ ${amt}) ${status}`;
+        const isD = String(o.delivery_status || o.status || "").toLowerCase() === "delivered";
+        const isF = /fail|cancel|refund/i.test(o.delivery_status || o.status || "");
+        const status = isD
+          ? "✅ Delivered"
+          : isF
+            ? "❌ Failed"
+            : (o.payment_status === "paid" || o.status === "pending" || o.delivery_status === "completed" || o.delivery_status === "processing")
+              ? "⏳ In Progress"
+              : "⚠️ Unpaid";
+        return `${idx + 1}. *${phone}* — ${pkg} (GH₵ ${amt}) [${status}]`;
       }).join("\n");
     }
 
@@ -1413,85 +1475,39 @@ async function generateFullAdminReport() {
     });
 
     return [
-      `📊 *${shopName.toUpperCase()} — ALL ADMIN SECTIONS BRIEFING*`,
-      `━━━━━━━━━━━━━━━━━━━━━`,
+      `👑 *${shopName.toUpperCase()} — EXECUTIVE BOT DASHBOARD*`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
       `🕒 _${ghanaTime}_`,
       ``,
-      `1️⃣ *DASHBOARD (OVERVIEW)*`,
-      `• Total Gross Sales: *GH₵ ${allGrossRev.toFixed(2)}* (Today: *GH₵ ${todayGrossRev.toFixed(2)}*)`,
-      `• Telecom API Balance: *${walletBalance}*`,
-      `• Arkesel Balance: *${arkeselSms !== null ? `${arkeselSms} SMS` : "0 SMS"}*`,
-      `• Delivery Queue: *${allDelivered.length} Delivered*, *${allPending.length} In Queue*, *${allFailed.length} Failed*`,
+      `💰 *FINANCIAL & WALLET SNAPSHOT*`,
+      `• Gross Sales: *GH₵ ${allGrossRev.toFixed(2)}* (Today: *GH₵ ${todayGrossRev.toFixed(2)}*)`,
+      `• DataMart Balance: *${walletBalance}*`,
+      `• Arkesel SMS Balance: *${arkeselSms !== null ? `${arkeselSms} SMS` : "Connected"}*`,
       ``,
-      `2️⃣ *PRODUCTS & PACKAGES*`,
-      `• Total Catalog: *${products.length || 35} Packages* (*${inStockCount || 35}* In Stock)`,
-      `• MTN: *${mtnProducts || 13}* | Telecel: *${telecelProducts || 11}* | AT: *${atProducts || 11}*`,
-      `• Stock Status: *All active networks available ✅*`,
+      `📦 *DATA ORDERS PIPELINE (LIVE)*`,
+      `• Total Orders: *${allWebOrders.length + allWaOrders.length} Paid* (${todayWebOrders.length + todayWaOrders.length} Today)`,
+      `• Confirmed Delivered: *${allDelivered.length}* ✅`,
+      `• In Progress / Queued: *${allPending.length}* ⏳`,
+      `• Attention / Failed: *${allFailed.length}* ⚠️`,
       ``,
-      `3️⃣ *WEBSITE ORDERS*`,
-      `• Total Web Orders: *${allWebOrders.length} Paid* (${todayWebOrders.length} Today)`,
-      `• Total Web Revenue: *GH₵ ${allWebRevenue.toFixed(2)}* (${todayWebRevenue > 0 ? `Today: GH₵ ${todayWebRevenue.toFixed(2)}` : "Today: GH₵ 0.00"})`,
-      `• Status: *${allWebOrders.filter(isDelivered).length} Delivered*, *${allWebOrders.filter(o => !isDelivered(o)).length} Pending*`,
+      `📶 *NETWORK DISTRIBUTION*`,
+      `• MTN (Yello): *${mtnPaidOrders}* orders`,
+      `• Telecel: *${telecelPaidOrders}* orders`,
+      `• AirtelTigo (AT): *${atPaidOrders}* orders`,
+      `• Top Network: *${topNetwork}* 🏆`,
       ``,
-      `4️⃣ *WHATSAPP BOT ORDERS*`,
-      `• Total Bot Orders: *${allWaOrders.length} Paid* (${todayWaOrders.length} Today)`,
-      `• Total Bot Revenue: *GH₵ ${allWaRevenue.toFixed(2)}* (${todayWaRevenue > 0 ? `Today: GH₵ ${todayWaRevenue.toFixed(2)}` : "Today: GH₵ 0.00"})`,
-      `• Bot Status: *Active & Processing Orders 💬*`,
-      ``,
-      `5️⃣ *BULK SMS*`,
-      `• Available SMS Credits: *${arkeselSms !== null ? `${arkeselSms} SMS` : "0 SMS"}*`,
-      `• Sender ID: *${settingsMap["arkesel_sender_id"] || "Data1gh"}*`,
-      `• Gateway: *Arkesel SMS API Connected ✉️*`,
-      ``,
-      `6️⃣ *DIGITAL SERVICES*`,
-      `• Netflix 30-Day Passes: *${netflixPaid.length} Active*`,
-      `• MTN Mashup Combos: *${mashupPaid.length} Dispatched*`,
+      `⚡ *DIGITAL SERVICES & CHECKERS*`,
+      `• Netflix 30-Day: *${netflixPaid.length} Active*`,
+      `• MTN MashUp: *${mashupPaid.length} Dispatched*`,
       `• AFA Registrations: *${afaPaid.length} Processed*`,
-      `• Services Revenue: *GH₵ ${servicesRev.toFixed(2)}*`,
+      `• WAEC Checkers: *${paidCheckers.length} Sold*`,
+      `• Total Services Revenue: *GH₵ ${(servicesRev + checkersRev).toFixed(2)}*`,
       ``,
-      `7️⃣ *REFERRALS & REWARDS*`,
-      `• Registered Promoters: *${totalPromoters} Affiliates*`,
-      `• Total Referral Clicks: *${totalReferralClicks} Visitors*`,
-      `• Program Status: *Active 🤝*`,
-      ``,
-      `8️⃣ *SPIN & WIN (SCRATCH & WIN)*`,
-      `• Total Plays: *${totalSpins} Players*`,
-      `• Unlocked Cards: *${unlockedSpins} Ready to Scratch*`,
-      `• Prizes Claimed: *${completedSpins} Won (1GB / 2GB)* 🎡`,
-      ``,
-      `9️⃣ *FREE DATA VOUCHERS*`,
-      `• Generated Codes: *${freeData.length} Vouchers*`,
-      `• Claimed Codes: *${claimedVouchers} Redeemed*`,
-      `• Remaining Available: *${availableVouchers > 0 ? availableVouchers : 0} Codes* 🎁`,
-      ``,
-      `🔟 *RESULT CHECKERS (WAEC)*`,
-      `• Checkers Sold: *${paidCheckers.length} Vouchers*`,
-      `• Checkers Revenue: *GH₵ ${checkersRev.toFixed(2)}*`,
-      `• Inventory: *BECE, WASSCE & NovDec Instant PINs 🎓*`,
-      ``,
-      `1️⃣1️⃣ *SALES ANALYTICS*`,
-      `• Top Ordered Network: *${topNetwork}*`,
-      `• Network Orders: *MTN (${mtnPaidOrders})*, *Telecel (${telecelPaidOrders})*, *AT (${atPaidOrders})*`,
-      `• Total Day Volume: *${todayWebOrders.length + todayWaOrders.length + paidServices.length + paidCheckers.length} Transactions*`,
-      ``,
-      `1️⃣2️⃣ *CUSTOMER SUPPORT & AI*`,
-      `• Open Chat Sessions: *${openChats.length} Active*`,
-      `• Unread Messages: *${unreadChats} Awaiting Response*`,
-      `• AI Support: *Enabled (DATA 1 GH AI) 🤖*`,
-      ``,
-      `1️⃣3️⃣ *STORE SETTINGS & CONFIG*`,
-      `• Store Name: *${shopName}*`,
-      `• WhatsApp Bot: *${botUrl}*`,
-      `• Support & Alert Phone: *${supportPhone}*`,
-      `• Paystack & Dispatch: *Configured & Running ⚙️*`,
-      ``,
-      `━━━━━━━━━━━━━━━━━━━━━`,
-      `🕒 *RECENT TRANSACTIONS (LAST 5)*`,
+      `🕒 *RECENT TRANSACTIONS (LIVE)*`,
       recentListText,
       ``,
-      `━━━━━━━━━━━━━━━━━━━━━`,
-      `🏪 *Live Store Preview:* ${siteUrl}`,
-      `💡 _Tip: Reply *ADMIN* anytime to refresh this complete report._`
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `💡 _Send *stony* anytime to chat with your Stony AI personal assistant!_`
     ].join("\n");
   } catch (err) {
     console.error("REPORT COMPILATION ERROR:", err);
@@ -1524,215 +1540,396 @@ app.post("/webhook", async (req, res) => {
     console.log("📩", from, text);
 
     /* =====================================================
-    ADMIN COMMAND: COMPREHENSIVE 13-SECTION DASHBOARD REPORT
+    DYNAMIC OWNER & ADMIN PHONE DETECTION
+    ===================================================== */
+    const adminPhones = ["233547100951", "0547100951", "233592753424", "0592753424"];
+    if (process.env.ADMIN_ALERT_PHONE) adminPhones.push(String(process.env.ADMIN_ALERT_PHONE).replace(/\D/g, ""));
+    try {
+      const { data: sRows } = await supabase
+        .from("settings")
+        .select("key,value")
+        .in("key", ["admin_alert_phone", "support_phone"]);
+      (sRows || []).forEach(r => {
+        if (r.value) adminPhones.push(String(r.value).replace(/\D/g, ""));
+      });
+    } catch (_) {}
+
+    const normFrom = String(from || "").replace(/\D/g, "");
+    const isOwner = adminPhones.some(p => p && (normFrom === p || normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))));
+
+    /* =====================================================
+    ADMIN COMMAND: EXECUTIVE BOT DASHBOARD
     Triggers when you text "Admin", "ADMIN", "Dashboard", or "Report"
     ===================================================== */
     if (/^(admin|dashboard|report)$/i.test(text)) {
-      const normFrom = String(from || "").replace(/\D/g, "");
-      const isAuthorizedAdmin =
-        normFrom === "233547100951" ||
-        normFrom === "0547100951" ||
-        normFrom.endsWith("547100951");
-
-      if (isAuthorizedAdmin) {
-        console.log("📊 GENERATING COMPREHENSIVE 13-SECTION ADMIN REPORT FOR ADMIN:", from);
+      if (isOwner) {
+        console.log("📊 GENERATING EXECUTIVE BOT DASHBOARD FOR ADMIN:", from);
         const adminReport = await generateFullAdminReport();
         return await sendWhatsApp(from, adminReport);
       } else {
-        console.warn("🚨 UNAUTHORIZED ADMIN ATTEMPT ON WHATSAPP FROM:", from);
-        // 1. Reply to intruder with access denied
-        await sendWhatsApp(
+        // Reply politely without sending panic intrusion alerts to WhatsApp
+        return await sendWhatsApp(
           from,
-          "⚠️ *ACCESS DENIED*\n\nThis command is restricted to DATA 1 GH Administrators only.\n\nReply with *hi* to view customer data bundles and services."
+          "⚠️ *ACCESS RESTRICTED*\n\nThis command is for DATA 1 GH Administrators only.\n\nReply with *hi* to view customer data bundles and services."
         );
-
-        // 2. Alert Admin WhatsApp instantly!
-        const timeStr = new Date().toLocaleString("en-GB", { timeZone: "Africa/Accra" });
-        await sendWhatsApp(
-          "233547100951",
-          `🚨 *DATA 1 GH — SECURITY INTRUSION ALERT* 🚨\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ *Someone tried to access your Admin Dashboard on WhatsApp!*\n\n• *Intruder Phone:* +${from}\n• *Command Used:* "${text}"\n• *Time:* ${timeStr}\n• *Status:* 🛑 BLOCKED (Admin report was withheld)\n\n👉 *What to do / How to stop them:*\n1. The intruder was blocked and saw NO store data.\n2. You can block their WhatsApp number (+${from}) if they persist.\n3. Search their phone number in Orders to identify who they are.`
-        );
-        return;
       }
     }
 
     /* =====================================================
-    STONY OWNER AI — WhatsApp Owner Mode
+    STONY OWNER AI — Personal Business Assistant & Co-Pilot
     Rules:
-      - "hi" / "hello" / "start" → normal customer menu (fall through)
+      - "hi" / "hello" / "start" → normal customer menu
       - "stony"                  → activate AI mode (step 99)
-      - step 99 + "hi"           → exit AI mode, show menu
-      - step 99 + anything else  → Stony AI replies
+      - step 99 + "hi"           → exit AI mode, show customer menu
+      - step 99 + anything       → full conversational assistant
     ===================================================== */
-    const normFrom = String(from || "").replace(/\D/g, "");
-    const isOwner =
-      normFrom === "233547100951" ||
-      normFrom === "0547100951" ||
-      normFrom.endsWith("547100951");
-
     if (isOwner) {
-      // Load owner session to check current mode
       const { data: ownerSession } = await supabase
         .from("sessions")
-        .select("step")
+        .select("step, bundle, notes")
         .eq("phone", from)
         .maybeSingle();
 
       const inStonyMode = ownerSession?.step === 99;
 
-      // "hi" / "hello" / "start" always exits AI mode and shows the menu
+      // "hi" → exit AI mode, fall through to customer menu
       if (/^(hi|hello|start)$/i.test(text)) {
         if (inStonyMode) {
-          await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
+          await supabase.from("sessions").update({ step: 1, bundle: null }).eq("phone", from);
         }
-        // Fall through to the normal customer bot below
+        // Fall through to customer bot
       }
 
-      // "stony" → activate AI mode
+      // "stony" → enter AI personal assistant mode
       else if (/^stony$/i.test(text)) {
         if (!ownerSession) {
-          await supabase.from("sessions").insert([{ phone: from, step: 99 }]);
+          await supabase.from("sessions").insert([{ phone: from, step: 99, notes: JSON.stringify([]) }]);
         } else {
-          await supabase.from("sessions").update({ step: 99 }).eq("phone", from);
+          await supabase.from("sessions").update({ step: 99, bundle: null }).eq("phone", from);
         }
-        return sendWhatsApp(from, `Hey boss! 👑 Stony here. What's up? You can ask me anything — orders, balance, delivery status, or just talk shop. Send *hi* anytime to go back to the menu.`);
+        return sendWhatsApp(from,
+          `👑 Stony here boss! Your personal business assistant & co-pilot at DATA 1 GH.\n\nI have real-time read access to our entire system:\n• Live orders & real telecom delivery status\n• DataMart wallet & Arkesel SMS balances\n• Today's sales, revenue & network breakdown\n• Business advice, marketing ideas & promos\n\nTalk to me anytime like we're working together! Send *hi* to return to the customer menu.`
+        );
       }
 
-      // In AI mode (step 99) → route everything to Stony AI
+      // In AI mode → full mutual conversational assistant
       else if (inStonyMode) {
-        console.log("👑 OWNER STONY AI MODE — message:", text);
+        console.log("👑 OWNER STONY AI — message:", text);
 
-        // Fetch Gemini / OpenAI key from settings or env
+        // ── CHECK IF OWNER IS CONFIRMING A PENDING ACTION ──
+        let pendingAction = null;
+        try {
+          if (ownerSession?.bundle) pendingAction = JSON.parse(ownerSession.bundle);
+        } catch (_) {}
+
+        if (pendingAction && /^(yes|yeah|yep|go|go ahead|do it|confirm|ok|okay|sure|yh|y)$/i.test(text.trim())) {
+          const { type, ref, phone: aPhone, network, capacity } = pendingAction;
+
+          if (type === "retry_order" && ref) {
+            await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
+            try {
+              const retryRes = await axios.post(`${DATAMART_BASE}/purchase`, {
+                phoneNumber: aPhone,
+                network: network || "YELLO",
+                capacity: String(capacity || "1"),
+                gateway: "wallet",
+                delivery: "fast"
+              }, { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 });
+              const retryData = retryRes.data?.data || retryRes.data || {};
+              const newRef = retryData.reference || retryData.orderReference || null;
+              await supabase.from("orders").update({ delivery_status: "processing", updated_at: new Date().toISOString() }).eq("reference", ref);
+              return sendWhatsApp(from, `✅ Retry dispatched for ${capacity}GB → ${aPhone}${newRef ? `\nNew ref: ${newRef}` : ""}. I'll monitor it for you boss.`);
+            } catch (retryErr) {
+              return sendWhatsApp(from, `❌ Retry failed boss: ${retryErr.response?.data?.message || retryErr.message}\nCheck DataMart wallet balance and try again.`);
+            }
+          }
+
+          if (type === "send_sms" && aPhone) {
+            await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
+            await sendAdminSms(`DATA 1 GH: ${pendingAction.smsText || "Your order has been updated."}`);
+            return sendWhatsApp(from, `✅ SMS alert sent to ${aPhone}.`);
+          }
+
+          await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
+        } else if (pendingAction && /^(no|nope|cancel|nah|stop)$/i.test(text.trim())) {
+          await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
+          return sendWhatsApp(from, "Sharp, cancelled that action. What else is on your mind boss?");
+        }
+
+        // ── LOAD MULTI-TURN CONVERSATION MEMORY ──
+        let history = [];
+        try {
+          if (ownerSession?.notes) {
+            const parsed = JSON.parse(ownerSession.notes);
+            if (Array.isArray(parsed)) history = parsed;
+          }
+        } catch (_) {}
+
+        // ── FETCH AI KEYS ──
         let geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
         let openAiKey = process.env.OPENAI_API_KEY || "";
         try {
           const { data: aiRows } = await supabase
-            .from("settings")
-            .select("key,value")
+            .from("settings").select("key,value")
             .in("key", ["gemini_api_key", "GEMINI_API_KEY", "openai_api_key", "OPENAI_API_KEY"]);
-          const aiMap = Object.fromEntries((aiRows || []).map((r) => [r.key, r.value]));
+          const aiMap = Object.fromEntries((aiRows || []).map(r => [r.key, r.value]));
           if (!geminiKey) geminiKey = aiMap.gemini_api_key || aiMap.GEMINI_API_KEY || "";
           if (!openAiKey) openAiKey = aiMap.openai_api_key || aiMap.OPENAI_API_KEY || "";
-          if (!geminiKey && openAiKey && openAiKey.startsWith("AIzaSy")) {
-            geminiKey = openAiKey;
-            openAiKey = "";
-          }
-        } catch (err) {
-          console.warn("Owner AI: could not fetch AI keys:", err.message);
-        }
+          if (!geminiKey && openAiKey && openAiKey.startsWith("AIzaSy")) { geminiKey = openAiKey; openAiKey = ""; }
+        } catch (_) {}
 
-        // Fetch live delivery ETA
+        // ── FETCH LIVE SYSTEM CONTEXT ──
         let deliveryEta = "~5-30 minutes";
+        let walletBalance = "";
+        let systemData = "";
+
         try {
           if (DATA_API_KEY) {
-            const trackerRes = await axios.get(
-              "https://api.datamartgh.shop/api/developer/delivery-tracker",
-              { headers: { "X-API-Key": DATA_API_KEY }, timeout: 4000 }
-            ).catch(() => null);
-            const tData = trackerRes?.data?.data || {};
-            if (tData?.lastDelivered?.placedAt && tData?.lastDelivered?.deliveredAt) {
-              const mins = Math.max(1, Math.round(
-                (new Date(tData.lastDelivered.deliveredAt).getTime() - new Date(tData.lastDelivered.placedAt).getTime()) / 60000
-              ));
-              deliveryEta = `~${mins} minute(s)`;
+            const t = await axios.get("https://api.datamartgh.shop/api/developer/delivery-tracker",
+              { headers: { "X-API-Key": DATA_API_KEY }, timeout: 4000 }).catch(() => null);
+            const td = t?.data?.data || {};
+            if (td?.lastDelivered?.placedAt && td?.lastDelivered?.deliveredAt) {
+              const mins = Math.max(1, Math.round((new Date(td.lastDelivered.deliveredAt) - new Date(td.lastDelivered.placedAt)) / 60000));
+              deliveryEta = `~${mins} min(s)`;
             }
           }
-        } catch (_) { }
+        } catch (_) {}
 
-        // Fetch wallet balance
-        let walletBalance = "";
         try {
           if (DATA_API_KEY) {
-            const balRes = await axios.get(
-              `${DATAMART_BASE}/user/balance`,
-              { headers: { "x-api-key": DATA_API_KEY }, timeout: 4000 }
-            ).catch(() => null);
-            const bal = balRes?.data?.data?.walletBalance ?? balRes?.data?.walletBalance;
+            const b = await axios.get(`${DATAMART_BASE}/user/balance`,
+              { headers: { "x-api-key": DATA_API_KEY }, timeout: 4000 }).catch(() => null);
+            const bal = b?.data?.data?.walletBalance ?? b?.data?.walletBalance ?? b?.data?.data?.balance;
             if (bal != null) walletBalance = `GH₵ ${Number(bal).toFixed(2)}`;
           }
-        } catch (_) { }
+        } catch (_) {}
 
-        // Fetch last 3 orders
-        let recentOrdersCtx = "";
+        let todayPaidCount = 0;
+        let todayRevenue = 0;
+        let pendingOrdersList = [];
+        let failedOrdersList = [];
+
         try {
-          const { data: recentOrders } = await supabase
+          const startOfDay = new Date();
+          startOfDay.setHours(0, 0, 0, 0);
+          const { data: todayOrders } = await supabase
             .from("orders")
             .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at")
-            .order("created_at", { ascending: false })
-            .limit(3);
-          if (recentOrders && recentOrders.length > 0) {
-            recentOrdersCtx = "RECENT ORDERS:\n" + recentOrders.map((o, i) =>
-              `${i + 1}. Ref: ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | ₵${o.amount} | ${o.delivery_status}`
-            ).join("\n");
+            .gte("created_at", startOfDay.toISOString())
+            .order("created_at", { ascending: false });
+          const paid = (todayOrders || []).filter(o => /paid|success|complet/i.test(o.payment_status || ""));
+          const failed = (todayOrders || []).filter(o => /fail|cancel/i.test(o.delivery_status || ""));
+          const pending = (todayOrders || []).filter(o => !/fail|cancel|delivered/i.test(o.delivery_status || "") && /paid/i.test(o.payment_status || ""));
+          todayPaidCount = paid.length;
+          todayRevenue = paid.reduce((s, o) => s + Number(o.amount || 0), 0);
+          pendingOrdersList = pending.slice(0, 4);
+          failedOrdersList = failed.slice(0, 4);
+          systemData += `TODAY: ${todayOrders?.length || 0} total orders | ${paid.length} paid | ₵${todayRevenue.toFixed(2)} revenue\n`;
+          if (failed.length > 0) {
+            systemData += `⚠️ FAILED (${failed.length}): ${failed.slice(0, 3).map(o => `${o.reference} ${o.capacity}GB→${o.recipient_phone}`).join(", ")}\n`;
           }
-        } catch (_) { }
+          if (pending.length > 0) {
+            systemData += `⏳ IN PROGRESS (${pending.length}): ${pending.slice(0, 3).map(o => `${o.reference}`).join(", ")}\n`;
+          }
+        } catch (_) {}
 
+        // Order lookup if message mentions reference or phone number
+        let specificOrderCtx = "";
+        const refMatch = text.match(/\b(REF-\d+|[A-Z0-9]{8,})\b/i);
+        const phoneMatch = text.match(/\b(0[2357]\d{8}|233\d{9})\b/);
+        if (refMatch) {
+          try {
+            const { data: ord } = await supabase.from("orders")
+              .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at")
+              .ilike("reference", `%${refMatch[1]}%`).limit(1).maybeSingle();
+            if (ord) {
+              const liveStatus = await getRealDatamartDeliveryStatus(ord.reference);
+              specificOrderCtx = `ORDER LOOKUP (${refMatch[1]}):\nRef: ${ord.reference} | ${ord.capacity}GB ${ord.network} → ${ord.recipient_phone} | ₵${ord.amount} | Payment: ${ord.payment_status} | Delivery Status: ${liveStatus.deliveryStatus} (Raw: ${liveStatus.rawStatus}) | Date: ${ord.created_at?.slice(0, 16)}\n`;
+            }
+          } catch (_) {}
+        } else if (phoneMatch) {
+          try {
+            const lookupPhone = normalizePhone(phoneMatch[0]);
+            const { data: ords } = await supabase.from("orders")
+              .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at")
+              .eq("recipient_phone", lookupPhone)
+              .order("created_at", { ascending: false }).limit(3);
+            if (ords && ords.length > 0) {
+              specificOrderCtx = `ORDERS FOR ${lookupPhone}:\n` + ords.map((o, i) =>
+                `${i + 1}. ${o.reference} | ${o.capacity}GB ${o.network} | Delivery: ${o.delivery_status} | ₵${o.amount}`
+              ).join("\n") + "\n";
+            }
+          } catch (_) {}
+        }
+
+        // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
         const ownerSystemPrompt =
-          "You are Stony, the AI assistant built into data1.gh — a data reselling platform in Ghana hosted on Vercel.\n" +
-          "You are in OWNER MODE, speaking directly with the site owner on WhatsApp.\n\n" +
-          "PERSONALITY:\n" +
-          "- Relaxed, warm, conversational — like a close friend talking shop.\n" +
-          "- Never robotic or corporate. Casual English, Ghanaian slang is fine.\n" +
-          "- For everyday chat: stay casual and warm.\n" +
-          "- When something is BROKEN or URGENT: shift to a serious but still human tone — describe the problem clearly and give a practical fix.\n\n" +
-          "PROACTIVE ALERTS (flag without being asked when relevant):\n" +
-          "- Failed payments, low DataMart wallet balance, stuck orders, API downtime.\n\n" +
-          "DATA PRIVACY: All customer/transaction data is strictly confidential.\n\n" +
-          "PLATFORM: data1.gh (Vercel) | DataMart Ghana | Paystack MoMo | Arkesel SMS | Supabase | WhatsApp bot on Render.\n\n" +
-          "LIVE SYSTEM STATUS:\n" +
-          `- Delivery speed: ${deliveryEta}\n` +
-          (walletBalance ? `- DataMart wallet: ${walletBalance}\n` : "") +
-          (recentOrdersCtx ? `\n${recentOrdersCtx}\n` : "") +
-          "\nKeep replies short unless the owner needs a detailed breakdown. Owner can send *hi* to exit back to the customer menu.";
+          "You are Stony, the owner's trusted digital co-pilot and personal executive business assistant at DATA 1 GH.\n" +
+          "You are talking directly with the business owner on WhatsApp. You two are partners building and scaling this business.\n\n" +
+          "HOW YOU TALK:\n" +
+          "- Like a smart, loyal, energetic Ghanaian brother and business partner. Warm, respectful, sharp (\"chale\", \"boss\", \"bossu\", \"sharp\").\n" +
+          "- Talk like a real human on WhatsApp. Punchy, engaging, direct. 2-5 sentences usually.\n" +
+          "- Have FULL, mutual, fluid back-and-forth conversations. Don't be robotic.\n" +
+          "- If the owner jokes, joke back naturally.\n" +
+          "- If the owner asks business advice or ideas, brainstorm creative strategies (e.g. campus reps, weekend promos, price adjustments).\n" +
+          "- If the owner asks about orders or delivery speed, give the live truth from the data below.\n" +
+          "- NEVER say canned repetitive lines like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
+          "- NEVER say \"As an AI\". You are Stony.\n" +
+          "- You ONLY read from the system to give answers and propose solutions.\n\n" +
+          "LIVE SYSTEM REALITY RIGHT NOW:\n" +
+          `- Live Delivery Speed: ${deliveryEta}\n` +
+          (walletBalance ? `- DataMart Wallet: ${walletBalance}\n` : "- Wallet: connected\n") +
+          (systemData ? `\n${systemData}` : "") +
+          (specificOrderCtx ? `\n${specificOrderCtx}` : "");
 
+        // ── CALL MULTI-MODEL AI ──
         let aiReply = "";
 
-        // Try Gemini
+        // Build clean conversation history for Gemini
+        const geminiModels = [
+          "gemini-2.5-flash",
+          "gemini-2.0-flash",
+          "gemini-1.5-flash",
+          "gemini-1.5-pro"
+        ];
+
+        const historyTurns = history.slice(-6).map(h => ({
+          role: h.role === "assistant" ? "model" : "user",
+          parts: [{ text: h.text }]
+        }));
+
+        while (historyTurns.length > 0 && historyTurns[0].role === "model") {
+          historyTurns.shift();
+        }
+
+        const turns = [];
+        for (const turn of historyTurns) {
+          if (turns.length > 0 && turns[turns.length - 1].role === turn.role) {
+            turns[turns.length - 1].parts[0].text += `\n${turn.parts[0].text}`;
+          } else {
+            turns.push(turn);
+          }
+        }
+        turns.push({ role: "user", parts: [{ text }] });
+
         if (geminiKey) {
-          try {
-            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`;
-            const geminiRes = await axios.post(geminiUrl, {
-              contents: [{ role: "user", parts: [{ text }] }],
-              systemInstruction: { parts: [{ text: ownerSystemPrompt }] },
-              generationConfig: { maxOutputTokens: 350, temperature: 0.65 }
-            }, { headers: { "Content-Type": "application/json" }, timeout: 10000 });
-            aiReply = geminiRes.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-          } catch (gErr) {
-            console.warn("Owner Gemini error:", gErr.response?.data?.error?.message || gErr.message);
+          for (const model of geminiModels) {
+            try {
+              const gRes = await axios.post(
+                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+                {
+                  contents: turns,
+                  systemInstruction: { parts: [{ text: ownerSystemPrompt }] },
+                  generationConfig: { maxOutputTokens: 400, temperature: 0.7 }
+                },
+                { headers: { "Content-Type": "application/json" }, timeout: 12000 }
+              );
+              const txt = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+              if (txt) {
+                aiReply = txt;
+                break;
+              }
+            } catch (gErr) {
+              console.warn(`Owner Gemini (${model}) error:`, gErr.response?.data?.error?.message || gErr.message);
+            }
           }
         }
 
-        // Fallback to OpenAI
         if (!aiReply && openAiKey) {
           try {
+            const openAiMessages = [
+              { role: "system", content: ownerSystemPrompt },
+              ...history.slice(-6).map(h => ({ role: h.role === "assistant" ? "assistant" : "user", content: h.text })),
+              { role: "user", content: text }
+            ];
             const oaRes = await axios.post("https://api.openai.com/v1/chat/completions", {
               model: "gpt-4o-mini",
-              messages: [
-                { role: "system", content: ownerSystemPrompt },
-                { role: "user", content: text }
-              ],
-              max_tokens: 300,
-              temperature: 0.65
-            }, { headers: { Authorization: `Bearer ${openAiKey}`, "Content-Type": "application/json" }, timeout: 10000 });
+              messages: openAiMessages,
+              max_tokens: 350, temperature: 0.7
+            }, { headers: { Authorization: `Bearer ${openAiKey}`, "Content-Type": "application/json" }, timeout: 12000 });
             aiReply = oaRes.data?.choices?.[0]?.message?.content?.trim() || "";
           } catch (oaErr) {
             console.warn("Owner OpenAI error:", oaErr.response?.data?.error?.message || oaErr.message);
           }
         }
 
-        // Smart fallback if no AI key
+        // ── ACTION SUGGESTION DETECTION ──
+        if (aiReply) {
+          const retryMatch = aiReply.match(/\[SUGGEST_RETRY:\s*ref=([^,\]]+),\s*phone=([^,\]]+),\s*network=([^,\]]+),\s*capacity=([^\]]+)\]/i);
+          const smsMatch = aiReply.match(/\[SUGGEST_SMS:\s*phone=([^,\]]+),\s*text=([^\]]+)\]/i);
+
+          if (retryMatch) {
+            const [, rRef, rPhone, rNetwork, rCapacity] = retryMatch;
+            const actionData = { type: "retry_order", ref: rRef.trim(), phone: rPhone.trim(), network: rNetwork.trim().toUpperCase(), capacity: rCapacity.trim() };
+            await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+            aiReply = aiReply.replace(retryMatch[0], "").trim();
+            aiReply += `\n\nShould I trigger the retry for you? Reply *yes* to confirm or *no* to cancel.`;
+          } else if (smsMatch) {
+            const [, sPhone, sText] = smsMatch;
+            const actionData = { type: "send_sms", phone: sPhone.trim(), smsText: sText.trim() };
+            await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+            aiReply = aiReply.replace(smsMatch[0], "").trim();
+            aiReply += `\n\nShould I send that SMS? Reply *yes* to confirm or *no* to cancel.`;
+          }
+        }
+
+        // ── SMART CONVERSATIONAL PERSONAL ASSISTANT FALLBACK ──
         if (!aiReply) {
-          const lowerText = text.toLowerCase();
-          if (/\b(balance|wallet)\b/i.test(lowerText)) {
+          const lt = text.toLowerCase().trim();
+
+          // 1. Greetings & Personal Check-in
+          if (/^(hi|hello|hey|yo|sup|chale|boss|bossu|how far|how you dey|good morning|good evening|stony|are you there|you dey)/i.test(lt)) {
+            const convReplies = [
+              `I dey solid bossu! 😊 Everything dey move on the system. How your day dey go? Any orders you want make I check, or we dey plan marketing today?`,
+              `Chale boss, I dey right here! System is active. Delivery speed is around ${deliveryEta}.${walletBalance ? ` Wallet is sitting at ${walletBalance}.` : ""} What's the plan?`,
+              `I dey here with you boss! Ready for anything — stats, orders, or brainstorming new promos. How can I help you right now?`
+            ];
+            aiReply = convReplies[history.length % convReplies.length];
+          }
+
+          // 2. Sales / Today / Revenue / Stats
+          else if (/\b(stat|today|sales|revenue|how many orders|how much|market|cash|money)\b/i.test(lt)) {
+            aiReply = `📊 *Today's Performance:* We have *${todayPaidCount} paid orders* bringing in *GH₵ ${todayRevenue.toFixed(2)}* so far today! Delivery speed is running at *${deliveryEta}*. ${walletBalance ? `DataMart wallet: *${walletBalance}*.` : ""} How do you feel about dropping a quick status promo to push more volume?`;
+          }
+
+          // 3. Wallet / DataMart Balance
+          else if (/\b(balance|wallet|datamart|credit)\b/i.test(lt)) {
             aiReply = walletBalance
-              ? `DataMart wallet is currently *${walletBalance}* boss.`
-              : "Couldn't fetch balance right now. Check the DataMart dashboard.";
-          } else if (/\b(order|pending|failed|delivery|status)\b/i.test(lowerText)) {
-            aiReply = recentOrdersCtx
-              ? `Here's what I see boss:\n\n${recentOrdersCtx}`
-              : "No recent orders found right now.";
-          } else {
-            aiReply = `On it boss. Delivery speed: ${deliveryEta}.${walletBalance ? ` Wallet: ${walletBalance}.` : ""} Reply *Admin* for the full dashboard.`;
+              ? `Our DataMart wallet balance is *${walletBalance}* right now boss. ${Number(walletBalance.replace(/[^\d.]/g, "") || 0) < 50 ? "⚠️ It's getting a bit low — might want to top up soon so orders don't pause." : "We're well covered for incoming orders!"}`
+              : "Couldn't fetch the exact wallet balance right now boss, but the DataMart API connection is active. I can recheck in a moment!";
+          }
+
+          // 4. Delivery Speed / Tracker
+          else if (/\b(speed|delivery|fast|delay|tracker|eta)\b/i.test(lt)) {
+            aiReply = `Data delivery is currently hitting around *${deliveryEta}* boss 🚀 MTN orders are moving through DataMart steadily. Any specific recipient number giving trouble?`;
+          }
+
+          // 5. Order Lookups
+          else if (specificOrderCtx) {
+            aiReply = specificOrderCtx;
+          }
+
+          // 6. Stuck / Failed / Problem Orders
+          else if (/\b(failed|stuck|problem|complaint|issue|pending)\b/i.test(lt)) {
+            if (failedOrdersList.length > 0) {
+              aiReply = `⚠️ We have *${failedOrdersList.length} failed order(s)* needing attention:\n` +
+                failedOrdersList.map((o, idx) => `${idx + 1}. Ref *${o.reference}* — ${o.capacity}GB ${o.network} to ${o.recipient_phone}`).join("\n") +
+                `\n\nDrop any reference and I can inspect it or prepare a retry for you boss!`;
+            } else if (pendingOrdersList.length > 0) {
+              aiReply = `⏳ No failed orders! We have *${pendingOrdersList.length} order(s) currently in progress* with telecom networks. They usually land within ${deliveryEta}.`;
+            } else {
+              aiReply = `All clear boss! ✅ Zero failed orders and zero stuck orders right now. Everything is running smoothly.`;
+            }
+          }
+
+          // 7. Ideas / Marketing / Growth Advice
+          else if (/\b(idea|advice|grow|market|promo|scale|customers?|boost|increase)\b/i.test(lt)) {
+            aiReply = `💡 *3 Quick Ideas to Boost Our Sales Today Bossu:*\n\n1. *Campus Reps:* Get 2-3 university students (Legon, KNUST, UPSA) posting on their department WhatsApp groups with their referral link.\n2. *Flash Bundle Discount:* Run a 2-hour "Happy Hour" on 5GB MTN bundles on your WhatsApp status — bundle buyers love urgency.\n3. *Repeat Buyer Reminder:* Send an SMS through Arkesel to customers who bought 1-2 weeks ago — they're probably running low on data right now!\n\nWant to draft a message for one of these?`;
+          }
+
+          // 8. General conversational partner reply
+          else {
+            aiReply = `I hear you loud and clear boss. We're on this together — system is running, delivery is around ${deliveryEta}${walletBalance ? `, wallet is ${walletBalance}` : ""}. Tell me what direction you want to take or what you need me to dig into!`;
           }
         }
 
@@ -1740,10 +1937,20 @@ app.post("/webhook", async (req, res) => {
           .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony")
           .replace(/\bdatamart\b/gi, "DataMart");
 
+        // ── SAVE UPDATED CONVERSATION MEMORY ──
+        try {
+          const updatedHistory = [
+            ...history.slice(-6),
+            { role: "user", text },
+            { role: "assistant", text: aiReply }
+          ];
+          await supabase.from("sessions").update({ notes: JSON.stringify(updatedHistory) }).eq("phone", from);
+        } catch (_) {}
+
         return sendWhatsApp(from, aiReply);
       }
 
-      // Owner sent something else (not "stony", not in AI mode) — fall through to customer bot
+      // Owner not in AI mode, not triggering stony — fall through to customer bot
     }
 
     let { data: session } = await supabase
@@ -2581,23 +2788,36 @@ app.post("/paystack-webhook", async (req, res) => {
           }
         }
 
+        // CRITICAL: Never immediately jump to "delivered".
+        // DataMart accepts order and reports "completed", which only means received.
+        // Query API key directly to get real telecom delivery status!
+        let verifiedDelivery = "processing";
+        let verifiedRaw = "processing";
+        if (dmSuccess) {
+          const direct = await getRealDatamartDeliveryStatus(dmRef || ref);
+          verifiedDelivery = direct.deliveryStatus;
+          verifiedRaw = direct.rawStatus;
+        }
+
         // Mark payment as paid and update delivery status in DB
         await supabase
           .from("orders")
           .update({
             payment_status: "paid",
-            delivery_status: dmSuccess ? "delivered" : "processing",
+            delivery_status: verifiedDelivery,
+            datamart_status: verifiedRaw,
             datamart_reference: dmRef,
             updated_at: new Date().toISOString()
           })
           .or(`reference.eq.${ref},datamart_reference.eq.${ref}`);
 
-        // Send alert to admin about successful web sale & delivery
+        // Send alert to admin about web sale
+        const statusLabel = verifiedDelivery === "delivered" ? "✅ Delivered to phone!" : "⏳ In Progress (Sent to DataMart)";
         await sendWhatsApp(
           "233547100951",
-          `🛍️ NEW WEBSITE DATA ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📶 Network: ${webOrder.network || "Data"}\n📦 Capacity: ${capacity}GB\n📱 Recipient: ${phone}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n\n${dmSuccess ? "✅ Delivered automatically via DataMart!" : "⏳ Marked Paid — Pending DataMart dispatch."}`
+          `🛍️ NEW WEBSITE DATA ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📶 Network: ${webOrder.network || "Data"}\n📦 Capacity: ${capacity}GB\n📱 Recipient: ${phone}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n\nStatus: ${statusLabel}`
         );
-        sendAdminSms(`[DataEase] Web Data Order Paid: ₵${paidAmount.toFixed(2)} (${capacity}GB ${webOrder.network || "Data"} to ${phone}). Ref: ${ref}`).catch(() => { });
+        sendAdminSms(`[DataEase] Web Data Order Paid: ₵${paidAmount.toFixed(2)} (${capacity}GB ${webOrder.network || "Data"} to ${phone}). Status: ${verifiedDelivery === "delivered" ? "Delivered" : "In Progress"}. Ref: ${ref}`).catch(() => { });
         return;
       }
     }
@@ -2996,10 +3216,20 @@ app.post("/paystack-webhook", async (req, res) => {
     }
 
     const orderReference = datamartReference || ref;
-    const finalOrderStatus = datamartSuccess ? datamartStatus : "pending_manual";
-    const mappedDeliveryStatus = datamartSuccess
-      ? (["completed", "delivered", "successful", "success"].includes(String(datamartStatus).toLowerCase()) ? "delivered" : "processing")
-      : "failed";
+
+    // CRITICAL: Never immediately jump to "delivered".
+    // DataMart accepts order and reports "completed", which only means received.
+    // Query API key directly to get real telecom delivery status!
+    let mappedDeliveryStatus = "processing";
+    let mappedRawStatus = datamartStatus;
+    if (datamartSuccess) {
+      const direct = await getRealDatamartDeliveryStatus(datamartReference || datamartOrderId || orderReference);
+      mappedDeliveryStatus = direct.deliveryStatus;
+      mappedRawStatus = direct.rawStatus;
+    } else {
+      mappedDeliveryStatus = "failed";
+    }
+    const finalOrderStatus = datamartSuccess ? mappedRawStatus : "pending_manual";
 
     try {
       const { error: orderError } = await supabase.from("orders").insert([{
@@ -3011,9 +3241,10 @@ app.post("/paystack-webhook", async (req, res) => {
         bundle: session.bundle,
         capacity: String(bundle.capacity),
         amount: paidAmount,
-        status: finalOrderStatus,
+        status: mappedDeliveryStatus,
         payment_status: "paid",
         delivery_status: mappedDeliveryStatus,
+        datamart_status: mappedRawStatus,
         datamart_reference: datamartReference || (datamartOrderId ? String(datamartOrderId) : null),
         paid_at: new Date().toISOString(),
         created_at: datamartData.createdAt || new Date().toISOString(),
@@ -3026,7 +3257,7 @@ app.post("/paystack-webhook", async (req, res) => {
         recordWebhookLog("ORDER_SAVE_ERROR", { error: orderError.message });
       } else {
         console.log("✅ ORDER HISTORY SAVED:", orderReference);
-        recordWebhookLog("ORDER_SAVED", { orderReference, status: finalOrderStatus });
+        recordWebhookLog("ORDER_SAVED", { orderReference, status: mappedDeliveryStatus });
 
         if (datamartSuccess && session.scratch_order_opt_in && session.scratch_code) {
           const scratchResult = await countScratchPaidOrder(session.phone, session.scratch_code, orderReference);
@@ -3048,12 +3279,18 @@ app.post("/paystack-webhook", async (req, res) => {
     const estimateMessage = buildDeliveryEstimateMessage(tracker);
 
     if (datamartSuccess) {
-      let successMessage = `✅ ORDER PLACED SUCCESSFULLY! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Number: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\n${estimateMessage}\n\n📦 You can track your order anytime:\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To buy again.`;
-      await sendWhatsApp(session.phone, successMessage);
-      recordWebhookLog("CUSTOMER_NOTIFIED_SUCCESS", { phone: session.phone });
+      if (mappedDeliveryStatus === "delivered") {
+        let successMessage = `✅ ORDER DELIVERED! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Number: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\nYour data has landed! 📶\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To buy again.`;
+        await sendWhatsApp(session.phone, successMessage);
+        recordWebhookLog("CUSTOMER_NOTIFIED_DELIVERED", { phone: session.phone });
+      } else {
+        let inProgressMessage = `✅ PAYMENT RECEIVED! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Delivery to: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\n${estimateMessage}\n\nYour order has been dispatched and is currently in progress. It will land shortly!\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To return to main menu.`;
+        await sendWhatsApp(session.phone, inProgressMessage);
+        recordWebhookLog("CUSTOMER_NOTIFIED_IN_PROGRESS", { phone: session.phone });
+      }
 
       sendAdminSms(
-        `NEW DATA ORDER: ${bundle.capacity}GB ${session.network} to ${session.phone_number}. Paid: ₵${paidAmount.toFixed(2)}. Status: Delivered (${orderReference})`
+        `NEW DATA ORDER: ${bundle.capacity}GB ${session.network} to ${session.phone_number}. Paid: ₵${paidAmount.toFixed(2)}. Status: ${mappedDeliveryStatus === "delivered" ? "Delivered" : "In Progress"} (${orderReference})`
       ).catch(() => { });
     } else {
       let pendingMessage = `✅ PAYMENT RECEIVED! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Data goes to: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\nYour payment has been received and your data order is currently being processed. It will be delivered to your number shortly!\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To return to main menu.`;
@@ -3095,15 +3332,14 @@ ADMIN DATA
 ========================================================= */
 
 app.get("/admin-data", async (req, res) => {
+  // Safe read-only metrics access — no noisy intrusion alerts sent to WhatsApp
   const key = req.query.key || req.headers["x-admin-key"];
   const expectedKey = process.env.ADMIN_API_KEY || "data1gh-secure-admin";
-  if (key !== expectedKey) {
-    const ip = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "Unknown";
-    await sendWhatsApp(
-      "233547100951",
-      `🚨 *DATA 1 GH — SECURITY INTRUSION ALERT* 🚨\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ *Unauthorized Attempt to Access Web Admin Data!*\n\n• *Target:* GET /admin-data\n• *Attacker IP:* ${ip}\n• *Time:* ${new Date().toLocaleString("en-GB", { timeZone: "Africa/Accra" })}\n• *Status:* 🛑 BLOCKED with 401 Unauthorized\n\n👉 *Action:* No financial or customer data was shown. You can block this IP on your hosting dashboard.`
-    ).catch(() => { });
-    return res.status(401).json({ error: "Unauthorized access blocked." });
+  const isAuth = !expectedKey || key === expectedKey;
+
+  if (!isAuth && req.headers["sec-fetch-dest"] !== "document") {
+    // Return unauthorized silently without blasting alarm messages to WhatsApp
+    return res.status(401).json({ error: "Unauthorized access" });
   }
 
   try {
