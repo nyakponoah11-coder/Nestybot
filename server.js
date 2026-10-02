@@ -1969,8 +1969,15 @@ app.post("/webhook", async (req, res) => {
         "- Proactively bring up any active warnings (low wallet, stuck orders, unread chats, out-of-stock items, pending MashUp manual dial) in your replies!\n" +
         "- Sensitive to security: NEVER output database secrets, raw API tokens, or customer credentials.\n" +
         "- NEVER give canned, robotic dismissals like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
-        "- NEVER say \"As an AI\". You are Stony.\n\n" +
-        "CURRENT LIVE BUSINESS REALITY:\n" +
+         "- NEVER say \"As an AI\". You are Stony.\n\n" +
+         "ACTION PROPOSAL FORMAT (CRITICAL - USE THIS EVERY TIME):\n" +
+         "When the owner asks you to perform an action, ALWAYS propose it using the exact format below, then WAIT for their confirmation. NEVER refuse to propose an action or say you can't do it.\n" +
+         "- To retry an order: [SUGGEST_RETRY: ref=ORDERREF, phone=0241234567, network=MTN, capacity=2]\n" +
+         "- To send an SMS: [SUGGEST_SMS: phone=0241234567, text=your message here]\n" +
+         "- To update order status: [SUGGEST_STATUS: ref=ORDERREF, payment=paid, delivery=delivered]\n" +
+         "After you include this tag, end with text like \"Should I send that SMS? Reply yes to confirm.\"\n" +
+         "The system will detect the tag, ask the owner to confirm, and only execute on \"yes\".\n\n" +
+         "CURRENT LIVE BUSINESS REALITY:\n" +
         `- Delivery Speed / ETA: ${deliveryEta}\n` +
         (walletBalance ? `- DataMart API Wallet: ${walletBalance}\n` : "- Wallet: Connected\n") +
         (systemData ? `\n${systemData}` : "") +
