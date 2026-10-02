@@ -7,7 +7,7 @@ const { simpleParser } = require("mailparser");
 const app = express();
 app.use(express.json());
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 /* =========================================================
 ENV
@@ -23,451 +23,10 @@ const STORE_API_URL = process.env.STORE_API_URL || "https://data-ease-shop-1.ver
 const SCRATCH_REQUIRED_ORDERS = 5;
 const SCRATCH_ONE_GB_PROBABILITY = 0.90;
 
-function createInMemorySupabase() {
-  const tables = new Map();
-
-  const now = new Date();
-  const initialOrders = [
-    {
-      id: "ord-seed-01",
-      ref: "DAT-YELLO-89102",
-      reference: "DAT-YELLO-89102",
-      phone_number: "0244123456",
-      whatsapp_phone: "0244123456",
-      momo_number: "0244123456",
-      network: "MTN",
-      bundle: "5",
-      capacity: "5",
-      amount: 23.50,
-      status: "completed",
-      payment_status: "paid",
-      delivery_status: "delivered",
-      created_at: new Date(now.getTime() - 25 * 60 * 1000).toISOString(),
-      updated_at: new Date(now.getTime() - 24 * 60 * 1000).toISOString()
-    },
-    {
-      id: "ord-seed-02",
-      ref: "DAT-TELE-77142",
-      reference: "DAT-TELE-77142",
-      phone_number: "0208123987",
-      whatsapp_phone: "0208123987",
-      momo_number: "0208123987",
-      network: "TELECEL",
-      bundle: "1",
-      capacity: "10",
-      amount: 38.50,
-      status: "completed",
-      payment_status: "paid",
-      delivery_status: "delivered",
-      created_at: new Date(now.getTime() - 70 * 60 * 1000).toISOString(),
-      updated_at: new Date(now.getTime() - 69 * 60 * 1000).toISOString()
-    },
-    {
-      id: "ord-seed-03",
-      ref: "DAT-FAIL-90112",
-      reference: "DAT-FAIL-90112",
-      phone_number: "0249876543",
-      whatsapp_phone: "0249876543",
-      momo_number: "0249876543",
-      network: "MTN",
-      bundle: "9",
-      capacity: "15",
-      amount: 63.50,
-      status: "failed",
-      payment_status: "failed",
-      delivery_status: "failed",
-      failure_reason: "Customer mobile money wallet had insufficient funds (Declined by MTN MoMo)",
-      failure_stage: "prompt_declined",
-      created_at: new Date(now.getTime() - 40 * 60 * 1000).toISOString(),
-      updated_at: new Date(now.getTime() - 39 * 60 * 1000).toISOString()
-    },
-    {
-      id: "ord-seed-04",
-      ref: "DAT-AT-66519",
-      reference: "DAT-AT-66519",
-      phone_number: "0276543210",
-      whatsapp_phone: "0276543210",
-      momo_number: "0276543210",
-      network: "AIRTELTIGO",
-      bundle: "3",
-      capacity: "3",
-      amount: 15.00,
-      status: "completed",
-      payment_status: "paid",
-      delivery_status: "delivered",
-      created_at: new Date(now.getTime() - 130 * 60 * 1000).toISOString(),
-      updated_at: new Date(now.getTime() - 128 * 60 * 1000).toISOString()
-    },
-    {
-      id: "ord-seed-05",
-      ref: "DAT-FAIL-90128",
-      reference: "DAT-FAIL-90128",
-      phone_number: "0501237890",
-      whatsapp_phone: "0501237890",
-      momo_number: "0501237890",
-      network: "TELECEL",
-      bundle: "4",
-      capacity: "20",
-      amount: 27.90,
-      status: "failed",
-      payment_status: "failed",
-      delivery_status: "failed",
-      failure_reason: "MoMo prompt timed out: Customer did not approve or enter PIN on phone (*110# prompt expired)",
-      failure_stage: "prompt_timeout",
-      created_at: new Date(now.getTime() - 95 * 60 * 1000).toISOString(),
-      updated_at: new Date(now.getTime() - 94 * 60 * 1000).toISOString()
-    },
-    {
-      id: "ord-seed-06",
-      ref: "DAT-YELLO-89140",
-      reference: "DAT-YELLO-89140",
-      phone_number: "0559988112",
-      whatsapp_phone: "0559988112",
-      momo_number: "0559988112",
-      network: "MTN",
-      bundle: "8",
-      capacity: "10",
-      amount: 44.00,
-      status: "completed",
-      payment_status: "paid",
-      delivery_status: "delivered",
-      created_at: new Date(now.getTime() - 190 * 60 * 1000).toISOString(),
-      updated_at: new Date(now.getTime() - 188 * 60 * 1000).toISOString()
-    },
-    {
-      id: "ord-seed-07",
-      ref: "DAT-FAIL-90155",
-      reference: "DAT-FAIL-90155",
-      phone_number: "0543322110",
-      whatsapp_phone: "0543322110",
-      momo_number: "0543322110",
-      network: "MTN",
-      bundle: "2",
-      capacity: "2",
-      amount: 9.50,
-      status: "failed",
-      payment_status: "failed",
-      delivery_status: "failed",
-      failure_reason: "Payment cancelled: User rejected approval prompt on device",
-      failure_stage: "user_cancelled",
-      created_at: new Date(now.getTime() - 160 * 60 * 1000).toISOString(),
-      updated_at: new Date(now.getTime() - 159 * 60 * 1000).toISOString()
-    },
-    {
-      id: "ord-seed-08",
-      ref: "DAT-PEND-90201",
-      reference: "DAT-PEND-90201",
-      phone_number: "0591122334",
-      whatsapp_phone: "0591122334",
-      momo_number: "0591122334",
-      network: "MTN",
-      bundle: "4",
-      capacity: "4",
-      amount: 18.50,
-      status: "pending",
-      payment_status: "pending",
-      delivery_status: "pending",
-      failure_reason: null,
-      created_at: new Date(now.getTime() - 5 * 60 * 1000).toISOString(),
-      updated_at: new Date(now.getTime() - 5 * 60 * 1000).toISOString()
-    }
-  ];
-
-  tables.set("orders", initialOrders);
-  tables.set("sessions", [
-    { phone: "0244123456", step: 5, network: "MTN", bundle: "5", ref: "DAT-YELLO-89102" },
-    { phone: "0208123987", step: 5, network: "TELECEL", bundle: "1", ref: "DAT-TELE-77142" },
-    { phone: "0591122334", step: 5, network: "MTN", bundle: "4", ref: "DAT-PEND-90201" }
-  ]);
-
-  function getTable(name) {
-    if (!tables.has(name)) {
-      tables.set(name, []);
-    }
-    return tables.get(name);
-  }
-
-  return {
-    from(tableName) {
-      const records = getTable(tableName);
-      let filters = [];
-      let sortFn = null;
-      let limitCount = null;
-      let isSingle = false;
-      let isMaybeSingle = false;
-      let pendingInsert = null;
-      let pendingUpdate = null;
-
-      const queryBuilder = {
-        select(cols = "*") {
-          return queryBuilder;
-        },
-        eq(col, val) {
-          filters.push(r => r[col] == val);
-          return queryBuilder;
-        },
-        in(col, vals) {
-          filters.push(r => Array.isArray(vals) && vals.includes(r[col]));
-          return queryBuilder;
-        },
-        gte(col, val) {
-          filters.push(r => r[col] >= val);
-          return queryBuilder;
-        },
-        order(col, { ascending = true } = {}) {
-          sortFn = (a, b) => {
-            if (a[col] < b[col]) return ascending ? -1 : 1;
-            if (a[col] > b[col]) return ascending ? 1 : -1;
-            return 0;
-          };
-          return queryBuilder;
-        },
-        limit(n) {
-          limitCount = n;
-          return queryBuilder;
-        },
-        single() {
-          isSingle = true;
-          return queryBuilder;
-        },
-        maybeSingle() {
-          isMaybeSingle = true;
-          return queryBuilder;
-        },
-        insert(data) {
-          pendingInsert = Array.isArray(data) ? data : [data];
-          return queryBuilder;
-        },
-        update(data) {
-          pendingUpdate = data;
-          return queryBuilder;
-        },
-        then(resolve, reject) {
-          try {
-            if (pendingInsert) {
-              const inserted = [];
-              for (const item of pendingInsert) {
-                const rec = {
-                  id: item.id || `mock-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-                  created_at: new Date().toISOString(),
-                  ...item
-                };
-                records.push(rec);
-                inserted.push(rec);
-              }
-              const res = { data: isSingle || isMaybeSingle ? inserted[0] || null : inserted, error: null };
-              return Promise.resolve(resolve(res));
-            }
-
-            if (pendingUpdate) {
-              let updated = [];
-              for (let i = 0; i < records.length; i++) {
-                const rec = records[i];
-                if (filters.every(f => f(rec))) {
-                  Object.assign(rec, pendingUpdate);
-                  updated.push(rec);
-                }
-              }
-              const res = { data: isSingle || isMaybeSingle ? updated[0] || null : updated, error: null };
-              return Promise.resolve(resolve(res));
-            }
-
-            let result = records.filter(r => filters.every(f => f(r)));
-            if (sortFn) result.sort(sortFn);
-            if (limitCount !== null) result = result.slice(0, limitCount);
-
-            if (isSingle) {
-              return Promise.resolve(resolve({ data: result[0] || null, error: result.length ? null : new Error("Row not found") }));
-            }
-            if (isMaybeSingle) {
-              return Promise.resolve(resolve({ data: result[0] || null, error: null }));
-            }
-            return Promise.resolve(resolve({ data: result, error: null }));
-          } catch (err) {
-            return Promise.resolve(resolve({ data: null, error: err }));
-          }
-        }
-      };
-
-      return queryBuilder;
-    }
-  };
-}
-
-/* =========================================================
-ACTIVITY FEED & FAILED PAYMENTS LOGGER
-========================================================= */
-
-const recentActivityLogs = [];
-const failedPayments = [];
-
-function recordActivityLog(type, details = {}) {
-  const item = {
-    id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    time: new Date().toISOString(),
-    type,
-    status: details.status || (type.includes("SUCCESS") ? "success" : type.includes("FAIL") ? "failed" : type.includes("PENDING") || type.includes("PROMPT") ? "warning" : "info"),
-    message: details.message || `${type} recorded`,
-    phone: details.phone || details.customer || null,
-    reference: details.reference || details.ref || null,
-    network: details.network || null,
-    amount: details.amount != null ? Number(details.amount) : null,
-    reason: details.reason || details.error || null,
-    details
-  };
-  recentActivityLogs.unshift(item);
-  if (recentActivityLogs.length > 300) recentActivityLogs.pop();
-  return item;
-}
-
-function recordFailedPayment(entry = {}) {
-  const item = {
-    id: `fail-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    time: new Date().toISOString(),
-    phone: normalizePhone(entry.phone || entry.customer || ""),
-    momo_number: normalizePhone(entry.momo_number || entry.phone || ""),
-    reference: entry.reference || entry.ref || `FAIL-${Date.now()}`,
-    network: entry.network || "UNKNOWN",
-    bundle: entry.bundle || entry.capacity || "Data",
-    amount: Number(entry.amount || 0),
-    reason: entry.reason || entry.gateway_response || "Payment was not successful or was declined",
-    stage: entry.stage || "charge_prompt",
-    status: "failed",
-    details: entry.details || null
-  };
-  failedPayments.unshift(item);
-  if (failedPayments.length > 300) failedPayments.pop();
-
-  recordActivityLog("PAYMENT_FAILED", {
-    message: `Payment failed for ${item.phone} (₵${item.amount.toFixed(2)}): ${item.reason}`,
-    phone: item.phone,
-    reference: item.reference,
-    network: item.network,
-    amount: item.amount,
-    reason: item.reason,
-    status: "failed"
-  });
-
-  return item;
-}
-
-// Seed initial sample failure logs and activities
-const _seedNow = new Date();
-const _seedFailures = [
-  {
-    id: "fail-seed-01",
-    time: new Date(_seedNow.getTime() - 40 * 60 * 1000).toISOString(),
-    phone: "0249876543",
-    momo_number: "0249876543",
-    reference: "DAT-FAIL-90112",
-    network: "MTN",
-    bundle: "15GB",
-    amount: 63.50,
-    reason: "Customer mobile money wallet had insufficient funds (Declined by MTN MoMo)",
-    stage: "prompt_declined",
-    status: "failed"
-  },
-  {
-    id: "fail-seed-02",
-    time: new Date(_seedNow.getTime() - 95 * 60 * 1000).toISOString(),
-    phone: "0501237890",
-    momo_number: "0501237890",
-    reference: "DAT-FAIL-90128",
-    network: "TELECEL",
-    bundle: "20GB",
-    amount: 27.90,
-    reason: "MoMo prompt timed out: Customer did not approve or enter PIN on phone (*110# prompt expired)",
-    stage: "prompt_timeout",
-    status: "failed"
-  },
-  {
-    id: "fail-seed-03",
-    time: new Date(_seedNow.getTime() - 160 * 60 * 1000).toISOString(),
-    phone: "0543322110",
-    momo_number: "0543322110",
-    reference: "DAT-FAIL-90155",
-    network: "MTN",
-    bundle: "2GB",
-    amount: 9.50,
-    reason: "Payment cancelled: User rejected approval prompt on device",
-    stage: "user_cancelled",
-    status: "failed"
-  }
-];
-failedPayments.push(..._seedFailures);
-
-recentActivityLogs.push(
-  {
-    id: "act-seed-01",
-    time: new Date(_seedNow.getTime() - 5 * 60 * 1000).toISOString(),
-    type: "MOMO_PROMPT_SENT",
-    status: "warning",
-    message: "MoMo payment prompt sent to 0591122334 for ₵18.50 (MTN 4GB)",
-    phone: "0591122334",
-    reference: "DAT-PEND-90201",
-    network: "MTN",
-    amount: 18.50
-  },
-  {
-    id: "act-seed-02",
-    time: new Date(_seedNow.getTime() - 25 * 60 * 1000).toISOString(),
-    type: "PAYMENT_SUCCESS",
-    status: "success",
-    message: "Payment received of ₵23.50 from 0244123456 (MTN 5GB)",
-    phone: "0244123456",
-    reference: "DAT-YELLO-89102",
-    network: "MTN",
-    amount: 23.50
-  },
-  {
-    id: "act-seed-03",
-    time: new Date(_seedNow.getTime() - 24 * 60 * 1000).toISOString(),
-    type: "DATAMART_DELIVERY_SUCCESS",
-    status: "success",
-    message: "DataMart Fast Lane order delivered successfully for 0244123456",
-    phone: "0244123456",
-    reference: "DAT-YELLO-89102",
-    network: "MTN",
-    amount: 23.50
-  },
-  {
-    id: "act-seed-04",
-    time: new Date(_seedNow.getTime() - 40 * 60 * 1000).toISOString(),
-    type: "PAYMENT_FAILED",
-    status: "failed",
-    message: "Payment failed for 0249876543 (₵63.50): Customer mobile money wallet had insufficient funds (Declined by MTN MoMo)",
-    phone: "0249876543",
-    reference: "DAT-FAIL-90112",
-    network: "MTN",
-    amount: 63.50,
-    reason: "Customer mobile money wallet had insufficient funds (Declined by MTN MoMo)"
-  },
-  {
-    id: "act-seed-05",
-    time: new Date(_seedNow.getTime() - 70 * 60 * 1000).toISOString(),
-    type: "PAYMENT_SUCCESS",
-    status: "success",
-    message: "Payment received of ₵38.50 from 0208123987 (Telecel 10GB)",
-    phone: "0208123987",
-    reference: "DAT-TELE-77142",
-    network: "TELECEL",
-    amount: 38.50
-  }
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
 );
-
-let supabase;
-try {
-  if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY && /^https?:\/\//i.test(process.env.SUPABASE_URL)) {
-    supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-    console.log("Connected to Supabase client");
-  } else {
-    console.warn("[AI Studio] Supabase credentials not configured — using in-memory mock store");
-    supabase = createInMemorySupabase();
-  }
-} catch (e) {
-  console.warn("[AI Studio] Supabase init failed — using in-memory mock store:", e.message);
-  supabase = createInMemorySupabase();
-}
 
 /* =========================================================
 DATAMART API
@@ -985,6 +544,69 @@ async function sendWhatsApp(to, text) {
 }
 
 /* =========================================================
+SEND ADMIN SMS (ARKESEL)
+========================================================= */
+
+async function sendAdminSms(message) {
+  try {
+    let arkeselKey = process.env.ARKESEL_API_KEY;
+    let adminPhone = process.env.ADMIN_ALERT_PHONE || "0547100951";
+    let senderId = process.env.ARKESEL_SENDER_ID || "Data1gh";
+
+    if (supabase) {
+      try {
+        const { data: sRows } = await supabase
+          .from("settings")
+          .select("key,value")
+          .in("key", ["admin_alert_phone", "support_phone", "arkesel_api_key", "ARKESEL_API_KEY", "arkesel_sender_id"]);
+        if (sRows && sRows.length > 0) {
+          const smap = Object.fromEntries(sRows.map((s) => [s.key, s.value]));
+          if (smap.arkesel_api_key || smap.ARKESEL_API_KEY) {
+            arkeselKey = smap.arkesel_api_key || smap.ARKESEL_API_KEY;
+          }
+          if (smap.admin_alert_phone || smap.support_phone) {
+            adminPhone = smap.admin_alert_phone || smap.support_phone;
+          }
+          if (smap.arkesel_sender_id) {
+            senderId = smap.arkesel_sender_id;
+          }
+        }
+      } catch (err) {
+        console.error("Failed to fetch SMS settings:", err.message);
+      }
+    }
+
+    if (!arkeselKey) {
+      console.warn("⚠️ No ARKESEL_API_KEY configured, skipping SMS alert.");
+      return;
+    }
+
+    let target = String(adminPhone).replace(/\D/g, "");
+    if (target.startsWith("233") && target.length === 12) target = "0" + target.slice(3);
+
+    const res = await axios.post(
+      "https://sms.arkesel.com/api/v2/sms/send",
+      {
+        sender: senderId,
+        message: message,
+        recipients: [target]
+      },
+      {
+        headers: {
+          "api-key": arkeselKey,
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        timeout: 10000
+      }
+    );
+    console.log("✅ Admin SMS sent successfully:", res.data?.message || res.status);
+  } catch (err) {
+    console.error("❌ Failed to send Admin SMS:", err.response?.data || err.message);
+  }
+}
+
+/* =========================================================
 NORMALIZE PHONE & MASKING
 ========================================================= */
 
@@ -1453,14 +1075,6 @@ async function initiateMomoCharge(from, session, bundle) {
 
     if (status === "send_otp") {
       await supabase.from("sessions").update({ ref, step: 9 }).eq("phone", from);
-      recordActivityLog("MOMO_OTP_REQUIRED", {
-        phone: from,
-        momo_number: session.momo_number,
-        reference: ref,
-        network: session.network,
-        amount: bundle.price,
-        message: `OTP / Voucher verification requested for ${session.momo_number} (₵${bundle.price.toFixed(2)})`
-      });
 
       if (provider === "vod") {
         return sendWhatsApp(
@@ -1477,17 +1091,6 @@ async function initiateMomoCharge(from, session, bundle) {
 
     if (status === "pay_offline" || status === "pending" || status === "success") {
       await supabase.from("sessions").update({ ref, step: 5 }).eq("phone", from);
-
-      recordActivityLog(status === "success" ? "PAYMENT_SUCCESS" : "MOMO_PROMPT_SENT", {
-        phone: from,
-        momo_number: session.momo_number,
-        reference: ref,
-        network: session.network,
-        amount: bundle.price,
-        message: status === "success" 
-          ? `Instant payment received: ₵${bundle.price.toFixed(2)} from ${session.momo_number}`
-          : `MoMo approval prompt sent to ${session.momo_number} for ₵${bundle.price.toFixed(2)} (${session.network})`
-      });
 
       if (status === "success") {
         return sendWhatsApp(from, `✅ Payment received of ₵${bundle.price.toFixed(2)}! Processing your order now...`);
@@ -1513,34 +1116,9 @@ async function initiateMomoCharge(from, session, bundle) {
       );
     }
 
-    if (status === "failed") {
-      recordFailedPayment({
-        phone: from,
-        momo_number: session.momo_number,
-        reference: ref,
-        network: session.network,
-        bundle: bundle.capacity,
-        amount: bundle.price,
-        reason: displayText || chargeData.gateway_response || "MoMo charge rejected by provider or insufficient balance",
-        stage: "prompt_declined",
-        details: chargeData
-      });
-    }
-
     console.warn("MOMO CHARGE UNEXPECTED STATUS:", status, "Falling back to payment link...");
   } catch (e) {
     console.error("MOMO CHARGE ERROR:", e.response?.data || e.message);
-    recordFailedPayment({
-      phone: from,
-      momo_number: session.momo_number,
-      reference: ref,
-      network: session.network,
-      bundle: bundle.capacity,
-      amount: bundle.price,
-      reason: e.response?.data?.message || e.message || "Failed to trigger mobile money prompt on phone",
-      stage: "prompt_initiation",
-      details: e.response?.data || null
-    });
   }
 
   // Fallback: Generate Paystack Payment Link if direct prompt failed/rejected
@@ -1549,29 +1127,11 @@ async function initiateMomoCharge(from, session, bundle) {
 
   if (authUrl) {
     await supabase.from("sessions").update({ ref: fallbackRef, step: 5 }).eq("phone", from);
-    recordActivityLog("PAYMENT_LINK_SENT", {
-      phone: from,
-      reference: fallbackRef,
-      network: session.network,
-      amount: bundle.price,
-      message: `Prompt fallback: Checkout link generated for ${session.momo_number} (₵${bundle.price.toFixed(2)})`
-    });
     return sendWhatsApp(
       from,
       `💳 COMPLETE YOUR PAYMENT\n\nWe could not trigger an automatic prompt to ${session.momo_number}.\n\n👉 Tap the secure link below to pay directly:\n${authUrl}\n\nAmount: ₵${bundle.price.toFixed(2)}\nYou can pay with MTN MoMo, Telecel, AirtelTigo, or Card.\n\n⏳ Once paid, your order will be processed automatically!`
     );
   }
-
-  recordFailedPayment({
-    phone: from,
-    momo_number: session.momo_number,
-    reference: fallbackRef,
-    network: session.network,
-    bundle: bundle.capacity,
-    amount: bundle.price,
-    reason: "Unable to trigger prompt and payment link generation failed",
-    stage: "checkout_link_failed"
-  });
 
   await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
   return sendWhatsApp(from, `❌ We could not start payment right now.\n\nPlease reply HI to try again.`);
@@ -1994,6 +1554,196 @@ app.post("/webhook", async (req, res) => {
         );
         return;
       }
+    }
+
+    /* =====================================================
+    STONY OWNER AI — WhatsApp Owner Mode
+    Rules:
+      - "hi" / "hello" / "start" → normal customer menu (fall through)
+      - "stony"                  → activate AI mode (step 99)
+      - step 99 + "hi"           → exit AI mode, show menu
+      - step 99 + anything else  → Stony AI replies
+    ===================================================== */
+    const normFrom = String(from || "").replace(/\D/g, "");
+    const isOwner =
+      normFrom === "233547100951" ||
+      normFrom === "0547100951" ||
+      normFrom.endsWith("547100951");
+
+    if (isOwner) {
+      // Load owner session to check current mode
+      const { data: ownerSession } = await supabase
+        .from("sessions")
+        .select("step")
+        .eq("phone", from)
+        .maybeSingle();
+
+      const inStonyMode = ownerSession?.step === 99;
+
+      // "hi" / "hello" / "start" always exits AI mode and shows the menu
+      if (/^(hi|hello|start)$/i.test(text)) {
+        if (inStonyMode) {
+          await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
+        }
+        // Fall through to the normal customer bot below
+      }
+
+      // "stony" → activate AI mode
+      else if (/^stony$/i.test(text)) {
+        if (!ownerSession) {
+          await supabase.from("sessions").insert([{ phone: from, step: 99 }]);
+        } else {
+          await supabase.from("sessions").update({ step: 99 }).eq("phone", from);
+        }
+        return sendWhatsApp(from, `Hey boss! 👑 Stony here. What's up? You can ask me anything — orders, balance, delivery status, or just talk shop. Send *hi* anytime to go back to the menu.`);
+      }
+
+      // In AI mode (step 99) → route everything to Stony AI
+      else if (inStonyMode) {
+        console.log("👑 OWNER STONY AI MODE — message:", text);
+
+        // Fetch Gemini / OpenAI key from settings or env
+        let geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "";
+        let openAiKey = process.env.OPENAI_API_KEY || "";
+        try {
+          const { data: aiRows } = await supabase
+            .from("settings")
+            .select("key,value")
+            .in("key", ["gemini_api_key", "GEMINI_API_KEY", "openai_api_key", "OPENAI_API_KEY"]);
+          const aiMap = Object.fromEntries((aiRows || []).map((r) => [r.key, r.value]));
+          if (!geminiKey) geminiKey = aiMap.gemini_api_key || aiMap.GEMINI_API_KEY || "";
+          if (!openAiKey) openAiKey = aiMap.openai_api_key || aiMap.OPENAI_API_KEY || "";
+          if (!geminiKey && openAiKey && openAiKey.startsWith("AIzaSy")) {
+            geminiKey = openAiKey;
+            openAiKey = "";
+          }
+        } catch (err) {
+          console.warn("Owner AI: could not fetch AI keys:", err.message);
+        }
+
+        // Fetch live delivery ETA
+        let deliveryEta = "~5-30 minutes";
+        try {
+          if (DATA_API_KEY) {
+            const trackerRes = await axios.get(
+              "https://api.datamartgh.shop/api/developer/delivery-tracker",
+              { headers: { "X-API-Key": DATA_API_KEY }, timeout: 4000 }
+            ).catch(() => null);
+            const tData = trackerRes?.data?.data || {};
+            if (tData?.lastDelivered?.placedAt && tData?.lastDelivered?.deliveredAt) {
+              const mins = Math.max(1, Math.round(
+                (new Date(tData.lastDelivered.deliveredAt).getTime() - new Date(tData.lastDelivered.placedAt).getTime()) / 60000
+              ));
+              deliveryEta = `~${mins} minute(s)`;
+            }
+          }
+        } catch (_) {}
+
+        // Fetch wallet balance
+        let walletBalance = "";
+        try {
+          if (DATA_API_KEY) {
+            const balRes = await axios.get(
+              `${DATAMART_BASE}/user/balance`,
+              { headers: { "x-api-key": DATA_API_KEY }, timeout: 4000 }
+            ).catch(() => null);
+            const bal = balRes?.data?.data?.walletBalance ?? balRes?.data?.walletBalance;
+            if (bal != null) walletBalance = `GH₵ ${Number(bal).toFixed(2)}`;
+          }
+        } catch (_) {}
+
+        // Fetch last 3 orders
+        let recentOrdersCtx = "";
+        try {
+          const { data: recentOrders } = await supabase
+            .from("orders")
+            .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at")
+            .order("created_at", { ascending: false })
+            .limit(3);
+          if (recentOrders && recentOrders.length > 0) {
+            recentOrdersCtx = "RECENT ORDERS:\n" + recentOrders.map((o, i) =>
+              `${i + 1}. Ref: ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | ₵${o.amount} | ${o.delivery_status}`
+            ).join("\n");
+          }
+        } catch (_) {}
+
+        const ownerSystemPrompt =
+          "You are Stony, the AI assistant built into data1.gh — a data reselling platform in Ghana hosted on Vercel.\n" +
+          "You are in OWNER MODE, speaking directly with the site owner on WhatsApp.\n\n" +
+          "PERSONALITY:\n" +
+          "- Relaxed, warm, conversational — like a close friend talking shop.\n" +
+          "- Never robotic or corporate. Casual English, Ghanaian slang is fine.\n" +
+          "- For everyday chat: stay casual and warm.\n" +
+          "- When something is BROKEN or URGENT: shift to a serious but still human tone — describe the problem clearly and give a practical fix.\n\n" +
+          "PROACTIVE ALERTS (flag without being asked when relevant):\n" +
+          "- Failed payments, low DataMart wallet balance, stuck orders, API downtime.\n\n" +
+          "DATA PRIVACY: All customer/transaction data is strictly confidential.\n\n" +
+          "PLATFORM: data1.gh (Vercel) | DataMart Ghana | Paystack MoMo | Arkesel SMS | Supabase | WhatsApp bot on Render.\n\n" +
+          "LIVE SYSTEM STATUS:\n" +
+          `- Delivery speed: ${deliveryEta}\n` +
+          (walletBalance ? `- DataMart wallet: ${walletBalance}\n` : "") +
+          (recentOrdersCtx ? `\n${recentOrdersCtx}\n` : "") +
+          "\nKeep replies short unless the owner needs a detailed breakdown. Owner can send *hi* to exit back to the customer menu.";
+
+        let aiReply = "";
+
+        // Try Gemini
+        if (geminiKey) {
+          try {
+            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`;
+            const geminiRes = await axios.post(geminiUrl, {
+              contents: [{ role: "user", parts: [{ text }] }],
+              systemInstruction: { parts: [{ text: ownerSystemPrompt }] },
+              generationConfig: { maxOutputTokens: 350, temperature: 0.65 }
+            }, { headers: { "Content-Type": "application/json" }, timeout: 10000 });
+            aiReply = geminiRes.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+          } catch (gErr) {
+            console.warn("Owner Gemini error:", gErr.response?.data?.error?.message || gErr.message);
+          }
+        }
+
+        // Fallback to OpenAI
+        if (!aiReply && openAiKey) {
+          try {
+            const oaRes = await axios.post("https://api.openai.com/v1/chat/completions", {
+              model: "gpt-4o-mini",
+              messages: [
+                { role: "system", content: ownerSystemPrompt },
+                { role: "user", content: text }
+              ],
+              max_tokens: 300,
+              temperature: 0.65
+            }, { headers: { Authorization: `Bearer ${openAiKey}`, "Content-Type": "application/json" }, timeout: 10000 });
+            aiReply = oaRes.data?.choices?.[0]?.message?.content?.trim() || "";
+          } catch (oaErr) {
+            console.warn("Owner OpenAI error:", oaErr.response?.data?.error?.message || oaErr.message);
+          }
+        }
+
+        // Smart fallback if no AI key
+        if (!aiReply) {
+          const lowerText = text.toLowerCase();
+          if (/\b(balance|wallet)\b/i.test(lowerText)) {
+            aiReply = walletBalance
+              ? `DataMart wallet is currently *${walletBalance}* boss.`
+              : "Couldn't fetch balance right now. Check the DataMart dashboard.";
+          } else if (/\b(order|pending|failed|delivery|status)\b/i.test(lowerText)) {
+            aiReply = recentOrdersCtx
+              ? `Here's what I see boss:\n\n${recentOrdersCtx}`
+              : "No recent orders found right now.";
+          } else {
+            aiReply = `On it boss. Delivery speed: ${deliveryEta}.${walletBalance ? ` Wallet: ${walletBalance}.` : ""} Reply *Admin* for the full dashboard.`;
+          }
+        }
+
+        aiReply = aiReply
+          .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony")
+          .replace(/\bdatamart\b/gi, "DataMart");
+
+        return sendWhatsApp(from, aiReply);
+      }
+
+      // Owner sent something else (not "stony", not in AI mode) — fall through to customer bot
     }
 
     let { data: session } = await supabase
@@ -2765,40 +2515,6 @@ app.post("/paystack-webhook", async (req, res) => {
     });
 
     if (!event || event.event !== "charge.success") {
-      if (event && (event.event === "charge.failed" || event.data?.status === "failed")) {
-        const ref = event.data?.reference || "N/A";
-        const failAmount = Number(event.data?.amount || 0) / 100;
-        const reason = event.data?.gateway_response || event.data?.message || "Customer payment failed / declined by mobile money provider";
-        const customer = event.data?.customer?.phone || event.data?.customer?.email || "";
-
-        recordFailedPayment({
-          reference: ref,
-          amount: failAmount,
-          reason,
-          phone: customer,
-          stage: "paystack_webhook",
-          details: event.data
-        });
-
-        try {
-          if (ref !== "N/A") {
-            await supabase.from("sessions").update({
-              status: "payment_failed",
-              failure_reason: reason,
-              updated_at: new Date().toISOString()
-            }).eq("ref", ref);
-
-            await supabase.from("orders").update({
-              status: "failed",
-              payment_status: "failed",
-              failure_reason: reason,
-              updated_at: new Date().toISOString()
-            }).eq("ref", ref);
-          }
-        } catch (e) {
-          console.error("FAILED ORDER UPDATE ERROR:", e.message);
-        }
-      }
       recordWebhookLog("IGNORED", { reason: "event is not charge.success", event: event?.event });
       return;
     }
@@ -2811,11 +2527,6 @@ app.post("/paystack-webhook", async (req, res) => {
 
     const paidAmount = Number(event.data?.amount || 0) / 100;
     console.log("💰 ACTUAL AMOUNT PAID:", paidAmount);
-    recordActivityLog("PAYMENT_SUCCESS", {
-      reference: ref,
-      amount: paidAmount,
-      message: `Paystack confirmed payment of ₵${paidAmount.toFixed(2)} for ${ref}`
-    });
 
     // 1. Primary: Look up session by exact ref
     let { data: session } = await supabase
@@ -2829,7 +2540,7 @@ app.post("/paystack-webhook", async (req, res) => {
       const { data: webOrder } = await supabase
         .from("orders")
         .select("*")
-        .or(`reference.eq.${ref},ref.eq.${ref}`)
+        .or(`reference.eq.${ref},datamart_reference.eq.${ref}`)
         .maybeSingle();
 
       if (webOrder) {
@@ -2879,13 +2590,14 @@ app.post("/paystack-webhook", async (req, res) => {
             datamart_reference: dmRef,
             updated_at: new Date().toISOString()
           })
-          .or(`reference.eq.${ref},ref.eq.${ref}`);
+          .or(`reference.eq.${ref},datamart_reference.eq.${ref}`);
 
         // Send alert to admin about successful web sale & delivery
         await sendWhatsApp(
           "233547100951",
           `🛍️ NEW WEBSITE DATA ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📶 Network: ${webOrder.network || "Data"}\n📦 Capacity: ${capacity}GB\n📱 Recipient: ${phone}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n\n${dmSuccess ? "✅ Delivered automatically via DataMart!" : "⏳ Marked Paid — Pending DataMart dispatch."}`
         );
+        sendAdminSms(`[DataEase] Web Data Order Paid: ₵${paidAmount.toFixed(2)} (${capacity}GB ${webOrder.network || "Data"} to ${phone}). Ref: ${ref}`).catch(() => {});
         return;
       }
     }
@@ -2895,7 +2607,7 @@ app.post("/paystack-webhook", async (req, res) => {
       const { data: webService } = await supabase
         .from("service_orders")
         .select("*")
-        .or(`reference.eq.${ref},ref.eq.${ref}`)
+        .eq("reference", ref)
         .maybeSingle();
 
       if (webService) {
@@ -2907,13 +2619,14 @@ app.post("/paystack-webhook", async (req, res) => {
             delivery_status: webService.service === "netflix" ? "active" : "pending",
             updated_at: new Date().toISOString()
           })
-          .or(`reference.eq.${ref},ref.eq.${ref}`);
+          .eq("reference", ref);
 
         const serviceName = webService.service === "netflix" ? "🎬 NETFLIX 30-DAY ACCESS" : webService.service === "mashup" ? "📦 MASHUP BUNDLE" : "✨ AFA REGISTRATION";
         await sendWhatsApp(
           "233547100951",
           `🎉 NEW WEBSITE ${serviceName} PAID!\n\n🆔 Reference: ${ref}\n📱 Phone: ${webService.customer_phone || "N/A"}\n💰 Amount: ₵${paidAmount.toFixed(2)}`
         );
+        sendAdminSms(`[DataEase] Web ${webService.service?.toUpperCase()} Paid: ₵${paidAmount.toFixed(2)} by ${webService.customer_phone || "N/A"}. Ref: ${ref}`).catch(() => {});
         return;
       }
     }
@@ -2923,7 +2636,7 @@ app.post("/paystack-webhook", async (req, res) => {
       const { data: webChecker } = await supabase
         .from("checker_orders")
         .select("*")
-        .or(`reference.eq.${ref},ref.eq.${ref}`)
+        .eq("reference", ref)
         .maybeSingle();
 
       if (webChecker) {
@@ -2934,12 +2647,13 @@ app.post("/paystack-webhook", async (req, res) => {
             payment_status: "paid",
             updated_at: new Date().toISOString()
           })
-          .or(`reference.eq.${ref},ref.eq.${ref}`);
+          .eq("reference", ref);
 
         await sendWhatsApp(
           "233547100951",
           `🎓 NEW ${webChecker.checker_type || "WAEC"} RESULT CHECKER ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📱 Phone: ${webChecker.customer_phone || "N/A"}\n💰 Amount: ₵${paidAmount.toFixed(2)}`
         );
+        sendAdminSms(`[DataEase] Checker Order Paid: ₵${paidAmount.toFixed(2)} (${webChecker.checker_type || "WAEC"} by ${webChecker.customer_phone || "N/A"}). Ref: ${ref}`).catch(() => {});
         return;
       }
     }
@@ -3007,13 +2721,16 @@ app.post("/paystack-webhook", async (req, res) => {
       const { error: orderError } = await supabase.from("orders").insert([{
         whatsapp_phone: session.phone,
         phone_number: normalizePhone(session.phone_number),
-        momo_number: normalizePhone(session.momo_number || session.phone_number),
-        ref: mashupRef,
+        recipient_phone: normalizePhone(session.phone_number),
+        reference: mashupRef,
         network: "MASHUP",
         bundle: session.bundle,
         capacity: parsed.combo.label,
         amount: paidAmount,
         status: "pending_manual",
+        payment_status: "paid",
+        delivery_status: "pending_manual",
+        paid_at: new Date().toISOString(),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }]);
@@ -3028,6 +2745,10 @@ app.post("/paystack-webhook", async (req, res) => {
         "233547100951",
         `🔔 NEW MASHUP ORDER — MANUAL ACTION NEEDED\n\n💰 Amount: ₵${parsed.amount.toFixed(2)}\n📦 Option selected: ${parsed.combo.label}\n📱 Deliver to: ${session.phone_number}\n💳 Paid via momo: ${session.momo_number}\n💵 Confirmed paid: ₵${paidAmount.toFixed(2)}\n\nDial *567*2#, select MashUp Offers, enter ₵${parsed.amount.toFixed(2)}, pick the option matching "${parsed.combo.label}", and apply it to the number above.`
       );
+
+      sendAdminSms(
+        `NEW MASHUP ORDER: ₵${paidAmount.toFixed(2)} paid for ${parsed.combo.label}. Recipient: ${session.phone_number}. Ref: ${mashupRef}. Fulfill manually.`
+      ).catch(() => {});
 
       await sendWhatsApp(
         session.phone,
@@ -3076,13 +2797,16 @@ app.post("/paystack-webhook", async (req, res) => {
         const { error: afaOrderError } = await supabase.from("orders").insert([{
           whatsapp_phone: session.phone,
           phone_number: normalizePhone(afaData.phone_number),
-          momo_number: normalizePhone(session.momo_number),
-          ref: afaExternalId,
+          recipient_phone: normalizePhone(afaData.phone_number),
+          reference: afaExternalId,
           network: "AFA",
           bundle: afaData.full_name,
           capacity: "AFA Registration",
           amount: paidAmount,
           status: afaStatus,
+          payment_status: "paid",
+          delivery_status: afaStatus === "completed" || afaStatus === "approved" ? "delivered" : "processing",
+          paid_at: new Date().toISOString(),
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         }]);
@@ -3097,19 +2821,26 @@ app.post("/paystack-webhook", async (req, res) => {
           session.phone,
           `✅ PAYMENT RECEIVED! 🎉\n\n🪪 AFA Registration submitted for: ${afaData.full_name}\n📱 Phone: ${afaData.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n📌 Status: ${afaStatus}\n\nYou'll be notified once it's approved.\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To buy again.`
         );
+
+        sendAdminSms(
+          `NEW AFA ORDER: ₵${paidAmount.toFixed(2)} paid for ${afaData.full_name} (${afaData.phone_number}). Status: ${afaStatus}. Ref: ${afaExternalId}`
+        ).catch(() => {});
       } catch (afaError) {
         console.error("❌ AFA API ERROR:", afaError.response?.data || afaError.message);
 
         await supabase.from("orders").insert([{
           whatsapp_phone: session.phone,
           phone_number: normalizePhone(afaData.phone_number),
-          momo_number: normalizePhone(session.momo_number),
-          ref: afaExternalId,
+          recipient_phone: normalizePhone(afaData.phone_number),
+          reference: afaExternalId,
           network: "AFA",
           bundle: afaData.full_name,
           capacity: "AFA Registration",
           amount: paidAmount,
           status: "pending_manual",
+          payment_status: "paid",
+          delivery_status: "pending_manual",
+          paid_at: new Date().toISOString(),
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         }]);
@@ -3118,6 +2849,10 @@ app.post("/paystack-webhook", async (req, res) => {
           "233547100951",
           `🔔 AFA REGISTRATION FAILED — MANUAL ACTION NEEDED\n\nThe AFA API call failed after payment was confirmed.\n\n👤 Full Name: ${afaData.full_name}\n📱 Phone: ${afaData.phone_number}\n🪪 Ghana Card: ${afaData.id_number}\n📍 Location: ${afaData.location}\n🎂 DOB: ${afaData.dob}\n💼 Occupation: ${afaData.occupation}\n💵 Confirmed paid: ₵${paidAmount.toFixed(2)}\n\nCheck the afaregistration.com dashboard or submit this manually, then update the order.`
         );
+
+        sendAdminSms(
+          `ALERT: AFA ORDER FAILED API! ₵${paidAmount.toFixed(2)} paid for ${afaData.full_name} (${afaData.phone_number}). Ref: ${afaExternalId}. Fulfill manually!`
+        ).catch(() => {});
 
         await sendWhatsApp(
           session.phone,
@@ -3147,13 +2882,16 @@ app.post("/paystack-webhook", async (req, res) => {
       const { error: netflixOrderError } = await supabase.from("orders").insert([{
         whatsapp_phone: session.phone,
         phone_number: normalizePhone(session.phone),
-        momo_number: normalizePhone(session.momo_number),
-        ref: netflixRef,
+        recipient_phone: normalizePhone(session.phone),
+        reference: netflixRef,
         network: "NETFLIX",
         bundle: refCode,
         capacity: "Netflix Subscription",
         amount: paidAmount,
         status: "pending_code_request",
+        payment_status: "paid",
+        delivery_status: "processing",
+        paid_at: paidAt,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }]);
@@ -3168,6 +2906,10 @@ app.post("/paystack-webhook", async (req, res) => {
         session.phone,
         `✅ PAYMENT RECEIVED! 🎉\n\n📺 Netflix Subscription — ₵${paidAmount.toFixed(2)}\n\nYOUR REFERENCE CODE: *${refCode}*\n⚠️ Save this. It can be used only ONCE to fetch a sign-in code.\n\nSTEP 1\nSign in to Netflix with this email:\n${NETFLIX_EMAIL}\n\n• Open Netflix on your phone, TV, or laptop\n• Choose "Sign in" and enter the email above\n• Netflix will send a sign-in code to that email\n\nSTEP 2\nOnce you've done that, reply here with your reference code above (${refCode}) to get your Netflix sign-in code.\n\nFor assistance: Whatsapp 0547100951 (@stony11)`
       );
+
+      sendAdminSms(
+        `NEW NETFLIX ORDER: ₵${paidAmount.toFixed(2)} paid by ${session.phone}. Ref: ${netflixRef}. Code: ${refCode}`
+      ).catch(() => {});
 
       return;
     }
@@ -3255,18 +2997,25 @@ app.post("/paystack-webhook", async (req, res) => {
 
     const orderReference = datamartReference || ref;
     const finalOrderStatus = datamartSuccess ? datamartStatus : "pending_manual";
+    const mappedDeliveryStatus = datamartSuccess
+      ? (["completed", "delivered", "successful", "success"].includes(String(datamartStatus).toLowerCase()) ? "delivered" : "processing")
+      : "failed";
 
     try {
       const { error: orderError } = await supabase.from("orders").insert([{
         whatsapp_phone: session.phone,
         phone_number: normalizePhone(session.phone_number),
-        momo_number: normalizePhone(session.momo_number || session.phone_number),
-        ref: orderReference,
+        recipient_phone: normalizePhone(session.phone_number),
+        reference: orderReference,
         network: session.network,
         bundle: session.bundle,
-        capacity: bundle.capacity,
+        capacity: String(bundle.capacity),
         amount: paidAmount,
         status: finalOrderStatus,
+        payment_status: "paid",
+        delivery_status: mappedDeliveryStatus,
+        datamart_reference: datamartReference || (datamartOrderId ? String(datamartOrderId) : null),
+        paid_at: new Date().toISOString(),
         created_at: datamartData.createdAt || new Date().toISOString(),
         updated_at: datamartData.updatedAt || new Date().toISOString(),
         campaign_code: session.scratch_order_opt_in ? session.scratch_code : null
@@ -3302,6 +3051,10 @@ app.post("/paystack-webhook", async (req, res) => {
       let successMessage = `✅ ORDER PLACED SUCCESSFULLY! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Number: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\n${estimateMessage}\n\n📦 You can track your order anytime:\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To buy again.`;
       await sendWhatsApp(session.phone, successMessage);
       recordWebhookLog("CUSTOMER_NOTIFIED_SUCCESS", { phone: session.phone });
+
+      sendAdminSms(
+        `NEW DATA ORDER: ${bundle.capacity}GB ${session.network} to ${session.phone_number}. Paid: ₵${paidAmount.toFixed(2)}. Status: Delivered (${orderReference})`
+      ).catch(() => {});
     } else {
       let pendingMessage = `✅ PAYMENT RECEIVED! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Data goes to: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\nYour payment has been received and your data order is currently being processed. It will be delivered to your number shortly!\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To return to main menu.`;
       await sendWhatsApp(session.phone, pendingMessage);
@@ -3313,6 +3066,10 @@ app.post("/paystack-webhook", async (req, res) => {
         `🚨 DATAMART FAILED — MANUAL DELIVERY NEEDED!\n\nCustomer paid, but DataMart API purchase failed:\n❌ Error: ${errorString}\n\n📦 Bundle: ${bundle.capacity}GB (${session.network})\n📱 Recipient: ${session.phone_number}\n💳 Paid from MoMo: ${session.momo_number || session.phone_number}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n🆔 Ref: ${orderReference}\n\nPlease deliver this order manually or check your DataMart wallet balance!`
       );
       recordWebhookLog("ADMIN_ALERTED_DATAMART_FAILURE", { error: errorString });
+
+      sendAdminSms(
+        `ALERT: DATA ORDER FAILED! ${bundle.capacity}GB ${session.network} to ${session.phone_number}. Paid: ₵${paidAmount.toFixed(2)}. Ref: ${orderReference}. Deliver manually!`
+      ).catch(() => {});
     }
   } catch (e) {
     recordWebhookLog("WEBHOOK_FATAL_ERROR", { error: e.response?.data || e.message });
@@ -3321,17 +3078,13 @@ app.post("/paystack-webhook", async (req, res) => {
 });
 
 /* =========================================================
-ADMIN PAGE & DASHBOARD
+ADMIN PAGE
 ========================================================= */
-
-app.get("/", (req, res) => {
-  res.sendFile(__dirname + "/admin.html");
-});
 
 app.get("/admin", (req, res) => {
   const key = req.query.key || req.headers["x-admin-key"];
-  const expectedKey = process.env.ADMIN_API_KEY;
-  if (expectedKey && key !== expectedKey && key !== "data1gh-secure-admin") {
+  const expectedKey = process.env.ADMIN_API_KEY || "data1gh-secure-admin";
+  if (key !== expectedKey) {
     return res.status(401).send("Unauthorized. Access restricted to administrator.");
   }
   res.sendFile(__dirname + "/admin.html");
@@ -3343,142 +3096,37 @@ ADMIN DATA
 
 app.get("/admin-data", async (req, res) => {
   const key = req.query.key || req.headers["x-admin-key"];
-  const expectedKey = process.env.ADMIN_API_KEY;
-  if (expectedKey && key !== expectedKey && key !== "data1gh-secure-admin") {
+  const expectedKey = process.env.ADMIN_API_KEY || "data1gh-secure-admin";
+  if (key !== expectedKey) {
     const ip = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "Unknown";
-    if (ACCESS_TOKEN && PHONE_ID) {
-      await sendWhatsApp(
-        "233547100951",
-        `🚨 *DATA 1 GH — SECURITY INTRUSION ALERT* 🚨\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ *Unauthorized Attempt to Access Web Admin Data!*\n\n• *Target:* GET /admin-data\n• *Attacker IP:* ${ip}\n• *Time:* ${new Date().toLocaleString("en-GB", { timeZone: "Africa/Accra" })}\n• *Status:* 🛑 BLOCKED with 401 Unauthorized\n\n👉 *Action:* No financial or customer data was shown. You can block this IP on your hosting dashboard.`
-      ).catch(() => { });
-    }
+    await sendWhatsApp(
+      "233547100951",
+      `🚨 *DATA 1 GH — SECURITY INTRUSION ALERT* 🚨\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ *Unauthorized Attempt to Access Web Admin Data!*\n\n• *Target:* GET /admin-data\n• *Attacker IP:* ${ip}\n• *Time:* ${new Date().toLocaleString("en-GB", { timeZone: "Africa/Accra" })}\n• *Status:* 🛑 BLOCKED with 401 Unauthorized\n\n👉 *Action:* No financial or customer data was shown. You can block this IP on your hosting dashboard.`
+    ).catch(() => { });
     return res.status(401).json({ error: "Unauthorized access blocked." });
   }
 
   try {
-    const now = new Date();
-    // UTC / Accra date string (YYYY-MM-DD)
-    const todayDateStr = now.toISOString().slice(0, 10);
-    const startOfTodayIso = `${todayDateStr}T00:00:00.000Z`;
+    const { data } = await supabase.from("sessions").select("*");
+    const sessions = data || [];
+    let revenue = 0;
 
-    const [ordersRes, sessionsRes] = await Promise.all([
-      supabase.from("orders").select("*").order("created_at", { ascending: false }),
-      supabase.from("sessions").select("*")
-    ]);
-
-    const allDbOrders = ordersRes.data || [];
-    const allDbSessions = sessionsRes.data || [];
-
-    const isPaid = (o) => {
-      if (!o) return false;
-      const ps = String(o.payment_status || "").toLowerCase();
-      const st = String(o.status || "").toLowerCase();
-      const ds = String(o.delivery_status || "").toLowerCase();
-      return ps === "paid" || ps === "success" || st === "paid" || st === "completed" || st === "delivered" || ds === "delivered" || ds === "completed" || st === "processing";
-    };
-
-    const isFailed = (o) => {
-      if (!o) return false;
-      const ps = String(o.payment_status || "").toLowerCase();
-      const st = String(o.status || "").toLowerCase();
-      const ds = String(o.delivery_status || "").toLowerCase();
-      return ps === "failed" || ps === "declined" || ps === "cancelled" || st === "failed" || st === "cancelled" || st === "payment_failed" || ds === "failed" || Boolean(o.failure_reason);
-    };
-
-    const isToday = (dateValue) => {
-      if (!dateValue) return false;
-      const str = String(dateValue);
-      return str.startsWith(todayDateStr) || new Date(dateValue) >= new Date(startOfTodayIso);
-    };
-
-    const normalizedOrders = allDbOrders.map(o => {
-      const paid = isPaid(o);
-      const failed = isFailed(o);
-      const createdAt = o.created_at || now.toISOString();
-      const dt = formatDateTime(createdAt);
-
-      return {
-        id: o.id,
-        ref: o.ref || o.reference || "N/A",
-        phone: o.phone_number || o.whatsapp_phone || o.recipient_phone || "N/A",
-        momo_number: o.momo_number || o.phone_number || o.whatsapp_phone || "N/A",
-        network: String(o.network || "MTN").toUpperCase(),
-        bundle: o.bundle || o.capacity || "Data",
-        capacity: o.capacity || o.bundle || "N/A",
-        amount: Number(o.amount || 0),
-        status: o.status || (paid ? "completed" : failed ? "failed" : "pending"),
-        payment_status: o.payment_status || (paid ? "paid" : failed ? "failed" : "pending"),
-        delivery_status: o.delivery_status || (paid ? "delivered" : failed ? "failed" : "pending"),
-        failure_reason: o.failure_reason || (failed ? "Payment was not successful or was declined" : null),
-        failure_stage: o.failure_stage || (failed ? "charge_failed" : null),
-        created_at: createdAt,
-        date: dt.date,
-        time: dt.time
-      };
-    });
-
-    // Merge failed payments
-    const combinedFailed = [...failedPayments];
-    normalizedOrders.filter(isFailed).forEach(fo => {
-      if (!combinedFailed.some(f => f.reference === fo.ref)) {
-        combinedFailed.push({
-          id: fo.id,
-          time: fo.created_at,
-          phone: fo.phone,
-          momo_number: fo.momo_number,
-          reference: fo.ref,
-          network: fo.network,
-          bundle: fo.capacity,
-          amount: fo.amount,
-          reason: fo.failure_reason || "Payment declined or cancelled by customer",
-          stage: fo.failure_stage || "charge_prompt",
-          status: "failed"
-        });
+    sessions.forEach(x => {
+      if (x.step === 5) {
+        const bundle = PACKAGES[x.network]?.[x.bundle];
+        if (bundle) revenue += bundle.price;
       }
     });
 
-    combinedFailed.sort((a, b) => new Date(b.time || 0) - new Date(a.time || 0));
-
-    const todayPaidOrders = normalizedOrders.filter(o => isPaid(o) && isToday(o.created_at));
-    const todayFailedPayments = combinedFailed.filter(f => isToday(f.time));
-    const todayPendingOrders = normalizedOrders.filter(o => !isPaid(o) && !isFailed(o) && isToday(o.created_at));
-
-    const allPaidOrders = normalizedOrders.filter(isPaid);
-    const allPendingOrders = normalizedOrders.filter(o => !isPaid(o) && !isFailed(o));
-
-    const todayPaidRevenue = todayPaidOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-    const todayFailedAmount = todayFailedPayments.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-    const totalRevenue = allPaidOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-
     res.json({
-      summary: {
-        todayOrdersCount: todayPaidOrders.length + todayFailedPayments.length + todayPendingOrders.length,
-        todayPaidCount: todayPaidOrders.length,
-        todayPaidRevenue: Number(todayPaidRevenue.toFixed(2)),
-        todayFailedCount: todayFailedPayments.length,
-        todayFailedAmount: Number(todayFailedAmount.toFixed(2)),
-        todayPendingCount: todayPendingOrders.length,
-        totalOrders: normalizedOrders.length,
-        totalRevenue: Number(totalRevenue.toFixed(2)),
-        totalDelivered: allPaidOrders.length,
-        totalFailed: combinedFailed.length
-      },
-      todayPaidOrders,
-      todayFailedPayments,
-      todayPendingOrders,
-      allOrders: normalizedOrders,
-      allFailedPayments: combinedFailed,
-      activities: recentActivityLogs,
-      // Backward compatibility fields
-      total: normalizedOrders.length,
-      delivered: allPaidOrders.length,
-      pending: allPendingOrders.length,
-      revenue: Number(totalRevenue.toFixed(2)),
-      orders: normalizedOrders.slice(0, 15)
+      total: sessions.length,
+      delivered: sessions.filter(x => x.step === 5).length,
+      pending: sessions.filter(x => x.step < 5).length,
+      revenue,
+      orders: sessions.slice(-10).reverse()
     });
   } catch (e) {
-    console.error("ADMIN DATA ERROR:", e.message);
-    res.status(500).json({ error: e.message });
+    res.json({ error: e.message });
   }
 });
 
@@ -3490,6 +3138,6 @@ app.get("/health", (req, res) => {
   res.status(200).send("Bot is alive!");
 });
 
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, () => {
   console.log("🚀 RUNNING ON", PORT);
 });
