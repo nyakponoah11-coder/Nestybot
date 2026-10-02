@@ -1988,6 +1988,9 @@ app.post("/webhook", async (req, res) => {
       let aiReply = "";
 
       const geminiModels = [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-pro",
         "gemini-2.5-pro",
         "gemini-2.0-flash",
         "gemini-1.5-flash"
@@ -2043,9 +2046,9 @@ app.post("/webhook", async (req, res) => {
             { role: "user", content: text }
           ];
           const oaRes = await axios.post("https://api.openai.com/v1/chat/completions", {
-            model: "gpt-4o-mini",
+            model: "gpt-4o",
             messages: openAiMessages,
-            max_tokens: 350, temperature: 0.7
+            max_tokens: 400, temperature: 0.7
           }, { headers: { Authorization: `Bearer ${openAiKey}`, "Content-Type": "application/json" }, timeout: 12000 });
           aiReply = oaRes.data?.choices?.[0]?.message?.content?.trim() || "";
         } catch (oaErr) {
