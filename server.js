@@ -580,7 +580,7 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
       .maybeSingle();
     const dbKey = cleanApiKey(dmRow?.value);
     if (dbKey && !keyCandidates.includes(dbKey)) keyCandidates.push(dbKey);
-  } catch (_) { }
+  } catch (_) {}
 
   if (keyCandidates.length === 0) return { deliveryStatus: "processing", rawStatus: "processing" };
 
@@ -1592,7 +1592,7 @@ app.post("/webhook", async (req, res) => {
       (sRows || []).forEach(r => {
         if (r.value) adminPhones.push(String(r.value).replace(/\D/g, ""));
       });
-    } catch (_) { }
+    } catch (_) {}
 
     const normFrom = String(from || "").replace(/\D/g, "");
     const isOwner = adminPhones.some(p => p && (normFrom === p || normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))));
@@ -1640,7 +1640,7 @@ app.post("/webhook", async (req, res) => {
       let pendingAction = null;
       try {
         if (ownerSession?.bundle) pendingAction = JSON.parse(ownerSession.bundle);
-      } catch (_) { }
+      } catch (_) {}
 
       if (pendingAction && /^(yes|yeah|yep|go|go ahead|do it|confirm|ok|okay|sure|yh|y)$/i.test(text.trim())) {
         const { type, ref, phone: aPhone, network, capacity } = pendingAction;
@@ -1670,18 +1670,6 @@ app.post("/webhook", async (req, res) => {
           return sendWhatsApp(from, `✅ SMS alert sent to ${aPhone}.`);
         }
 
-        if (type === "update_status" && ref) {
-          await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
-          const updates = {
-            payment_status: pendingAction.payment_status,
-            delivery_status: pendingAction.delivery_status || pendingAction.payment_status,
-            status: pendingAction.delivery_status || pendingAction.payment_status,
-            updated_at: new Date().toISOString(),
-          };
-          await supabase.from("orders").update(updates).eq("reference", ref);
-          return sendWhatsApp(from, `✅ Order ${ref} updated:\nPayment: ${pendingAction.payment_status}\nDelivery: ${pendingAction.delivery_status || pendingAction.payment_status}`);
-        }
-
         await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
       } else if (pendingAction && /^(no|nope|cancel|nah|stop)$/i.test(text.trim())) {
         await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
@@ -1695,7 +1683,7 @@ app.post("/webhook", async (req, res) => {
           const parsed = JSON.parse(ownerSession.notes);
           if (Array.isArray(parsed)) history = parsed;
         }
-      } catch (_) { }
+      } catch (_) {}
 
       // ── FETCH AI KEYS ──
       let geminiKey = cleanApiKey(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || "");
@@ -1708,7 +1696,7 @@ app.post("/webhook", async (req, res) => {
         if (!geminiKey) geminiKey = aiMap.gemini_api_key || aiMap.GEMINI_API_KEY || aiMap.VITE_GEMINI_API_KEY || "";
         if (!openAiKey) openAiKey = aiMap.openai_api_key || aiMap.OPENAI_API_KEY || "";
         if (!geminiKey && openAiKey && openAiKey.startsWith("AIzaSy")) { geminiKey = openAiKey; openAiKey = ""; }
-      } catch (_) { }
+      } catch (_) {}
 
       // ── FETCH LIVE COMPREHENSIVE WHOLE-SYSTEM CONTEXT ──
       let deliveryEta = "~5-30 minutes";
@@ -1740,7 +1728,7 @@ app.post("/webhook", async (req, res) => {
             deliveryEta = `~${mins} min(s)`;
           }
         }
-      } catch (_) { }
+      } catch (_) {}
 
       try {
         if (DATA_API_KEY) {
@@ -1749,7 +1737,7 @@ app.post("/webhook", async (req, res) => {
           const bal = b?.data?.data?.walletBalance ?? b?.data?.walletBalance ?? b?.data?.data?.balance;
           if (bal != null) walletBalance = `GH₵ ${Number(bal).toFixed(2)}`;
         }
-      } catch (_) { }
+      } catch (_) {}
 
       const activeArkesel = ARKESEL_API_KEY || process.env.ARKESEL_API_KEY;
       if (activeArkesel) {
@@ -1761,7 +1749,7 @@ app.post("/webhook", async (req, res) => {
           const d = aRes.data?.data || aRes.data;
           const s = Number(d?.sms_balance ?? d?.smsBalance ?? d?.sms);
           if (!isNaN(s)) arkeselSmsBalance = `${s} SMS`;
-        } catch (_) { }
+        } catch (_) {}
       }
 
       try {
@@ -1918,14 +1906,14 @@ app.post("/webhook", async (req, res) => {
                   ord.delivery_status = "processing";
                 }
               }
-            } catch (_) { }
+            } catch (_) {}
           }
 
           if (ord) {
             const liveStatus = await getRealDatamartDeliveryStatus(ord.datamart_reference || ord.reference);
             specificOrderCtx = `ORDER LOOKUP (${lookupRef}):\nRef: ${ord.reference} | ${ord.capacity}GB ${ord.network} → ${ord.recipient_phone} | ₵${ord.amount} | Payment: ${ord.payment_status} | Delivery Status: ${liveStatus.deliveryStatus} (Raw: ${liveStatus.rawStatus}) | Date: ${ord.created_at?.slice(0, 16)}\n`;
           }
-        } catch (_) { }
+        } catch (_) {}
       } else if (phoneMatch) {
         try {
           const lookupPhone = normalizePhone(phoneMatch[0]);
@@ -1938,7 +1926,7 @@ app.post("/webhook", async (req, res) => {
               `${i + 1}. ${o.reference} | ${o.capacity}GB ${o.network} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status} | ₵${o.amount}`
             ).join("\n") + "\n";
           }
-        } catch (_) { }
+        } catch (_) {}
       }
 
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
@@ -1967,17 +1955,9 @@ app.post("/webhook", async (req, res) => {
         "- When the owner asks whether you can perform or what you monitor, confirm you oversee the whole system across all 13 pillars and give an exact breakdown.\n" +
         "- When the owner asks what happens after payment is successful or if you still perform/monitor after payment, explain how you actively supervise the entire post-payment lifecycle 24/7 (MoMo/Paystack reconciliation, automated DataMart dispatch, polling until delivered bypassing fake 200 OKs, low wallet balance warnings < GH₵ 50, Arkesel SMS receipts, admin WhatsApp alerts, stuck order anomaly detection >15 mins, and customer care readiness).\n" +
         "- Proactively bring up any active warnings (low wallet, stuck orders, unread chats, out-of-stock items, pending MashUp manual dial) in your replies!\n" +
-        "- Sensitive to security: NEVER output database secrets, raw API tokens, or customer credentials.\n" +
+        "- Sensitive to security: You have READ-ONLY system access. Safely read and summarize system reality. NEVER output database secrets, raw API tokens, or customer credentials.\n" +
         "- NEVER give canned, robotic dismissals like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
         "- NEVER say \"As an AI\". You are Stony.\n\n" +
-        "ACTION PROPOSAL FORMAT (CRITICAL - USE THIS EVERY TIME):\n" +
-        "When the owner asks you to perform an action, you MUST end your reply with a SUGGEST tag in this exact format:\n" +
-        "- To retry an order: [SUGGEST_RETRY: ref=ORDERREF, phone=0241234567, network=MTN, capacity=2]\n" +
-        "- To send an SMS: [SUGGEST_SMS: phone=0241234567, text=your message here]\n" +
-        "- To update order status: [SUGGEST_STATUS: ref=ORDERREF, payment=paid, delivery=delivered]\n" +
-        "Example: \\\"I'll send that SMS. [SUGGEST_SMS: phone=0592753424, text=hi]\\\"\n" +
-        "NEVER ask the owner for permission in natural language. ALWAYS use the SUGGEST tag format.\n" +
-        "The system will detect the tag and ask the owner to confirm with yes/no.\n\n" +
         "CURRENT LIVE BUSINESS REALITY:\n" +
         `- Delivery Speed / ETA: ${deliveryEta}\n` +
         (walletBalance ? `- DataMart API Wallet: ${walletBalance}\n` : "- Wallet: Connected\n") +
@@ -1988,12 +1968,14 @@ app.post("/webhook", async (req, res) => {
       let aiReply = "";
 
       const geminiModels = [
-        "gemini-3.8-flash",
-        "gemini-3.5-flash",
-        "gemini-3.5-pro",
-        "gemini-2.5-pro",
+        "gemini-2.5-flash",
         "gemini-2.0-flash",
-        "gemini-1.5-flash"
+        "gemini-1.5-flash",
+        "gemini-2.5-pro",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-3.8-flash"
       ];
 
       const historyTurns = history.slice(-6).map(h => ({
@@ -2046,9 +2028,9 @@ app.post("/webhook", async (req, res) => {
             { role: "user", content: text }
           ];
           const oaRes = await axios.post("https://api.openai.com/v1/chat/completions", {
-            model: "gpt-4o",
+            model: "gpt-4o-mini",
             messages: openAiMessages,
-            max_tokens: 400, temperature: 0.7
+            max_tokens: 350, temperature: 0.7
           }, { headers: { Authorization: `Bearer ${openAiKey}`, "Content-Type": "application/json" }, timeout: 12000 });
           aiReply = oaRes.data?.choices?.[0]?.message?.content?.trim() || "";
         } catch (oaErr) {
@@ -2057,64 +2039,22 @@ app.post("/webhook", async (req, res) => {
       }
 
       // ── ACTION SUGGESTION DETECTION ──
-      let retryMatch = null;
-      let smsMatch = null;
-      let statusMatch = null;
-
       if (aiReply) {
-        retryMatch = aiReply.match(/\[SUGGEST_RETRY:\s*ref=([^,\]]+),\s*phone=([^,\]]+),\s*network=([^,\]]+),\s*capacity=([^\]]+)\]/i);
-        smsMatch = aiReply.match(/\[SUGGEST_SMS:\s*phone=([^,\]]+),\s*text=([^\]]+)\]/is);
-        statusMatch = aiReply.match(/\[SUGGEST_STATUS:\s*ref=([^,\]]+),\s*payment=([^,\]]+),\s*delivery=([^\]]+)\]/is);
-
-        // DEBUG: log what AI replied
-        console.log("[DEBUG] AI reply:", aiReply.substring(0, 200));
-        console.log("[DEBUG] SMS match:", smsMatch ? "FOUND" : "NOT FOUND");
-        console.log("[DEBUG] Status match:", statusMatch ? "FOUND" : "NOT FOUND");
-        console.log("[DEBUG] Retry match:", retryMatch ? "FOUND" : "NOT FOUND");
+        const retryMatch = aiReply.match(/\[SUGGEST_RETRY:\s*ref=([^,\]]+),\s*phone=([^,\]]+),\s*network=([^,\]]+),\s*capacity=([^\]]+)\]/i);
+        const smsMatch = aiReply.match(/\[SUGGEST_SMS:\s*phone=([^,\]]+),\s*text=([^\]]+)\]/i);
 
         if (retryMatch) {
           const [, rRef, rPhone, rNetwork, rCapacity] = retryMatch;
           const actionData = { type: "retry_order", ref: rRef.trim(), phone: rPhone.trim(), network: rNetwork.trim().toUpperCase(), capacity: rCapacity.trim() };
-          await supabase.from("sessions").upsert({ phone: from, bundle: JSON.stringify(actionData) }, { onConflict: "phone" });
+          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
           aiReply = aiReply.replace(retryMatch[0], "").trim();
           aiReply += `\n\nShould I trigger the retry for you? Reply *yes* to confirm or *no* to cancel.`;
         } else if (smsMatch) {
           const [, sPhone, sText] = smsMatch;
           const actionData = { type: "send_sms", phone: sPhone.trim(), smsText: sText.trim() };
-          await supabase.from("sessions").upsert({ phone: from, bundle: JSON.stringify(actionData) }, { onConflict: "phone" });
+          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
           aiReply = aiReply.replace(smsMatch[0], "").trim();
           aiReply += `\n\nShould I send that SMS? Reply *yes* to confirm or *no* to cancel.`;
-        } else if (statusMatch) {
-          const [, sRef, sPayment, sDelivery] = statusMatch;
-          const actionData = { type: "update_status", ref: sRef.trim(), payment_status: sPayment.trim(), delivery_status: sDelivery.trim() };
-          await supabase.from("sessions").upsert({ phone: from, bundle: JSON.stringify(actionData) }, { onConflict: "phone" });
-          aiReply = aiReply.replace(statusMatch[0], "").trim();
-          aiReply += `\n\nShould I update order ${sRef.trim()} — payment: ${sPayment.trim()}, delivery: ${sDelivery.trim()}? Reply *yes* to confirm or *no* to cancel.`;
-        }
-      }
-
-      // ── ACTION INTENT FALLBACK: detect owner action requests in natural language ──
-      if (!retryMatch && !smsMatch && !statusMatch && isOwner && aiReply) {
-        const lt = (aiReply + " " + text).toLowerCase();
-        const phoneRegex = /(0[2357]\d{8}|233[2357]\d{8})/;
-        const msgPhoneMatch = lt.match(phoneRegex);
-
-        // Detect "send sms to [phone]" or "send [text] to [phone]" patterns
-        const sendSmsIntent = lt.match(/(?:send\s+sms|send\s+text|message)\s+.*?(?:to\s+)?(0[2357]\d{8}|233[2357]\d{8})/i);
-        if (sendSmsIntent) {
-          const targetPhone = sendSmsIntent[1];
-          const actionData = { type: "send_sms", phone: targetPhone, smsText: "hi" };
-          await supabase.from("sessions").upsert({ phone: from, bundle: JSON.stringify(actionData) }, { onConflict: "phone" });
-          aiReply += `\n\n[SUGGEST_SMS_DETECTED: phone=${targetPhone}]\nShould I send that SMS? Reply *yes* to confirm or *no* to cancel.`;
-        }
-
-        // Detect status update intent for a known order reference
-        const statusIntent = lt.match(/(?:update|mark|set|change)\s+.*?(ref|order)?\s*(ref-\d+|[a-z0-9]{8,})/i);
-        if (statusIntent) {
-          const orderRef = statusIntent[2];
-          const actionData = { type: "update_status", ref: orderRef, payment_status: "paid", delivery_status: "processing" };
-          await supabase.from("sessions").upsert({ phone: from, bundle: JSON.stringify(actionData) }, { onConflict: "phone" });
-          aiReply += `\n\n[SUGGEST_STATUS_DETECTED: ref=${orderRef}]\nShould I update order ${orderRef}? Reply *yes* to confirm or *no* to cancel.`;
         }
       }
 
@@ -2277,7 +2217,7 @@ app.post("/webhook", async (req, res) => {
           { role: "assistant", text: aiReply }
         ];
         await supabase.from("sessions").update({ notes: JSON.stringify(updatedHistory), step: 99 }).eq("phone", from);
-      } catch (_) { }
+      } catch (_) {}
 
       return sendWhatsApp(from, aiReply);
     }
@@ -2400,7 +2340,7 @@ app.post("/webhook", async (req, res) => {
                 `🔍 *Order Status (${ord.reference})*\n• Bundle: ${ord.capacity}GB ${ord.network}\n• Recipient: ${ord.recipient_phone}\n• Payment: ${ord.payment_status}\n• Delivery: ${ds}\n\nNeed to buy data? Reply *hi* for main menu.`
               );
             }
-          } catch (_) { }
+          } catch (_) {}
         }
 
         return sendWhatsApp(from, MENU);
