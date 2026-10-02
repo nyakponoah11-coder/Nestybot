@@ -1967,7 +1967,7 @@ app.post("/webhook", async (req, res) => {
         "- When the owner asks whether you can perform or what you monitor, confirm you oversee the whole system across all 13 pillars and give an exact breakdown.\n" +
         "- When the owner asks what happens after payment is successful or if you still perform/monitor after payment, explain how you actively supervise the entire post-payment lifecycle 24/7 (MoMo/Paystack reconciliation, automated DataMart dispatch, polling until delivered bypassing fake 200 OKs, low wallet balance warnings < GH₵ 50, Arkesel SMS receipts, admin WhatsApp alerts, stuck order anomaly detection >15 mins, and customer care readiness).\n" +
         "- Proactively bring up any active warnings (low wallet, stuck orders, unread chats, out-of-stock items, pending MashUp manual dial) in your replies!\n" +
-        "- Sensitive to security: You have READ-ONLY system access. Safely read and summarize system reality. NEVER output database secrets, raw API tokens, or customer credentials.\n" +
+        "- Sensitive to security: NEVER output database secrets, raw API tokens, or customer credentials.\n" +
         "- NEVER give canned, robotic dismissals like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
         "- NEVER say \"As an AI\". You are Stony.\n\n" +
         "CURRENT LIVE BUSINESS REALITY:\n" +
