@@ -1971,12 +1971,13 @@ app.post("/webhook", async (req, res) => {
         "- NEVER give canned, robotic dismissals like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
          "- NEVER say \"As an AI\". You are Stony.\n\n" +
          "ACTION PROPOSAL FORMAT (CRITICAL - USE THIS EVERY TIME):\n" +
-         "When the owner asks you to perform an action, ALWAYS propose it using the exact format below, then WAIT for their confirmation. NEVER refuse to propose an action or say you can't do it.\n" +
+         "When the owner asks you to perform an action, you MUST end your reply with a SUGGEST tag in this exact format:\n" +
          "- To retry an order: [SUGGEST_RETRY: ref=ORDERREF, phone=0241234567, network=MTN, capacity=2]\n" +
          "- To send an SMS: [SUGGEST_SMS: phone=0241234567, text=your message here]\n" +
          "- To update order status: [SUGGEST_STATUS: ref=ORDERREF, payment=paid, delivery=delivered]\n" +
-         "After you include this tag, end with text like \"Should I send that SMS? Reply yes to confirm.\"\n" +
-         "The system will detect the tag, ask the owner to confirm, and only execute on \"yes\".\n\n" +
+         "Example: \\\"I'll send that SMS. [SUGGEST_SMS: phone=0592753424, text=hi]\\\"\n" +
+         "NEVER ask the owner for permission in natural language. ALWAYS use the SUGGEST tag format.\n" +
+         "The system will detect the tag and ask the owner to confirm with yes/no.\n\n" +
          "CURRENT LIVE BUSINESS REALITY:\n" +
         `- Delivery Speed / ETA: ${deliveryEta}\n` +
         (walletBalance ? `- DataMart API Wallet: ${walletBalance}\n` : "- Wallet: Connected\n") +
@@ -2072,19 +2073,19 @@ app.post("/webhook", async (req, res) => {
         if (retryMatch) {
           const [, rRef, rPhone, rNetwork, rCapacity] = retryMatch;
           const actionData = { type: "retry_order", ref: rRef.trim(), phone: rPhone.trim(), network: rNetwork.trim().toUpperCase(), capacity: rCapacity.trim() };
-          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+          await supabase.from("sessions").upsert({ phone: from, bundle: JSON.stringify(actionData) }, { onConflict: "phone" });
           aiReply = aiReply.replace(retryMatch[0], "").trim();
           aiReply += `\n\nShould I trigger the retry for you? Reply *yes* to confirm or *no* to cancel.`;
         } else if (smsMatch) {
           const [, sPhone, sText] = smsMatch;
           const actionData = { type: "send_sms", phone: sPhone.trim(), smsText: sText.trim() };
-          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+          await supabase.from("sessions").upsert({ phone: from, bundle: JSON.stringify(actionData) }, { onConflict: "phone" });
           aiReply = aiReply.replace(smsMatch[0], "").trim();
           aiReply += `\n\nShould I send that SMS? Reply *yes* to confirm or *no* to cancel.`;
         } else if (statusMatch) {
           const [, sRef, sPayment, sDelivery] = statusMatch;
           const actionData = { type: "update_status", ref: sRef.trim(), payment_status: sPayment.trim(), delivery_status: sDelivery.trim() };
-          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+          await supabase.from("sessions").upsert({ phone: from, bundle: JSON.stringify(actionData) }, { onConflict: "phone" });
           aiReply = aiReply.replace(statusMatch[0], "").trim();
           aiReply += `\n\nShould I update order ${sRef.trim()} — payment: ${sPayment.trim()}, delivery: ${sDelivery.trim()}? Reply *yes* to confirm or *no* to cancel.`;
         }
