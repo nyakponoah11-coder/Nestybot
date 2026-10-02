@@ -580,7 +580,7 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
       .maybeSingle();
     const dbKey = cleanApiKey(dmRow?.value);
     if (dbKey && !keyCandidates.includes(dbKey)) keyCandidates.push(dbKey);
-  } catch (_) {}
+  } catch (_) { }
 
   if (keyCandidates.length === 0) return { deliveryStatus: "processing", rawStatus: "processing" };
 
@@ -1592,7 +1592,7 @@ app.post("/webhook", async (req, res) => {
       (sRows || []).forEach(r => {
         if (r.value) adminPhones.push(String(r.value).replace(/\D/g, ""));
       });
-    } catch (_) {}
+    } catch (_) { }
 
     const normFrom = String(from || "").replace(/\D/g, "");
     const isOwner = adminPhones.some(p => p && (normFrom === p || normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))));
@@ -1640,7 +1640,7 @@ app.post("/webhook", async (req, res) => {
       let pendingAction = null;
       try {
         if (ownerSession?.bundle) pendingAction = JSON.parse(ownerSession.bundle);
-      } catch (_) {}
+      } catch (_) { }
 
       if (pendingAction && /^(yes|yeah|yep|go|go ahead|do it|confirm|ok|okay|sure|yh|y)$/i.test(text.trim())) {
         const { type, ref, phone: aPhone, network, capacity } = pendingAction;
@@ -1670,6 +1670,18 @@ app.post("/webhook", async (req, res) => {
           return sendWhatsApp(from, `✅ SMS alert sent to ${aPhone}.`);
         }
 
+        if (type === "update_status" && ref) {
+          await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
+          const updates = {
+            payment_status: pendingAction.payment_status,
+            delivery_status: pendingAction.delivery_status || pendingAction.payment_status,
+            status: pendingAction.delivery_status || pendingAction.payment_status,
+            updated_at: new Date().toISOString(),
+          };
+          await supabase.from("orders").update(updates).eq("reference", ref);
+          return sendWhatsApp(from, `✅ Order ${ref} updated:\nPayment: ${pendingAction.payment_status}\nDelivery: ${pendingAction.delivery_status || pendingAction.payment_status}`);
+        }
+
         await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
       } else if (pendingAction && /^(no|nope|cancel|nah|stop)$/i.test(text.trim())) {
         await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
@@ -1683,7 +1695,7 @@ app.post("/webhook", async (req, res) => {
           const parsed = JSON.parse(ownerSession.notes);
           if (Array.isArray(parsed)) history = parsed;
         }
-      } catch (_) {}
+      } catch (_) { }
 
       // ── FETCH AI KEYS ──
       let geminiKey = cleanApiKey(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || "");
@@ -1696,7 +1708,7 @@ app.post("/webhook", async (req, res) => {
         if (!geminiKey) geminiKey = aiMap.gemini_api_key || aiMap.GEMINI_API_KEY || aiMap.VITE_GEMINI_API_KEY || "";
         if (!openAiKey) openAiKey = aiMap.openai_api_key || aiMap.OPENAI_API_KEY || "";
         if (!geminiKey && openAiKey && openAiKey.startsWith("AIzaSy")) { geminiKey = openAiKey; openAiKey = ""; }
-      } catch (_) {}
+      } catch (_) { }
 
       // ── FETCH LIVE COMPREHENSIVE WHOLE-SYSTEM CONTEXT ──
       let deliveryEta = "~5-30 minutes";
@@ -1728,7 +1740,7 @@ app.post("/webhook", async (req, res) => {
             deliveryEta = `~${mins} min(s)`;
           }
         }
-      } catch (_) {}
+      } catch (_) { }
 
       try {
         if (DATA_API_KEY) {
@@ -1737,7 +1749,7 @@ app.post("/webhook", async (req, res) => {
           const bal = b?.data?.data?.walletBalance ?? b?.data?.walletBalance ?? b?.data?.data?.balance;
           if (bal != null) walletBalance = `GH₵ ${Number(bal).toFixed(2)}`;
         }
-      } catch (_) {}
+      } catch (_) { }
 
       const activeArkesel = ARKESEL_API_KEY || process.env.ARKESEL_API_KEY;
       if (activeArkesel) {
@@ -1749,7 +1761,7 @@ app.post("/webhook", async (req, res) => {
           const d = aRes.data?.data || aRes.data;
           const s = Number(d?.sms_balance ?? d?.smsBalance ?? d?.sms);
           if (!isNaN(s)) arkeselSmsBalance = `${s} SMS`;
-        } catch (_) {}
+        } catch (_) { }
       }
 
       try {
@@ -1906,14 +1918,14 @@ app.post("/webhook", async (req, res) => {
                   ord.delivery_status = "processing";
                 }
               }
-            } catch (_) {}
+            } catch (_) { }
           }
 
           if (ord) {
             const liveStatus = await getRealDatamartDeliveryStatus(ord.datamart_reference || ord.reference);
             specificOrderCtx = `ORDER LOOKUP (${lookupRef}):\nRef: ${ord.reference} | ${ord.capacity}GB ${ord.network} → ${ord.recipient_phone} | ₵${ord.amount} | Payment: ${ord.payment_status} | Delivery Status: ${liveStatus.deliveryStatus} (Raw: ${liveStatus.rawStatus}) | Date: ${ord.created_at?.slice(0, 16)}\n`;
           }
-        } catch (_) {}
+        } catch (_) { }
       } else if (phoneMatch) {
         try {
           const lookupPhone = normalizePhone(phoneMatch[0]);
@@ -1926,7 +1938,7 @@ app.post("/webhook", async (req, res) => {
               `${i + 1}. ${o.reference} | ${o.capacity}GB ${o.network} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status} | ₵${o.amount}`
             ).join("\n") + "\n";
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
@@ -2042,6 +2054,7 @@ app.post("/webhook", async (req, res) => {
       if (aiReply) {
         const retryMatch = aiReply.match(/\[SUGGEST_RETRY:\s*ref=([^,\]]+),\s*phone=([^,\]]+),\s*network=([^,\]]+),\s*capacity=([^\]]+)\]/i);
         const smsMatch = aiReply.match(/\[SUGGEST_SMS:\s*phone=([^,\]]+),\s*text=([^\]]+)\]/i);
+        const statusMatch = aiReply.match(/\[SUGGEST_STATUS:\s*ref=([^,\]]+),\s*payment=([^,\]]+),\s*delivery=([^\]]+)\]/i);
 
         if (retryMatch) {
           const [, rRef, rPhone, rNetwork, rCapacity] = retryMatch;
@@ -2055,6 +2068,12 @@ app.post("/webhook", async (req, res) => {
           await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
           aiReply = aiReply.replace(smsMatch[0], "").trim();
           aiReply += `\n\nShould I send that SMS? Reply *yes* to confirm or *no* to cancel.`;
+        } else if (statusMatch) {
+          const [, sRef, sPayment, sDelivery] = statusMatch;
+          const actionData = { type: "update_status", ref: sRef.trim(), payment_status: sPayment.trim(), delivery_status: sDelivery.trim() };
+          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+          aiReply = aiReply.replace(statusMatch[0], "").trim();
+          aiReply += `\n\nShould I update order ${sRef.trim()} — payment: ${sPayment.trim()}, delivery: ${sDelivery.trim()}? Reply *yes* to confirm or *no* to cancel.`;
         }
       }
 
@@ -2217,7 +2236,7 @@ app.post("/webhook", async (req, res) => {
           { role: "assistant", text: aiReply }
         ];
         await supabase.from("sessions").update({ notes: JSON.stringify(updatedHistory), step: 99 }).eq("phone", from);
-      } catch (_) {}
+      } catch (_) { }
 
       return sendWhatsApp(from, aiReply);
     }
@@ -2340,7 +2359,7 @@ app.post("/webhook", async (req, res) => {
                 `🔍 *Order Status (${ord.reference})*\n• Bundle: ${ord.capacity}GB ${ord.network}\n• Recipient: ${ord.recipient_phone}\n• Payment: ${ord.payment_status}\n• Delivery: ${ds}\n\nNeed to buy data? Reply *hi* for main menu.`
               );
             }
-          } catch (_) {}
+          } catch (_) { }
         }
 
         return sendWhatsApp(from, MENU);
