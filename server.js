@@ -2086,8 +2086,33 @@ app.post("/webhook", async (req, res) => {
           const [, sRef, sPayment, sDelivery] = statusMatch;
           const actionData = { type: "update_status", ref: sRef.trim(), payment_status: sPayment.trim(), delivery_status: sDelivery.trim() };
           await supabase.from("sessions").upsert({ phone: from, bundle: JSON.stringify(actionData) }, { onConflict: "phone" });
-          aiReply = aiReply.replace(statusMatch[0], "").trim();
+           aiReply = aiReply.replace(statusMatch[0], "").trim();
           aiReply += `\n\nShould I update order ${sRef.trim()} — payment: ${sPayment.trim()}, delivery: ${sDelivery.trim()}? Reply *yes* to confirm or *no* to cancel.`;
+        }
+      }
+
+      // ── ACTION INTENT FALLBACK: detect owner action requests in natural language ──
+      if (!retryMatch && !smsMatch && !statusMatch && isOwner && aiReply) {
+        const lt = (aiReply + " " + text).toLowerCase();
+        const phoneRegex = /(0[2357]\d{8}|233[2357]\d{8})/;
+        const msgPhoneMatch = lt.match(phoneRegex);
+
+        // Detect "send sms to [phone]" or "send [text] to [phone]" patterns
+        const sendSmsIntent = lt.match(/(?:send\s+sms|send\s+text|message)\s+.*?(?:to\s+)?(0[2357]\d{8}|233[2357]\d{8})/i);
+        if (sendSmsIntent) {
+          const targetPhone = sendSmsIntent[1];
+          const actionData = { type: "send_sms", phone: targetPhone, smsText: "hi" };
+          await supabase.from("sessions").upsert({ phone: from, bundle: JSON.stringify(actionData) }, { onConflict: "phone" });
+          aiReply += `\n\n[SUGGEST_SMS_DETECTED: phone=${targetPhone}]\nShould I send that SMS? Reply *yes* to confirm or *no* to cancel.`;
+        }
+
+        // Detect status update intent for a known order reference
+        const statusIntent = lt.match(/(?:update|mark|set|change)\s+.*?(ref|order)?\s*(ref-\d+|[a-z0-9]{8,})/i);
+        if (statusIntent) {
+          const orderRef = statusIntent[2];
+          const actionData = { type: "update_status", ref: orderRef, payment_status: "paid", delivery_status: "processing" };
+          await supabase.from("sessions").upsert({ phone: from, bundle: JSON.stringify(actionData) }, { onConflict: "phone" });
+          aiReply += `\n\n[SUGGEST_STATUS_DETECTED: ref=${orderRef}]\nShould I update order ${orderRef}? Reply *yes* to confirm or *no* to cancel.`;
         }
       }
 
