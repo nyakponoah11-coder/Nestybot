@@ -2060,8 +2060,14 @@ app.post("/webhook", async (req, res) => {
       // ── ACTION SUGGESTION DETECTION ──
       if (aiReply) {
         const retryMatch = aiReply.match(/\[SUGGEST_RETRY:\s*ref=([^,\]]+),\s*phone=([^,\]]+),\s*network=([^,\]]+),\s*capacity=([^\]]+)\]/i);
-        const smsMatch = aiReply.match(/\[SUGGEST_SMS:\s*phone=([^,\]]+),\s*text=([^\]]+)\]/i);
-        const statusMatch = aiReply.match(/\[SUGGEST_STATUS:\s*ref=([^,\]]+),\s*payment=([^,\]]+),\s*delivery=([^\]]+)\]/i);
+        const smsMatch = aiReply.match(/\[SUGGEST_SMS:\s*phone=([^,\]]+),\s*text=([^\]]+)\]/is);
+        const statusMatch = aiReply.match(/\[SUGGEST_STATUS:\s*ref=([^,\]]+),\s*payment=([^,\]]+),\s*delivery=([^\]]+)\]/is);
+
+        // DEBUG: log what AI replied
+        console.log("[DEBUG] AI reply:", aiReply.substring(0, 200));
+        console.log("[DEBUG] SMS match:", smsMatch ? "FOUND" : "NOT FOUND");
+        console.log("[DEBUG] Status match:", statusMatch ? "FOUND" : "NOT FOUND");
+        console.log("[DEBUG] Retry match:", retryMatch ? "FOUND" : "NOT FOUND");
 
         if (retryMatch) {
           const [, rRef, rPhone, rNetwork, rCapacity] = retryMatch;
