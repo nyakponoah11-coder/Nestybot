@@ -559,6 +559,162 @@ function cleanApiKey(raw) {
   return k;
 }
 
+function extractOrderReferences(input) {
+  if (!input || typeof input !== "string") return [];
+  const matches = [];
+
+  // Match WS followed by alphanumeric, or standard prefixes (ORD-, REF-, CK-, NF-)
+  const prefixMatches = input.match(/\b(WS[A-Za-z0-9]{6,12}|ORD-[A-Za-z0-9_-]+|REF-[A-Za-z0-9_-]+|CK-[A-Za-z0-9_-]+|NF-[A-Za-z0-9_-]+)\b/gi) || [];
+  matches.push(...prefixMatches);
+
+  // Match codes enclosed in asterisks (e.g. *WSXS8J5M8*, *WSZTLFW6G*)
+  const asteriskMatches = input.match(/\*([A-Za-z0-9_-]{7,20})\*/g) || [];
+  for (const m of asteriskMatches) {
+    const c = m.replace(/\*/g, "").trim();
+    if (c.length >= 7) matches.push(c);
+  }
+
+  // Match standalone alphanumeric tokens of 7-16 chars that have both letters and digits
+  const standaloneMatches = input.match(/\b([A-Za-z0-9]{7,16})\b/g) || [];
+  const stopWords = new Set([
+    "AIRTELTIGO", "DELIVERED", "PROCESSING", "CANCELLED", "PENDING", "DATAMART",
+    "WHATSAPP", "CUSTOMER", "STATUS", "CONFIRM", "CANCEL", "SUGGEST", "ACTION",
+    "UPDATE", "TELECEL", "MASHUP", "BUNDLE", "ORDERS", "ORDER", "REPORT",
+    "SYSTEM", "WALLET", "BALANCE", "ARKESEL", "PAYSTACK", "RECEIVE", "RECIEVE",
+    "RECEIVED", "DELIVERY", "DATABASE", "CONFIRMATION", "MESSAGE", "MINUTES",
+    "ANOMALY", "WARNING", "PACKAGE", "PACKAGES", "RESOLVE", "NETWORK"
+  ]);
+
+  for (const s of standaloneMatches) {
+    const up = s.toUpperCase();
+    if (!stopWords.has(up) && /[0-9]/.test(s) && /[A-Za-z]/.test(s)) {
+      matches.push(s);
+    }
+  }
+
+  return [...new Set(matches.map(m => m.replace(/[*_#`"']/g, "").trim()).filter(Boolean))];
+}
+
+async function updateOrderDeliveryStatusSafely(ref, newStatus) {
+  const cleanRef = String(ref || "").replace(/[*_#`"']/g, "").trim();
+  if (!cleanRef) return null;
+
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanRef);
+  const filter = isUuid
+    ? `reference.ilike.%${cleanRef}%,datamart_reference.ilike.%${cleanRef}%,id.eq.${cleanRef}`
+    : `reference.ilike.%${cleanRef}%,datamart_reference.ilike.%${cleanRef}%`;
+
+  try {
+    // 1. Check & update in orders table
+    const { data: ord } = await supabase
+      .from("orders")
+      .update({
+        delivery_status: newStatus,
+        updated_at: new Date().toISOString()
+      })
+      .or(filter)
+      .select("reference, recipient_phone, network, capacity, amount")
+      .maybeSingle();
+
+    if (ord) return { table: "orders", reference: ord.reference, phone: ord.recipient_phone, data: ord };
+
+    // 2. Check & update in service_orders table
+    const sFilter = isUuid ? `reference.ilike.%${cleanRef}%,id.eq.${cleanRef}` : `reference.ilike.%${cleanRef}%`;
+    const { data: sOrd } = await supabase
+      .from("service_orders")
+      .update({
+        delivery_status: newStatus,
+        updated_at: new Date().toISOString()
+      })
+      .or(sFilter)
+      .select("reference, recipient_phone, service_type")
+      .maybeSingle();
+
+    if (sOrd) return { table: "service_orders", reference: sOrd.reference, phone: sOrd.recipient_phone, data: sOrd };
+
+    // 3. Check & update in checker_orders table
+    const { data: cOrd } = await supabase
+      .from("checker_orders")
+      .update({
+        delivery_status: newStatus,
+        updated_at: new Date().toISOString()
+      })
+      .or(sFilter)
+      .select("reference, recipient_phone, exam_type")
+      .maybeSingle();
+
+    if (cOrd) return { table: "checker_orders", reference: cOrd.reference, phone: cOrd.recipient_phone, data: cOrd };
+
+    // 4. Check & update in sessions table (direct bot transactions)
+    const { data: sess } = await supabase
+      .from("sessions")
+      .update({ step: newStatus === "delivered" ? 5 : 4 })
+      .eq("ref", cleanRef)
+      .select("ref, phone, network, bundle")
+      .maybeSingle();
+
+    if (sess) return { table: "sessions", reference: sess.ref, phone: sess.phone, data: sess };
+  } catch (err) {
+    console.warn("updateOrderDeliveryStatusSafely warning:", err.message);
+  }
+
+  return { table: "orders", reference: cleanRef, phone: null, data: null };
+}
+
+function extractActionSuggestion(rawText) {
+  if (!rawText || typeof rawText !== "string") return null;
+  const tagStart = rawText.indexOf("[SUGGEST_ACTION:");
+  if (tagStart === -1) return null;
+
+  const jsonStart = rawText.indexOf("{", tagStart);
+  if (jsonStart === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let jsonEnd = -1;
+
+  for (let i = jsonStart; i < rawText.length; i++) {
+    const char = rawText[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (char === "\\") {
+      escape = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (char === "{") depth++;
+      else if (char === "}") {
+        depth--;
+        if (depth === 0) {
+          jsonEnd = i;
+          break;
+        }
+      }
+    }
+  }
+
+  if (jsonEnd === -1) return null;
+
+  const jsonStr = rawText.slice(jsonStart, jsonEnd + 1);
+  const bracketEnd = rawText.indexOf("]", jsonEnd);
+  const fullTag = bracketEnd !== -1 ? rawText.slice(tagStart, bracketEnd + 1) : rawText.slice(tagStart, jsonEnd + 1);
+
+  try {
+    const parsed = JSON.parse(jsonStr);
+    return { parsed, fullTag, jsonStr };
+  } catch (err) {
+    console.warn("Failed to parse suggested action JSON:", jsonStr, err.message);
+    return null;
+  }
+}
+
 /* =========================================================
 GET REAL DATAMART DELIVERY STATUS (BYPASS 200 / "COMPLETED")
 ========================================================= */
@@ -639,11 +795,11 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
 SEND ADMIN SMS (ARKESEL)
 ========================================================= */
 
-async function sendAdminSms(message) {
+async function sendAdminSms(message, customTargetPhone) {
   try {
     let arkeselKey = process.env.ARKESEL_API_KEY;
     let adminPhone = process.env.ADMIN_ALERT_PHONE || "0547100951";
-    let senderId = process.env.ARKESEL_SENDER_ID || "Data1gh";
+    let senderId = process.env.ARKESEL_SENDER_ID || "D_1Gh";
 
     if (supabase) {
       try {
@@ -659,7 +815,7 @@ async function sendAdminSms(message) {
           if (smap.admin_alert_phone || smap.support_phone) {
             adminPhone = smap.admin_alert_phone || smap.support_phone;
           }
-          if (smap.arkesel_sender_id) {
+          if (smap.arkesel_sender_id && smap.arkesel_sender_id.toLowerCase() !== "data1gh") {
             senderId = smap.arkesel_sender_id;
           }
         }
@@ -668,12 +824,16 @@ async function sendAdminSms(message) {
       }
     }
 
+    if (!senderId || senderId.toLowerCase() === "data1gh") {
+      senderId = "D_1Gh";
+    }
+
     if (!arkeselKey) {
       console.warn("⚠️ No ARKESEL_API_KEY configured, skipping SMS alert.");
       return;
     }
 
-    let target = String(adminPhone).replace(/\D/g, "");
+    let target = String(customTargetPhone || adminPhone).replace(/\D/g, "");
     if (target.startsWith("233") && target.length === 12) target = "0" + target.slice(3);
 
     const res = await axios.post(
@@ -692,9 +852,10 @@ async function sendAdminSms(message) {
         timeout: 10000
       }
     );
-    console.log("✅ Admin SMS sent successfully:", res.data?.message || res.status);
+    console.log(`✅ SMS sent successfully to ${target} via sender ID ${senderId}:`, res.data?.message || res.status);
+    return res.data;
   } catch (err) {
-    console.error("❌ Failed to send Admin SMS:", err.response?.data || err.message);
+    console.error("❌ Failed to send SMS:", err.response?.data || err.message);
   }
 }
 
@@ -1642,46 +1803,117 @@ app.post("/webhook", async (req, res) => {
         if (ownerSession?.bundle) pendingAction = JSON.parse(ownerSession.bundle);
       } catch (_) {}
 
-      if (pendingAction && /^(yes|yeah|yep|go|go ahead|do it|confirm|ok|okay|sure|yh|y|proceed)$/i.test(text.trim())) {
-        const { type, ref, phone: aPhone, network, capacity, status, smsText, inStock, productId, productName } = pendingAction;
+      // Load multi-turn conversation memory early
+      let history = [];
+      try {
+        if (ownerSession?.notes) {
+          const parsed = JSON.parse(ownerSession.notes);
+          if (Array.isArray(parsed)) history = parsed;
+        }
+      } catch (_) {}
+
+      const cleanInput = text.trim();
+      const isCancel = /\b(no|nope|cancel|nah|stop|abort|don'?t|leave it|ignore)\b/i.test(cleanInput);
+
+      // Recognize confirmation broadly (keywords, "they received it", "update status", "yes update", etc.)
+      const isConfirm = !isCancel && (
+        /^(yes|yeah|yep|go|go ahead|do it|confirm|ok|okay|sure|yh|y|proceed|sharp|done|apply|execute|please)$/i.test(cleanInput) ||
+        /\b(they have (received|recieve)|they (received|recieve)|recieved?|delivered|landed|got it)\b/i.test(cleanInput) ||
+        /\b(update (the )?status|update (it|them|both|orders?)|mark (it|them|both)? (as )?delivered|go ahead and update|yes update|confirm update|proceed with update|do (the )?update|update now)\b/i.test(cleanInput) ||
+        (/\b(update|deliver|delivered|reciev|receiv|proceed|apply|mark)\b/i.test(cleanInput) && !isCancel)
+      );
+
+      // If pendingAction exists and owner cancels
+      if (pendingAction && isCancel) {
+        await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
+        return sendWhatsApp(from, "Sharp, cancelled that action bossu! No changes were made to the database. What else is on your mind?");
+      }
+
+      // If owner is confirming AND has pendingAction
+      if (pendingAction && isConfirm) {
+        const { type, network, capacity, status, smsText, inStock, productId, productName } = pendingAction;
         await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
 
-        if (type === "update_order_status" && ref) {
-          try {
-            await supabase.from("orders").update({
-              delivery_status: status || "delivered",
-              updated_at: new Date().toISOString()
-            }).eq("reference", ref);
+        // Gather all target references from pendingAction
+        let targetRefs = [];
+        if (Array.isArray(pendingAction.orders)) targetRefs.push(...pendingAction.orders);
+        if (Array.isArray(pendingAction.refs)) targetRefs.push(...pendingAction.refs);
+        if (Array.isArray(pendingAction.references)) targetRefs.push(...pendingAction.references);
+        if (pendingAction.ref) targetRefs.push(pendingAction.ref);
+        if (pendingAction.reference) targetRefs.push(pendingAction.reference);
+        if (pendingAction.order_id) targetRefs.push(pendingAction.order_id);
 
-            let smsSent = false;
-            if (pendingAction.send_sms && aPhone) {
-              const msg = smsText || `DATA 1 GH: Your data order ${ref} has been marked as ${status || "delivered"}. Check balance on *124#. Thank you!`;
-              const sRes = await sendAdminSms(msg, aPhone);
-              smsSent = Boolean(sRes?.ok);
+        // Fallback: check if references are in the current text or previous assistant message
+        if (targetRefs.length === 0) {
+          targetRefs = extractOrderReferences(text);
+        }
+        if (targetRefs.length === 0 && history.length > 0) {
+          const recentText = history.slice(-3).map(h => h.text).join(" ");
+          targetRefs = extractOrderReferences(recentText);
+        }
+
+        targetRefs = [...new Set(targetRefs.map(r => String(r || "").replace(/[*_#`"']/g, "").trim()).filter(Boolean))];
+
+        // 1. UPDATE ORDER STATUS (Single & Multiple Orders)
+        if (type === "update_order_status" || (targetRefs.length > 0 && /\b(update|status|delivered)\b/i.test(cleanInput))) {
+          const statusToSet = status || "delivered";
+          const updatedRefs = [];
+
+          for (const r of targetRefs) {
+            const upd = await updateOrderDeliveryStatusSafely(r, statusToSet);
+            if (upd) {
+              updatedRefs.push(r);
+              // Optional SMS alert to customer
+              if (pendingAction.send_sms && (upd.phone || pendingAction.phone)) {
+                const targetPhone = upd.phone || pendingAction.phone;
+                const msg = smsText || `DATA 1 GH: Your data order ${r} has landed! Check balance on *124#. Thank you!`;
+                sendAdminSms(msg, targetPhone).catch(() => {});
+              }
             }
-            return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\nOrder *${ref}* has been updated to *${(status || "delivered").toUpperCase()}*!${smsSent ? `\n📲 Confirmation SMS sent to ${aPhone}.` : ""}\n\nAnything else you need me to handle?`);
-          } catch (err) {
-            return sendWhatsApp(from, `❌ Could not update order ${ref}: ${err.message}`);
+          }
+
+          if (updatedRefs.length > 0) {
+            // Record in conversation history so assistant remembers
+            try {
+              const executionNote = {
+                role: "assistant",
+                text: `✅ Action completed: Updated ${updatedRefs.length} order(s) (${updatedRefs.join(", ")}) to ${statusToSet.toUpperCase()} in the database.`
+              };
+              const updatedHistory = [...history.slice(-5), { role: "user", text }, executionNote];
+              await supabase.from("sessions").update({ notes: JSON.stringify(updatedHistory) }).eq("phone", from);
+            } catch (_) {}
+
+            return sendWhatsApp(from,
+              `✅ *ACTION COMPLETED BOSS!*\n\n` +
+              `I have successfully updated ${updatedRefs.length} order(s) to *${statusToSet.toUpperCase()}* in the database:\n` +
+              updatedRefs.map(r => `• *${r}*`).join("\n") +
+              `\n\nDatabase is now synchronized with reality! What else would you like me to tackle?`
+            );
           }
         }
 
-        if (type === "resync_order" && ref) {
+        // 2. RESYNC ORDER
+        if (type === "resync_order" && targetRefs.length > 0) {
+          const r = targetRefs[0];
           try {
-            const live = await getRealDatamartDeliveryStatus(ref);
+            const live = await getRealDatamartDeliveryStatus(r);
             if (live?.deliveryStatus) {
               await supabase.from("orders").update({
                 delivery_status: live.deliveryStatus,
                 datamart_status: live.rawStatus,
                 updated_at: new Date().toISOString()
-              }).eq("reference", ref);
+              }).eq("reference", r);
             }
-            return sendWhatsApp(from, `✅ *RESYNC COMPLETE!*\n\nOrder *${ref}* live network status:\n• Delivery Status: *${live?.deliveryStatus || "Updated"}*\n• Raw: ${live?.rawStatus || "Checked"}\n\nDatabase has been updated.`);
+            return sendWhatsApp(from, `✅ *RESYNC COMPLETE!*\n\nOrder *${r}* live network status:\n• Delivery Status: *${live?.deliveryStatus || "Updated"}*\n• Raw: ${live?.rawStatus || "Checked"}\n\nDatabase has been updated.`);
           } catch (err) {
             return sendWhatsApp(from, `❌ Resync error: ${err.message}`);
           }
         }
 
-        if (type === "retry_order" && ref) {
+        // 3. RETRY ORDER
+        if (type === "retry_order" && targetRefs.length > 0) {
+          const r = targetRefs[0];
+          const aPhone = pendingAction.phone;
           try {
             const retryRes = await axios.post(`${DATAMART_BASE}/purchase`, {
               phoneNumber: aPhone,
@@ -1692,38 +1924,112 @@ app.post("/webhook", async (req, res) => {
             }, { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 });
             const retryData = retryRes.data?.data || retryRes.data || {};
             const newRef = retryData.reference || retryData.orderReference || null;
-            await supabase.from("orders").update({ delivery_status: "processing", updated_at: new Date().toISOString() }).eq("reference", ref);
+            await supabase.from("orders").update({ delivery_status: "processing", updated_at: new Date().toISOString() }).eq("reference", r);
             return sendWhatsApp(from, `✅ *RETRY DISPATCHED BOSS!*\n\nPackage: ${capacity}GB → ${aPhone}\nNetwork: ${network || "YELLO"}${newRef ? `\nNew supplier ref: ${newRef}` : ""}\n\nI will continue supervising delivery for you.`);
           } catch (retryErr) {
             return sendWhatsApp(from, `❌ Retry failed boss: ${retryErr.response?.data?.message || retryErr.message}\nCheck DataMart wallet balance and try again.`);
           }
         }
 
-        if (type === "send_sms" && aPhone) {
+        // 4. SEND CUSTOM SMS
+        if (type === "send_sms" && pendingAction.phone) {
           const msg = smsText || "DATA 1 GH: Your order has been updated. Thank you!";
-          await sendAdminSms(msg, aPhone);
-          return sendWhatsApp(from, `✅ *SMS DELIVERED!*\n\nRecipient: ${aPhone}\nMessage: "${msg}"`);
+          await sendAdminSms(msg, pendingAction.phone);
+          return sendWhatsApp(from, `✅ *SMS DELIVERED!*\n\nRecipient: ${pendingAction.phone}\nSender ID: *D_1Gh*\nMessage: "${msg}"`);
         }
 
-        if (type === "toggle_stock" && productId) {
-          await supabase.from("products").update({ in_stock: Boolean(inStock), updated_at: new Date().toISOString() }).eq("id", productId);
+        // 5. TOGGLE PRODUCT STOCK
+        if ((type === "toggle_stock" || type === "toggle_product_stock") && (productId || pendingAction.product_id)) {
+          const pId = productId || pendingAction.product_id;
+          await supabase.from("products").update({ in_stock: Boolean(inStock), updated_at: new Date().toISOString() }).eq("id", pId);
           return sendWhatsApp(from, `✅ *INVENTORY UPDATED!*\n\n*${productName || "Package"}* is now *${inStock ? "IN STOCK" : "OUT OF STOCK"}* on the website!`);
         }
 
+        // 6. UPDATE PRODUCT PRICE
+        if (type === "update_product_price" && (productId || pendingAction.product_id)) {
+          const pId = productId || pendingAction.product_id;
+          const newPrice = parseFloat(pendingAction.price || pendingAction.new_price);
+          if (!isNaN(newPrice)) {
+            await supabase.from("products").update({ price: newPrice, updated_at: new Date().toISOString() }).eq("id", pId);
+            return sendWhatsApp(from, `✅ *PRICE UPDATED!*\n\n*${productName || "Package"}* price has been changed to *GH₵ ${newPrice.toFixed(2)}* on the store!`);
+          }
+        }
+
+        // 7. RESOLVE SUPPORT CHAT
+        if (type === "resolve_support_chat") {
+          const cId = pendingAction.conversation_id || pendingAction.conversationId;
+          const cPhone = pendingAction.phone;
+          let q = supabase.from("chat_conversations").update({ status: "resolved", unread_for_support: 0, updated_at: new Date().toISOString() });
+          if (cId) q = q.eq("id", cId);
+          else if (cPhone) q = q.eq("customer_phone", cPhone);
+          else q = q.eq("status", "open");
+          await q;
+          return sendWhatsApp(from, `✅ *SUPPORT CHAT RESOLVED!*\n\nActive customer support conversation has been marked as resolved and closed from queue.`);
+        }
+
+        // 8. UPDATE DIGITAL SERVICE STATUS (Netflix, MashUp, AFA)
+        if (type === "update_service_status" && targetRefs.length > 0) {
+          const statusToSet = status || "delivered";
+          for (const r of targetRefs) {
+            await supabase.from("service_orders").update({ delivery_status: statusToSet, updated_at: new Date().toISOString() }).or(`reference.ilike.%${r}%`);
+            if (pendingAction.send_sms && (pendingAction.phone || pendingAction.customer_phone)) {
+              const targetPhone = pendingAction.phone || pendingAction.customer_phone;
+              const msg = smsText || `DATA 1 GH: Your service order ${r} is now ${statusToSet.toUpperCase()}! Thank you.`;
+              sendAdminSms(msg, targetPhone).catch(() => {});
+            }
+          }
+          return sendWhatsApp(from, `✅ *SERVICE ORDER UPDATED!*\n\nReference(s): ${targetRefs.join(", ")}\nNew Status: *${statusToSet.toUpperCase()}*`);
+        }
+
+        // 9. UPDATE CHECKER STATUS
+        if (type === "update_checker_status" && targetRefs.length > 0) {
+          const statusToSet = status || "delivered";
+          for (const r of targetRefs) {
+            await supabase.from("checker_orders").update({ delivery_status: statusToSet, updated_at: new Date().toISOString() }).or(`reference.ilike.%${r}%`);
+          }
+          return sendWhatsApp(from, `✅ *RESULT CHECKER ORDER UPDATED!*\n\nReference(s): ${targetRefs.join(", ")}\nNew Status: *${statusToSet.toUpperCase()}*`);
+        }
+
         return sendWhatsApp(from, "✅ Action performed bossu! System updated.");
-      } else if (pendingAction && /^(no|nope|cancel|nah|stop|abort)$/i.test(text.trim())) {
-        await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
-        return sendWhatsApp(from, "Sharp, cancelled that action. No changes were made boss! What else is on your mind?");
       }
 
-      // ── LOAD MULTI-TURN CONVERSATION MEMORY ──
-      let history = [];
-      try {
-        if (ownerSession?.notes) {
-          const parsed = JSON.parse(ownerSession.notes);
-          if (Array.isArray(parsed)) history = parsed;
+      // ── CONTEXTUAL FALLBACK EXECUTION ──
+      // If pendingAction was somehow empty/expired but owner says "they have received it so update the status"
+      if (!isCancel && isConfirm && /\b(update|status|delivered|reciev|receiv)\b/i.test(cleanInput)) {
+        let ctxRefs = extractOrderReferences(text);
+        if (ctxRefs.length === 0 && history.length > 0) {
+          const recentTurns = history.slice(-4).map(h => h.text).join(" ");
+          ctxRefs = extractOrderReferences(recentTurns);
         }
-      } catch (_) {}
+
+        if (ctxRefs.length > 0) {
+          const statusToSet = "delivered";
+          const updatedRefs = [];
+          for (const r of ctxRefs) {
+            const upd = await updateOrderDeliveryStatusSafely(r, statusToSet);
+            if (upd) updatedRefs.push(r);
+          }
+
+          await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
+
+          // Save confirmation in conversation memory
+          try {
+            const executionNote = {
+              role: "assistant",
+              text: `✅ Action completed: Updated ${updatedRefs.length} order(s) (${updatedRefs.join(", ")}) to ${statusToSet.toUpperCase()} in the database.`
+            };
+            const updatedHistory = [...history.slice(-5), { role: "user", text }, executionNote];
+            await supabase.from("sessions").update({ notes: JSON.stringify(updatedHistory) }).eq("phone", from);
+          } catch (_) {}
+
+          return sendWhatsApp(from,
+            `✅ *ACTION COMPLETED BOSS!*\n\n` +
+            `I have updated ${updatedRefs.length} order(s) to *DELIVERED* in the database:\n` +
+            updatedRefs.map(r => `• *${r}*`).join("\n") +
+            `\n\nDatabase is synchronized with reality. What else would you like me to tackle?`
+          );
+        }
+      }
 
       // ── FETCH AI KEYS ──
       let geminiKey = cleanApiKey(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || "");
@@ -1996,11 +2302,20 @@ app.post("/webhook", async (req, res) => {
         "- When the owner asks what happens after payment is successful or if you still perform/monitor after payment, explain how you actively supervise the entire post-payment lifecycle 24/7 (MoMo/Paystack reconciliation, automated DataMart dispatch, polling until delivered bypassing fake 200 OKs, low wallet balance warnings < GH₵ 50, Arkesel SMS receipts, admin WhatsApp alerts, stuck order anomaly detection >15 mins, and customer care readiness).\n" +
         "- Proactively bring up any active warnings (low wallet, stuck orders, unread chats, out-of-stock items, pending MashUp manual dial) in your replies!\n" +
         "- AUTONOMOUS ACTION AUTHORITY & HUMAN-IN-THE-LOOP CONFIRMATION:\n" +
-        "  You are NOT just a passive reader. You can actively PERFORM ACTIONS across the system (update order delivery status to delivered/failed, retry telecom orders via DataMart API, resync orders with DataMart, send custom SMS to customers, update product stock in/out, and resolve support chats).\n" +
+        "  You are NOT just a passive reader. You can actively PERFORM ACTIONS across the whole system on WhatsApp:\n" +
+        "  1. Update order delivery status to delivered/failed/processing/cancelled (single or batch)\n" +
+        "  2. Re-dispatch/retry failed telecom dispatches via DataMart API wallet\n" +
+        "  3. Resync live telecom carrier delivery status with DataMart\n" +
+        "  4. Send custom customer SMS via Arkesel using approved Sender ID D_1Gh\n" +
+        "  5. Toggle product packages between IN STOCK and OUT OF STOCK\n" +
+        "  6. Change product package prices on the store\n" +
+        "  7. Resolve customer support live chats\n" +
+        "  8. Update digital service orders (Netflix, MashUp *567*2#, AFA) and result checkers\n" +
         "  CRITICAL SAFETY RULE: You must NEVER execute any action automatically or silently. You MUST ALWAYS propose the exact action to the owner first and ask for explicit confirmation: 'Shall I go ahead and do this boss? Reply YES to confirm or NO to cancel'.\n" +
         "  When the owner asks you to do something, or when you proactively detect an issue, clearly propose the specific action and wait for their confirmation before execution.\n" +
-        "  To stage an action in your response, use the format [SUGGEST_ACTION: {\"type\": \"update_order_status\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"toggle_stock\", ...}]\n" +
+        "  To stage an action in your response, use the format [SUGGEST_ACTION: {\"type\": \"update_order_status\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\", ...}]\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
+        "- Approved SMS Sender ID for DATA 1 GH is 'D_1Gh'. Whenever sending customer SMS or alerts, use sender ID 'D_1Gh'.\n" +
         "- NEVER give canned, robotic dismissals like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
         "- NEVER say \"As an AI\". You are Stony.\n\n" +
         "CURRENT LIVE BUSINESS REALITY:\n" +
@@ -2085,37 +2400,70 @@ app.post("/webhook", async (req, res) => {
 
       // ── ACTION SUGGESTION DETECTION ──
       if (aiReply) {
-        const actionMatch = aiReply.match(/\[SUGGEST_ACTION:\s*({[^\]]+})\]/i);
+        const actionObj = extractActionSuggestion(aiReply);
         const retryMatch = aiReply.match(/\[SUGGEST_RETRY:\s*ref=([^,\]]+),\s*phone=([^,\]]+),\s*network=([^,\]]+),\s*capacity=([^\]]+)\]/i);
         const smsMatch = aiReply.match(/\[SUGGEST_SMS:\s*phone=([^,\]]+),\s*text=([^\]]+)\]/i);
 
-        if (actionMatch) {
+        if (actionObj) {
           try {
-            const parsed = JSON.parse(actionMatch[1]);
-            await supabase.from("sessions").update({ bundle: JSON.stringify(parsed) }).eq("phone", from);
-            aiReply = aiReply.replace(actionMatch[0], "").trim();
-            aiReply += `\n\n⚠️ *CONFIRMATION REQUIRED:*\nShall I go ahead with this action bossu? Reply *YES* to execute or *NO* to cancel.`;
-          } catch (_) {}
+            await supabase.from("sessions").update({ bundle: JSON.stringify(actionObj.parsed) }).eq("phone", from);
+            aiReply = aiReply.replace(actionObj.fullTag, "").trim();
+            // Don't append duplicate confirmation text if the AI already asked for confirmation in its prompt
+            if (!/\b(reply (yes|y|no|n)|shall i go ahead|confirm)\b/i.test(aiReply)) {
+              aiReply += `\n\n⚠️ *CONFIRMATION REQUIRED:*\nShall I go ahead with this action bossu? Reply *YES* to execute or *NO* to cancel.`;
+            }
+          } catch (err) {
+            console.warn("Failed saving suggested action:", err.message);
+          }
         } else if (retryMatch) {
           const [, rRef, rPhone, rNetwork, rCapacity] = retryMatch;
           const actionData = { type: "retry_order", ref: rRef.trim(), phone: rPhone.trim(), network: rNetwork.trim().toUpperCase(), capacity: rCapacity.trim() };
           await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
           aiReply = aiReply.replace(retryMatch[0], "").trim();
-          aiReply += `\n\nShould I trigger the retry for you? Reply *yes* to confirm or *no* to cancel.`;
+          if (!/\b(reply (yes|y|no|n)|confirm)\b/i.test(aiReply)) {
+            aiReply += `\n\nShould I trigger the retry for you? Reply *YES* to confirm or *NO* to cancel.`;
+          }
         } else if (smsMatch) {
           const [, sPhone, sText] = smsMatch;
           const actionData = { type: "send_sms", phone: sPhone.trim(), smsText: sText.trim() };
           await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
           aiReply = aiReply.replace(smsMatch[0], "").trim();
-          aiReply += `\n\nShould I send that SMS? Reply *yes* to confirm or *no* to cancel.`;
+          if (!/\b(reply (yes|y|no|n)|confirm)\b/i.test(aiReply)) {
+            aiReply += `\n\nShould I send that SMS? Reply *YES* to confirm or *NO* to cancel.`;
+          }
         }
+
+        // Clean up any remaining suggestion tags so no raw internal syntax leaks
+        aiReply = aiReply.replace(/\[SUGGEST_[A-Z_]+:[^\]]*\]/gi, "").trim();
       }
 
       // ── SMART CONVERSATIONAL PERSONAL ASSISTANT FALLBACK & DIRECT COMMANDS ──
       if (!aiReply) {
         const lt = text.toLowerCase().trim();
 
-        // Direct Action Command 1: Update order delivery status
+        // Direct Action Command 1: Update order delivery status (Single or Multiple)
+        const orderRefsInText = extractOrderReferences(text);
+        const hasUpdateIntent = /\b(update|mark|set|change)\b/i.test(text) && /\b(delivered|failed|processing|cancelled|delivery status|status)\b/i.test(text);
+
+        if (orderRefsInText.length > 0 && hasUpdateIntent) {
+          const targetStatus = /\b(failed)\b/i.test(text) ? "failed" : (/\b(processing)\b/i.test(text) ? "processing" : (/\b(cancelled)\b/i.test(text) ? "cancelled" : "delivered"));
+          const actionData = {
+            type: "update_order_status",
+            orders: orderRefsInText,
+            status: targetStatus,
+            send_sms: targetStatus === "delivered"
+          };
+          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+
+          return sendWhatsApp(from,
+            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+            `📋 *Task:* Update Delivery Status to *${targetStatus.toUpperCase()}*\n` +
+            `🎯 *Target Orders (${orderRefsInText.length}):*\n` +
+            orderRefsInText.map(r => `• *${r}*`).join("\n") +
+            `\n\nBossu, should I go ahead and update ${orderRefsInText.length > 1 ? "all these orders" : "this order"} in the database now? Reply *YES* to execute or *NO* to cancel.`
+          );
+        }
+
         const orderCmdMatch =
           text.match(/(?:mark|set|update|change)\s+(?:order\s+)?([A-Za-z0-9_-]{6,30})\s+(?:to|as)\s+(delivered|failed|processing|cancelled)/i) ||
           text.match(/(?:mark|set|update)\s+(delivered|failed|processing|cancelled)\s+(?:for\s+)?(?:order\s+)?([A-Za-z0-9_-]{6,30})/i);
@@ -2125,25 +2473,19 @@ app.post("/webhook", async (req, res) => {
           const targetRef = isFirst ? orderCmdMatch[1].trim() : orderCmdMatch[2].trim();
           const targetStatus = (isFirst ? orderCmdMatch[2] : orderCmdMatch[1]).toLowerCase().trim();
 
-          const { data: ord } = await supabase.from("orders").select("reference, recipient_phone, network, capacity, amount").or(`reference.ilike.%${targetRef}%,id.eq.${targetRef}`).maybeSingle();
-          const phone = ord?.recipient_phone || "";
-          const pkg = ord ? `${ord.capacity}GB ${ord.network}` : "package";
-
           const actionData = {
             type: "update_order_status",
-            ref: ord?.reference || targetRef,
+            orders: [targetRef],
+            ref: targetRef,
             status: targetStatus,
-            phone,
-            send_sms: targetStatus === "delivered",
-            smsText: `DATA 1 GH: Your ${pkg} data order (${targetRef}) has landed! Dial *124# or *126# to check. Thank you!`,
+            send_sms: targetStatus === "delivered"
           };
           await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
 
           return sendWhatsApp(from,
             `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
             `📋 *Task:* Update Order Delivery Status\n` +
-            `🎯 *Target:* Order *${targetRef}* (${pkg})\n` +
-            (phone ? `📱 *Customer:* ${phone}\n` : "") +
+            `🎯 *Target:* Order *${targetRef}*\n` +
             `⚡ *New Status:* *${targetStatus.toUpperCase()}*\n` +
             `💬 *SMS Notification:* ${targetStatus === "delivered" ? "Yes, send delivery receipt" : "No"}\n\n` +
             `Bossu, should I go ahead and do this? Reply *YES* to execute or *NO* to cancel.`
@@ -2202,6 +2544,125 @@ app.post("/webhook", async (req, res) => {
               `Bossu, should I go ahead and update the store? Reply *YES* or *NO*.`
             );
           }
+        }
+
+        // Direct Action Command 5: Retry telecom dispatch via DataMart
+        const retryCmdMatch = text.match(/(?:retry|re-dispatch|redispatch|repurchase)\s+(?:order\s+)?([A-Za-z0-9_-]{6,30})/i);
+        if (retryCmdMatch) {
+          const targetRef = retryCmdMatch[1].trim();
+          const { data: ord } = await supabase.from("orders").select("reference, recipient_phone, network, capacity, amount").or(`reference.ilike.%${targetRef}%,datamart_reference.ilike.%${targetRef}%`).maybeSingle();
+          if (ord) {
+            const actionData = {
+              type: "retry_order",
+              ref: ord.reference,
+              phone: ord.recipient_phone,
+              network: ord.network,
+              capacity: ord.capacity
+            };
+            await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+
+            return sendWhatsApp(from,
+              `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+              `📋 *Task:* Retry Telecom Order Dispatch\n` +
+              `🎯 *Target:* Order *${ord.reference}*\n` +
+              `📦 *Package:* ${ord.capacity}GB ${ord.network} → ${ord.recipient_phone}\n` +
+              `⚡ *Channel:* DataMart Fast Delivery API (Wallet)\n\n` +
+              `Bossu, should I trigger this retry right now? Reply *YES* to execute or *NO* to cancel.`
+            );
+          }
+        }
+
+        // Direct Action Command 6: Product price change
+        const priceCmdMatch =
+          text.match(/(?:set|change|update)\s+price\s+(?:of\s+)?([A-Za-z0-9\s]+?)\s+(?:to|as)\s+(?:ghc|gh₵|₵)?\s*(\d+(?:\.\d{1,2})?)/i) ||
+          text.match(/(?:set|change|update)\s+([A-Za-z0-9\s]+?)\s+price\s+(?:to|as)\s+(?:ghc|gh₵|₵)?\s*(\d+(?:\.\d{1,2})?)/i);
+        if (priceCmdMatch) {
+          const itemText = priceCmdMatch[1].trim();
+          const newPrice = parseFloat(priceCmdMatch[2]);
+          const { data: prods } = await supabase.from("products").select("id, name, network, capacity, price");
+          const found = (prods || []).find(p => `${p.network} ${p.capacity} ${p.name || ""}`.toLowerCase().includes(itemText.toLowerCase()));
+          if (found && !isNaN(newPrice)) {
+            const actionData = {
+              type: "update_product_price",
+              productId: found.id,
+              price: newPrice,
+              productName: `${found.network} ${found.capacity}`
+            };
+            await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+
+            return sendWhatsApp(from,
+              `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+              `📋 *Task:* Update Product Price\n` +
+              `📦 *Package:* ${found.network} ${found.capacity}\n` +
+              `💰 *Current Price:* GH₵ ${Number(found.price).toFixed(2)}\n` +
+              `⚡ *New Price:* *GH₵ ${newPrice.toFixed(2)}*\n\n` +
+              `Bossu, should I update this price on the store? Reply *YES* to confirm or *NO* to cancel.`
+            );
+          }
+        }
+
+        // Direct Action Command 7: Resolve support chat
+        const chatCmdMatch = text.match(/(?:resolve|close|clear)\s+(?:support\s+)?(?:chat|conversation)(?:\s+(?:with|for)\s+([A-Za-z0-9_-]+))?/i);
+        if (chatCmdMatch) {
+          const target = chatCmdMatch[1]?.trim() || "";
+          const actionData = {
+            type: "resolve_support_chat",
+            phone: target || null
+          };
+          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+
+          return sendWhatsApp(from,
+            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+            `📋 *Task:* Resolve Customer Support Chat\n` +
+            (target ? `📱 *Target Customer:* ${target}\n` : `💬 *Target:* Clear active open support chat queue\n`) +
+            `\nBossu, should I mark this chat as resolved? Reply *YES* or *NO*.`
+          );
+        }
+
+        // Direct Action Command 8: Interactive Operations & Issue Radar
+        if (/^(issues|check issues|scan issues|scan system|system issues|what issues|any problem|pending tasks|what to do|action list|problems)\b/i.test(lt)) {
+          let report = `🚨 *STONY OPERATIONS & ISSUE RADAR*\n\n`;
+          let issueCount = 0;
+          let firstAction = null;
+
+          if (stuckOrders.length > 0) {
+            report += `⏳ *Stuck Deliveries (>15 mins):*\n` + stuckOrders.slice(0, 3).map(o => `• *${o.reference}*: ${o.capacity}GB ${o.network} → ${o.recipient_phone}`).join("\n") + "\n\n";
+            issueCount += stuckOrders.length;
+            firstAction = { type: "update_order_status", orders: stuckOrders.map(o => o.reference), status: "delivered", send_sms: true };
+          }
+          if (failedOrdersList.length > 0) {
+            report += `❌ *Failed Orders Needing Attention:*\n` + failedOrdersList.slice(0, 3).map(o => `• *${o.reference}*: ${o.capacity}GB ${o.network} → ${o.recipient_phone}`).join("\n") + "\n\n";
+            issueCount += failedOrdersList.length;
+          }
+          if (pendingMashupCount > 0) {
+            report += `📱 *Pending MashUp Queue:* ${pendingMashupCount} order(s) awaiting manual dial (*567*2#).\n\n`;
+            issueCount += pendingMashupCount;
+          }
+          if (unreadSupportCount > 0) {
+            report += `💬 *Customer Support:* ${unreadSupportCount} unread message(s) waiting on website!\n\n`;
+            issueCount += unreadSupportCount;
+          }
+          if (outOfStockCount > 0) {
+            report += `⚠️ *Out of Stock:* ${outOfStockCount} package(s) marked out of stock on website.\n\n`;
+            issueCount += outOfStockCount;
+          }
+          if (walletBalance && /₵\s*([0-4]?\d(?:\.\d+)?)/.test(walletBalance)) {
+            report += `💳 *Low DataMart Wallet:* ${walletBalance} (top up needed to prevent paused dispatches).\n\n`;
+            issueCount += 1;
+          }
+
+          if (issueCount === 0) {
+            return sendWhatsApp(from, `✅ *ALL CLEAR BOSSU!*\n\nI just scanned the whole system across all 13 departments: No stuck orders, no failed deliveries, customer chats are attended, and packages are in stock!\n\nDelivery Speed: *${deliveryEta}*\nDataMart Wallet: *${walletBalance || "Active"}*\nBulk SMS: *${arkeselSmsBalance || "Active"}* (Sender: *D_1Gh*)\n\nWhat would you like me to tackle?`);
+          }
+
+          if (firstAction && stuckOrders.length > 0) {
+            await supabase.from("sessions").update({ bundle: JSON.stringify(firstAction) }).eq("phone", from);
+            report += `💡 *Recommended Action:*\nShall I mark the ${stuckOrders.length} stuck order(s) as *DELIVERED* and send customer receipts from *D_1Gh*? Reply *YES* to execute or tell me what to do!`;
+          } else {
+            report += `💡 *How can I help you boss?*\nJust text me what to do:\n• "Update [order] to delivered"\n• "Retry order [order]"\n• "Send SMS to [phone] saying ..."\n• "Mark [package] in stock / out of stock"\n• "Change price of [package] to [amount]"`;
+          }
+
+          return sendWhatsApp(from, report);
         }
 
         // 1. Order Lookups (like WSF7AEZQA)
