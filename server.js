@@ -19,7 +19,7 @@ const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET;
 const DATA_API_KEY = process.env.DATA_API_KEY;
 const AFA_API_KEY = process.env.AFA_API_KEY;
 const ARKESEL_API_KEY = process.env.ARKESEL_API_KEY;
-const STORE_API_URL = process.env.STORE_API_URL || "https://data-ease-shop-1.vercel.app/api/whatsapp-bot";
+const STORE_API_URL = process.env.STORE_API_URL || "https://data1gh.vercel.app/whatsapp-bot";
 const SCRATCH_REQUIRED_ORDERS = 5;
 const SCRATCH_ONE_GB_PROBABILITY = 0.90;
 
