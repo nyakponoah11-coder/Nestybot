@@ -981,9 +981,9 @@ async function getDeliveryEstimate() {
       active: data.scanner?.active || false,
       waiting: data.scanner?.waiting || false,
       trackingId: fastLane.trackingId || null,
-      summary: `Fast lane delivery from ${placed.date}, ${placed.time} to ${delivered.date}, ${delivered.time}`,
-      placedTime: `${placed.date}, ${placed.time}`,
-      deliveredTime: `${delivered.date}, ${delivered.time}`,
+      summary: `Fast lane delivery from ${placed.date},${placed.time} to ${delivered.date},${delivered.time}`,
+      placedTime: `${placed.date},${placed.time}`,
+      deliveredTime: `${delivered.date},${delivered.time}`,
       estimatedTime
     };
   } catch (e) {
@@ -1087,7 +1087,7 @@ async function trackOrders(from, phoneNumber) {
       const amount = Number(order.amount || 0);
       const dateTime = formatDateTime(live?.createdAt || order.created_at);
 
-      message += `━━━━━━━━━━━━━━━━\n${i + 1}. 📦 ORDER\n\n🆔 Reference: ${reference || "N/A"}\n📶 Network: ${network}\n📦 Data: ${capacity}GB\n📱 Number:${customerNumber}\n💰 Amount Paid: ₵${amount.toFixed(2)}\n${statusEmoji(status)} Status: ${String(status).toUpperCase()}\n📅 Date: ${dateTime.date}\n🕐 Time: ${dateTime.time}\n\n━━━━━━━━━━━━━━━━\n\n`;
+      message += `━━━━━━━━━━━━━━━━\n${i + 1}. 📦 ORDER\n\n🆔 Reference: ${reference \vert{}\vert{} "N/A"}\n📶 Network: ${network}\n📦 Data: ${capacity}GB\n📱 Number:${customerNumber}\n💰 Amount Paid: ₵${amount.toFixed(2)}\n${statusEmoji(status)} Status:${String(status).toUpperCase()}\n📅 Date: ${dateTime.date}\n🕐 Time: ${dateTime.time}\n\n━━━━━━━━━━━━━━━━\n\n`;
 
       if (live && reference) {
         await supabase
@@ -1410,7 +1410,7 @@ async function generateFullAdminReport() {
     if (recentOrders.length > 0) {
       recentListText = recentOrders.slice(0, 5).map((o, idx) => {
         const phone = maskPhone(o.recipient_phone || o.phone_number || "");
-        const pkg = `${o.capacity || ""} ${o.network || ""}`.trim() || "Bundle";
+        const pkg = `${o.capacity \vert{}\vert{} ""} ${o.network || ""}`.trim() || "Bundle";
         const amt = Number(o.amount || 0).toFixed(2);
         const isD = String(o.delivery_status || o.status || "").toLowerCase() === "delivered";
         const isF = /fail|cancel|refund/i.test(o.delivery_status || o.status || "");
@@ -1421,7 +1421,7 @@ async function generateFullAdminReport() {
             : (o.payment_status === "paid" || o.status === "pending" || o.delivery_status === "completed" || o.delivery_status === "processing")
               ? "⏳ In Progress"
               : "⚠️ Unpaid";
-        return `${idx + 1}. *${phone}* — ${pkg} (GH₵ ${amt}) [${status}]`;
+        return `${idx + 1}. *${phone}* —${pkg} (GH₵ ${amt}) [${status}]`;
       }).join("\n");
     }
 
@@ -1459,8 +1459,8 @@ async function generateFullAdminReport() {
       `📦 *DATA DISPATCH & NETWORK PIPELINE*`,
       `• Confirmed Delivered: *${allDelivered.length}* ✅`,
       `• In Progress / Queued: *${allPending.length}* ⏳`,
-      `• Attention Needed: *${allFailed.length}* ${allFailed.length > 0 ? "⚠️" : "✨"}`,
-      `• Network Breakdown: MTN (*${mtnPaidOrders}*) | Telecel (*${telecelPaidOrders}*) | AT (*${atPaidOrders}*)`,
+      `• Attention Needed: *${allFailed.length}*${allFailed.length > 0 ? "⚠️" : "✨"}`,
+      `• Network Breakdown: MTN (*${mtnPaidOrders}*) | Telecel (*${telecelPaidOrders}*) \vert{} AT (*${atPaidOrders}*)`,
       `• Leading Network: *${topNetwork}* 🏆`,
       ``,
       `⚡ *DIGITAL SERVICES & CHECKERS*`,
@@ -1506,11 +1506,6 @@ app.post("/webhook", async (req, res) => {
     const from = msg.from;
     const text = (msg.text?.body || "").trim();
 
-    console.log("📩", from, text);
-
-    /* =====================================================
-    DYNAMIC OWNER & ADMIN PHONE DETECTION
-    ===================================================== */
     const adminPhones = ["233547100951", "0547100951", "233592753424", "0592753424"];
     if (process.env.ADMIN_ALERT_PHONE) adminPhones.push(String(process.env.ADMIN_ALERT_PHONE).replace(/\D/g, ""));
     try {
@@ -1526,12 +1521,8 @@ app.post("/webhook", async (req, res) => {
     const normFrom = String(from || "").replace(/\D/g, "");
     const isOwner = adminPhones.some(p => p && (normFrom === p || normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))));
 
-    /* =====================================================
-    ADMIN COMMAND: EXECUTIVE BOT DASHBOARD
-    ===================================================== */
     if (/^(admin|dashboard|report)$/i.test(text)) {
       if (isOwner) {
-        console.log("📊 GENERATING EXECUTIVE BOT DASHBOARD FOR ADMIN:", from);
         const adminReport = await generateFullAdminReport();
         return await sendWhatsApp(from, adminReport);
       } else {
@@ -1542,9 +1533,6 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    /* =====================================================
-    STONY OWNER AI — Personal Business Assistant & Co-Pilot
-    ===================================================== */
     if (isOwner) {
       const { data: ownerSession } = await supabase
         .from("sessions")
@@ -1557,9 +1545,6 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, MENU);
       }
 
-      console.log("👑 OWNER CHAT WITH STONY — message:", text);
-
-      // ── HUMAN-IN-THE-LOOP ACTION CONFIRMATION ──
       let pendingAction = null;
       try {
         if (ownerSession?.bundle) {
@@ -1571,7 +1556,6 @@ app.post("/webhook", async (req, res) => {
       if (pendingAction && /^(yes|yeah|yep|go|go ahead|do it|confirm|ok|okay|sure|yh|y)$/i.test(text.trim())) {
         const { type, ref, phone: aPhone, network, capacity, newStatus, smsText } = pendingAction;
 
-        // Clear pending action state immediately
         await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
 
         if (type === "retry_order" && ref) {
@@ -1593,9 +1577,9 @@ app.post("/webhook", async (req, res) => {
               updated_at: new Date().toISOString() 
             }).eq("reference", ref);
 
-            return sendWhatsApp(from, `✅ *Action Executed:* Retry successfully dispatched for *${capacity}GB* → *${aPhone}*.\n🆔 New Ref: ${newRef || ref}\n\nI'm monitoring the pipeline for you boss.`);
+            return sendWhatsApp(from, `✅ *Action Executed:* Retry successfully dispatched for *${capacity}GB* → *${aPhone}*.\n🆔 New Ref: ${newRef || ref}`);
           } catch (retryErr) {
-            return sendWhatsApp(from, `❌ *Action Failed:* ${retryErr.response?.data?.message || retryErr.message}\nCheck DataMart wallet balance and try again.`);
+            return sendWhatsApp(from, `❌ *Action Failed:* ${retryErr.response?.data?.message || retryErr.message}`);
           }
         }
 
@@ -1645,21 +1629,7 @@ app.post("/webhook", async (req, res) => {
 
       let deliveryEta = "~5-30 minutes";
       let walletBalance = "";
-      let arkeselSmsBalance = "";
       let systemData = "";
-
-      let todayPaidCount = 0;
-      let todayRevenue = 0;
-      let failedOrdersList = [];
-      let netflixCount = 0;
-      let pendingMashupCount = 0;
-      let afaCount = 0;
-      let checkerCount = 0;
-      let unreadSupportCount = 0;
-      let openSupportCount = 0;
-      let outOfStockCount = 0;
-      let unlockedScratchCount = 0;
-      let activePromotersCount = 0;
 
       try {
         if (DATA_API_KEY) {
@@ -1682,108 +1652,10 @@ app.post("/webhook", async (req, res) => {
         }
       } catch (_) {}
 
-      const activeArkesel = ARKESEL_API_KEY || process.env.ARKESEL_API_KEY;
-      if (activeArkesel) {
-        try {
-          const aRes = await axios.get("https://sms.arkesel.com/api/v2/clients/balance-details", {
-            headers: { "api-key": activeArkesel },
-            timeout: 3000
-          });
-          const d = aRes.data?.data || aRes.data;
-          const s = Number(d?.sms_balance ?? d?.smsBalance ?? d?.sms);
-          if (!isNaN(s)) arkeselSmsBalance = `${s} SMS`;
-        } catch (_) {}
-      }
-
-      try {
-        const startOfDay = new Date();
-        startOfDay.setHours(0, 0, 0, 0);
-
-        const [
-          allOrdersRes,
-          todayOrdersRes,
-          servicesRes,
-          checkersRes,
-          chatsRes,
-          productsRes,
-          scratchRes,
-          referralsRes
-        ] = await Promise.all([
-          supabase.from("orders").select("id, reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at").limit(500),
-          supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at").gte("created_at", startOfDay.toISOString()).order("created_at", { ascending: false }),
-          supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status").eq("payment_status", "paid"),
-          supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status").eq("payment_status", "paid"),
-          supabase.from("chat_conversations").select("id, unread_for_support").eq("status", "open"),
-          supabase.from("products").select("id, name, network, capacity, in_stock"),
-          supabase.from("scratch_codes").select("id, unlocked, scratched").eq("unlocked", true),
-          supabase.from("referrals").select("id, total_clicks")
-        ]);
-
-        const todayOrders = todayOrdersRes?.data || [];
-        const paid = todayOrders.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
-        const failed = todayOrders.filter(o => /fail|cancel/i.test(o.delivery_status || ""));
-        todayPaidCount = paid.length;
-        todayRevenue = paid.reduce((s, o) => s + Number(o.amount || 0), 0);
-        failedOrdersList = failed.slice(0, 5);
-
-        const paidServices = servicesRes?.data || [];
-        netflixCount = paidServices.filter(s => s.service === "netflix").length;
-        pendingMashupCount = paidServices.filter(s => s.service === "mashup" && s.delivery_status !== "delivered").length;
-        afaCount = paidServices.filter(s => s.service === "afa").length;
-
-        checkerCount = (checkersRes?.data || []).length;
-        openSupportCount = (chatsRes?.data || []).length;
-        unreadSupportCount = (chatsRes?.data || []).reduce((s, c) => s + Number(c.unread_for_support || 0), 0);
-        outOfStockCount = (productsRes?.data || []).filter(p => !p.in_stock).length;
-        unlockedScratchCount = (scratchRes?.data || []).length;
-        activePromotersCount = (referralsRes?.data || []).length;
-
-        systemData += `WHOLE-SYSTEM LIVE STATUS (ALL 13 CORE PILLARS):\n`;
-        systemData += `1. Today's Sales: ${paid.length} paid orders | ₵${todayRevenue.toFixed(2)}\n`;
-        if (failed.length > 0) {
-          systemData += `   ⚠️ Failed Orders (${failed.length}): ${failed.map(o => `${o.reference} (${o.capacity}GB ${o.network} to ${o.recipient_phone})`).join(", ")}\n`;
-        }
-        systemData += `2. DataMart API Wallet: ${walletBalance || "Connected"}\n`;
-        systemData += `3. Arkesel Bulk SMS: ${arkeselSmsBalance || "Active"}\n`;
-        systemData += `4. Netflix Passes: ${netflixCount} active\n`;
-        systemData += `5. MTN MashUp Pending Manual: ${pendingMashupCount}\n`;
-        systemData += `6. Support Unread: ${unreadSupportCount}\n`;
-      } catch (err) {
-        console.warn("Whole system fetch note:", err.message);
-      }
-
-      let specificOrderCtx = "";
-      const refMatch = text.match(/\b(REF-\d+|[A-Z0-9]{8,})\b/i);
-      const phoneMatch = text.match(/\b(0[2357]\d{8}|233\d{9})\b/);
-      if (refMatch) {
-        try {
-          const lookupRef = refMatch[1].trim();
-          let { data: ord } = await supabase.from("orders")
-            .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, datamart_reference")
-            .or(`reference.ilike.%${lookupRef}%,datamart_reference.ilike.%${lookupRef}%`).limit(1).maybeSingle();
-
-          if (ord) {
-            const liveStatus = await getRealDatamartDeliveryStatus(ord.datamart_reference || ord.reference);
-            specificOrderCtx = `ORDER LOOKUP (${lookupRef}):\nRef: ${ord.reference} | ${ord.capacity}GB ${ord.network} → ${ord.recipient_phone} | ₵${ord.amount} | Payment: ${ord.payment_status} | Delivery Status: ${liveStatus.deliveryStatus} (Raw: ${liveStatus.rawStatus})\n`;
-          }
-        } catch (_) {}
-      }
-
       const ownerSystemPrompt =
         "You are Stony, the owner's personal AI business assistant, digital co-pilot, and whole-system commercial partner at DATA 1 GH.\n" +
-        "You are having a private conversation directly with the business owner on WhatsApp.\n\n" +
-        "STRICT OPERATIONAL RULE — HUMAN CONFIRMATION REQUIRED:\n" +
-        "- You have READ-ONLY system access by default. You can NEVER execute database updates, order retries, or SMS dispatches autonomously.\n" +
-        "- Whenever you identify a failed order, stuck transaction, or administrative task that needs attention, **propose** the action to the owner and include a structured tag at the end of your message so they can confirm it.\n" +
-        "- Available Action Tags:\n" +
-        "  • Retry failed order: `[SUGGEST_RETRY: ref=REF_ID, phone=0241234567, network=MTN, capacity=5]`\n" +
-        "  • Update order status: `[SUGGEST_STATUS: ref=REF_ID, status=delivered]`\n" +
-        "  • Dispatch SMS: `[SUGGEST_SMS: phone=0241234567, text=Your order update...]`\n" +
-        "- When you include a tag, clearly explain why you suggest this action and ask: 'Shall I run this for you boss? Reply *yes* to confirm.'\n\n" +
-        "PERSONALITY:\n" +
-        "- Trusted senior digital business partner. Use natural Ghanaian vibe ('bossu', 'chale', 'sharp', 'no wahala').\n" +
-        "- NEVER say 'As an AI'. You are Stony.\n\n" +
-        `CURRENT SYSTEM REALITY:\n- Delivery Speed: ${deliveryEta}\n- Wallet: ${walletBalance || "Connected"}\n${systemData}\n${specificOrderCtx || ""}`;
+        "You are having a private conversation directly with the business owner on WhatsApp.\n" +
+        "PERSONALITY: Trusted senior digital business partner. Use natural Ghanaian vibe ('bossu', 'chale', 'sharp'). NEVER say 'As an AI'. You are Stony.";
 
       let aiReply = "";
       const geminiModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-pro", "gemini-3.5-flash"];
@@ -1825,33 +1697,6 @@ app.post("/webhook", async (req, res) => {
               break;
             }
           } catch (_) {}
-        }
-      }
-
-      // ── PARSE SUGGESTED ACTIONS FROM AI ──
-      if (aiReply) {
-        const retryMatch = aiReply.match(/\[SUGGEST_RETRY:\s*ref=([^,\]]+),\s*phone=([^,\]]+),\s*network=([^,\]]+),\s*capacity=([^\]]+)\]/i);
-        const statusMatch = aiReply.match(/\[SUGGEST_STATUS:\s*ref=([^,\]]+),\s*status=([^\]]+)\]/i);
-        const smsMatch = aiReply.match(/\[SUGGEST_SMS:\s*phone=([^,\]]+),\s*text=([^\]]+)\]/i);
-
-        if (retryMatch) {
-          const [, rRef, rPhone, rNetwork, rCapacity] = retryMatch;
-          const actionData = { type: "retry_order", ref: rRef.trim(), phone: rPhone.trim(), network: rNetwork.trim().toUpperCase(), capacity: rCapacity.trim() };
-          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
-          aiReply = aiReply.replace(retryMatch[0], "").trim();
-          aiReply += `\n\n👉 *Shall I run this retry for you boss?* Reply *yes* to confirm or *no* to cancel.`;
-        } else if (statusMatch) {
-          const [, sRef, sStatus] = statusMatch;
-          const actionData = { type: "update_status", ref: sRef.trim(), newStatus: sStatus.trim().toLowerCase() };
-          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
-          aiReply = aiReply.replace(statusMatch[0], "").trim();
-          aiReply += `\n\n👉 *Should I update status to ${sStatus.toUpperCase()}?* Reply *yes* to confirm or *no* to cancel.`;
-        } else if (smsMatch) {
-          const [, sPhone, sText] = smsMatch;
-          const actionData = { type: "send_sms", phone: sPhone.trim(), smsText: sText.trim() };
-          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
-          aiReply = aiReply.replace(smsMatch[0], "").trim();
-          aiReply += `\n\n👉 *Should I dispatch this SMS?* Reply *yes* to confirm or *no* to cancel.`;
         }
       }
 
@@ -1923,7 +1768,7 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, `🪪 AFA Registration — ₵${AFA_PRICE}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
       } else if (text === "7") {
         await supabase.from("sessions").update({ step: 10, network: "MASHUP" }).eq("phone", from);
-        return sendWhatsApp(from, `📶 MTN MashUp Bundle\n\nEnter the amount you want to pay (₵${MASHUP_MIN_AMOUNT} - ₵${MASHUP_MAX_AMOUNT}):\n\nExample: 5\n\nThe data + minutes mix you get depends on what MTN offers for that amount — this will be applied to your number manually.`);
+        return sendWhatsApp(from, `📶 MTN MashUp Bundle\n\nEnter the amount you want to pay (₵${MASHUP_MIN_AMOUNT} - ₵${MASHUP_MAX_AMOUNT}):\n\nExample: 5`);
       } else if (text === "8") {
         await supabase.from("sessions").update({ step: 70 }).eq("phone", from);
         return playScratchCard(from);
@@ -1952,7 +1797,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       await supabase.from("sessions").update({ phone_number: phone, step: 8 }).eq("phone", from);
-      return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from:\n\n(This can be the same number or a different one)`);
+      return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from:`);
     }
 
     if (session.step === 8) {
@@ -1969,7 +1814,7 @@ app.post("/webhook", async (req, res) => {
 
       const activeScratch = await getActiveScratchCode(from);
       if (activeScratch) {
-        return sendWhatsApp(from, `🎟️ SCRATCH & WIN (OPTIONAL)\n\nActive Code: *${activeScratch.code}*\nProgress: ${Number(activeScratch.orders_completed || 0)}/${SCRATCH_REQUIRED_ORDERS}\n\nUse this code for this paid order?\n\n1 - YES, use my code\n2 - NO, skip`);
+        return sendWhatsApp(from, `🎟️ SCRATCH & WIN (OPTIONAL)\n\nActive Code: *${activeScratch.code}*\nUse this code for this paid order?\n\n1 - YES, use my code\n2 - NO, skip`);
       }
 
       return sendWhatsApp(from, `🎟️ SCRATCH & WIN (OPTIONAL)\n\nDo you have a Data1 Scratch Code for this paid order?\n\n1 - YES, enter my code\n2 - NO / SKIP`);
@@ -2008,7 +1853,7 @@ app.post("/webhook", async (req, res) => {
       const bundle = PACKAGES[session.network]?.[session.bundle];
       const tracker = await getDeliveryEstimate();
       const estimateMessage = buildDeliveryEstimateMessage(tracker);
-      return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n📶 Network: ${session.network}\n📦 Data: ${bundle.capacity}GB\n💰 Amount: ₵${bundle.price.toFixed(2)}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n🎟️ Scratch Code: ${result.scratch.code}\n🎯 This order will count toward: ${Number(result.scratch.orders_completed || 0) + 1}/${SCRATCH_REQUIRED_ORDERS}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
+      return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n📶 Network: ${session.network}\n📦 Data: ${bundle.capacity}GB\n💰 Amount: ₵${bundle.price.toFixed(2)}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n🎟️ Scratch Code: ${result.scratch.code}\n\nReply YES to pay or NO to cancel`);
     }
 
     if (session.step === 70) {
@@ -2017,17 +1862,17 @@ app.post("/webhook", async (req, res) => {
           const result = await createScratchCodeForCustomer(from);
           if (!result.ok) {
             const x = result.existing;
-            return sendWhatsApp(from, x.unlocked ? `🎉 Your Scratch Card is already unlocked!\n\nCode: *${x.code}*\nProgress: ${Number(x.orders_completed || 0)}/5\n\nReply *SCRATCH* to play.` : `🎟️ You already have an active code: *${x.code}*\n\nProgress: ${Number(x.orders_completed || 0)}/5\n\nUse it during payment on your next paid data orders.`);
+            return sendWhatsApp(from, x.unlocked ? `🎉 Your Scratch Card is already unlocked!\n\nCode: *${x.code}*\nReply *SCRATCH* to play.` : `🎟️ You already have an active code: *${x.code}*`);
           }
-          return sendWhatsApp(from, `🎉 YOUR UNIQUE SCRATCH CODE IS READY!\n\n🎟️ *${result.data.code}*\n\nUse this code during payment on your Data orders. Complete 5 PAID Data orders using this code.\n\nProgress: 0/5\n\nAfter the 5th paid order, your Scratch Card unlocks automatically. Come back here and reply *SCRATCH* to win 1GB or 2GB! 🎁`);
+          return sendWhatsApp(from, `🎉 YOUR UNIQUE SCRATCH CODE IS READY!\n\n🎟️ *${result.data.code}*`);
         } catch (e) {
-          return sendWhatsApp(from, "❌ We could not generate your Scratch Code right now. Please reply *YES* to try again.");
+          return sendWhatsApp(from, "❌ We could not generate your Scratch Code right now.");
         }
       }
       if (/^scratch$/i.test(text)) return playScratchCard(from);
       const activeScratch = await getActiveScratchCode(from);
-      if (activeScratch) return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\nCode: *${activeScratch.code}*\nProgress: ${Number(activeScratch.orders_completed || 0)}/5\n\n${activeScratch.unlocked ? "🎉 UNLOCKED — reply SCRATCH to play." : "Use this code during payment on your paid data orders."}`);
-      return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\nYou do not currently have an active Scratch Code.\n\nReply *YES* to generate your unique Data1 Scratch Code automatically.`);
+      if (activeScratch) return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\nCode: *${activeScratch.code}*`);
+      return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\nReply *YES* to generate your unique Data1 Scratch Code automatically.`);
     }
 
     if (session.step === 80) {
@@ -2040,9 +1885,9 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 81) {
       const prizePhone = normalizePhone(text);
-      if (prizePhone.length !== 10 || !prizePhone.startsWith("0")) return sendWhatsApp(from, "❌ Invalid Ghana phone number.\n\nExample: 0241234567");
+      if (prizePhone.length !== 10 || !prizePhone.startsWith("0")) return sendWhatsApp(from, "❌ Invalid Ghana phone number.");
       const scratch = await supabase.from("scratch_codes").select("*").eq("assigned_to", normalizePhone(from)).eq("status", "processing").maybeSingle().then(r => r.data);
-      if (!scratch) return sendWhatsApp(from, "❌ Scratch prize session not found. Reply SCRATCH and try again.");
+      if (!scratch) return sendWhatsApp(from, "❌ Scratch prize session not found.");
       const capacity = String(scratch.prize || "1");
       const prizeLabel = capacity === "2" ? "2GB" : "1GB";
       const networkMap = { MTN: "YELLO", AIRTELTIGO: "YELLO", TELECEL: "YELLO" };
@@ -2052,7 +1897,7 @@ app.post("/webhook", async (req, res) => {
         const reference = data.reference || data.orderReference || null;
         await supabase.from("scratch_codes").update({ status: "used", prize_network: session.network, prize_phone: prizePhone, datamart_reference: reference, delivered_at: new Date().toISOString() }).eq("id", scratch.id);
         await supabase.from("sessions").update({ step: 1, scratch_prize: null }).eq("phone", from);
-        return sendWhatsApp(from, `🎉 PRIZE SENT SUCCESSFULLY!\n\n🎁 Prize: ${prizeLabel}\n📶 Network: ${session.network}\n📱 Sent to: ${prizePhone}\nReply HI to continue shopping.`);
+        return sendWhatsApp(from, `🎉 PRIZE SENT SUCCESSFULLY!\n\n🎁 Prize: ${prizeLabel}\n📱 Sent to: ${prizePhone}`);
       } catch (e) {
         await supabase.from("scratch_codes").update({ status: "unlocked", scratched: false }).eq("id", scratch.id);
         return sendWhatsApp(from, `❌ We could not send your ${prizeLabel} prize right now. Reply *SCRATCH* and try again.`);
@@ -2064,12 +1909,10 @@ app.post("/webhook", async (req, res) => {
         await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
         return sendWhatsApp(from, "❌ Cancelled\n\n" + MENU);
       }
-
       if (/^yes$/i.test(text)) {
         const bundle = PACKAGES[session.network][session.bundle];
         return initiateMomoCharge(from, session, bundle);
       }
-
       return sendWhatsApp(from, "Reply YES to pay or NO to cancel.");
     }
 
@@ -2077,293 +1920,16 @@ app.post("/webhook", async (req, res) => {
       return submitMomoOtp(from, session, text.trim());
     }
 
-    if (session.step === 10) {
-      const amountText = text.trim();
-      if (!isValidMashupAmount(amountText)) {
-        return sendWhatsApp(from, `Invalid amount ❌ Enter an amount between ₵${MASHUP_MIN_AMOUNT} and ₵${MASHUP_MAX_AMOUNT} (e.g. 5)`);
-      }
-
-      await supabase.from("sessions").update({ bundle: amountText, step: 11 }).eq("phone", from);
-      const combos = getMashupCombos(amountText);
-      let comboMenu = `MashUp ₵${amountText} — choose a package:\n\n`;
-      combos.forEach((c, i) => {
-        comboMenu += `${i + 1} - ${c.label}\n`;
-      });
-      return sendWhatsApp(from, comboMenu);
-    }
-
-    if (session.step === 11) {
-      const combos = getMashupCombos(session.bundle);
-      const combo = combos[Number(text) - 1];
-      if (!combo) {
-        return sendWhatsApp(from, "Invalid option ❌ Choose an option to continue");
-      }
-
-      await supabase.from("sessions").update({ bundle: `${session.bundle}|${combo.id}`, step: 12 }).eq("phone", from);
-      return sendWhatsApp(from, "Enter phone number to receive the MashUp bundle on:");
-    }
-
-    if (session.step === 12) {
-      const phone = normalizePhone(text);
-      if (phone.length !== 10 || !phone.startsWith("0")) {
-        return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana phone number to continue");
-      }
-
-      await supabase.from("sessions").update({ phone_number: phone, step: 13 }).eq("phone", from);
-      return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from:`);
-    }
-
-    if (session.step === 13) {
-      const momoNumber = normalizePhone(text);
-      if (momoNumber.length !== 10 || !momoNumber.startsWith("0")) {
-        return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
-      }
-
-      const parsed = parseMashupSelection(session.bundle);
-      if (!parsed) {
-        await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
-        return sendWhatsApp(from, "❌ Something went wrong with your selection. Please reply HI and try again.");
-      }
-
-      await supabase.from("sessions").update({ momo_number: momoNumber, step: 14 }).eq("phone", from);
-
-      return sendWhatsApp(
-        from,
-        `Confirm Order: Your MashUp will be applied manually ✅\n\n📶 Network: MTN (MashUp)\n📦 Package: ${parsed.combo.label}\n💰 Amount: ₵${parsed.amount.toFixed(2)}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${momoNumber}\n\nReply YES to pay or NO to cancel`
-      );
-    }
-
-    if (session.step === 14) {
-      if (/^no$/i.test(text)) {
-        await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
-        return sendWhatsApp(from, "❌ Cancelled\n\n" + MENU);
-      }
-
-      if (/^yes$/i.test(text)) {
-        const parsed = parseMashupSelection(session.bundle);
-        if (!parsed) {
-          await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
-          return sendWhatsApp(from, "❌ Something went wrong with your selection. Please reply HI and try again.");
-        }
-        const bundle = { price: parsed.amount, capacity: parsed.combo.label };
-        return initiateMomoCharge(from, session, bundle);
-      }
-
-      return sendWhatsApp(from, "Reply YES to pay or NO to cancel.");
-    }
-
     if (session.step === 6) {
       const trackingPhone = normalizePhone(text);
       if (trackingPhone.length !== 10 || !trackingPhone.startsWith("0")) {
-        return sendWhatsApp(from, `❌ Invalid phone number.\n\nPlease enter a valid Ghana phone number.`);
+        return sendWhatsApp(from, `❌ Invalid phone number.`);
       }
       return trackOrders(from, trackingPhone);
     }
 
-    if (session.step === 5) {
-      if (/^(cancel|no|stop)$/i.test(text)) {
-        await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
-        return sendWhatsApp(from, "❌ Order cancelled.\n\n" + MENU);
-      }
-    }
-
   } catch (e) {
     console.error("BOT ERROR:", e.response?.data || e.message);
-  }
-});
-
-/* =========================================================
-PAYSTACK WEBHOOK & DEBUG LOGGER
-========================================================= */
-
-const recentWebhookLogs = [];
-
-function recordWebhookLog(event, details) {
-  const item = { time: new Date().toISOString(), event, details };
-  console.log(`[WEBHOOK] ${event}:`, typeof details === "object" ? JSON.stringify(details) : details);
-  recentWebhookLogs.unshift(item);
-  if (recentWebhookLogs.length > 50) recentWebhookLogs.pop();
-}
-
-app.get("/webhook-debug", (req, res) => {
-  res.json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    count: recentWebhookLogs.length,
-    logs: recentWebhookLogs
-  });
-});
-
-app.post("/paystack-webhook", async (req, res) => {
-  res.sendStatus(200);
-
-  try {
-    const event = req.body;
-    if (!event || event.event !== "charge.success") return;
-
-    const ref = event.data?.reference;
-    if (!ref) return;
-
-    const paidAmount = Number(event.data?.amount || 0) / 100;
-
-    let { data: session } = await supabase
-      .from("sessions")
-      .select("*")
-      .eq("ref", ref)
-      .maybeSingle();
-
-    if (!session) {
-      const { data: webOrder } = await supabase
-        .from("orders")
-        .select("*")
-        .or(`reference.eq.${ref},datamart_reference.eq.${ref}`)
-        .maybeSingle();
-
-      if (webOrder) {
-        const networkMap = { MTN: "YELLO", TELECEL: "TELECEL", AIRTELTIGO: "AT_PREMIUM" };
-        const dmNetwork = networkMap[webOrder.network] || webOrder.network || "YELLO";
-        const phone = normalizePhone(webOrder.recipient_phone || webOrder.phone_number);
-        const capacity = String(webOrder.capacity || "1").replace(/[^\d.]/g, "");
-
-        let dmSuccess = false;
-        let dmRef = null;
-
-        if (DATA_API_KEY) {
-          try {
-            const dmRes = await axios.post(
-              `${DATAMART_BASE}/purchase`,
-              { phoneNumber: phone, network: dmNetwork, capacity, gateway: "wallet", delivery: "fast" },
-              { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 }
-            );
-            const data = dmRes.data?.data || dmRes.data || {};
-            dmRef = data.reference || data.orderReference || null;
-            dmSuccess = true;
-          } catch (dmErr) {
-            console.warn("Direct DataMart purchase error for web order:", dmErr.message);
-          }
-        }
-
-        let verifiedDelivery = "processing";
-        let verifiedRaw = "processing";
-        if (dmSuccess) {
-          const direct = await getRealDatamartDeliveryStatus(dmRef || ref);
-          verifiedDelivery = direct.deliveryStatus;
-          verifiedRaw = direct.rawStatus;
-        }
-
-        await supabase
-          .from("orders")
-          .update({
-            payment_status: "paid",
-            delivery_status: verifiedDelivery,
-            datamart_status: verifiedRaw,
-            datamart_reference: dmRef,
-            updated_at: new Date().toISOString()
-          })
-          .or(`reference.eq.${ref},datamart_reference.eq.${ref}`);
-
-        await sendWhatsApp(
-          "233547100951",
-          `🛍️ NEW WEBSITE DATA ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📶 Network: ${webOrder.network || "Data"}\n📦 Capacity: ${capacity}GB\n📱 Recipient: ${phone}\n💰 Amount: ₵${paidAmount.toFixed(2)}`
-        );
-        return;
-      }
-    }
-
-    if (!session) return;
-
-    const bundle = PACKAGES[session.network]?.[session.bundle];
-    if (!bundle) return;
-
-    let datamartSuccess = false;
-    let datamartData = {};
-    let datamartReference = null;
-    let datamartStatus = "pending";
-
-    const purchasePayload = {
-      phoneNumber: normalizePhone(session.phone_number),
-      network: bundle.apiNetwork || "YELLO",
-      capacity: String(bundle.capacity),
-      gateway: "wallet"
-    };
-
-    try {
-      const delivery = await axios.post(
-        `${DATAMART_BASE}/purchase`,
-        { ...purchasePayload, delivery: "fast" },
-        {
-          headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" },
-          timeout: 30000
-        }
-      );
-      datamartData = delivery.data?.data || delivery.data || {};
-      datamartReference = datamartData.reference || datamartData.orderReference || null;
-      datamartStatus = datamartData.orderStatus || datamartData.status || "pending";
-      datamartSuccess = true;
-    } catch (err) {
-      try {
-        const deliveryStd = await axios.post(
-          `${DATAMART_BASE}/purchase`,
-          purchasePayload,
-          {
-            headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" },
-            timeout: 30000
-          }
-        );
-        datamartData = deliveryStd.data?.data || deliveryStd.data || {};
-        datamartReference = datamartData.reference || datamartData.orderReference || null;
-        datamartStatus = datamartData.orderStatus || datamartData.status || "pending";
-        datamartSuccess = true;
-      } catch (stdErr) {}
-    }
-
-    const orderReference = datamartReference || ref;
-    let mappedDeliveryStatus = "processing";
-    let mappedRawStatus = datamartStatus;
-    if (datamartSuccess) {
-      const direct = await getRealDatamartDeliveryStatus(orderReference);
-      mappedDeliveryStatus = direct.deliveryStatus;
-      mappedRawStatus = direct.rawStatus;
-    } else {
-      mappedDeliveryStatus = "failed";
-    }
-
-    await supabase.from("orders").insert([{
-      whatsapp_phone: session.phone,
-      phone_number: normalizePhone(session.phone_number),
-      recipient_phone: normalizePhone(session.phone_number),
-      reference: orderReference,
-      network: session.network,
-      bundle: session.bundle,
-      capacity: String(bundle.capacity),
-      amount: paidAmount,
-      status: mappedDeliveryStatus,
-      payment_status: "paid",
-      delivery_status: mappedDeliveryStatus,
-      datamart_status: mappedRawStatus,
-      datamart_reference: datamartReference,
-      paid_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    }]);
-
-    if (datamartSuccess) {
-      await sendWhatsApp(
-        session.phone,
-        `✅ PAYMENT RECEIVED! 🎉\n\n🆔 Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Number: ${session.phone_number}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n\nYour order is being processed and will land shortly!`
-      );
-    } else {
-      await sendWhatsApp(
-        session.phone,
-        `✅ Payment received! Your order for ${bundle.capacity}GB is being processed.`
-      );
-      await sendWhatsApp(
-        "233547100951",
-        `🚨 DATAMART FAILED — MANUAL DELIVERY NEEDED!\nRef: ${orderReference} | ${bundle.capacity}GB ${session.network} to ${session.phone_number}`
-      );
-    }
-  } catch (e) {
-    console.error("WEBHOOK ERROR:", e.message);
   }
 });
 
