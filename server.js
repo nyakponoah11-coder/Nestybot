@@ -439,7 +439,7 @@ function drawScratchPrize() {
 async function playScratchCard(from) {
   const scratch = await getActiveScratchCode(from);
   if (!scratch) return sendWhatsApp(from, "🎟️ SCRATCH & WIN\n\nYou do not currently have an active Scratch Code.\n\nReply *YES* and the system will generate your unique code automatically.");
-  if (!scratch.unlocked) return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\n🎟️ Code: ${scratch.code}\n💳 Paid orders: ${Number(scratch.orders_completed || 0)}/${SCRATCH_REQUIRED_ORDERS}\n🔒 Status: LOCKED`);
+  if (!scratch.unlocked) return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\n🎟️️ Code: ${scratch.code}\n💳 Paid orders: ${Number(scratch.orders_completed || 0)}/${SCRATCH_REQUIRED_ORDERS}\n🔒 Status: LOCKED`);
   if (scratch.scratched || scratch.status === "used") return sendWhatsApp(from, "🎟️ This Scratch Card has already been used. Reply *YES* to start a new challenge.");
   const prize = drawScratchPrize();
   const { error } = await supabase.from("scratch_codes").update({ scratched: true, status: "processing", prize: prize.capacity, prize_label: prize.prize, scratched_at: new Date().toISOString() }).eq("id", scratch.id).eq("scratched", false);
@@ -957,6 +957,7 @@ app.post("/webhook", async (req, res) => {
     const text = (msg.text?.body || "").trim();
 
     const adminPhones = ["233547100951", "0547100951", "233592753424", "0592753424"];
+    if (process.env.ADMIN_ALERT_PHONE) adminPhones.push(String(process.env.ADMIN_ALERT_PHONE).replace(/\D/g, ""));
     const normFrom = String(from || "").replace(/\D/g, "");
     const isOwner = adminPhones.some(p => p && (normFrom === p || normFrom.endsWith(p.slice(-9))));
 
@@ -970,13 +971,203 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (isOwner) {
-      const { data: ownerSession } = await supabase.from("sessions").select("step, bundle, notes").eq("phone", from).maybeSingle();
+      const { data: ownerSession } = await supabase
+        .from("sessions")
+        .select("step, bundle, notes")
+        .eq("phone", from)
+        .maybeSingle();
+
       if (/^(menu|customer)$/i.test(text)) {
         await supabase.from("sessions").update({ step: 1, bundle: null }).eq("phone", from);
         return sendWhatsApp(from, MENU);
       }
 
-      let aiReply = `I dey here with you boss! System is active and monitored. What area do you want us to tackle?`;
+      // ── CHECK IF OWNER IS CONFIRMING A PENDING ACTION ──
+      let pendingAction = null;
+      try {
+        if (ownerSession?.bundle) {
+          const parsed = JSON.parse(ownerSession.bundle);
+          if (parsed?.type) pendingAction = parsed;
+        }
+      } catch (_) {}
+
+      if (pendingAction && /^(yes|yeah|yep|go|go ahead|do it|confirm|ok|okay|sure|yh|y)$/i.test(text.trim())) {
+        const { type, ref, phone: aPhone, network, capacity, smsText } = pendingAction;
+        await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
+
+        if (type === "retry_order" && ref) {
+          try {
+            const retryRes = await axios.post(`${DATAMART_BASE}/purchase`, {
+              phoneNumber: aPhone,
+              network: network || "YELLO",
+              capacity: String(capacity || "1"),
+              gateway: "wallet",
+              delivery: "fast"
+            }, { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 });
+            
+            const retryData = retryRes.data?.data || retryRes.data || {};
+            const newRef = retryData.reference || retryData.orderReference || null;
+            
+            await supabase.from("orders").update({ 
+              delivery_status: "processing", 
+              status: "processing",
+              updated_at: new Date().toISOString() 
+            }).eq("reference", ref);
+
+            return sendWhatsApp(from, `✅ *Action Executed:* Retry successfully dispatched for *${capacity}GB* → *${aPhone}*.\n🆔 New Ref: ${newRef || ref}`);
+          } catch (retryErr) {
+            return sendWhatsApp(from, `❌ *Action Failed:* ${retryErr.response?.data?.message || retryErr.message}`);
+          }
+        }
+
+        if (type === "send_sms") {
+          await sendAdminSms(smsText || "DATA 1 GH: Your order has been updated.");
+          return sendWhatsApp(from, `✅ *Action Executed:* Admin SMS alert dispatched successfully.`);
+        }
+      } else if (pendingAction && /^(no|nope|cancel|nah|stop)$/i.test(text.trim())) {
+        await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
+        return sendWhatsApp(from, "Sharp, cancelled that action. What else is on your mind boss?");
+      }
+
+      let history = [];
+      try {
+        if (ownerSession?.notes) {
+          const parsed = JSON.parse(ownerSession.notes);
+          if (Array.isArray(parsed)) history = parsed;
+        }
+      } catch (_) {}
+
+      let geminiKey = cleanApiKey(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "");
+      let openAiKey = cleanApiKey(process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY || "");
+
+      let deliveryEta = "~5-30 minutes";
+      let walletBalance = "Fetching...";
+      let totalOrdersCount = 0;
+      let todayRevenueVal = 0;
+
+      try {
+        if (DATA_API_KEY) {
+          const b = await axios.get(`${DATAMART_BASE}/user/balance`, {
+            headers: { "x-api-key": DATA_API_KEY },
+            timeout: 4000
+          });
+          const bal = b?.data?.data?.walletBalance ?? b?.data?.walletBalance ?? b?.data?.data?.balance;
+          if (bal != null) walletBalance = `GH₵ ${Number(bal).toFixed(2)}`;
+        }
+      } catch (_) {
+        walletBalance = "Unavailable";
+      }
+
+      try {
+        const { count } = await supabase.from("orders").select("*", { count: "exact", head: true });
+        if (count != null) totalOrdersCount = count;
+
+        const startOfDay = new Date();
+        startOfDay.setHours(0, 0, 0, 0);
+        const { data: todayOrders } = await supabase.from("orders").select("amount, payment_status").gte("created_at", startOfDay.toISOString());
+        
+        if (todayOrders) {
+          const paidToday = todayOrders.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
+          todayRevenueVal = paidToday.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+        }
+      } catch (_) {}
+
+      const ownerSystemPrompt =
+        "You are Stony, the owner's personal AI business assistant, digital co-pilot, and whole-system partner at DATA 1 GH.\n" +
+        "You are having a private conversation directly with the business owner on WhatsApp.\n" +
+        "PERSONALITY: Trusted senior digital business partner. Use natural Ghanaian vibe ('bossu', 'chale', 'sharp'). NEVER say 'As an AI'. You are Stony.\n\n" +
+        "STRICT OPERATIONAL RULE — HUMAN CONFIRMATION REQUIRED:\n" +
+        "- You have READ-ONLY system access by default. You can NEVER execute database updates, order retries, or SMS dispatches autonomously.\n" +
+        "- Whenever you identify a failed order, stuck transaction, or task requiring action, **propose** it and include a structured tag: `[SUGGEST_SMS: phone=059274356, text=We miss you]` or `[SUGGEST_RETRY: ref=REF123, phone=0241234567, network=MTN, capacity=5]`.\n\n" +
+        `CURRENT REAL-TIME SYSTEM STATS:\n- DataMart Wallet Balance: ${walletBalance}\n- Total Orders Recorded: ${totalOrdersCount}\n- Today's Revenue: GH₵ ${todayRevenueVal.toFixed(2)}\n- Delivery Speed: ${deliveryEta}`;
+
+      let aiReply = "";
+      const geminiModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-pro", "gemini-3.5-flash"];
+
+      const historyTurns = history.slice(-6).map(h => ({
+        role: h.role === "assistant" ? "model" : "user",
+        parts: [{ text: h.text }]
+      }));
+
+      while (historyTurns.length > 0 && historyTurns[0].role === "model") {
+        historyTurns.shift();
+      }
+
+      const turns = [];
+      for (const turn of historyTurns) {
+        if (turns.length > 0 && turns[turns.length - 1].role === turn.role) {
+          turns[turns.length - 1].parts[0].text += `\n${turn.parts[0].text}`;
+        } else {
+          turns.push(turn);
+        }
+      }
+      turns.push({ role: "user", parts: [{ text }] });
+
+      if (geminiKey) {
+        for (const model of geminiModels) {
+          try {
+            const gRes = await axios.post(
+              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+              {
+                contents: turns,
+                systemInstruction: { parts: [{ text: ownerSystemPrompt }] },
+                generationConfig: { maxOutputTokens: 400, temperature: 0.7 }
+              },
+              { headers: { "Content-Type": "application/json" }, timeout: 12000 }
+            );
+            const txt = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+            if (txt) {
+              aiReply = txt;
+              break;
+            }
+          } catch (_) {}
+        }
+      }
+
+      // ── PARSE ACTION TAGS FROM AI ──
+      if (aiReply) {
+        const retryMatch = aiReply.match(/\[SUGGEST_RETRY:\s*ref=([^,\]]+),\s*phone=([^,\]]+),\s*network=([^,\]]+),\s*capacity=([^\]]+)\]/i);
+        const smsMatch = aiReply.match(/\[SUGGEST_SMS:\s*phone=([^,\]]+),\s*text=([^\]]+)\]/i);
+
+        if (retryMatch) {
+          const [, rRef, rPhone, rNetwork, rCapacity] = retryMatch;
+          const actionData = { type: "retry_order", ref: rRef.trim(), phone: rPhone.trim(), network: rNetwork.trim().toUpperCase(), capacity: rCapacity.trim() };
+          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+          aiReply = aiReply.replace(retryMatch[0], "").trim();
+          aiReply += `\n\n👉 *Shall I run this retry for you boss?* Reply *yes* to confirm or *no* to cancel.`;
+        } else if (smsMatch) {
+          const [, sPhone, sText] = smsMatch;
+          const actionData = { type: "send_sms", phone: sPhone.trim(), smsText: sText.trim() };
+          await supabase.from("sessions").update({ bundle: JSON.stringify(actionData) }).eq("phone", from);
+          aiReply = aiReply.replace(smsMatch[0], "").trim();
+          aiReply += `\n\n👉 *Should I dispatch this SMS?* Reply *yes* to confirm or *no* to cancel.`;
+        }
+      }
+
+      if (!aiReply) {
+        const lt = text.toLowerCase();
+        if (/balance|wallet|money/i.test(lt)) {
+          aiReply = `💳 Our DataMart wallet balance is currently *${walletBalance}* bossu!`;
+        } else if (/order|orders|how many/i.test(lt)) {
+          aiReply = `📦 We have recorded *${totalOrdersCount} total orders* so far, with *GH₵ ${todayRevenueVal.toFixed(2)}* brought in today!`;
+        } else {
+          aiReply = `I dey here with you boss! Wallet is ${walletBalance} and we have ${totalOrdersCount} total orders on record. What should we look into?`;
+        }
+      }
+
+      aiReply = aiReply
+        .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony")
+        .replace(/\bdatamart\b/gi, "DataMart");
+
+      try {
+        const updatedHistory = [
+          ...history.slice(-6),
+          { role: "user", text },
+          { role: "assistant", text: aiReply }
+        ];
+        await supabase.from("sessions").update({ notes: JSON.stringify(updatedHistory), step: 99 }).eq("phone", from);
+      } catch (_) {}
+
       return sendWhatsApp(from, aiReply);
     }
 
