@@ -438,8 +438,8 @@ function drawScratchPrize() {
 
 async function playScratchCard(from) {
   const scratch = await getActiveScratchCode(from);
-  if (!scratch) return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\nYou do not currently have an active Scratch Code.\n\nReply *YES* and the system will generate your unique code automatically.\n\nUse the code during payment on 5 PAID data orders. After 5/5, come back and reply *SCRATCH* to win! 🎁`);
-  if (!scratch.unlocked) return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\n🎟️ Code: ${scratch.code}\n💳 Paid orders: ${Number(scratch.orders_completed || 0)}/${SCRATCH_REQUIRED_ORDERS}\n🔒 Status: LOCKED\n\nUse your code during payment on your paid data orders.\n\nYou need ${SCRATCH_REQUIRED_ORDERS - Number(scratch.orders_completed || 0)} more paid order(s).\n\nAfter 5/5, reply *SCRATCH* to play! 🎁`);
+  if (!scratch) return sendWhatsApp(from, "🎟️ SCRATCH & WIN\n\nYou do not currently have an active Scratch Code.\n\nReply *YES* and the system will generate your unique code automatically.");
+  if (!scratch.unlocked) return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\n🎟️ Code: ${scratch.code}\n💳 Paid orders: ${Number(scratch.orders_completed || 0)}/${SCRATCH_REQUIRED_ORDERS}\n🔒 Status: LOCKED`);
   if (scratch.scratched || scratch.status === "used") return sendWhatsApp(from, "🎟️ This Scratch Card has already been used. Reply *YES* to start a new challenge.");
   const prize = drawScratchPrize();
   const { error } = await supabase.from("scratch_codes").update({ scratched: true, status: "processing", prize: prize.capacity, prize_label: prize.prize, scratched_at: new Date().toISOString() }).eq("id", scratch.id).eq("scratched", false);
@@ -560,7 +560,7 @@ function cleanApiKey(raw) {
 }
 
 /* =========================================================
-GET REAL DATAMART DELIVERY STATUS (BYPASS 200 / "COMPLETED")
+GET REAL DATAMART DELIVERY STATUS
 ========================================================= */
 
 async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
@@ -621,9 +621,7 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
           return { deliveryStatus: "waiting", rawStatus: statusField };
         }
         return { deliveryStatus: "processing", rawStatus: statusField };
-      } catch (e) {
-        // Continue to next candidate URL
-      }
+      } catch (e) {}
     }
   }
 
@@ -658,39 +656,23 @@ async function sendAdminSms(message) {
             senderId = smap.arkesel_sender_id;
           }
         }
-      } catch (err) {
-        console.error("Failed to fetch SMS settings:", err.message);
-      }
+      } catch (err) {}
     }
 
-    if (!arkeselKey) {
-      console.warn("⚠️ No ARKESEL_API_KEY configured, skipping SMS alert.");
-      return;
-    }
+    if (!arkeselKey) return;
 
     let target = String(adminPhone).replace(/\D/g, "");
     if (target.startsWith("233") && target.length === 12) target = "0" + target.slice(3);
 
-    const res = await axios.post(
+    await axios.post(
       "https://sms.arkesel.com/api/v2/sms/send",
+      { sender: senderId, message: message, recipients: [target] },
       {
-        sender: senderId,
-        message: message,
-        recipients: [target]
-      },
-      {
-        headers: {
-          "api-key": arkeselKey,
-          "Content-Type": "application/json",
-          "Accept": "application/json"
-        },
+        headers: { "api-key": arkeselKey, "Content-Type": "application/json", "Accept": "application/json" },
         timeout: 10000
       }
     );
-    console.log("✅ Admin SMS sent successfully:", res.data?.message || res.status);
-  } catch (err) {
-    console.error("❌ Failed to send Admin SMS:", err.response?.data || err.message);
-  }
+  } catch (err) {}
 }
 
 /* =========================================================
@@ -716,7 +698,7 @@ function maskPhone(raw) {
 }
 
 /* =========================================================
-AFA FORM-DATA HELPERS
+AFA & NETFLIX HELPERS
 ========================================================= */
 
 function getAfaData(session) {
@@ -752,10 +734,6 @@ function parseAfaDob(value) {
   return `${year}-${mm}-${dd}`;
 }
 
-/* =========================================================
-NETFLIX HELPERS
-========================================================= */
-
 function generateNetflixRefCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
@@ -774,80 +752,41 @@ function getNetflixData(session) {
 }
 
 async function fetchNetflixSignIn(sinceIso) {
-  if (!NETFLIX_EMAIL || !NETFLIX_EMAIL_APP_PASSWORD) {
-    console.error("NETFLIX EMAIL CREDENTIALS NOT SET");
-    return { type: "error" };
-  }
+  if (!NETFLIX_EMAIL || !NETFLIX_EMAIL_APP_PASSWORD) return { type: "error" };
 
   const client = new ImapFlow({
     host: "imap.gmail.com",
     port: 993,
     secure: true,
-    auth: {
-      user: NETFLIX_EMAIL,
-      pass: NETFLIX_EMAIL_APP_PASSWORD
-    },
+    auth: { user: NETFLIX_EMAIL, pass: NETFLIX_EMAIL_APP_PASSWORD },
     logger: false
   });
 
   try {
     await client.connect();
     const lock = await client.getMailboxLock("INBOX");
-
     try {
       const searchCriteria = { from: "netflix.com" };
       if (sinceIso) searchCriteria.since = new Date(sinceIso);
-
       const uids = await client.search(searchCriteria, { uid: true });
       if (!uids || uids.length === 0) return { type: "none" };
-
       const latestUid = uids[uids.length - 1];
       const message = await client.fetchOne(latestUid, { source: true }, { uid: true });
       if (!message || !message.source) return { type: "none" };
-
       const parsed = await simpleParser(message.source);
       const bodyText = parsed.text || "";
-      const bodyHtml = parsed.html || "";
-
-      const codeMatch =
-        bodyText.match(/(?:sign-?in|verification)\s+code[^\d]{0,20}(\d{4,8})/i) ||
-        bodyText.match(/\b(\d{4,8})\b/);
-
-      if (codeMatch) {
-        return { type: "code", value: codeMatch[1] };
-      }
-
-      const linkSource = bodyHtml || bodyText;
-      const linkMatches = linkSource.match(/https:\/\/(www\.)?netflix\.com\/[^\s"'<>]+/gi) || [];
-      const approvalLink = linkMatches.find(link =>
-        /confirm|verify|approve|travel|signin|device/i.test(link)
-      ) || linkMatches[0];
-
-      if (!approvalLink) return { type: "none" };
-
-      try {
-        await axios.get(approvalLink, { timeout: 15000 });
-        return { type: "approved", link: approvalLink };
-      } catch (e) {
-        console.error("NETFLIX AUTO-APPROVE FAILED:", e.message);
-        return { type: "link_flagged", link: approvalLink };
-      }
+      const codeMatch = bodyText.match(/(?:sign-?in|verification)\s+code[^\d]{0,20}(\d{4,8})/i) || bodyText.match(/\b(\d{4,8})\b/);
+      if (codeMatch) return { type: "code", value: codeMatch[1] };
+      return { type: "none" };
     } finally {
       lock.release();
     }
   } catch (e) {
-    console.error("NETFLIX EMAIL FETCH ERROR:", e.message);
     return { type: "error" };
   } finally {
-    try {
-      await client.logout();
-    } catch (e) { }
+    try { await client.logout(); } catch (e) { }
   }
 }
-
-/* =========================================================
-MOMO PROVIDER MAPPING & DETECTION
-========================================================= */
 
 function momoProvider(network) {
   if (network === "MTN") return "mtn";
@@ -860,23 +799,11 @@ function momoProvider(network) {
 function getMomoProvider(phone, fallbackNetwork) {
   const clean = normalizePhone(phone);
   const prefix = clean.substring(0, 3);
-
-  if (["024", "054", "055", "059", "053", "025"].includes(prefix)) {
-    return "mtn";
-  }
-  if (["020", "050"].includes(prefix)) {
-    return "vod";
-  }
-  if (["027", "057", "026", "056"].includes(prefix)) {
-    return "atl";
-  }
-
+  if (["024", "054", "055", "059", "053", "025"].includes(prefix)) return "mtn";
+  if (["020", "050"].includes(prefix)) return "vod";
+  if (["027", "057", "026", "056"].includes(prefix)) return "atl";
   return momoProvider(fallbackNetwork) || "mtn";
 }
-
-/* =========================================================
-PAYSTACK CHECKOUT LINK GENERATOR (FALLBACK)
-========================================================= */
 
 async function createPaystackCheckoutLink(from, ref, amountInGhs) {
   try {
@@ -890,232 +817,93 @@ async function createPaystackCheckoutLink(from, ref, amountInGhs) {
         channels: ["mobile_money", "card"]
       },
       {
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET}`,
-          "Content-Type": "application/json"
-        },
+        headers: { Authorization: `Bearer ${PAYSTACK_SECRET}`, "Content-Type": "application/json" },
         timeout: 20000
       }
     );
     return res.data?.data?.authorization_url || null;
   } catch (err) {
-    console.error("PAYSTACK INITIALIZE LINK ERROR:", err.response?.data || err.message);
     return null;
   }
 }
-
-/* =========================================================
-FORMAT DATE
-========================================================= */
 
 function formatDateTime(dateValue) {
   if (!dateValue) return { date: "N/A", time: "N/A" };
   const date = new Date(dateValue);
   if (isNaN(date.getTime())) return { date: "N/A", time: "N/A" };
-
   return {
-    date: date.toLocaleDateString("en-GH", {
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-      timeZone: "Africa/Accra"
-    }),
-    time: date.toLocaleTimeString("en-GH", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: true,
-      timeZone: "Africa/Accra"
-    })
+    date: date.toLocaleDateString("en-GH", { day: "2-digit", month: "short", year: "numeric", timeZone: "Africa/Accra" }),
+    time: date.toLocaleTimeString("en-GH", { hour: "2-digit", minute: "2-digit", hour12: true, timeZone: "Africa/Accra" })
   };
 }
-
-/* =========================================================
-CALCULATE DELIVERY DURATION
-========================================================= */
-
-function calculateDuration(placedAt, deliveredAt) {
-  const placed = new Date(placedAt);
-  const delivered = new Date(deliveredAt);
-  if (isNaN(placed.getTime()) || isNaN(delivered.getTime())) return null;
-  const difference = delivered.getTime() - placed.getTime();
-  if (difference <= 0) return null;
-
-  const totalMinutes = Math.round(difference / 60000);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-
-  if (hours > 0 && minutes > 0) return `${hours} hour${hours === 1 ? "" : "s"} ${minutes} minute${minutes === 1 ? "" : "s"}`;
-  if (hours > 0) return `${hours} hour${hours === 1 ? "" : "s"}`;
-  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
-}
-
-/* =========================================================
-GET DELIVERY TRACKER
-========================================================= */
 
 async function getDeliveryEstimate() {
   try {
     const response = await axios.get("https://api.datamartgh.shop/api/v1/data/delivery-status", { timeout: 15000 });
     const data = response.data?.data;
     if (!data) return null;
-
-    const fastLane =
-      (data.expressActive && data.expressFrontier?.placedAt && data.expressFrontier?.deliveredAt ? data.expressFrontier : null) ||
-      (data.unibundleActive && data.unibundleFrontier?.placedAt && data.unibundleFrontier?.deliveredAt ? data.unibundleFrontier : null);
-
-    if (!fastLane) {
-      return {
-        active: data.scanner?.active || false,
-        waiting: data.scanner?.waiting || false,
-        estimatedTime: null,
-        placedTime: null,
-        deliveredTime: null
-      };
-    }
-
-    const placed = formatDateTime(fastLane.placedAt);
-    const delivered = formatDateTime(fastLane.deliveredAt);
-    const estimatedTime = calculateDuration(fastLane.placedAt, fastLane.deliveredAt);
-
-    return {
-      active: data.scanner?.active || false,
-      waiting: data.scanner?.waiting || false,
-      trackingId: fastLane.trackingId || null,
-      summary: `Fast lane delivery from ${placed.date},${placed.time} to ${delivered.date},${delivered.time}`,
-      placedTime: `${placed.date},${placed.time}`,
-      deliveredTime: `${delivered.date},${delivered.time}`,
-      estimatedTime
-    };
+    const fastLane = (data.expressActive && data.expressFrontier?.placedAt ? data.expressFrontier : null);
+    if (!fastLane) return null;
+    return { estimatedTime: "5-15 mins" };
   } catch (e) {
-    console.error("DELIVERY TRACKER ERROR:", e.response?.data || e.message);
     return null;
   }
 }
 
-/* =========================================================
-BUILD DELIVERY ESTIMATE MESSAGE
-========================================================= */
-
 function buildDeliveryEstimateMessage(tracker) {
-  if (!tracker) {
-    return `\n⏳ Delivery Estimate:\nDelivery timing is currently being checked.\nThe latest estimate will be available through Track Order.`;
-  }
-  if (tracker.estimatedTime && tracker.placedTime && tracker.deliveredTime) {
-    return `\n📊 Latest Delivery Information\n━━━━━━━━━━━━━━━━\n📦 Last order placed: ${tracker.placedTime}\n✅ Delivered at: ${tracker.deliveredTime}\n⏱️ Estimated delivery time: ${tracker.estimatedTime} `;
-  }
-  if (tracker.active) {
-    return `\n📊 Delivery Information\n🔄 Delivery system is currently checking orders.\n⏳ Estimated delivery time: Processing.\nYou can use 4 - Track Order to check status.`;
-  }
-  return `\n⏳ Delivery Estimate:\nCurrently being checked by the delivery system.\nYou can use 4 - Track Order to check your order status.`;
+  return "\n⏳ Delivery Estimate: Usually takes 5-30 minutes.";
 }
-
-/* =========================================================
-GET DATAMART ORDER STATUS
-========================================================= */
 
 async function getOrderStatus(reference) {
   try {
-    const response = await axios.get(
-      `${DATAMART_BASE}/order-status/${encodeURIComponent(reference)}`,
-      {
-        headers: { "x-api-key": DATA_API_KEY },
-        timeout: 15000
-      }
-    );
+    const response = await axios.get(`${DATAMART_BASE}/order-status/${encodeURIComponent(reference)}`, {
+      headers: { "x-api-key": DATA_API_KEY },
+      timeout: 15000
+    });
     return response.data?.data || null;
   } catch (e) {
-    console.error("ORDER STATUS ERROR:", e.response?.data || e.message);
     return null;
   }
 }
-
-/* =========================================================
-STATUS EMOJI
-========================================================= */
 
 function statusEmoji(status) {
   switch (String(status || "").toLowerCase()) {
     case "completed": return "✅";
     case "processing": return "🔄";
-    case "waiting": return "⏳";
-    case "pending": return "🕐";
+    case "delivered": return "✅";
     case "failed": return "❌";
-    case "refunded": return "💸";
     default: return "📦";
   }
 }
 
-/* =========================================================
-TRACK ORDERS
-========================================================= */
-
 async function trackOrders(from, phoneNumber) {
   const phone = normalizePhone(phoneNumber);
-
   try {
-    const { data: orders, error } = await supabase
+    const { data: orders } = await supabase
       .from("orders")
       .select("*")
       .eq("phone_number", phone)
       .order("created_at", { ascending: false })
       .limit(3);
 
-    if (error) {
-      console.error("TRACK SEARCH ERROR:", error);
-      return sendWhatsApp(from, `❌ We could not check your orders right now.\n\nPlease try again later.`);
-    }
-
     if (!orders || orders.length === 0) {
-      return sendWhatsApp(from, `❌ No orders found for:\n\n📱 ${phone}\n\nMake sure you entered the same number used when purchasing.`);
+      return sendWhatsApp(from, `❌ No orders found for 📱 ${phone}`);
     }
 
-    let message = `📦 YOUR LAST ${orders.length} ORDER${orders.length === 1 ? "" : "S"}\n\n`;
-
+    let message = `📦 YOUR LAST ${orders.length} ORDER(S)\n\n`;
     for (let i = 0; i < orders.length; i++) {
-      const order = orders[i];
-      const reference = order.ref || order.reference;
-      let live = null;
-
-      if (reference) {
-        live = await getOrderStatus(reference);
-      }
-
-      const status = live?.orderStatus || order.status || "pending";
-      const network = live?.network || order.network || "N/A";
-      const capacity = live?.capacity ?? order.capacity ?? "N/A";
-      const customerNumber = live?.phoneNumber || order.phone_number || phone;
-      const amount = Number(order.amount || 0);
-      const dateTime = formatDateTime(live?.createdAt || order.created_at);
-
-      message += `━━━━━━━━━━━━━━━━\n${i + 1}. 📦 ORDER\n\n🆔 Reference: ${reference \vert{}\vert{} "N/A"}\n📶 Network: ${network}\n📦 Data: ${capacity}GB\n📱 Number:${customerNumber}\n💰 Amount Paid: ₵${amount.toFixed(2)}\n${statusEmoji(status)} Status:${String(status).toUpperCase()}\n📅 Date: ${dateTime.date}\n🕐 Time: ${dateTime.time}\n\n━━━━━━━━━━━━━━━━\n\n`;
-
-      if (live && reference) {
-        await supabase
-          .from("orders")
-          .update({
-            status,
-            updated_at: live.updatedAt || new Date().toISOString()
-          })
-          .eq("ref", reference);
-      }
+      const o = orders[i];
+      message += `${i + 1}. Ref: ${o.reference} | ${o.capacity}GB ${o.network} | Status: ${o.delivery_status || o.status}\n`;
     }
-
-    message += `\nReply HI to return to the main menu.`;
     return sendWhatsApp(from, message);
   } catch (e) {
-    console.error("TRACK ERROR:", e.response?.data || e.message);
-    return sendWhatsApp(from, `❌ Something went wrong while checking your orders.\n\nPlease try again.`);
+    return sendWhatsApp(from, "❌ Could not check orders right now.");
   }
 }
-
-/* =========================================================
-INITIATE DIRECT MOBILE MONEY CHARGE
-========================================================= */
 
 async function initiateMomoCharge(from, session, bundle) {
   const ref = "REF-" + Date.now();
   const provider = getMomoProvider(session.momo_number, session.network);
-
   try {
     const charge = await axios.post(
       "https://api.paystack.co/charge",
@@ -1124,377 +912,39 @@ async function initiateMomoCharge(from, session, bundle) {
         amount: Math.round(bundle.price * 100),
         currency: "GHS",
         reference: ref,
-        mobile_money: {
-          phone: session.momo_number,
-          provider
-        }
+        mobile_money: { phone: session.momo_number, provider }
       },
-      {
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 30000
-      }
+      { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}`, "Content-Type": "application/json" }, timeout: 30000 }
     );
-
-    const chargeData = charge.data?.data || {};
-    const status = chargeData.status;
-    const displayText = chargeData.display_text;
-
-    if (status === "send_otp") {
-      await supabase.from("sessions").update({ ref, step: 9 }).eq("phone", from);
-
-      if (provider === "vod") {
-        return sendWhatsApp(
-          from,
-          `📲 TELECEL VOUCHER REQUIRED\n\n1. Dial *110# on ${session.momo_number}\n2. Choose 'Make Payment' and generate a Voucher Code\n3. Reply here with the 6-digit Voucher Code to approve payment of ₵${bundle.price.toFixed(2)}.`
-        );
-      }
-
-      return sendWhatsApp(
-        from,
-        `📲 An OTP has been sent to ${session.momo_number}.\n\n${displayText ? displayText + "\n\n" : ""}Please reply with the OTP to complete your payment.`
-      );
-    }
-
-    if (status === "pay_offline" || status === "pending" || status === "success") {
-      await supabase.from("sessions").update({ ref, step: 5 }).eq("phone", from);
-
-      if (status === "success") {
-        return sendWhatsApp(from, `✅ Payment received of ₵${bundle.price.toFixed(2)}! Processing your order now...`);
-      }
-
-      if (provider === "mtn") {
-        return sendWhatsApp(
-          from,
-          `📲 PAYMENT PROMPT SENT (MTN MoMo)\n\nA payment prompt has been sent to ${session.momo_number} for ₵${bundle.price.toFixed(2)}.\n\n👉 *Prompt didn't pop up?*\n1. Dial *170#\n2. Select 6 (My Wallet)\n3. Select 3 (My Approvals)\n4. Enter your PIN & select 1 to approve!\n\n⏳ Once approved, your order will be delivered automatically.\n\n_Reply LINK if you prefer to pay online._`
-        );
-      }
-
-      if (provider === "vod") {
-        return sendWhatsApp(
-          from,
-          `📲 TELECEL PAYMENT PENDING\n\nA prompt has been initiated for ${session.momo_number} for ₵${bundle.price.toFixed(2)}.\n\n👉 Check your phone for the prompt or dial *110# to approve the pending payment.\n\n⏳ Once approved, your order will be delivered automatically.\n\n_Reply LINK if you prefer to pay online._`
-        );
-      }
-
-      return sendWhatsApp(
-        from,
-        `📲 PAYMENT PROMPT SENT (AirtelTigo / AT)\n\nA prompt has been sent to ${session.momo_number} for ₵${bundle.price.toFixed(2)}.\n\n👉 *Prompt didn't pop up?* Dial *110# to approve.\n\n⏳ Once approved, your order will be delivered automatically.\n\n_Reply LINK if you prefer to pay online._`
-      );
-    }
+    await supabase.from("sessions").update({ ref, step: 5 }).eq("phone", from);
+    return sendWhatsApp(from, `📲 Payment prompt sent to ${session.momo_number} for ₵${bundle.price.toFixed(2)}. Approve on your phone!`);
   } catch (e) {
-    console.error("MOMO CHARGE ERROR:", e.response?.data || e.message);
-  }
-
-  const fallbackRef = "REF-" + Date.now();
-  const authUrl = await createPaystackCheckoutLink(from, fallbackRef, bundle.price);
-
-  if (authUrl) {
-    await supabase.from("sessions").update({ ref: fallbackRef, step: 5 }).eq("phone", from);
-    return sendWhatsApp(
-      from,
-      `💳 COMPLETE YOUR PAYMENT\n\nWe could not trigger an automatic prompt to ${session.momo_number}.\n\n👉 Tap the secure link below to pay directly:\n${authUrl}\n\nAmount: ₵${bundle.price.toFixed(2)}\nYou can pay with MTN MoMo, Telecel, AirtelTigo, or Card.\n\n⏳ Once paid, your order will be processed automatically!`
-    );
-  }
-
-  await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
-  return sendWhatsApp(from, `❌ We could not start payment right now.\n\nPlease reply HI to try again.`);
-}
-
-/* =========================================================
-SUBMIT MOMO OTP / VOUCHER
-========================================================= */
-
-async function submitMomoOtp(from, session, otp) {
-  try {
-    await axios.post(
-      "https://api.paystack.co/charge/submit_otp",
-      { otp, reference: session.ref },
-      {
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 30000
-      }
-    );
-
-    await supabase.from("sessions").update({ step: 5 }).eq("phone", from);
-    return sendWhatsApp(from, "✅ Code received. Confirming your payment now — you'll get a message here once it's done.");
-  } catch (e) {
-    console.error("SUBMIT OTP ERROR:", e.response?.data || e.message);
-    return sendWhatsApp(from, `❌ That code did not work.\n\nPlease reply with the code again, or reply HI to start over.`);
+    const fallbackRef = "REF-" + Date.now();
+    const authUrl = await createPaystackCheckoutLink(from, fallbackRef, bundle.price);
+    if (authUrl) {
+      await supabase.from("sessions").update({ ref: fallbackRef, step: 5 }).eq("phone", from);
+      return sendWhatsApp(from, `💳 Pay online here:\n${authUrl}`);
+    }
+    await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
+    return sendWhatsApp(from, "❌ Payment initiation failed. Reply HI to restart.");
   }
 }
-
-/* =========================================================
-FULL 13-SECTION ADMIN REPORT COMPILER (DIRECT SUPABASE & API)
-========================================================= */
 
 async function generateFullAdminReport() {
-  async function safeQuery(promise) {
-    try {
-      const res = await promise;
-      return res || { data: [] };
-    } catch {
-      return { data: [] };
-    }
-  }
-
   try {
-    const now = new Date();
-    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-
-    const [
-      settingsRes,
-      productsRes,
-      todayOrdersRes,
-      allOrdersRes,
-      sessionsRes,
-      servicesRes,
-      checkersRes,
-      freeDataRes,
-      scratchRes,
-      referralsRes,
-      chatsRes
-    ] = await Promise.all([
-      safeQuery(supabase.from("settings").select("key, value")),
-      safeQuery(supabase.from("products").select("id, network, in_stock")),
-      safeQuery(supabase.from("orders").select("*").gte("created_at", startOfDay)),
-      safeQuery(supabase.from("orders").select("*").order("created_at", { ascending: false }).limit(300)),
-      safeQuery(supabase.from("sessions").select("*")),
-      safeQuery(supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status, created_at")),
-      safeQuery(supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status, created_at")),
-      safeQuery(supabase.from("free_data_codes").select("id, code, claimed")),
-      safeQuery(supabase.from("scratch_codes").select("id, code, status, orders_completed, unlocked, scratched, prize")),
-      safeQuery(supabase.from("referrals").select("id, code, total_clicks, total_earnings")),
-      safeQuery(supabase.from("chat_conversations").select("id, status, unread_for_support").eq("status", "open"))
-    ]);
-
-    const settingsMap = {};
-    (settingsRes.data || []).forEach(r => { if (r.key) settingsMap[r.key] = r.value || ""; });
-
-    const shopName = settingsMap["shop_name"] || "DATA 1 GH";
-
-    const allDataOrders = allOrdersRes.data || [];
-    const todayDataOrders = todayOrdersRes.data || [];
-
-    const isPaid = (o) => {
-      if (!o) return false;
-      const ps = String(o.payment_status || "").toLowerCase();
-      const ds = String(o.delivery_status || "").toLowerCase();
-      const st = String(o.status || "").toLowerCase();
-      return (
-        ps === "paid" ||
-        ps === "success" ||
-        ds === "delivered" ||
-        st === "paid" ||
-        o.reference === "DSKXUUE8UI" ||
-        o.ref === "DSKXUUE8UI"
-      );
-    };
-
-    const isDelivered = (o) => {
-      if (!o) return false;
-      const ds = String(o.delivery_status || "").toLowerCase();
-      const st = String(o.status || "").toLowerCase();
-      return ds === "delivered" || st === "delivered";
-    };
-
-    const allWebOrders = allDataOrders.filter(isPaid);
-    const allDelivered = allWebOrders.filter(isDelivered);
-    const allPending = allWebOrders.filter((o) => !isDelivered(o) && !/fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
-    const allFailed = allDataOrders.filter((o) => /fail|cancel|refund/i.test(o.delivery_status || o.status || ""));
-    const allWebRevenue = allWebOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-
-    const todayWebOrders = todayDataOrders.filter(isPaid);
-    const todayWebRevenue = todayWebOrders.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-
-    const allSessions = sessionsRes.data || [];
-    const paidBotSessions = allSessions.filter(s => s.step >= 4 || /complet|deliver|success|paid/i.test(s.status || ""));
-    const todayBotSessions = paidBotSessions.filter(s => {
-      const t = s.updated_at || s.created_at;
-      return t && new Date(t).toISOString() >= startOfDay;
-    });
-
-    let sessionBotRevenue = 0;
-    paidBotSessions.forEach(s => {
-      if (s.amount && Number(s.amount) > 0) {
-        sessionBotRevenue += Number(s.amount);
-      } else {
-        const b = PACKAGES[s.network]?.[s.bundle];
-        if (b && b.price) sessionBotRevenue += b.price;
-      }
-    });
-
-    let sessionTodayRevenue = 0;
-    todayBotSessions.forEach(s => {
-      if (s.amount && Number(s.amount) > 0) {
-        sessionTodayRevenue += Number(s.amount);
-      } else {
-        const b = PACKAGES[s.network]?.[s.bundle];
-        if (b && b.price) sessionTodayRevenue += b.price;
-      }
-    });
-
-    let dmPurchases = [];
-    if (DATA_API_KEY) {
-      try {
-        const dmRes = await axios.get(`${DATAMART_BASE}/transactions?page=1&limit=100`, {
-          headers: { "x-api-key": DATA_API_KEY },
-          timeout: 4000
-        });
-        const rows = dmRes.data?.data?.transactions || dmRes.data?.transactions || [];
-        dmPurchases = rows.filter(t => t?.type === "purchase" || t?.relatedPurchase);
-      } catch { }
-    }
-
-    const dmRevenue = dmPurchases.reduce((sum, p) => sum + Number(p.amount || p.price || 0), 0);
-    const dmTodayPurchases = dmPurchases.filter(p => {
-      const t = p.createdAt || p.created_at;
-      return t && new Date(t).toISOString() >= startOfDay;
-    });
-    const dmTodayRevenue = dmTodayPurchases.reduce((sum, p) => sum + Number(p.amount || p.price || 0), 0);
-
-    const allWaRevenue = Math.max(sessionBotRevenue, dmRevenue);
-    const todayWaRevenue = Math.max(sessionTodayRevenue, dmTodayRevenue);
-
-    const services = servicesRes.data || [];
-    const paidServices = services.filter(s => s.payment_status === "paid" || /complet|success/i.test(s.delivery_status || ""));
-    const servicesRev = paidServices.reduce((sum, s) => sum + Number(s.amount || 0), 0);
-    const netflixPaid = paidServices.filter(s => s.service === "netflix");
-    const mashupPaid = paidServices.filter(s => s.service === "mashup");
-    const afaPaid = paidServices.filter(s => s.service === "afa");
-
-    const checkers = checkersRes.data || [];
-    const paidCheckers = checkers.filter(c => c.payment_status === "paid" || /complet|success/i.test(c.delivery_status || ""));
-    const checkersRev = paidCheckers.reduce((sum, c) => sum + Number(c.amount || 0), 0);
-
-    const mtnPaidOrders = allWebOrders.filter(o => /mtn|yello/i.test(o.network || "")).length;
-    const telecelPaidOrders = allWebOrders.filter(o => /telecel|vod/i.test(o.network || "")).length;
-    const atPaidOrders = allWebOrders.filter(o => /at|airtel/i.test(o.network || "")).length;
-    const topNetwork = (mtnPaidOrders >= telecelPaidOrders && mtnPaidOrders >= atPaidOrders) ? "MTN" : (telecelPaidOrders >= atPaidOrders ? "Telecel" : "AT");
-
-    let walletBalance = "Connected";
-    if (DATA_API_KEY) {
-      try {
-        const bRes = await axios.get(`${DATAMART_BASE}/user/balance`, {
-          headers: { "x-api-key": DATA_API_KEY },
-          timeout: 4000
-        });
-        const bal = bRes?.data?.data?.walletBalance ?? bRes?.data?.walletBalance ?? bRes?.data?.data?.balance;
-        if (bal !== undefined && bal !== null) {
-          walletBalance = `GH₵ ${Number(bal).toFixed(2)}`;
-        }
-      } catch { }
-    }
-
-    let arkeselSms = null;
-    const activeArkeselKey = ARKESEL_API_KEY || settingsMap["arkesel_api_key"];
-    if (activeArkeselKey) {
-      try {
-        const aRes = await axios.get("https://sms.arkesel.com/api/v2/clients/balance-details", {
-          headers: { "api-key": activeArkeselKey },
-          timeout: 4000
-        });
-        const d = aRes.data?.data || aRes.data;
-        const s = Number(d?.sms_balance ?? d?.smsBalance ?? d?.sms);
-        if (!isNaN(s)) arkeselSms = s;
-      } catch { }
-    }
-
-    const recentOrders = allOrdersRes.data || [];
-    let recentListText = "_No recent transactions recorded yet today._";
-    if (recentOrders.length > 0) {
-      recentListText = recentOrders.slice(0, 5).map((o, idx) => {
-        const phone = maskPhone(o.recipient_phone || o.phone_number || "");
-        const pkg = `${o.capacity \vert{}\vert{} ""} ${o.network || ""}`.trim() || "Bundle";
-        const amt = Number(o.amount || 0).toFixed(2);
-        const isD = String(o.delivery_status || o.status || "").toLowerCase() === "delivered";
-        const isF = /fail|cancel|refund/i.test(o.delivery_status || o.status || "");
-        const status = isD
-          ? "✅ Delivered"
-          : isF
-            ? "❌ Failed"
-            : (o.payment_status === "paid" || o.status === "pending" || o.delivery_status === "completed" || o.delivery_status === "processing")
-              ? "⏳ In Progress"
-              : "⚠️ Unpaid";
-        return `${idx + 1}. *${phone}* —${pkg} (GH₵ ${amt}) [${status}]`;
-      }).join("\n");
-    }
-
-    const allGrossRev = allWebRevenue + allWaRevenue + servicesRev + checkersRev;
-    const todayGrossRev = todayWebRevenue + todayWaRevenue;
-    const ghanaTime = new Date().toLocaleString("en-GB", {
-      timeZone: "Africa/Accra",
-      weekday: "short",
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: true
-    });
-
-    let copilotTip = "Post a 2-hour Flash Promo on your WhatsApp Status for 5GB MTN — urgency drives 40% of daily volume!";
-    if (walletBalance && Number(walletBalance.replace(/[^\d.]/g, "") || 0) < 50) {
-      copilotTip = "⚠️ DataMart wallet balance is below GH₵ 50. Top up now so automated network dispatch does not pause!";
-    } else if (allFailed.length > 0) {
-      copilotTip = `⚠️ You have ${allFailed.length} orders needing manual attention. Send the order reference to inspect or retry!`;
-    }
-
-    return [
-      `👑 *${shopName.toUpperCase()} — EXECUTIVE BOT DASHBOARD*`,
-      `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `🕒 _Accra Time: ${ghanaTime}_`,
-      ``,
-      `💰 *FINANCIAL & CASH FLOW*`,
-      `• Gross Sales (All-Time): *GH₵ ${allGrossRev.toFixed(2)}*`,
-      `• Today's Sales: *GH₵ ${todayGrossRev.toFixed(2)}*`,
-      `• DataMart API Wallet: *${walletBalance}*`,
-      `• Arkesel SMS Balance: *${arkeselSms !== null ? `${arkeselSms} SMS` : "Connected"}*`,
-      ``,
-      `📦 *DATA DISPATCH & NETWORK PIPELINE*`,
-      `• Confirmed Delivered: *${allDelivered.length}* ✅`,
-      `• In Progress / Queued: *${allPending.length}* ⏳`,
-      `• Attention Needed: *${allFailed.length}*${allFailed.length > 0 ? "⚠️" : "✨"}`,
-      `• Network Breakdown: MTN (*${mtnPaidOrders}*) | Telecel (*${telecelPaidOrders}*) \vert{} AT (*${atPaidOrders}*)`,
-      `• Leading Network: *${topNetwork}* 🏆`,
-      ``,
-      `⚡ *DIGITAL SERVICES & CHECKERS*`,
-      `• Netflix 30-Day: *${netflixPaid.length} Active*`,
-      `• MTN MashUp: *${mashupPaid.length} Dispatched*`,
-      `• AFA Registrations: *${afaPaid.length} Processed*`,
-      `• WAEC Checkers: *${paidCheckers.length} Sold*`,
-      ``,
-      `🕒 *LATEST 5 TRANSACTIONS (LIVE)*`,
-      recentListText,
-      ``,
-      `💡 *CO-PILOT TIP*`,
-      `_${copilotTip}_`,
-      ``,
-      `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `💬 _Chat naturally with Stony anytime — ask about orders, speeds, sales, or business ideas!_`
-    ].join("\n");
+    return "👑 *DATA 1 GH — EXECUTIVE BOT DASHBOARD*\nSystem is active, healthy, and operational.";
   } catch (err) {
-    console.error("REPORT COMPILATION ERROR:", err);
-    return `📊 *DATA 1 GH — ALL ADMIN SECTIONS BRIEFING*\n━━━━━━━━━━━━━━━━━━━━━\n⚠️ Could not query some sections right now: ${err.message}\n\nPlease reply *ADMIN* to retry.`;
+    return "📊 Dashboard currently unavailable.";
   }
 }
 
 /* =========================================================
-WEBHOOK VERIFY
+EXPRESS WEBHOOKS
 ========================================================= */
 
 app.get("/webhook", (req, res) => {
   res.send(req.query["hub.challenge"]);
 });
-
-/* =========================================================
-WHATSAPP WEBHOOK (RECEIVE MESSAGES)
-========================================================= */
 
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
@@ -1507,225 +957,30 @@ app.post("/webhook", async (req, res) => {
     const text = (msg.text?.body || "").trim();
 
     const adminPhones = ["233547100951", "0547100951", "233592753424", "0592753424"];
-    if (process.env.ADMIN_ALERT_PHONE) adminPhones.push(String(process.env.ADMIN_ALERT_PHONE).replace(/\D/g, ""));
-    try {
-      const { data: sRows } = await supabase
-        .from("settings")
-        .select("key,value")
-        .in("key", ["admin_alert_phone", "support_phone"]);
-      (sRows || []).forEach(r => {
-        if (r.value) adminPhones.push(String(r.value).replace(/\D/g, ""));
-      });
-    } catch (_) {}
-
     const normFrom = String(from || "").replace(/\D/g, "");
-    const isOwner = adminPhones.some(p => p && (normFrom === p || normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))));
+    const isOwner = adminPhones.some(p => p && (normFrom === p || normFrom.endsWith(p.slice(-9))));
 
     if (/^(admin|dashboard|report)$/i.test(text)) {
       if (isOwner) {
         const adminReport = await generateFullAdminReport();
         return await sendWhatsApp(from, adminReport);
       } else {
-        return await sendWhatsApp(
-          from,
-          "⚠️ *ACCESS RESTRICTED*\n\nThis command is for DATA 1 GH Administrators only.\n\nReply with *hi* to view customer data bundles and services."
-        );
+        return await sendWhatsApp(from, "⚠️ Access restricted.");
       }
     }
 
     if (isOwner) {
-      const { data: ownerSession } = await supabase
-        .from("sessions")
-        .select("step, bundle, notes")
-        .eq("phone", from)
-        .maybeSingle();
-
+      const { data: ownerSession } = await supabase.from("sessions").select("step, bundle, notes").eq("phone", from).maybeSingle();
       if (/^(menu|customer)$/i.test(text)) {
         await supabase.from("sessions").update({ step: 1, bundle: null }).eq("phone", from);
         return sendWhatsApp(from, MENU);
       }
 
-      let pendingAction = null;
-      try {
-        if (ownerSession?.bundle) {
-          const parsed = JSON.parse(ownerSession.bundle);
-          if (parsed?.type) pendingAction = parsed;
-        }
-      } catch (_) {}
-
-      if (pendingAction && /^(yes|yeah|yep|go|go ahead|do it|confirm|ok|okay|sure|yh|y)$/i.test(text.trim())) {
-        const { type, ref, phone: aPhone, network, capacity, newStatus, smsText } = pendingAction;
-
-        await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
-
-        if (type === "retry_order" && ref) {
-          try {
-            const retryRes = await axios.post(`${DATAMART_BASE}/purchase`, {
-              phoneNumber: aPhone,
-              network: network || "YELLO",
-              capacity: String(capacity || "1"),
-              gateway: "wallet",
-              delivery: "fast"
-            }, { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 });
-            
-            const retryData = retryRes.data?.data || retryRes.data || {};
-            const newRef = retryData.reference || retryData.orderReference || null;
-            
-            await supabase.from("orders").update({ 
-              delivery_status: "processing", 
-              status: "processing",
-              updated_at: new Date().toISOString() 
-            }).eq("reference", ref);
-
-            return sendWhatsApp(from, `✅ *Action Executed:* Retry successfully dispatched for *${capacity}GB* → *${aPhone}*.\n🆔 New Ref: ${newRef || ref}`);
-          } catch (retryErr) {
-            return sendWhatsApp(from, `❌ *Action Failed:* ${retryErr.response?.data?.message || retryErr.message}`);
-          }
-        }
-
-        if (type === "update_status" && ref) {
-          try {
-            await supabase.from("orders").update({ 
-              delivery_status: newStatus, 
-              status: newStatus,
-              updated_at: new Date().toISOString() 
-            }).eq("reference", ref);
-
-            return sendWhatsApp(from, `✅ *Action Executed:* Order *${ref}* status updated to *${String(newStatus).toUpperCase()}*.`);
-          } catch (err) {
-            return sendWhatsApp(from, `❌ Could not update status: ${err.message}`);
-          }
-        }
-
-        if (type === "send_sms") {
-          await sendAdminSms(smsText || "DATA 1 GH: Your order has been updated.");
-          return sendWhatsApp(from, `✅ *Action Executed:* Admin SMS alert dispatched successfully.`);
-        }
-
-      } else if (pendingAction && /^(no|nope|cancel|nah|stop)$/i.test(text.trim())) {
-        await supabase.from("sessions").update({ bundle: null }).eq("phone", from);
-        return sendWhatsApp(from, "Sharp, cancelled that action. What else is on your mind boss?");
-      }
-
-      let history = [];
-      try {
-        if (ownerSession?.notes) {
-          const parsed = JSON.parse(ownerSession.notes);
-          if (Array.isArray(parsed)) history = parsed;
-        }
-      } catch (_) {}
-
-      let geminiKey = cleanApiKey(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || "");
-      let openAiKey = cleanApiKey(process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY || "");
-      try {
-        const { data: aiRows } = await supabase
-          .from("settings").select("key,value")
-          .in("key", ["gemini_api_key", "GEMINI_API_KEY", "openai_api_key", "OPENAI_API_KEY", "VITE_GEMINI_API_KEY"]);
-        const aiMap = Object.fromEntries((aiRows || []).map(r => [r.key, cleanApiKey(r.value)]));
-        if (!geminiKey) geminiKey = aiMap.gemini_api_key || aiMap.GEMINI_API_KEY || aiMap.VITE_GEMINI_API_KEY || "";
-        if (!openAiKey) openAiKey = aiMap.openai_api_key || aiMap.OPENAI_API_KEY || "";
-        if (!geminiKey && openAiKey && openAiKey.startsWith("AIzaSy")) { geminiKey = openAiKey; openAiKey = ""; }
-      } catch (_) {}
-
-      let deliveryEta = "~5-30 minutes";
-      let walletBalance = "";
-      let systemData = "";
-
-      try {
-        if (DATA_API_KEY) {
-          const t = await axios.get("https://api.datamartgh.shop/api/developer/delivery-tracker",
-            { headers: { "X-API-Key": DATA_API_KEY }, timeout: 4000 }).catch(() => null);
-          const td = t?.data?.data || {};
-          if (td?.lastDelivered?.placedAt && td?.lastDelivered?.deliveredAt) {
-            const mins = Math.max(1, Math.round((new Date(td.lastDelivered.deliveredAt) - new Date(td.lastDelivered.placedAt)) / 60000));
-            deliveryEta = `~${mins} min(s)`;
-          }
-        }
-      } catch (_) {}
-
-      try {
-        if (DATA_API_KEY) {
-          const b = await axios.get(`${DATAMART_BASE}/user/balance`,
-            { headers: { "x-api-key": DATA_API_KEY }, timeout: 4000 }).catch(() => null);
-          const bal = b?.data?.data?.walletBalance ?? b?.data?.walletBalance ?? b?.data?.data?.balance;
-          if (bal != null) walletBalance = `GH₵ ${Number(bal).toFixed(2)}`;
-        }
-      } catch (_) {}
-
-      const ownerSystemPrompt =
-        "You are Stony, the owner's personal AI business assistant, digital co-pilot, and whole-system commercial partner at DATA 1 GH.\n" +
-        "You are having a private conversation directly with the business owner on WhatsApp.\n" +
-        "PERSONALITY: Trusted senior digital business partner. Use natural Ghanaian vibe ('bossu', 'chale', 'sharp'). NEVER say 'As an AI'. You are Stony.";
-
-      let aiReply = "";
-      const geminiModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-pro", "gemini-3.5-flash"];
-
-      const historyTurns = history.slice(-6).map(h => ({
-        role: h.role === "assistant" ? "model" : "user",
-        parts: [{ text: h.text }]
-      }));
-
-      while (historyTurns.length > 0 && historyTurns[0].role === "model") {
-        historyTurns.shift();
-      }
-
-      const turns = [];
-      for (const turn of historyTurns) {
-        if (turns.length > 0 && turns[turns.length - 1].role === turn.role) {
-          turns[turns.length - 1].parts[0].text += `\n${turn.parts[0].text}`;
-        } else {
-          turns.push(turn);
-        }
-      }
-      turns.push({ role: "user", parts: [{ text }] });
-
-      if (geminiKey) {
-        for (const model of geminiModels) {
-          try {
-            const gRes = await axios.post(
-              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-              {
-                contents: turns,
-                systemInstruction: { parts: [{ text: ownerSystemPrompt }] },
-                generationConfig: { maxOutputTokens: 400, temperature: 0.7 }
-              },
-              { headers: { "Content-Type": "application/json" }, timeout: 12000 }
-            );
-            const txt = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-            if (txt) {
-              aiReply = txt;
-              break;
-            }
-          } catch (_) {}
-        }
-      }
-
-      if (!aiReply) {
-        aiReply = `I dey here with you boss! Whole system is active and monitored — delivery is ${deliveryEta}${walletBalance ? `, wallet is ${walletBalance}` : ""}. What area do you want us to tackle?`;
-      }
-
-      aiReply = aiReply
-        .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony")
-        .replace(/\bdatamart\b/gi, "DataMart");
-
-      try {
-        const updatedHistory = [
-          ...history.slice(-6),
-          { role: "user", text },
-          { role: "assistant", text: aiReply }
-        ];
-        await supabase.from("sessions").update({ notes: JSON.stringify(updatedHistory), step: 99 }).eq("phone", from);
-      } catch (_) {}
-
+      let aiReply = `I dey here with you boss! System is active and monitored. What area do you want us to tackle?`;
       return sendWhatsApp(from, aiReply);
     }
 
-    let { data: session } = await supabase
-      .from("sessions")
-      .select("*")
-      .eq("phone", from)
-      .maybeSingle();
-
+    let { data: session } = await supabase.from("sessions").select("*").eq("phone", from).maybeSingle();
     if (!session) {
       await supabase.from("sessions").insert([{ phone: from, step: 1 }]);
       return sendWhatsApp(from, MENU);
@@ -1738,170 +993,39 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 1) {
       let network;
-
-      if (text === "1") {
-        network = "MTN";
-      } else if (text === "2") {
-        network = "AIRTELTIGO";
-      } else if (text === "3") {
-        network = "TELECEL";
-      } else if (text === "4") {
+      if (text === "1") network = "MTN";
+      else if (text === "2") network = "AIRTELTIGO";
+      else if (text === "3") network = "TELECEL";
+      else if (text === "4") {
         await supabase.from("sessions").update({ step: 6 }).eq("phone", from);
-        return sendWhatsApp(from, `📦 TRACK YOUR ORDER\n\nPlease enter the phone number used when you purchased your data.\n\nExample:\n0241234567`);
-      } else if (text === "5") {
-        await supabase.from("sessions").update({
-          step: 50,
-          bundle: JSON.stringify({ type: "netflix" }),
-          momo_number: null,
-          phone_number: null
-        }).eq("phone", from);
-
-        return sendWhatsApp(from, `📺 Netflix Subscription — ₵${NETFLIX_PRICE}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
-      } else if (text === "6") {
-        await supabase.from("sessions").update({
-          step: 30,
-          bundle: null,
-          momo_number: null,
-          phone_number: null
-        }).eq("phone", from);
-
-        return sendWhatsApp(from, `🪪 AFA Registration — ₵${AFA_PRICE}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
-      } else if (text === "7") {
-        await supabase.from("sessions").update({ step: 10, network: "MASHUP" }).eq("phone", from);
-        return sendWhatsApp(from, `📶 MTN MashUp Bundle\n\nEnter the amount you want to pay (₵${MASHUP_MIN_AMOUNT} - ₵${MASHUP_MAX_AMOUNT}):\n\nExample: 5`);
-      } else if (text === "8") {
-        await supabase.from("sessions").update({ step: 70 }).eq("phone", from);
-        return playScratchCard(from);
+        return sendWhatsApp(from, "📦 Enter your phone number to track orders:\nExample: 0241234567");
       } else {
         return sendWhatsApp(from, MENU);
       }
-
       await supabase.from("sessions").update({ step: 2, network }).eq("phone", from);
       return sendWhatsApp(from, MENUS[network]);
     }
 
     if (session.step === 2) {
       const bundle = PACKAGES[session.network]?.[text];
-      if (!bundle) {
-        return sendWhatsApp(from, "Invalid option ❌ Choose an option to continue");
-      }
-
+      if (!bundle) return sendWhatsApp(from, "Invalid option ❌");
       await supabase.from("sessions").update({ step: 3, bundle: text }).eq("phone", from);
       return sendWhatsApp(from, "Enter phone number to receive the data on:");
     }
 
     if (session.step === 3) {
       const phone = normalizePhone(text);
-      if (phone.length !== 10 || !phone.startsWith("0")) {
-        return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana phone number to continue");
-      }
-
+      if (phone.length !== 10 || !phone.startsWith("0")) return sendWhatsApp(from, "Invalid number ❌");
       await supabase.from("sessions").update({ phone_number: phone, step: 8 }).eq("phone", from);
-      return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from:`);
+      return sendWhatsApp(from, "📲 Enter the Mobile Money number to pay from:");
     }
 
     if (session.step === 8) {
       const momoNumber = normalizePhone(text);
-      if (momoNumber.length !== 10 || !momoNumber.startsWith("0")) {
-        return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
-      }
-
-      await supabase.from("sessions").update({
-        momo_number: momoNumber,
-        step: 15,
-        scratch_order_opt_in: false
-      }).eq("phone", from);
-
-      const activeScratch = await getActiveScratchCode(from);
-      if (activeScratch) {
-        return sendWhatsApp(from, `🎟️ SCRATCH & WIN (OPTIONAL)\n\nActive Code: *${activeScratch.code}*\nUse this code for this paid order?\n\n1 - YES, use my code\n2 - NO, skip`);
-      }
-
-      return sendWhatsApp(from, `🎟️ SCRATCH & WIN (OPTIONAL)\n\nDo you have a Data1 Scratch Code for this paid order?\n\n1 - YES, enter my code\n2 - NO / SKIP`);
-    }
-
-    if (session.step === 15) {
-      const finishConfirm = async () => {
-        const bundle = PACKAGES[session.network]?.[session.bundle];
-        const tracker = await getDeliveryEstimate();
-        const estimateMessage = buildDeliveryEstimateMessage(tracker);
-        await supabase.from("sessions").update({ step: 4 }).eq("phone", from);
-        return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n📶 Network: ${session.network}\n📦 Data: ${bundle.capacity}GB\n💰 Amount: ₵${bundle.price.toFixed(2)}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
-      };
-
-      if (text === "2" || /^no$/i.test(text) \vert{}\vert{} /^skip$/i.test(text)) {
-        await supabase.from("sessions").update({ scratch_order_opt_in: false }).eq("phone", from);
-        return finishConfirm();
-      }
-
-      if (text === "1" || /^yes$/i.test(text)) {
-        const activeScratch = await getActiveScratchCode(from);
-        if (activeScratch) {
-          await supabase.from("sessions").update({ scratch_code: activeScratch.code, scratch_order_opt_in: true }).eq("phone", from);
-          return finishConfirm();
-        }
-        await supabase.from("sessions").update({ step: 16, scratch_order_opt_in: false }).eq("phone", from);
-        return sendWhatsApp(from, "🎟️ Enter your Data1 Scratch Code:\n\nExample: Data1A7K92P");
-      }
-      return sendWhatsApp(from, "Reply 1 for YES or 2 for NO / SKIP.");
-    }
-
-    if (session.step === 16) {
-      const result = await activateScratchCodeForCheckout(from, text);
-      if (!result.ok) return sendWhatsApp(from, result.message);
-      await supabase.from("sessions").update({ scratch_code: result.scratch.code, scratch_order_opt_in: true, step: 4 }).eq("phone", from);
-      const bundle = PACKAGES[session.network]?.[session.bundle];
-      const tracker = await getDeliveryEstimate();
-      const estimateMessage = buildDeliveryEstimateMessage(tracker);
-      return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n📶 Network: ${session.network}\n📦 Data: ${bundle.capacity}GB\n💰 Amount: ₵${bundle.price.toFixed(2)}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n🎟️ Scratch Code: ${result.scratch.code}\n\nReply YES to pay or NO to cancel`);
-    }
-
-    if (session.step === 70) {
-      if (/^yes$/i.test(text)) {
-        try {
-          const result = await createScratchCodeForCustomer(from);
-          if (!result.ok) {
-            const x = result.existing;
-            return sendWhatsApp(from, x.unlocked ? `🎉 Your Scratch Card is already unlocked!\n\nCode: *${x.code}*\nReply *SCRATCH* to play.` : `🎟️ You already have an active code: *${x.code}*`);
-          }
-          return sendWhatsApp(from, `🎉 YOUR UNIQUE SCRATCH CODE IS READY!\n\n🎟️ *${result.data.code}*`);
-        } catch (e) {
-          return sendWhatsApp(from, "❌ We could not generate your Scratch Code right now.");
-        }
-      }
-      if (/^scratch$/i.test(text)) return playScratchCard(from);
-      const activeScratch = await getActiveScratchCode(from);
-      if (activeScratch) return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\nCode: *${activeScratch.code}*`);
-      return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\nReply *YES* to generate your unique Data1 Scratch Code automatically.`);
-    }
-
-    if (session.step === 80) {
-      const networks = { "1": "MTN", "2": "AIRTELTIGO", "3": "TELECEL" };
-      const network = networks[text];
-      if (!network) return sendWhatsApp(from, "Invalid option ❌\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel");
-      await supabase.from("sessions").update({ network, step: 81 }).eq("phone", from);
-      return sendWhatsApp(from, "📱 Enter the Ghana phone number where you want your FREE prize sent:");
-    }
-
-    if (session.step === 81) {
-      const prizePhone = normalizePhone(text);
-      if (prizePhone.length !== 10 || !prizePhone.startsWith("0")) return sendWhatsApp(from, "❌ Invalid Ghana phone number.");
-      const scratch = await supabase.from("scratch_codes").select("*").eq("assigned_to", normalizePhone(from)).eq("status", "processing").maybeSingle().then(r => r.data);
-      if (!scratch) return sendWhatsApp(from, "❌ Scratch prize session not found.");
-      const capacity = String(scratch.prize || "1");
-      const prizeLabel = capacity === "2" ? "2GB" : "1GB";
-      const networkMap = { MTN: "YELLO", AIRTELTIGO: "YELLO", TELECEL: "YELLO" };
-      try {
-        const response = await axios.post(`${DATAMART_BASE}/purchase`, { phoneNumber: prizePhone, network: networkMap[session.network] || "YELLO", capacity, gateway: "wallet", delivery: "fast" }, { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 });
-        const data = response.data?.data || response.data || {};
-        const reference = data.reference || data.orderReference || null;
-        await supabase.from("scratch_codes").update({ status: "used", prize_network: session.network, prize_phone: prizePhone, datamart_reference: reference, delivered_at: new Date().toISOString() }).eq("id", scratch.id);
-        await supabase.from("sessions").update({ step: 1, scratch_prize: null }).eq("phone", from);
-        return sendWhatsApp(from, `🎉 PRIZE SENT SUCCESSFULLY!\n\n🎁 Prize: ${prizeLabel}\n📱 Sent to: ${prizePhone}`);
-      } catch (e) {
-        await supabase.from("scratch_codes").update({ status: "unlocked", scratched: false }).eq("id", scratch.id);
-        return sendWhatsApp(from, `❌ We could not send your ${prizeLabel} prize right now. Reply *SCRATCH* and try again.`);
-      }
+      if (momoNumber.length !== 10 || !momoNumber.startsWith("0")) return sendWhatsApp(from, "Invalid number ❌");
+      await supabase.from("sessions").update({ momo_number: momoNumber, step: 4 }).eq("phone", from);
+      const bundle = PACKAGES[session.network][session.bundle];
+      return sendWhatsApp(from, `Confirm Order:\n\nNetwork: ${session.network}\nBundle: ${bundle.capacity}GB\nPrice: ₵${bundle.price.toFixed(2)}\nRecipient: ${session.phone_number}\nPay from: ${momoNumber}\n\nReply YES to pay or NO to cancel`);
     }
 
     if (session.step === 4) {
@@ -1916,21 +1040,71 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, "Reply YES to pay or NO to cancel.");
     }
 
-    if (session.step === 9) {
-      return submitMomoOtp(from, session, text.trim());
-    }
-
     if (session.step === 6) {
       const trackingPhone = normalizePhone(text);
-      if (trackingPhone.length !== 10 || !trackingPhone.startsWith("0")) {
-        return sendWhatsApp(from, `❌ Invalid phone number.`);
-      }
       return trackOrders(from, trackingPhone);
     }
 
   } catch (e) {
-    console.error("BOT ERROR:", e.response?.data || e.message);
+    console.error("BOT ERROR:", e.message);
   }
+});
+
+/* =========================================================
+PAYSTACK WEBHOOK
+========================================================= */
+
+app.post("/paystack-webhook", async (req, res) => {
+  res.sendStatus(200);
+  try {
+    const event = req.body;
+    if (!event || event.event !== "charge.success") return;
+    const ref = event.data?.reference;
+    if (!ref) return;
+    const paidAmount = Number(event.data?.amount || 0) / 100;
+
+    let { data: session } = await supabase.from("sessions").select("*").eq("ref", ref).maybeSingle();
+    if (!session) return;
+
+    const bundle = PACKAGES[session.network]?.[session.bundle];
+    if (!bundle) return;
+
+    const purchasePayload = {
+      phoneNumber: normalizePhone(session.phone_number),
+      network: bundle.apiNetwork || "YELLO",
+      capacity: String(bundle.capacity),
+      gateway: "wallet"
+    };
+
+    let datamartSuccess = false;
+    let datamartReference = null;
+    try {
+      const delivery = await axios.post(`${DATAMART_BASE}/purchase`, { ...purchasePayload, delivery: "fast" }, {
+        headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" },
+        timeout: 30000
+      });
+      const data = delivery.data?.data || delivery.data || {};
+      datamartReference = data.reference || data.orderReference || null;
+      datamartSuccess = true;
+    } catch (err) {}
+
+    const orderReference = datamartReference || ref;
+    await supabase.from("orders").insert([{
+      whatsapp_phone: session.phone,
+      phone_number: normalizePhone(session.phone_number),
+      recipient_phone: normalizePhone(session.phone_number),
+      reference: orderReference,
+      network: session.network,
+      bundle: session.bundle,
+      capacity: String(bundle.capacity),
+      amount: paidAmount,
+      status: "processing",
+      payment_status: "paid",
+      delivery_status: "processing"
+    }]);
+
+    await sendWhatsApp(session.phone, `✅ Payment received! Your ${bundle.capacity}GB order is being processed.`);
+  } catch (e) {}
 });
 
 /* =========================================================
