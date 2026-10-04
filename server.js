@@ -95,7 +95,7 @@ DATA 1 GH — COMPLETE SITE KNOWLEDGE BASE (FROM HTTPS://DATA1GH.VERCEL.APP):
 • AFA Registration (GH₵ 20 - GH₵ 25):
   - Farmer Alliance SIM registration allowing the user's MTN line to unlock permanent corporate discount bundles directly from MTN.
 • WAEC & BECE Result Checkers (WAEC: GH₵ 20 | BECE: GH₵ 18):
-  - Instant scratch card vouchers for checking WASSCE, BECE, or Nov/Dec exam results. Serial Number and PIN show immediately on screen and via SMS receipt.
+  - Instant scratch card vouchers for checking WASSCE, BECE, or Nov/Dec exam results. Serial Number and PIN show immediately on screen and on the tracking portal.
 
 4. ENGAGEMENT, APPS & REWARDS:
 • Scratch & Win / Lucky Spin Wheel:
@@ -556,7 +556,8 @@ const MENU = `Welcome to Data1gh🇬🇭
 7 - MashUp Bundle (MTN)
 8 - 🎟️ Scratch & Win
 
-Choose an option or chat with Stony!`;
+🤖 *AI Mode:* Send *Stony* anytime to enter AI Mode!
+Choose an option to continue`;
 
 /* =========================================================
 BUNDLE MENUS
@@ -792,7 +793,7 @@ function generateCustomerNaturalFallback(lowerText) {
     return `Once your payment is successful bossu 🎉:\n` +
       `1. Payment is verified automatically.\n` +
       `2. Data drops straight to your phone in 5-30 minutes 📶.\n` +
-      `3. You get an SMS confirmation receipt from D_1Gh.\n\n` +
+      `3. Live tracking status is updated instantly in real-time.\n\n` +
       `You can track anytime at ${TRACK_ORDER_URL} or reply *4* with your phone number/reference!`;
   }
 
@@ -911,6 +912,62 @@ async function updateOrderDeliveryStatusSafely(ref, newStatus) {
   return { table: "orders", reference: cleanRef, phone: null, data: null };
 }
 
+async function updateOrderPaymentStatusSafely(ref, newPaymentStatus) {
+  const cleanRef = String(ref || "").replace(/[*_#`"']/g, "").trim();
+  if (!cleanRef) return null;
+
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanRef);
+  const filter = isUuid
+    ? `reference.ilike.%${cleanRef}%,datamart_reference.ilike.%${cleanRef}%,id.eq.${cleanRef}`
+    : `reference.ilike.%${cleanRef}%,datamart_reference.ilike.%${cleanRef}%`;
+
+  try {
+    // 1. Orders table
+    const { data: ord } = await supabase
+      .from("orders")
+      .update({
+        payment_status: newPaymentStatus,
+        updated_at: new Date().toISOString()
+      })
+      .or(filter)
+      .select("reference, recipient_phone, network, capacity, amount, payment_status, delivery_status")
+      .maybeSingle();
+
+    if (ord) return { table: "orders", reference: ord.reference, phone: ord.recipient_phone, data: ord };
+
+    // 2. Service orders table
+    const sFilter = isUuid ? `reference.ilike.%${cleanRef}%,id.eq.${cleanRef}` : `reference.ilike.%${cleanRef}%`;
+    const { data: sOrd } = await supabase
+      .from("service_orders")
+      .update({
+        payment_status: newPaymentStatus,
+        updated_at: new Date().toISOString()
+      })
+      .or(sFilter)
+      .select("reference, recipient_phone, service_type, payment_status")
+      .maybeSingle();
+
+    if (sOrd) return { table: "service_orders", reference: sOrd.reference, phone: sOrd.recipient_phone, data: sOrd };
+
+    // 3. Checker orders table
+    const { data: cOrd } = await supabase
+      .from("checker_orders")
+      .update({
+        payment_status: newPaymentStatus,
+        updated_at: new Date().toISOString()
+      })
+      .or(sFilter)
+      .select("reference, recipient_phone, exam_type, payment_status")
+      .maybeSingle();
+
+    if (cOrd) return { table: "checker_orders", reference: cOrd.reference, phone: cOrd.recipient_phone, data: cOrd };
+  } catch (err) {
+    console.warn("updateOrderPaymentStatusSafely warning:", err.message);
+  }
+
+  return { table: "orders", reference: cleanRef, phone: null, data: null };
+}
+
 /* =========================================================
 OWNER STATE PERSISTENCE (IN-MEMORY CACHE + SUPABASE UPSERT)
 Guarantees pending actions and conversation history are never
@@ -969,6 +1026,97 @@ async function saveOwnerHistory(phone, historyList) {
   } catch (err) {
     console.warn("⚠️ Failed upserting owner history:", err.message);
   }
+}
+
+/* =========================================================
+USER MODE STATE (BOT MODE vs STONY AI MODE)
+- 'bot': Displays MENU, follows step-by-step numbers 1-8
+- 'ai':  Chat with Stony AI (Gemini / OpenAI / Site Knowledge)
+========================================================= */
+const userModes = new Map(); // normPhone -> 'bot' | 'ai'
+
+function getUserMode(phone, session) {
+  const norm = String(phone || "").replace(/\D/g, "");
+  if (userModes.has(norm)) return userModes.get(norm);
+  if (userModes.has(String(phone))) return userModes.get(String(phone));
+  if (session?.step === 99) return "ai";
+  return "bot";
+}
+
+function setUserMode(phone, mode) {
+  const norm = String(phone || "").replace(/\D/g, "");
+  userModes.set(norm, mode);
+  userModes.set(String(phone), mode);
+}
+
+function extractStatusFromText(input) {
+  const t = String(input || "").toLowerCase();
+  if (/\b(delivered|received|recieve|recieved|landed|success|successful|done)\b/i.test(t)) return "delivered";
+  if (/\b(processing|process|ongoing|in progress|working)\b/i.test(t)) return "processing";
+  if (/\b(pending|queued|queue)\b/i.test(t)) return "pending";
+  if (/\b(waiting|awaiting)\b/i.test(t)) return "waiting";
+  if (/\b(failed|fail|error|declined)\b/i.test(t)) return "failed";
+  if (/\b(cancelled|canceled|cancel)\b/i.test(t)) return "cancelled";
+  if (/\b(refunded|refund)\b/i.test(t)) return "refunded";
+  if (/\b(completed|complete)\b/i.test(t)) return "completed";
+  const m = t.match(/\b(?:to|as|status)\s+([a-z_-]{3,20})\b/i);
+  if (m && !/^(the|an?|my|this|that|order|status)$/i.test(m[1])) {
+    return m[1].toLowerCase().trim();
+  }
+  return null;
+}
+
+function extractPaymentStatusFromText(input) {
+  const t = String(input || "").toLowerCase();
+  if (/\b(paid|success|successful|cleared|completed)\b/i.test(t)) return "paid";
+  if (/\b(pending|unpaid|awaiting payment)\b/i.test(t)) return "pending";
+  if (/\b(failed|declined|error)\b/i.test(t)) return "failed";
+  if (/\b(refunded|refund)\b/i.test(t)) return "refunded";
+  if (/\b(cancelled|canceled)\b/i.test(t)) return "cancelled";
+  const m = t.match(/\bpayment(?:\s+status)?\s+(?:to|as)?\s*([a-z_-]{3,20})\b/i);
+  if (m && !/^(the|an?|my|this|that|order|status|payment)$/i.test(m[1])) {
+    return m[1].toLowerCase().trim();
+  }
+  return null;
+}
+
+/* =========================================================
+STORE SETTINGS & ANNOUNCEMENTS UPDATER
+Allows Stony AI to update announcements & store settings in Supabase
+========================================================= */
+async function updateStoreSetting(key, value) {
+  const cleanKey = String(key || "").trim().toLowerCase();
+  const cleanVal = String(value !== undefined && value !== null ? value : "").trim();
+  const upserts = [{ key: cleanKey, value: cleanVal }];
+  if (cleanKey === "support_phone") {
+    upserts.push({ key: "admin_alert_phone", value: cleanVal });
+  }
+  if (cleanKey === "datamart_api_key") {
+    upserts.push({ key: "DATA_API_KEY", value: cleanVal });
+  }
+  if (cleanKey === "arkesel_api_key") {
+    upserts.push({ key: "ARKESEL_API_KEY", value: cleanVal });
+  }
+  const { error } = await supabase.from("settings").upsert(upserts, { onConflict: "key" });
+  if (error) throw new Error(error.message);
+  return { key: cleanKey, value: cleanVal };
+}
+
+async function updateStoreAnnouncement({ title, message, enabled }) {
+  const upserts = [];
+  if (enabled !== undefined) {
+    upserts.push({ key: "announcement_enabled", value: enabled ? "true" : "false" });
+  }
+  if (title !== undefined && title !== null) {
+    upserts.push({ key: "announcement_title", value: String(title).trim() });
+  }
+  if (message !== undefined && message !== null) {
+    upserts.push({ key: "announcement_message", value: String(message).trim() });
+    upserts.push({ key: "shop_announcement", value: String(message).trim() });
+  }
+  const { error } = await supabase.from("settings").upsert(upserts, { onConflict: "key" });
+  if (error) throw new Error(error.message);
+  return { title, message, enabled };
 }
 
 function extractActionSuggestion(rawText) {
@@ -2145,6 +2293,133 @@ async function generateFullAdminReport() {
 }
 
 /* =========================================================
+CUSTOMER STONY AI HANDLER (KNOWLEDGE BASE & MULTI-MODEL)
+========================================================= */
+async function handleCustomerAi(from, rawText) {
+  const text = String(rawText || "").trim();
+  const lower = text.toLowerCase();
+
+  // 1. Direct Storefront & App Links Intent
+  if (/\b(link|store|website|shop|site|online|web|front\s*end|frontend)\b/i.test(lower)) {
+    return sendWhatsApp(
+      from,
+      `🌐 *DATA 1 GH STOREFRONT*\n\n` +
+      `Browse and order all data bundles, Netflix, AFA & WAEC checkers directly on our official store:\n` +
+      `👉 *Store Link:* ${STORE_FRONTEND_URL}\n` +
+      `📱 *Download Android App:* ${DOWNLOAD_APP_URL}\n` +
+      `📦 *Track Orders:* ${TRACK_ORDER_URL}\n\n` +
+      `Or reply *Hi* to view the menu:\n1 - MTN\n2 - AirtelTigo\n3 - Telecel\n4 - Track Order\n5 - Netflix\n6 - AFA\n7 - MashUp\n8 - Scratch & Win`
+    );
+  }
+
+  if (/\b(app|apk|download|mobile\s*app|android|install)\b/i.test(lower)) {
+    return sendWhatsApp(
+      from,
+      `📱 *DOWNLOAD OUR OFFICIAL ANDROID APP*\n\n` +
+      `Get our lightweight mobile app with 1-click ordering, saved recipients, and instant push updates:\n` +
+      `👉 *Install APK:* ${DOWNLOAD_APP_URL}\n\n` +
+      `Prefer WhatsApp? Reply *Hi* to view the menu!`
+    );
+  }
+
+  // 2. Direct Order Tracking Intent
+  const phoneMatch = lower.match(/\b(0[2357]\d{8}|233\d{9})\b/);
+  const refMatch = text.match(/\b(REF-\d+|[A-Z0-9]{8,})\b/i);
+  if (refMatch || (phoneMatch && !/\b(price|cost|bundle|buy|order|how|hello|hi|good)\b/i.test(lower))) {
+    const lookup = refMatch ? refMatch[1] : phoneMatch[0];
+    try {
+      const { data: ord } = await supabase
+        .from("orders")
+        .select("reference, network, capacity, amount, delivery_status, recipient_phone, payment_status")
+        .or(`reference.ilike.%${lookup}%,recipient_phone.ilike.%${lookup}%`)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (ord) {
+        const liveStatus = await getRealDatamartDeliveryStatus(ord.reference);
+        const ds = liveStatus.deliveryStatus === "delivered" ? "Delivered ✅" : (liveStatus.deliveryStatus === "processing" ? "Processing ⏳" : `${liveStatus.deliveryStatus || "In Progress"} ⏳`);
+        return sendWhatsApp(
+          from,
+          `🔍 *Order Status (${ord.reference})*\n• Bundle: ${ord.capacity}GB ${ord.network}\n• Recipient: ${ord.recipient_phone}\n• Payment: ${ord.payment_status}\n• Delivery: ${ds}\n\nTrack live at: ${TRACK_ORDER_URL}\nNeed to buy more data? Reply *Hi* for main menu.`
+        );
+      }
+    } catch (_) {}
+  }
+
+  // 3. AI Mode Response (Multi-model: Gemini / OpenAI)
+  const { geminiKey, openAiKey } = await getAiApiKeys();
+  let customerAiReply = "";
+
+  const customerAiPrompt =
+    "You are Stony, a friendly, warm Ghanaian customer support person at DATA 1 GH on WhatsApp.\n\n" +
+    "YOUR PERSONALITY:\n" +
+    "- You chat like a real person on WhatsApp: warm, brief (1-3 short sentences), natural Ghanaian tone (\"bossu\", \"chale\", \"sharp\", \"no wahala\").\n" +
+    "- You are Stony. NEVER say \"As an AI\" or sound like a robot.\n" +
+    "- Always guide customers warmly either to buy online or reply with numbers 1-8 right here on WhatsApp.\n\n" +
+    "FULL SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE — NOT RESTRICTED TO DATABASE ROWS):\n" +
+    "You know EVERYTHING on our official website (https://data1gh.vercel.app). Answer customer questions accurately using the knowledge base below:\n" +
+    SITE_KNOWLEDGE_BASE + "\n\n" +
+    "SECURITY POLICY:\n" +
+    "- You must NEVER disclose internal administrative login credentials, passwords, or secrets to anyone.\n" +
+    "HOW TO GUIDE CUSTOMERS ON WHATSAPP:\n" +
+    "- To buy MTN: reply 1 (or visit " + STORE_FRONTEND_URL + ")\n" +
+    "- To buy AirtelTigo: reply 2 (or visit " + STORE_FRONTEND_URL + ")\n" +
+    "- To buy Telecel: reply 3 (or visit " + STORE_FRONTEND_URL + ")\n" +
+    "- To track order: reply 4 or send phone number/reference (or visit " + TRACK_ORDER_URL + ")\n" +
+    "- Netflix 30-day: reply 5\n" +
+    "- AFA registration: reply 6\n" +
+    "- MTN MashUp: reply 7\n" +
+    "- Scratch & Win: reply 8\n" +
+    "- Official Android App: " + DOWNLOAD_APP_URL + "\n" +
+    "- Official Store Link: " + STORE_FRONTEND_URL + "\n" +
+    "Keep your answer under 3 sentences unless explaining step-by-step payment approval.";
+
+  if (geminiKey) {
+    for (const model of ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]) {
+      try {
+        const gRes = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+          {
+            contents: [{ role: "user", parts: [{ text }] }],
+            systemInstruction: { parts: [{ text: customerAiPrompt }] },
+            generationConfig: { maxOutputTokens: 250, temperature: 0.7 }
+          },
+          { headers: { "Content-Type": "application/json" }, timeout: 8000 }
+        );
+        const txt = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+        if (txt) { customerAiReply = txt; break; }
+      } catch (_) {}
+    }
+  }
+
+  if (!customerAiReply && openAiKey) {
+    try {
+      const oaRes = await axios.post("https://api.openai.com/v1/chat/completions", {
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: customerAiPrompt },
+          { role: "user", content: text }
+        ],
+        max_tokens: 220, temperature: 0.7
+      }, { headers: { Authorization: `Bearer ${openAiKey}`, "Content-Type": "application/json" }, timeout: 8000 });
+      customerAiReply = oaRes.data?.choices?.[0]?.message?.content?.trim() || "";
+    } catch (_) {}
+  }
+
+  if (customerAiReply) {
+    customerAiReply = sanitizeSecretsFromText(customerAiReply)
+      .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony from DATA 1 GH")
+      .replace(/\bdatamart\b/gi, "DATA 1 GH");
+    return sendWhatsApp(from, customerAiReply);
+  }
+
+  // 4. Fallback
+  const fallbackReply = generateCustomerNaturalFallback(lower);
+  return sendWhatsApp(from, fallbackReply);
+}
+
+/* =========================================================
 WEBHOOK VERIFY
 ========================================================= */
 
@@ -2205,18 +2480,81 @@ app.post("/webhook", async (req, res) => {
     }
 
     /* =====================================================
-    STONY OWNER AI — Personal Business Assistant & Co-Pilot
-    Rules:
-      - "menu" / "customer"  → show customer menu
-      - ANY other message    → Stony AI replies directly as personal assistant
+    MODE BREAKDOWN (BOT MENU MODE vs STONY AI MODE)
+    - "Hi" / "Hello" / "Start" / "Menu" / "Bot" -> Enter BOT MODE (shows MENU)
+    - "Stony" / "AI" / "AI Mode" -> Enter STONY AI MODE
     ===================================================== */
-    if (isOwner) {
-      let { data: ownerSession } = await supabase
-        .from("sessions")
-        .select("step, bundle, notes")
-        .eq("phone", from)
-        .maybeSingle();
+    const isHi = /^(hi|hello|start|menu|bot|bot mode|menu mode|customer)$/i.test(text);
+    const isStonySwitch = /^(stony|ai|ai mode|stony ai|switch to ai|ask stony|talk to stony|enter ai mode)$/i.test(text);
+    const startsWithStony = /^stony\b/i.test(text);
 
+    // 1. SWITCH TO BOT MODE (Shows Menu)
+    if (isHi) {
+      setUserMode(from, "bot");
+      await supabase.from("sessions").upsert({ phone: String(from), step: 1, bundle: null }, { onConflict: "phone" });
+      if (isOwner) {
+        await clearOwnerPendingAction(from);
+      }
+      return sendWhatsApp(from, MENU);
+    }
+
+    // 2. SWITCH TO STONY AI MODE
+    if (isStonySwitch) {
+      setUserMode(from, "ai");
+      await supabase.from("sessions").upsert({ phone: String(from), step: 99 }, { onConflict: "phone" });
+
+      if (isOwner) {
+        return sendWhatsApp(from,
+          `🤖 *STONY AI MODE ACTIVATED (OWNER)*\n\n` +
+          `Hello bossu! I'm Stony, your 24/7 AI co-pilot for DATA 1 GH 🇬🇭.\n\n` +
+          `I have full live access to our website (${STORE_FRONTEND_URL}) and the admin portal. You can command me to:\n` +
+          `• Update delivery status to ANY state: *delivered*, *processing*, *pending*, *waiting*, *failed*, *cancelled*, *refunded*, etc.\n` +
+          `• Update payment status to ANY state: *paid*, *pending*, *failed*, *refunded*, *cancelled*\n` +
+          `• Update store settings & announcements (e.g. "update announcement to 20% bonus data today", "turn off announcement", "change support phone to 0541234567")\n` +
+          `• Update product prices and toggle stock (e.g. "change 5GB MTN price to 25")\n` +
+          `• Check live sales, stuck orders, DataMart wallet, and issue radar\n` +
+          `• Brainstorm business suggestions & promos\n\n` +
+          `📱 *SMS Policy:* Customer SMS is automated for Result Checkers (PIN/Serial) and Netflix (sign-in codes). Data delivery SMS is disabled, and failed orders always alert you via SMS.\n\n` +
+          `💡 *Switch back:* Send *Hi* or *Menu* anytime to return to Bot Menu mode.\n\n` +
+          `What would you like me to tackle, boss?`
+        );
+      } else {
+        return sendWhatsApp(from,
+          `🤖 *STONY AI MODE ACTIVATED*\n\n` +
+          `Hello! I'm Stony, your AI assistant at DATA 1 GH 🇬🇭.\n\n` +
+          `I have full knowledge of our website (${STORE_FRONTEND_URL}) and all our services. You can ask me anything about:\n` +
+          `• Data bundle prices for MTN, AirtelTigo & Telecel\n` +
+          `• How to buy online or right here on WhatsApp\n` +
+          `• Netflix subscriptions, AFA registrations & WAEC checkers\n` +
+          `• Order status & troubleshooting\n\n` +
+          `💡 *Switch back:* Send *Hi* or *Menu* anytime to return to Bot Menu mode.\n\n` +
+          `How can I help you today?`
+        );
+      }
+    }
+
+    // 3. Message starts with "Stony [command/query]"
+    let effectiveText = text;
+    if (startsWithStony) {
+      setUserMode(from, "ai");
+      await supabase.from("sessions").upsert({ phone: String(from), step: 99 }, { onConflict: "phone" });
+      effectiveText = text.replace(/^stony\s*[,:]?\s*/i, "").trim() || "hello";
+    }
+
+    let { data: currentSession } = await supabase
+      .from("sessions")
+      .select("*")
+      .eq("phone", from)
+      .maybeSingle();
+
+    const activeMode = getUserMode(from, currentSession);
+
+    /* =====================================================
+    STONY OWNER AI — Personal Business Assistant & Co-Pilot
+    Active when user is Owner AND mode is 'ai' (or text started with Stony)
+    ===================================================== */
+    if (isOwner && (activeMode === "ai" || startsWithStony)) {
+      let ownerSession = currentSession;
       if (!ownerSession) {
         try {
           const { data: created } = await supabase
@@ -2228,14 +2566,7 @@ app.post("/webhook", async (req, res) => {
         } catch (_) {}
       }
 
-      // If owner explicitly wants to test the customer menu
-      if (/^(menu|customer)$/i.test(text)) {
-        await supabase.from("sessions").upsert({ phone: String(from), step: 1, bundle: null }, { onConflict: "phone" });
-        await clearOwnerPendingAction(from);
-        return sendWhatsApp(from, MENU);
-      }
-
-      console.log("👑 OWNER CHAT WITH STONY — message:", text);
+      console.log("👑 OWNER CHAT WITH STONY (AI MODE) — message:", effectiveText);
 
       // ── CHECK IF OWNER IS CONFIRMING A PENDING ACTION ──
       const normFrom = String(from || "").replace(/\D/g, "");
@@ -2318,8 +2649,8 @@ app.post("/webhook", async (req, res) => {
         targetRefs = [...new Set(targetRefs.map(r => String(r || "").replace(/[*_#`"']/g, "").trim()).filter(Boolean))];
 
         // 1. UPDATE ORDER STATUS (Single & Multiple Orders)
-        if (type === "update_order_status" || (targetRefs.length > 0 && /\b(update|status|delivered)\b/i.test(cleanInput))) {
-          const statusToSet = status || "delivered";
+        if (type === "update_order_status" || (targetRefs.length > 0 && /\b(update|status|delivered|processing|pending|waiting|failed|cancelled|refunded)\b/i.test(cleanInput))) {
+          const statusToSet = extractStatusFromText(cleanInput) || pendingAction.status || status || "delivered";
           const updatedRefs = [];
 
           for (const r of targetRefs) {
@@ -2337,7 +2668,7 @@ app.post("/webhook", async (req, res) => {
                 role: "assistant",
                 text: `✅ Action completed: Updated ${updatedRefs.length} order(s) (${updatedRefs.join(", ")}) to ${statusToSet.toUpperCase()} in the database.`
               };
-              const updatedHistory = [...history.slice(-5), { role: "user", text }, executionNote];
+              const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
               await saveOwnerHistory(from, updatedHistory);
             } catch (_) {}
 
@@ -2345,7 +2676,38 @@ app.post("/webhook", async (req, res) => {
               `✅ *ACTION COMPLETED BOSS!*\n\n` +
               `I have successfully updated ${updatedRefs.length} order(s) to *${statusToSet.toUpperCase()}* in the database:\n` +
               updatedRefs.map(r => `• *${r}*`).join("\n") +
-              `\n\nDatabase is now synchronized with reality! What else would you like me to tackle?`
+              `\n\nDatabase is now synchronized with reality! (SMS alerts disabled). What else would you like me to tackle?`
+            );
+          }
+        }
+
+        // 1b. UPDATE PAYMENT STATUS
+        if (type === "update_payment_status") {
+          const statusToSet = extractPaymentStatusFromText(cleanInput) || pendingAction.payment_status || pendingAction.status || status || "paid";
+          const updatedRefs = [];
+
+          for (const r of targetRefs) {
+            const upd = await updateOrderPaymentStatusSafely(r, statusToSet);
+            if (upd) {
+              updatedRefs.push(r);
+            }
+          }
+
+          if (updatedRefs.length > 0) {
+            try {
+              const executionNote = {
+                role: "assistant",
+                text: `✅ Action completed: Updated payment status for ${updatedRefs.length} order(s) (${updatedRefs.join(", ")}) to ${statusToSet.toUpperCase()} in the database.`
+              };
+              const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
+              await saveOwnerHistory(from, updatedHistory);
+            } catch (_) {}
+
+            return sendWhatsApp(from,
+              `✅ *PAYMENT STATUS UPDATED BOSS!*\n\n` +
+              `I have successfully updated the payment status of ${updatedRefs.length} order(s) to *${statusToSet.toUpperCase()}* in the database:\n` +
+              updatedRefs.map(r => `• *${r}*`).join("\n") +
+              `\n\nDatabase payment records are synchronized! What else would you like me to tackle?`
             );
           }
         }
@@ -2453,12 +2815,42 @@ app.post("/webhook", async (req, res) => {
           return sendWhatsApp(from, `✅ *RESULT CHECKER ORDER UPDATED!*\n\nReference(s): ${targetRefs.join(", ")}\nNew Status: *${statusToSet.toUpperCase()}*`);
         }
 
+        // 10. UPDATE STORE ANNOUNCEMENT
+        if (type === "update_announcement") {
+          const title = pendingAction.title || "Store Announcement";
+          const message = pendingAction.message || pendingAction.announcement || "";
+          const enabled = pendingAction.enabled !== undefined ? Boolean(pendingAction.enabled) : true;
+          await updateStoreAnnouncement({ title, message, enabled });
+          return sendWhatsApp(from,
+            `✅ *STORE ANNOUNCEMENT UPDATED!*\n\n` +
+            `📢 *Title:* ${title}\n` +
+            (message ? `💬 *Message:* "${message}"\n` : "") +
+            `⚡ *Status:* ${enabled ? "LIVE ON SHOP ✅" : "OFF ❌"}\n\n` +
+            `Visitors on https://data1gh.vercel.app will see this immediately!`
+          );
+        }
+
+        // 11. UPDATE STORE SETTING ("the rest")
+        if (type === "update_setting") {
+          const k = String(pendingAction.key || "").trim();
+          const v = String(pendingAction.value !== undefined ? pendingAction.value : "").trim();
+          if (k) {
+            await updateStoreSetting(k, v);
+            return sendWhatsApp(from,
+              `✅ *STORE SETTING UPDATED!*\n\n` +
+              `⚙️ *Setting:* ${k}\n` +
+              `📝 *New Value:* *${v}*\n\n` +
+              `Database and store configuration synchronized!`
+            );
+          }
+        }
+
         return sendWhatsApp(from, "✅ Action performed bossu! System updated.");
       }
 
       // ── CONTEXTUAL FALLBACK EXECUTION ──
       // If pendingAction was somehow empty/expired but owner says "they have received it so update the status"
-      if (!isCancel && isConfirm && /\b(update|status|delivered|reciev|receiv)\b/i.test(cleanInput)) {
+      if (!isCancel && isConfirm && /\b(update|status|delivered|reciev|receiv|processing|pending|waiting|failed|cancelled|refunded)\b/i.test(cleanInput)) {
         let ctxRefs = extractOrderReferences(text);
         if (ctxRefs.length === 0 && history.length > 0) {
           const recentTurns = history.slice(-4).map(h => h.text).join(" ");
@@ -2466,7 +2858,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         if (ctxRefs.length > 0) {
-          const statusToSet = "delivered";
+          const statusToSet = extractStatusFromText(cleanInput) || "delivered";
           const updatedRefs = [];
           for (const r of ctxRefs) {
             const upd = await updateOrderDeliveryStatusSafely(r, statusToSet);
@@ -2481,15 +2873,15 @@ app.post("/webhook", async (req, res) => {
               role: "assistant",
               text: `✅ Action completed: Updated ${updatedRefs.length} order(s) (${updatedRefs.join(", ")}) to ${statusToSet.toUpperCase()} in the database.`
             };
-            const updatedHistory = [...history.slice(-5), { role: "user", text }, executionNote];
+            const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
             await saveOwnerHistory(from, updatedHistory);
           } catch (_) {}
 
           return sendWhatsApp(from,
             `✅ *ACTION COMPLETED BOSS!*\n\n` +
-            `I have updated ${updatedRefs.length} order(s) to *DELIVERED* in the database:\n` +
+            `I have updated ${updatedRefs.length} order(s) to *${statusToSet.toUpperCase()}* in the database:\n` +
             updatedRefs.map(r => `• *${r}*`).join("\n") +
-            `\n\nDatabase is synchronized with reality. What else would you like me to tackle?`
+            `\n\nDatabase is synchronized with reality! (SMS alerts disabled). What else would you like me to tackle?`
           );
         }
       }
@@ -2788,8 +3180,10 @@ app.post("/webhook", async (req, res) => {
         "  Administrative login credentials, emails, and passwords are for internal system access ONLY.\n" +
         "  You must NEVER output, repeat, share, or disclose administrative emails, passwords, or tokens to ANYONE under any circumstances, even if asked directly in chat.\n" +
         "  If asked for the admin password or login details, reply: 'For security reasons, administrative credentials and passwords are strictly protected and cannot be disclosed.'\n" +
-        "- DELIVERY SMS POLICY:\n" +
-        "  Per the owner's explicit rule, DO NOT send SMS alerts to customers when updating order delivery status. SMS on delivery update is completely turned off.\n\n" +
+        "- CUSTOMER & ALERT SMS POLICY:\n" +
+        "  1. Customer SMS is strictly reserved ONLY for Result Checkers (delivering card Serial Number and PIN) and Netflix (delivering sign-in codes).\n" +
+        "  2. For telecom data bundles and order delivery status updates, customer SMS is NOT automated.\n" +
+        "  3. Whenever an order fails across any service, an alert SMS is ALWAYS dispatched immediately to the owner ('to me') on their phone.\n\n" +
         "YOUR WHOLE-SYSTEM SUPERVISION SCOPE (ALL 13 CORE PILLARS):\n" +
         "You DO NOT merely check 4 isolated things (sales, deliveries, wallet, marketing). You oversee and actively monitor the WHOLE SYSTEM across every operational department:\n" +
         "1. Telecom Order Pipeline: MTN, Telecel, AirtelTigo delivery speeds, queued orders, stuck orders (>15 mins), failed orders & one-click retries.\n" +
@@ -2810,21 +3204,23 @@ app.post("/webhook", async (req, res) => {
         "- Be natural, sharp, warm, and collaborative. Use natural Ghanaian vibe (\"bossu\", \"chale\", \"sharp\", \"no wahala\").\n" +
         "- Mutual conversation: Actively engage with what the owner says. Discuss topics back and forth, brainstorm ideas, give reasoned opinions.\n" +
         "- When the owner asks whether you can perform or what you monitor, confirm you oversee the whole system across all 13 pillars and give an exact breakdown.\n" +
-        "- When the owner asks what happens after payment is successful or if you still perform/monitor after payment, explain how you actively supervise the entire post-payment lifecycle 24/7 (MoMo/Paystack reconciliation, automated DataMart dispatch, polling until delivered bypassing fake 200 OKs, low wallet balance warnings < GH₵ 50, Arkesel SMS receipts, admin WhatsApp alerts, stuck order anomaly detection >15 mins, and customer care readiness).\n" +
+        "- When the owner asks what happens after payment is successful or if you still perform/monitor after payment, explain how you actively supervise the entire post-payment lifecycle 24/7 (MoMo/Paystack reconciliation, automated DataMart dispatch, polling until delivered bypassing fake 200 OKs, low wallet balance warnings < GH₵ 50, admin WhatsApp alerts, stuck order anomaly detection >15 mins, and customer care readiness — with NO automated customer SMS sent).\n" +
         "- Proactively bring up any active warnings (low wallet, stuck orders, unread chats, out-of-stock items, pending MashUp manual dial) in your replies!\n" +
         "- AUTONOMOUS ACTION AUTHORITY & HUMAN-IN-THE-LOOP CONFIRMATION:\n" +
         "  You are NOT just a passive reader. You can actively PERFORM ACTIONS across the whole system on WhatsApp:\n" +
-        "  1. Update order delivery status to delivered/failed/processing/cancelled (single or batch)\n" +
-        "  2. Re-dispatch/retry failed telecom dispatches via DataMart API wallet\n" +
-        "  3. Resync live telecom carrier delivery status with DataMart\n" +
-        "  4. Send custom customer SMS via Arkesel using approved Sender ID D_1Gh\n" +
-        "  5. Toggle product packages between IN STOCK and OUT OF STOCK\n" +
-        "  6. Change product package prices on the store\n" +
-        "  7. Resolve customer support live chats\n" +
-        "  8. Update digital service orders (Netflix, MashUp *567*2#, AFA) and result checkers\n" +
-        "  CRITICAL SAFETY RULE: You must NEVER execute any action automatically or silently. You MUST ALWAYS propose the exact action to the owner first and ask for explicit confirmation: 'Shall I go ahead and do this boss? Reply YES to confirm or NO to cancel'.\n" +
-        "  When the owner asks you to do something, or when you proactively detect an issue, clearly propose the specific action and wait for their confirmation before execution.\n" +
-        "  To stage an action in your response, use the format [SUGGEST_ACTION: {\"type\": \"update_order_status\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\", ...}]\n" +
+        "  1. Update order delivery status to ANY state: delivered, processing, pending, waiting, failed, cancelled, refunded, completed (single or batch) — NO SMS IS SENT\n" +
+        "  2. Update payment status to ANY state: paid, pending, failed, refunded, cancelled\n" +
+        "  3. Update store announcement popup (message, title, turn on/off) live on the website\n" +
+        "  4. Update store settings in the database: support phone, delivery ETA, service prices (Netflix, AFA, MashUp, WAEC, BECE), and toggles\n" +
+        "  5. Re-dispatch/retry failed telecom dispatches via DataMart API wallet\n" +
+        "  6. Resync live telecom carrier delivery status with DataMart\n" +
+        "  7. Send custom customer SMS via Arkesel using approved Sender ID D_1Gh\n" +
+        "  8. Toggle product packages between IN STOCK and OUT OF STOCK\n" +
+        "  9. Change product package prices on the store\n" +
+        "  10. Resolve customer support live chats\n" +
+        "  11. Update digital service orders (Netflix, MashUp *567*2#, AFA) and result checkers\n" +
+        "  CRITICAL SAFETY RULE: You must NEVER execute any destructive or external action automatically. Propose the exact action and ask for confirmation: 'Shall I go ahead and do this boss? Reply YES to confirm or NO to cancel'.\n" +
+        "  To stage an action in your response, use the format [SUGGEST_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\", ...}]\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- Approved SMS Sender ID for DATA 1 GH is 'D_1Gh'. Whenever sending customer SMS or alerts, use sender ID 'D_1Gh'.\n" +
         "- NEVER give canned, robotic dismissals like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
@@ -2932,14 +3328,44 @@ app.post("/webhook", async (req, res) => {
 
       // ── SMART CONVERSATIONAL PERSONAL ASSISTANT FALLBACK & DIRECT COMMANDS ──
       if (!aiReply) {
-        const lt = text.toLowerCase().trim();
+        const cmdText = (effectiveText || text).trim();
+        const lt = cmdText.toLowerCase();
 
         // Direct Action Command 1: Update order delivery status (Single or Multiple)
-        const orderRefsInText = extractOrderReferences(text);
-        const hasUpdateIntent = /\b(update|mark|set|change)\b/i.test(text) && /\b(delivered|failed|processing|cancelled|delivery status|status)\b/i.test(text);
+        const orderRefsInText = extractOrderReferences(cmdText);
+
+        // Direct Action Command 1a: Payment Status Update
+        const paymentCmdMatch =
+          cmdText.match(/(?:mark|set|update|change)\s+(?:the\s+)?payment(?:\s+status)?\s+(?:of|for)?\s*([A-Za-z0-9_-]{6,30})\s+(?:to|as)?\s*([a-zA-Z_\s-]{3,20})/i) ||
+          cmdText.match(/(?:mark|set|update|change)\s+(?:order\s+)?([A-Za-z0-9_-]{6,30})\s+payment(?:\s+status)?\s+(?:to|as)?\s*([a-zA-Z_\s-]{3,20})/i) ||
+          cmdText.match(/(?:mark|set)\s+(?:order\s+)?([A-Za-z0-9_-]{6,30})\s+as\s+(paid|unpaid|refunded)/i);
+
+        if (paymentCmdMatch) {
+          const targetRef = paymentCmdMatch[1].trim();
+          const rawStatus = (paymentCmdMatch[2] || "paid").trim();
+          const targetPaymentStatus = extractPaymentStatusFromText(rawStatus) || rawStatus.toLowerCase();
+
+          const actionData = {
+            type: "update_payment_status",
+            orders: [targetRef],
+            ref: targetRef,
+            payment_status: targetPaymentStatus,
+            status: targetPaymentStatus
+          };
+          await setOwnerPendingAction(from, actionData);
+
+          return sendWhatsApp(from,
+            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+            `📋 *Task:* Update Order Payment Status\n` +
+            `🎯 *Target Order:* *${targetRef}*\n` +
+            `💰 *New Payment Status:* *${targetPaymentStatus.toUpperCase()}*\n\n` +
+            `Bossu, should I go ahead and mark this order's payment as *${targetPaymentStatus.toUpperCase()}* in the database? Reply *YES* to execute or *NO* to cancel.`
+          );
+        }
+        const hasUpdateIntent = /\b(update|mark|set|change)\b/i.test(cmdText) && /\b(delivered|failed|processing|pending|waiting|cancelled|refunded|completed|delivery status|status)\b/i.test(cmdText);
 
         if (orderRefsInText.length > 0 && hasUpdateIntent) {
-          const targetStatus = /\b(failed)\b/i.test(text) ? "failed" : (/\b(processing)\b/i.test(text) ? "processing" : (/\b(cancelled)\b/i.test(text) ? "cancelled" : "delivered"));
+          const targetStatus = extractStatusFromText(cmdText) || "delivered";
           const actionData = {
             type: "update_order_status",
             orders: orderRefsInText,
@@ -2953,18 +3379,19 @@ app.post("/webhook", async (req, res) => {
             `📋 *Task:* Update Delivery Status to *${targetStatus.toUpperCase()}*\n` +
             `🎯 *Target Orders (${orderRefsInText.length}):*\n` +
             orderRefsInText.map(r => `• *${r}*`).join("\n") +
-            `\n\nBossu, should I go ahead and update ${orderRefsInText.length > 1 ? "all these orders" : "this order"} in the database now? Reply *YES* to execute or *NO* to cancel.`
+            `\n💬 *SMS Notification:* No (SMS disabled for delivery updates)\n\nBossu, should I go ahead and update ${orderRefsInText.length > 1 ? "all these orders" : "this order"} in the database now? Reply *YES* to execute or *NO* to cancel.`
           );
         }
 
         const orderCmdMatch =
-          text.match(/(?:mark|set|update|change)\s+(?:order\s+)?([A-Za-z0-9_-]{6,30})\s+(?:to|as)\s+(delivered|failed|processing|cancelled)/i) ||
-          text.match(/(?:mark|set|update)\s+(delivered|failed|processing|cancelled)\s+(?:for\s+)?(?:order\s+)?([A-Za-z0-9_-]{6,30})/i);
+          cmdText.match(/(?:mark|set|update|change)\s+(?:order\s+)?([A-Za-z0-9_-]{6,30})\s+(?:to|as)\s+([a-zA-Z_\s-]{3,20})/i) ||
+          cmdText.match(/(?:mark|set|update)\s+([a-zA-Z_\s-]{3,20})\s+(?:for\s+)?(?:order\s+)?([A-Za-z0-9_-]{6,30})/i);
 
         if (orderCmdMatch) {
-          const isFirst = /^(delivered|failed|processing|cancelled)$/i.test(orderCmdMatch[2]);
+          const isFirst = !extractOrderReferences(orderCmdMatch[2]).length;
           const targetRef = isFirst ? orderCmdMatch[1].trim() : orderCmdMatch[2].trim();
-          const targetStatus = (isFirst ? orderCmdMatch[2] : orderCmdMatch[1]).toLowerCase().trim();
+          const rawStatus = (isFirst ? orderCmdMatch[2] : orderCmdMatch[1]).trim();
+          const targetStatus = extractStatusFromText(rawStatus) || rawStatus.toLowerCase();
 
           const actionData = {
             type: "update_order_status",
@@ -2982,6 +3409,104 @@ app.post("/webhook", async (req, res) => {
             `⚡ *New Status:* *${targetStatus.toUpperCase()}*\n` +
             `💬 *SMS Notification:* No (SMS disabled for delivery updates)\n\n` +
             `Bossu, should I go ahead and do this? Reply *YES* to execute or *NO* to cancel.`
+          );
+        }
+
+        // Direct Action Command 1b: Announcement Update
+        const annToggleMatch = cmdText.match(/(?:turn\s*(?:on|off)|enable|disable)\s+(?:the\s+)?announcement/i);
+        const annMsgMatch = cmdText.match(/(?:update|change|set)\s+(?:the\s+)?announcement(?:\s+(?:message|text|to|:))?\s*["“']?([^"”']+)["”']?/i);
+
+        if (annToggleMatch) {
+          const enable = /\b(on|enable)\b/i.test(annToggleMatch[0]);
+          const actionData = {
+            type: "update_announcement",
+            enabled: enable,
+            title: "Store Announcement"
+          };
+          await setOwnerPendingAction(from, actionData);
+          return sendWhatsApp(from,
+            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+            `📋 *Task:* ${enable ? "Enable (Turn On)" : "Disable (Turn Off)"} Store Announcement Popup\n` +
+            `🌐 *Target Store:* ${STORE_FRONTEND_URL}\n\n` +
+            `Bossu, should I ${enable ? "turn on" : "turn off"} the announcement modal on the website? Reply *YES* to execute or *NO* to cancel.`
+          );
+        }
+
+        if (annMsgMatch) {
+          const newMsg = annMsgMatch[1].trim();
+          if (newMsg && !/^(on|off|true|false|help|status)$/i.test(newMsg)) {
+            const actionData = {
+              type: "update_announcement",
+              message: newMsg,
+              title: "Store Announcement",
+              enabled: true
+            };
+            await setOwnerPendingAction(from, actionData);
+            return sendWhatsApp(from,
+              `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+              `📋 *Task:* Update Store Announcement Popup\n` +
+              `📢 *Title:* Store Announcement\n` +
+              `💬 *New Message:* "${newMsg}"\n` +
+              `⚡ *Status:* Active (Will pop up on shop)\n\n` +
+              `Bossu, should I publish this announcement on the website? Reply *YES* to execute or *NO* to cancel.`
+            );
+          }
+        }
+
+        // Direct Action Command 1c: Store Settings ("the rest")
+        const phoneSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:the\s+)?support\s+phone\s+(?:to|=)?\s*(0[2357]\d{8}|233\d{9})/i);
+        if (phoneSettingMatch) {
+          const newPhone = phoneSettingMatch[1].trim();
+          const actionData = { type: "update_setting", key: "support_phone", value: newPhone };
+          await setOwnerPendingAction(from, actionData);
+          return sendWhatsApp(from,
+            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+            `📋 *Task:* Update Support & Alert Phone\n` +
+            `📱 *New Number:* *${newPhone}*\n\n` +
+            `Bossu, should I save this as the customer support and admin alert number? Reply *YES* or *NO*.`
+          );
+        }
+
+        const etaSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:the\s+)?delivery\s+(?:eta|speed|time)\s+(?:to|=)\s*["“']?([^"”']+)["”']?/i);
+        if (etaSettingMatch) {
+          const newEta = etaSettingMatch[1].trim();
+          const actionData = { type: "update_setting", key: "delivery_eta", value: newEta };
+          await setOwnerPendingAction(from, actionData);
+          return sendWhatsApp(from,
+            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+            `📋 *Task:* Update Delivery ETA Display\n` +
+            `⚡ *New ETA:* *${newEta}*\n\n` +
+            `Bossu, should I update the delivery ETA on the website? Reply *YES* or *NO*.`
+          );
+        }
+
+        const priceSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:the\s+)?(netflix|afa|mashup|waec|bece)\s+price\s+(?:to|=)?\s*(\d+(?:\.\d+)?)/i);
+        if (priceSettingMatch) {
+          const service = priceSettingMatch[1].toLowerCase();
+          const newPrice = priceSettingMatch[2];
+          const key = service === "waec" ? "waec_price" : (service === "bece" ? "bece_price" : `${service}_price`);
+          const actionData = { type: "update_setting", key, value: newPrice };
+          await setOwnerPendingAction(from, actionData);
+          return sendWhatsApp(from,
+            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+            `📋 *Task:* Update ${service.toUpperCase()} Service Price\n` +
+            `💰 *New Price:* *GH₵ ${Number(newPrice).toFixed(2)}*\n\n` +
+            `Bossu, should I update this price on the store? Reply *YES* or *NO*.`
+          );
+        }
+
+        const genericSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:store\s+)?setting\s+([a-zA-Z0-9_-]+)\s+(?:to|=)\s*["“']?([^"”']+)["”']?/i);
+        if (genericSettingMatch) {
+          const key = genericSettingMatch[1].trim().toLowerCase();
+          const val = genericSettingMatch[2].trim();
+          const actionData = { type: "update_setting", key, value: val };
+          await setOwnerPendingAction(from, actionData);
+          return sendWhatsApp(from,
+            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+            `📋 *Task:* Update Store Setting\n` +
+            `⚙️ *Key:* ${key}\n` +
+            `📝 *New Value:* *${val}*\n\n` +
+            `Bossu, should I save this setting to the database? Reply *YES* or *NO*.`
           );
         }
 
@@ -3151,7 +3676,7 @@ app.post("/webhook", async (req, res) => {
 
           if (firstAction && stuckOrders.length > 0) {
             await setOwnerPendingAction(from, firstAction);
-            report += `💡 *Recommended Action:*\nShall I mark the ${stuckOrders.length} stuck order(s) as *DELIVERED* and send customer receipts from *D_1Gh*? Reply *YES* to execute or tell me what to do!`;
+            report += `💡 *Recommended Action:*\nShall I mark the ${stuckOrders.length} stuck order(s) as *DELIVERED* in the database? (Customer SMS is turned off). Reply *YES* to execute or tell me what to do!`;
           } else {
             report += `💡 *How can I help you boss?*\nJust text me what to do:\n• "Update [order] to delivered"\n• "Retry order [order]"\n• "Send SMS to [phone] saying ..."\n• "Mark [package] in stock / out of stock"\n• "Change price of [package] to [amount]"`;
           }
@@ -3205,7 +3730,7 @@ app.post("/webhook", async (req, res) => {
             `2. 🚀 Automated DataMart Fast-Lane Dispatch: The bundle is submitted immediately to the network supplier API with zero manual delay.\n` +
             `3. ⏱️ Active Delivery Verification (Bypassing fake 200 OKs): I actively poll telecom delivery status until it confirms 'delivered'. If an order is stuck in 'processing' for >15 mins, I flag it as an anomaly for an instant 1-click retry.\n` +
             `4. 💳 Wallet Auto-Check: After every purchase, I recalculate the DataMart developer wallet balance and alert you if it drops below GH₵ 50 so dispatch never halts.\n` +
-            `5. ✉️ Instant Alerts & Receipts: The customer receives an SMS receipt via Arkesel Bulk SMS, and you get an instant sale notification on WhatsApp.\n` +
+            `5. 🔔 Instant Alerts: You get an instant sale notification on WhatsApp and the database updates live (automated customer SMS is turned off).\n` +
             `6. 🎁 Growth & Retention: I update customer Scratch & Win progress (towards 5/5 orders) and credit affiliate referral commissions.\n` +
             `7. 💬 Customer Care Readiness: When customers ask in support about their paid order, I pull their live network status using their phone number or reference to answer them instantly.\n\n` +
             `Everything is supervised 24/7 bossu! Which order or department do you want us to inspect?`;
@@ -3242,7 +3767,7 @@ app.post("/webhook", async (req, res) => {
 
         // 8. Result Checkers (WAEC / BECE / WASSCE)
         else if (/\b(checker|waec|bece|wassce|novdec|result)\b/i.test(lt)) {
-          aiReply = `🎓 *WAEC Result Checkers:* We have sold *${checkerCount} checker voucher(s)*. Instant PIN and serial issuance is active via SMS and web receipt!`;
+          aiReply = `🎓 *WAEC Result Checkers:* We have sold *${checkerCount} checker voucher(s)*. Instant PIN and serial issuance is active directly on the website portal!`;
         }
 
         // 9. Live Customer Support Chats
@@ -3331,7 +3856,13 @@ app.post("/webhook", async (req, res) => {
 
     if (!session) {
       await supabase.from("sessions").insert([{ phone: from, step: 1 }]);
+      session = { phone: from, step: 1 };
       return sendWhatsApp(from, MENU);
+    }
+
+    // Direct AI mode handling for non-owner customers
+    if (activeMode === "ai" || session.step === 99) {
+      return handleCustomerAi(from, effectiveText || text);
     }
 
     /* =====================================================
@@ -3384,124 +3915,7 @@ app.post("/webhook", async (req, res) => {
         await supabase.from("sessions").update({ step: 70 }).eq("phone", from);
         return playScratchCard(from);
       } else {
-        const lower = text.toLowerCase().trim();
-
-        // 1. Direct Storefront & App Links Intent
-        if (/\b(link|store|website|shop|site|online|web|front\s*end|frontend)\b/i.test(lower)) {
-          return sendWhatsApp(
-            from,
-            `🌐 *DATA 1 GH STOREFRONT*\n\n` +
-            `Browse and order all data bundles, Netflix, AFA & WAEC checkers directly on our official store:\n` +
-            `👉 *Store Link:* ${STORE_FRONTEND_URL}\n` +
-            `📱 *Download Android App:* ${DOWNLOAD_APP_URL}\n` +
-            `📦 *Track Orders:* ${TRACK_ORDER_URL}\n\n` +
-            `Or reply with:\n1 - MTN\n2 - AirtelTigo\n3 - Telecel\n4 - Track Order\n5 - Netflix\n6 - AFA\n7 - MashUp\n8 - Scratch & Win`
-          );
-        }
-
-        if (/\b(app|apk|download|mobile\s*app|android|install)\b/i.test(lower)) {
-          return sendWhatsApp(
-            from,
-            `📱 *DOWNLOAD OUR OFFICIAL ANDROID APP*\n\n` +
-            `Get our lightweight mobile app with 1-click ordering, saved recipients, and instant push updates:\n` +
-            `👉 *Install APK:* ${DOWNLOAD_APP_URL}\n\n` +
-            `Prefer WhatsApp? Reply *hi* to view the menu!`
-          );
-        }
-
-        // 2. Direct Order Tracking Intent
-        const phoneMatch = lower.match(/\b(0[2357]\d{8}|233\d{9})\b/);
-        const refMatch = text.match(/\b(REF-\d+|[A-Z0-9]{8,})\b/i);
-        if (refMatch || (phoneMatch && !/\b(price|cost|bundle|buy|order|how|hello|hi|good)\b/i.test(lower))) {
-          const lookup = refMatch ? refMatch[1] : phoneMatch[0];
-          try {
-            const { data: ord } = await supabase
-              .from("orders")
-              .select("reference, network, capacity, amount, delivery_status, recipient_phone, payment_status")
-              .or(`reference.ilike.%${lookup}%,recipient_phone.ilike.%${lookup}%`)
-              .order("created_at", { ascending: false })
-              .limit(1)
-              .maybeSingle();
-
-            if (ord) {
-              const liveStatus = await getRealDatamartDeliveryStatus(ord.reference);
-              const ds = liveStatus.deliveryStatus === "delivered" ? "Delivered ✅" : "In Progress ⏳";
-              return sendWhatsApp(
-                from,
-                `🔍 *Order Status (${ord.reference})*\n• Bundle: ${ord.capacity}GB ${ord.network}\n• Recipient: ${ord.recipient_phone}\n• Payment: ${ord.payment_status}\n• Delivery: ${ds}\n\nTrack live at: ${TRACK_ORDER_URL}\nNeed to buy more data? Reply *hi* for main menu.`
-              );
-            }
-          } catch (_) {}
-        }
-
-        // 3. AI MODE ON WHATSAPP (Powered by Full Site Knowledge Base)
-        const { geminiKey, openAiKey } = await getAiApiKeys();
-        let customerAiReply = "";
-
-        const customerAiPrompt =
-          "You are Stony, a friendly, warm Ghanaian customer support person at DATA 1 GH on WhatsApp.\n\n" +
-          "YOUR PERSONALITY:\n" +
-          "- You chat like a real person on WhatsApp: warm, brief (1-3 short sentences), natural Ghanaian tone (\"bossu\", \"chale\", \"sharp\", \"no wahala\").\n" +
-          "- You are Stony. NEVER say \"As an AI\" or sound like a robot.\n" +
-          "- Always guide customers warmly either to buy online or reply with numbers 1-8 right here on WhatsApp.\n\n" +
-          "FULL SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE — NOT RESTRICTED TO DATABASE ROWS):\n" +
-          "You know EVERYTHING on our official website (https://data1gh.vercel.app). Answer customer questions accurately using the knowledge base below:\n" +
-          SITE_KNOWLEDGE_BASE + "\n\n" +
-          "HOW TO GUIDE CUSTOMERS ON WHATSAPP:\n" +
-          "- To buy MTN: reply 1 (or visit " + STORE_FRONTEND_URL + ")\n" +
-          "- To buy AirtelTigo: reply 2 (or visit " + STORE_FRONTEND_URL + ")\n" +
-          "- To buy Telecel: reply 3 (or visit " + STORE_FRONTEND_URL + ")\n" +
-          "- To track order: reply 4 or send phone number/reference (or visit " + TRACK_ORDER_URL + ")\n" +
-          "- Netflix 30-day: reply 5 (GH₵ 30 with auto sign-in codes)\n" +
-          "- AFA registration: reply 6 (GH₵ 20 for cheap corporate MTN data)\n" +
-          "- MTN MashUp: reply 7\n" +
-          "- Scratch & Win: reply 8\n" +
-          "- Official Android App: " + DOWNLOAD_APP_URL + "\n" +
-          "- Official Store Link: " + STORE_FRONTEND_URL + "\n" +
-          "Keep your answer under 3 sentences unless explaining step-by-step payment approval.";
-
-        if (geminiKey) {
-          for (const model of ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]) {
-            try {
-              const gRes = await axios.post(
-                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-                {
-                  contents: [{ role: "user", parts: [{ text }] }],
-                  systemInstruction: { parts: [{ text: customerAiPrompt }] },
-                  generationConfig: { maxOutputTokens: 250, temperature: 0.7 }
-                },
-                { headers: { "Content-Type": "application/json" }, timeout: 8000 }
-              );
-              const txt = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-              if (txt) { customerAiReply = txt; break; }
-            } catch (_) {}
-          }
-        }
-
-        if (!customerAiReply && openAiKey) {
-          try {
-            const oaRes = await axios.post("https://api.openai.com/v1/chat/completions", {
-              model: "gpt-4o-mini",
-              messages: [
-                { role: "system", content: customerAiPrompt },
-                { role: "user", content: text }
-              ],
-              max_tokens: 220, temperature: 0.7
-            }, { headers: { Authorization: `Bearer ${openAiKey}`, "Content-Type": "application/json" }, timeout: 8000 });
-            customerAiReply = oaRes.data?.choices?.[0]?.message?.content?.trim() || "";
-          } catch (_) {}
-        }
-
-        if (customerAiReply) {
-          customerAiReply = sanitizeSecretsFromText(customerAiReply)
-            .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony from DATA 1 GH")
-            .replace(/\bdatamart\b/gi, "DATA 1 GH");
-          return sendWhatsApp(from, customerAiReply);
-        }
-
-        // 4. Intelligent Natural Language Fallback (Covering Everything from the Site)
-        const fallbackReply = generateCustomerNaturalFallback(lower);
-        return sendWhatsApp(from, fallbackReply);
+        return handleCustomerAi(from, text);
       }
 
       await supabase.from("sessions").update({ step: 2, network }).eq("phone", from);
