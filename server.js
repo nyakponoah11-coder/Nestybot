@@ -2376,7 +2376,7 @@ async function handleCustomerAi(from, rawText) {
     "Keep your answer under 3 sentences unless explaining step-by-step payment approval.";
 
   if (geminiKey) {
-    for (const model of ["gemini-3.8-flash"]) {
+    for (const model of ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]) {
       try {
         const gRes = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
@@ -4967,9 +4967,7 @@ app.post("/paystack-webhook", async (req, res) => {
           `🔔 AFA REGISTRATION FAILED — MANUAL ACTION NEEDED\n\nThe AFA API call failed after payment was confirmed.\n\n👤 Full Name: ${afaData.full_name}\n📱 Phone: ${afaData.phone_number}\n🪪 Ghana Card: ${afaData.id_number}\n📍 Location: ${afaData.location}\n🎂 DOB: ${afaData.dob}\n💼 Occupation: ${afaData.occupation}\n💵 Confirmed paid: ₵${paidAmount.toFixed(2)}\n\nCheck the afaregistration.com dashboard or submit this manually, then update the order.`
         );
 
-        sendAdminSms(
-          `ALERT: AFA ORDER FAILED API! ₵${paidAmount.toFixed(2)} paid for ${afaData.full_name} (${afaData.phone_number}). Ref: ${afaExternalId}. Fulfill manually!`
-        ).catch(() => { });
+        // Automated failed-order SMS disabled.
 
         await sendWhatsApp(
           session.phone,
@@ -5200,10 +5198,7 @@ app.post("/paystack-webhook", async (req, res) => {
         `🚨 DATAMART FAILED — MANUAL DELIVERY NEEDED!\n\nCustomer paid, but DataMart API purchase failed:\n❌ Error: ${errorString}\n\n📦 Bundle: ${bundle.capacity}GB (${session.network})\n📱 Recipient: ${session.phone_number}\n💳 Paid from MoMo: ${session.momo_number || session.phone_number}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n🆔 Ref: ${orderReference}\n\nPlease deliver this order manually or check your DataMart wallet balance!`
       );
       recordWebhookLog("ADMIN_ALERTED_DATAMART_FAILURE", { error: errorString });
-
-      sendAdminSms(
-        `ALERT: DATA ORDER FAILED! ${bundle.capacity}GB ${session.network} to ${session.phone_number}. Paid: ₵${paidAmount.toFixed(2)}. Ref: ${orderReference}. Deliver manually!`
-      ).catch(() => { });
+      // Automated failed-order SMS disabled.
     }
   } catch (e) {
     recordWebhookLog("WEBHOOK_FATAL_ERROR", { error: e.response?.data || e.message });
