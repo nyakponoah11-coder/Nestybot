@@ -1446,17 +1446,6 @@ lost across webhooks even if sessions table row didn't exist yet.
 const ownerPendingActions = new Map();
 const ownerHistories = new Map();
 
-// Pre-seed default pending action for admin verification if owner confirms staged SMS
-const DEFAULT_STAGED_SMS = {
-  type: "send_sms",
-  phone: "0592753424",
-  smsText: "I see you tomorrow",
-  sender: "D_1Gh"
-};
-["0592753424", "233592753424", "0547100951", "233547100951"].forEach(p => {
-  ownerPendingActions.set(p, DEFAULT_STAGED_SMS);
-});
-
 async function setOwnerPendingAction(phone, action) {
   const norm = String(phone || "").replace(/\D/g, "");
   if (action) {
@@ -1649,7 +1638,36 @@ function extractProposedActionFromText(rawText) {
   // 1. Bracket syntax [SUGGEST_ACTION: {...}]
   const tagAction = extractActionSuggestion(rawText);
   if (tagAction?.parsed) {
-    return { action: tagAction.parsed, fullTag: tagAction.fullTag };
+    const act = { ...tagAction.parsed };
+    const rawType = String(act.type || act.action || "").toLowerCase().trim();
+    if (rawType === "sms" || rawType === "custom_sms" || rawType === "sendsms") {
+      act.type = "send_sms";
+    } else if (rawType === "send_bulk_sms" || rawType === "bulk") {
+      act.type = "bulk_sms";
+    }
+
+    // Normalize phone number
+    if (!act.phone && (act.recipient || act.to || act.target || act.phoneNumber || act.phone_number)) {
+      act.phone = act.recipient || act.to || act.target || act.phoneNumber || act.phone_number;
+    }
+    if (act.phone && /^(me|my\s+(?:line|number|phone)|owner|admin)$/i.test(String(act.phone).trim())) {
+      act.phone = "0547100951";
+    }
+
+    // Normalize SMS message
+    if (!act.message && (act.smsText || act.text || act.body || act.content || act.sms)) {
+      act.message = act.smsText || act.text || act.body || act.content || act.sms;
+    }
+    if (!act.smsText && act.message) {
+      act.smsText = act.message;
+    }
+
+    // Normalize bulk targets
+    if (!act.target && (act.group || act.target_group || act.recipients)) {
+      act.target = act.group || act.target_group || (Array.isArray(act.recipients) ? act.recipients.join(",") : act.recipients);
+    }
+
+    return { action: act, fullTag: tagAction.fullTag };
   }
 
   // 2. Bracket syntax [SUGGEST_RETRY: ref=..., phone=...]
@@ -1668,25 +1686,70 @@ function extractProposedActionFromText(rawText) {
   }
 
   // 3. Bracket syntax [SUGGEST_SMS: phone=..., text=...]
-  const smsTagMatch = rawText.match(/\[SUGGEST_SMS:\s*phone=([^,\]]+),\s*text=([^\]]+)\]/i);
+  const smsTagMatch = rawText.match(/\[SUGGEST_SMS:\s*(?:phone|to)=([^,\]]+),\s*(?:text|message)=([^\]]+)\]/i);
   if (smsTagMatch) {
+    const rawTarget = smsTagMatch[1].trim();
+    const phone = /^(me|my|owner|admin)/i.test(rawTarget) ? "0547100951" : rawTarget;
     return {
       action: {
         type: "send_sms",
-        phone: smsTagMatch[1].trim(),
-        smsText: smsTagMatch[2].trim()
+        phone,
+        smsText: smsTagMatch[2].trim(),
+        message: smsTagMatch[2].trim(),
+        sender: "D_1Gh"
       },
       fullTag: smsTagMatch[0]
     };
   }
 
-  // 4. Natural language or bulleted SMS proposal
+  // 3b. Bracket syntax [SUGGEST_BULK_SMS: target=..., text=...]
+  const bulkTagMatch = rawText.match(/\[SUGGEST_BULK_SMS:\s*(?:target|to)=([^,\]]+),\s*(?:text|message)=([^\]]+)\]/i);
+  if (bulkTagMatch) {
+    return {
+      action: {
+        type: "bulk_sms",
+        target: bulkTagMatch[1].trim(),
+        message: bulkTagMatch[2].trim(),
+        smsText: bulkTagMatch[2].trim(),
+        sender: "D_1Gh"
+      },
+      fullTag: bulkTagMatch[0]
+    };
+  }
+
+  const isConfirmationPrompt = /\b(shall i (?:go ahead|execute|dispatch|proceed)|reply (?:yes|y|no|n)|reply yes|reply no|confirm|green light)\b/i.test(rawText);
+
+  // 4a. Natural language Bulk SMS proposal
+  if (/\b(?:bulk\s+sms)\b/i.test(rawText) && (isConfirmationPrompt || /\b(staged|recipients?|arkesel|dispatch)\b/i.test(rawText))) {
+    const bulkTargetMatch = rawText.match(/[\*_]*(?:target|group|recipients?|to)[\*_]*\s*:\s*[\*_]*([^\n\r]+)/i) ||
+                           rawText.match(/to\s+([a-zA-Z0-9\s,]+?)(?:\s+using|\s+with|\s+saying|\s*\()/i);
+    const bulkMsgMatch = rawText.match(/(?:message|saying|text|sms)[^\n\r:]{0,15}:\s*[\*_]*\s*["“]([^"”]+)["”]/i) ||
+                         rawText.match(/["“]([^"”]{2,160})["”]/) ||
+                         rawText.match(/(?:message|saying|text)[^\n\r:]{0,15}:\s*[\*_]*\s*([^\n\r]+)/i);
+
+    const targetGroup = bulkTargetMatch ? bulkTargetMatch[1].trim().replace(/^[\*_]+|[\*_]+$/g, "") : "all customers";
+    const msg = bulkMsgMatch ? bulkMsgMatch[1].trim().replace(/^["“”'\*]+|["“”'\*]+$/g, "") : "";
+    if (msg.length > 0) {
+      return {
+        action: {
+          type: "bulk_sms",
+          target: targetGroup,
+          message: msg,
+          smsText: msg,
+          sender: "D_1Gh"
+        },
+        fullTag: null
+      };
+    }
+  }
+
+  // 4b. Natural language or bulleted Single SMS proposal
   // e.g.:
+  // I have staged the request to send the SMS "Hi" to your line (0547100951) using the approved sender ID *D_1Gh*.
   // *Recipient:* 0592753424
-  // *Sender ID:* D_1Gh
   // *Message:* "I see you tomorrow"
-  // Shall I go ahead and do this boss? Reply YES to confirm
-  const phoneMatch = rawText.match(/[\*_]*(?:recipient|target|customer|to)[\*_]*\s*:\s*[\*_]*(0[2357]\d{8}|233\d{9})[\*_]*/i) ||
+  const phoneMatch = rawText.match(/[\*_]*(?:recipient|target|customer|to|line)[\*_]*\s*:\s*[\*_]*(0[2357]\d{8}|233\d{9})[\*_]*/i) ||
+                     rawText.match(/(?:to\s+(?:your\s+)?line|to\s+number|to\s+recipient|to\s+customer)\s*\(?(0[2357]\d{8}|233\d{9})\)?/i) ||
                      rawText.match(/(?:custom\s+)?sms\s+(?:sent\s+)?out\s+to\s*\*?(0[2357]\d{8}|233\d{9})\*?/i) ||
                      rawText.match(/\b(0[2357]\d{8}|233\d{9})\b/);
 
@@ -1694,9 +1757,7 @@ function extractProposedActionFromText(rawText) {
                    rawText.match(/["“]([^"”]{2,160})["”]/) ||
                    rawText.match(/(?:message|saying|text)[^\n\r:]{0,15}:\s*[\*_]*\s*([^\n\r]+)/i);
 
-  const isConfirmationPrompt = /\b(shall i go ahead|reply (yes|y|no|n)|reply yes|reply no|confirm|green light)\b/i.test(rawText);
-
-  if (phoneMatch && msgMatch && (isConfirmationPrompt || /\b(sms|sender id|arkesel|dispatch)\b/i.test(rawText))) {
+  if (phoneMatch && msgMatch && (isConfirmationPrompt || /\b(sms|sender id|arkesel|dispatch|staged)\b/i.test(rawText))) {
     const rawSms = msgMatch[1].trim().replace(/^["“”'\*]+|["“”'\*]+$/g, "").trim();
     if (rawSms.length > 0) {
       return {
@@ -1704,6 +1765,7 @@ function extractProposedActionFromText(rawText) {
           type: "send_sms",
           phone: phoneMatch[1].trim(),
           smsText: rawSms,
+          message: rawSms,
           sender: "D_1Gh"
         },
         fullTag: null
@@ -1832,71 +1894,315 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
 }
 
 /* =========================================================
-SEND ADMIN SMS (ARKESEL)
+ARKESEL SMS GATEWAY ENGINE (SINGLE & BULK SMS DISPATCH)
+v2 API with automated v1 fallback, batching, and error reporting
 ========================================================= */
 
-async function sendAdminSms(message, customTargetPhone) {
-  try {
-    let arkeselKey = process.env.ARKESEL_API_KEY;
-    let adminPhone = process.env.ADMIN_ALERT_PHONE || "0547100951";
-    let senderId = process.env.ARKESEL_SENDER_ID || "D_1Gh";
+function formatArkeselPhone(raw) {
+  if (!raw) return null;
+  const digits = String(raw).replace(/\D/g, "");
+  if (digits.startsWith("233") && digits.length === 12) return digits;
+  if (digits.startsWith("0") && digits.length === 10) return `233${digits.slice(1)}`;
+  if (digits.length === 9) return `233${digits}`;
+  if (digits.length >= 10 && digits.length <= 15) return digits;
+  return null;
+}
 
-    if (supabase) {
-      try {
-        const { data: sRows } = await supabase
-          .from("settings")
-          .select("key,value")
-          .in("key", ["admin_alert_phone", "support_phone", "arkesel_api_key", "ARKESEL_API_KEY", "arkesel_sender_id"]);
-        if (sRows && sRows.length > 0) {
-          const smap = Object.fromEntries(sRows.map((s) => [s.key, s.value]));
-          if (smap.arkesel_api_key || smap.ARKESEL_API_KEY) {
-            arkeselKey = smap.arkesel_api_key || smap.ARKESEL_API_KEY;
-          }
-          if (smap.admin_alert_phone || smap.support_phone) {
-            adminPhone = smap.admin_alert_phone || smap.support_phone;
-          }
-          if (smap.arkesel_sender_id && smap.arkesel_sender_id.toLowerCase() !== "data1gh") {
-            senderId = smap.arkesel_sender_id;
-          }
-        }
-      } catch (err) {
-        console.error("Failed to fetch SMS settings:", err.message);
-      }
-    }
-
-    if (!senderId || senderId.toLowerCase() === "data1gh") {
-      senderId = "D_1Gh";
-    }
-
-    if (!arkeselKey) {
-      console.warn("⚠️ No ARKESEL_API_KEY configured, skipping SMS alert.");
-      return;
-    }
-
-    let target = String(customTargetPhone || adminPhone).replace(/\D/g, "");
-    if (target.startsWith("233") && target.length === 12) target = "0" + target.slice(3);
-
-    const res = await axios.post(
-      "https://sms.arkesel.com/api/v2/sms/send",
-      {
-        sender: senderId,
-        message: message,
-        recipients: [target]
-      },
-      {
-        headers: {
-          "api-key": arkeselKey,
-          "Content-Type": "application/json",
-          "Accept": "application/json"
-        },
-        timeout: 10000
-      }
-    );
-    console.log(`✅ SMS sent successfully to ${target} via sender ID ${senderId}:`, res.data?.message || res.status);
-    return res.data;
-  } catch (err) {
-    console.error("❌ Failed to send SMS:", err.response?.data || err.message);
+async function sendArkeselSms({ recipients, message, senderId }) {
+  const msg = String(message || "").trim();
+  if (!msg) {
+    return { ok: false, error: "SMS message body cannot be empty", totalSent: 0, totalFailed: 0 };
   }
+
+  const rawList = Array.isArray(recipients) ? recipients : [recipients];
+  const validRecipients = Array.from(
+    new Set(rawList.map(r => formatArkeselPhone(r)).filter(Boolean))
+  );
+
+  if (validRecipients.length === 0) {
+    return { ok: false, error: "No valid Ghana phone numbers provided for SMS delivery", totalSent: 0, totalFailed: 0 };
+  }
+
+  // 1. Resolve Arkesel Key
+  let arkeselKey = cleanApiKey(
+    process.env.ARKESEL_API_KEY ||
+    process.env.ARKESEL_KEY ||
+    process.env.VITE_ARKESEL_API_KEY ||
+    process.env.ARKESEL_SMS_KEY
+  );
+
+  let sender = String(senderId || process.env.ARKESEL_SENDER_ID || "D_1Gh").trim();
+  if (!sender || sender.toUpperCase() === "DATA1GH") {
+    sender = "D_1Gh";
+  }
+
+  if (supabase) {
+    try {
+      const { data: sRows } = await supabase
+        .from("settings")
+        .select("key, value")
+        .in("key", ["arkesel_api_key", "ARKESEL_API_KEY", "arkesel_key", "arkesel_sender_id", "ARKESEL_SENDER_ID"]);
+      for (const row of sRows || []) {
+        const k = String(row?.key || "").toLowerCase();
+        if (k.includes("key") && !arkeselKey) {
+          const c = cleanApiKey(row?.value);
+          if (c) arkeselKey = c;
+        }
+        if (k.includes("sender") && (!sender || sender === "D_1Gh")) {
+          const s = String(row?.value || "").trim();
+          if (s) sender = s;
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (!arkeselKey) {
+    console.warn("⚠️ No ARKESEL_API_KEY configured for SMS delivery.");
+    return {
+      ok: false,
+      error: "Arkesel API key is not configured. Please add it to Admin Settings or environment.",
+      totalSent: 0,
+      totalFailed: validRecipients.length,
+      sender
+    };
+  }
+
+  sender = sender.slice(0, 11);
+
+  const BATCH_SIZE = 50;
+  let totalSent = 0;
+  let totalFailed = 0;
+  let lastError = "";
+
+  for (let i = 0; i < validRecipients.length; i += BATCH_SIZE) {
+    const chunk = validRecipients.slice(i, i + BATCH_SIZE);
+    let batchOk = false;
+
+    // Method A: Arkesel v2 endpoint
+    try {
+      const res = await axios.post(
+        "https://sms.arkesel.com/api/v2/sms/send",
+        {
+          sender,
+          message: msg,
+          recipients: chunk
+        },
+        {
+          headers: {
+            "api-key": arkeselKey,
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+          },
+          timeout: 12000
+        }
+      );
+
+      const d = res.data?.data || res.data || {};
+      const statusStr = String(res.data?.status || d?.status || "").toLowerCase();
+      if (res.status === 200 && (
+        statusStr === "success" ||
+        statusStr === "100" ||
+        statusStr === "ok" ||
+        d?.status === "success" ||
+        res.data?.message?.includes("successful") ||
+        res.data?.code === "100" ||
+        res.data?.code === 100
+      )) {
+        batchOk = true;
+        totalSent += chunk.length;
+        console.log(`✅ Arkesel v2 SMS delivered to ${chunk.length} recipient(s) via sender ID ${sender}`);
+      } else {
+        lastError = res.data?.message || res.data?.error || `Arkesel status: ${statusStr || res.status}`;
+      }
+    } catch (v2Err) {
+      lastError = v2Err.response?.data?.message || v2Err.response?.data?.error || v2Err.message;
+      console.warn("Arkesel v2 SMS error, attempting v1 fallback:", lastError);
+    }
+
+    // Method B: Arkesel v1 fallback
+    if (!batchOk) {
+      try {
+        const v1Url = `https://sms.arkesel.com/sms/api?action=send-sms&api_key=${encodeURIComponent(
+          arkeselKey
+        )}&to=${encodeURIComponent(chunk.join(","))}&from=${encodeURIComponent(
+          sender
+        )}&sms=${encodeURIComponent(msg)}&response=json`;
+
+        const v1Res = await axios.get(v1Url, {
+          headers: { Accept: "application/json" },
+          timeout: 12000
+        });
+
+        const v1Data = v1Res.data || {};
+        const v1Code = String(v1Data?.code || v1Data?.status || "").toLowerCase();
+        if (v1Code === "ok" || v1Code === "success" || v1Code === "100" || v1Data?.message?.includes("successful")) {
+          batchOk = true;
+          totalSent += chunk.length;
+          console.log(`✅ Arkesel v1 SMS delivered to ${chunk.length} recipient(s) via sender ID ${sender}`);
+        } else {
+          lastError = v1Data?.message || v1Data?.error || lastError || "v1 dispatch failed";
+        }
+      } catch (v1Err) {
+        lastError = v1Err.response?.data?.message || v1Err.message || lastError;
+      }
+    }
+
+    if (!batchOk) {
+      totalFailed += chunk.length;
+    }
+  }
+
+  if (totalSent > 0) {
+    return { ok: true, totalSent, totalFailed, sender, recipients: validRecipients };
+  } else {
+    return { ok: false, totalSent: 0, totalFailed, error: lastError || "Failed to deliver SMS through Arkesel gateway", sender };
+  }
+}
+
+async function sendAdminSms(message, customTargetPhone) {
+  let adminPhone = process.env.ADMIN_ALERT_PHONE || "0547100951";
+  if (supabase) {
+    try {
+      const { data: sRows } = await supabase
+        .from("settings")
+        .select("key,value")
+        .in("key", ["admin_alert_phone", "support_phone"]);
+      for (const r of sRows || []) {
+        if (r.value) { adminPhone = r.value; break; }
+      }
+    } catch (_) {}
+  }
+  const target = customTargetPhone || adminPhone;
+  return await sendArkeselSms({
+    recipients: [target],
+    message,
+    senderId: "D_1Gh"
+  });
+}
+
+async function fetchBulkSmsRecipients(targetGroup) {
+  const tg = String(targetGroup || "all").toLowerCase().trim();
+  const phoneSet = new Set();
+
+  // If specific numbers provided directly in targetGroup (e.g. "0541234567, 0592753424")
+  const directNumbers = tg.match(/(?:0[2357]\d{8}|233\d{9})/g);
+  if (directNumbers && directNumbers.length > 0) {
+    for (const num of directNumbers) {
+      const f = formatArkeselPhone(num);
+      if (f) phoneSet.add(f);
+    }
+    if (phoneSet.size > 0) {
+      return Array.from(phoneSet);
+    }
+  }
+
+  if (!supabase) return [];
+
+  try {
+    if (tg.includes("pending") || tg.includes("processing") || tg.includes("waiting")) {
+      // Pending orders
+      const { data: ords } = await supabase
+        .from("orders")
+        .select("recipient_phone")
+        .in("delivery_status", ["pending", "processing", "waiting"])
+        .limit(200);
+      for (const o of ords || []) {
+        const f = formatArkeselPhone(o.recipient_phone);
+        if (f) phoneSet.add(f);
+      }
+    } else if (tg.includes("today")) {
+      // Today's orders
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      const { data: ords } = await supabase
+        .from("orders")
+        .select("recipient_phone")
+        .gte("created_at", startOfDay.toISOString())
+        .limit(200);
+      for (const o of ords || []) {
+        const f = formatArkeselPhone(o.recipient_phone);
+        if (f) phoneSet.add(f);
+      }
+    } else {
+      // All customers: query recent unique customer numbers from orders, service_orders, checker_orders
+      const [ordRes, srvRes, chkRes] = await Promise.allSettled([
+        supabase.from("orders").select("recipient_phone").not("recipient_phone", "is", null).order("created_at", { ascending: false }).limit(300),
+        supabase.from("service_orders").select("phone").not("phone", "is", null).order("created_at", { ascending: false }).limit(100),
+        supabase.from("checker_orders").select("phone").not("phone", "is", null).order("created_at", { ascending: false }).limit(100),
+      ]);
+
+      if (ordRes.status === "fulfilled" && Array.isArray(ordRes.value?.data)) {
+        for (const r of ordRes.value.data) {
+          const f = formatArkeselPhone(r.recipient_phone);
+          if (f) phoneSet.add(f);
+        }
+      }
+      if (srvRes.status === "fulfilled" && Array.isArray(srvRes.value?.data)) {
+        for (const r of srvRes.value.data) {
+          const f = formatArkeselPhone(r.phone);
+          if (f) phoneSet.add(f);
+        }
+      }
+      if (chkRes.status === "fulfilled" && Array.isArray(chkRes.value?.data)) {
+        for (const r of chkRes.value.data) {
+          const f = formatArkeselPhone(r.phone);
+          if (f) phoneSet.add(f);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Error fetching bulk SMS recipients:", err.message);
+  }
+
+  return Array.from(phoneSet);
+}
+
+function parseOwnerSmsCommand(text, ownerPhone) {
+  const t = String(text || "").trim();
+  const ownerNum = ownerPhone ? String(ownerPhone).replace(/\D/g, "") : "0547100951";
+  const formattedOwner = ownerNum.startsWith("233") ? "0" + ownerNum.slice(3) : ownerNum;
+
+  // 1. BULK SMS COMMANDS
+  const bulkMatch1 = t.match(/^(?:send\s+)?bulk\s+sms\s+(?:to\s+)?(all\s+customers?|all|customers?|pending\s+orders?|pending|today'?s?\s+orders?|today|\+?\d[\d,\s;]+)(?:\s*:\s*|\s+(?:saying|with message|that|message:)\s+|\s+)["“”']?([^"“”']+)["“”']?$/i);
+  if (bulkMatch1) {
+    let msg = bulkMatch1[2].trim().replace(/^["“”']+|["“”']+$/g, "");
+    return { isBulk: true, target: bulkMatch1[1].trim(), message: msg };
+  }
+  const bulkMatch2 = t.match(/^(?:send\s+)?bulk\s+sms\s*:\s*["“”']?([^"“”']+)["“”']?$/i);
+  if (bulkMatch2) {
+    let msg = bulkMatch2[1].trim().replace(/^["“”']+|["“”']+$/g, "");
+    return { isBulk: true, target: "all customers", message: msg };
+  }
+
+  // 2. SINGLE SMS COMMANDS
+  // Pattern A: "Send sms to [phone|me] saying [message]"
+  const singleMatchA = t.match(/^(?:send\s+)?(?:an\s+)?(?:custom\s+)?sms\s+(?:to\s+)?(me|my\s+(?:line|number|phone)|0[2357]\d{8}|233\d{9})(?:\s*:\s*|\s+(?:saying|with message|that|message:)\s+|\s+)["“”']?([^"“”']+)["“”']?$/i);
+  if (singleMatchA) {
+    const rawTarget = singleMatchA[1].trim();
+    const phone = /^(me|my)/i.test(rawTarget) ? formattedOwner : rawTarget;
+    let msg = singleMatchA[2].trim().replace(/^["“”']+|["“”']+$/g, "");
+    return { isBulk: false, phone, message: msg };
+  }
+
+  // Pattern B: "Send sms [message] to [phone|me]" e.g. "Send sms hi to me"
+  const singleMatchB = t.match(/^(?:send\s+)?(?:an\s+)?(?:custom\s+)?sms\s+["“”']?([^"“”']+?)["“”']?\s+to\s+(me|my\s+(?:line|number|phone)|0[2357]\d{8}|233\d{9})$/i);
+  if (singleMatchB) {
+    const rawTarget = singleMatchB[2].trim();
+    const phone = /^(me|my)/i.test(rawTarget) ? formattedOwner : rawTarget;
+    let msg = singleMatchB[1].trim().replace(/^["“”']+|["“”']+$/g, "");
+    return { isBulk: false, phone, message: msg };
+  }
+
+  // Pattern C: "text [phone|me] [message]" or "sms [phone|me] [message]"
+  const singleMatchC = t.match(/^(?:text|sms)\s+(me|my\s+(?:line|number|phone)|0[2357]\d{8}|233\d{9})(?:\s*:\s*|\s+(?:saying|with message|that|message:)\s+|\s+)["“”']?([^"“”']+)["“”']?$/i);
+  if (singleMatchC) {
+    const rawTarget = singleMatchC[1].trim();
+    const phone = /^(me|my)/i.test(rawTarget) ? formattedOwner : rawTarget;
+    let msg = singleMatchC[2].trim().replace(/^["“”']+|["“”']+$/g, "");
+    return { isBulk: false, phone, message: msg };
+  }
+
+  return null;
 }
 
 /* =========================================================
@@ -3069,9 +3375,16 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // If confirming and still no explicit pending action, check default SMS staged action
-      if (!pendingAction && isConfirm) {
-        pendingAction = DEFAULT_STAGED_SMS;
+      // If confirming and still no explicit pending action, try to recover from history or tell owner
+      if (!pendingAction && isConfirm && history.length > 0) {
+        const lastAssist = [...history].reverse().find(h => h.role === "assistant" && h.text);
+        if (lastAssist) {
+          const recovered = extractProposedActionFromText(lastAssist.text);
+          if (recovered?.action) {
+            pendingAction = recovered.action;
+            console.log("♻️ RECOVERED PENDING ACTION FROM RECENT CONVERSATION HISTORY:", pendingAction);
+          }
+        }
       }
 
       // If pendingAction exists and owner cancels
@@ -3084,6 +3397,11 @@ app.post("/webhook", async (req, res) => {
       if (pendingAction && isConfirm) {
         const { type, network, capacity, status, smsText, inStock, productId, productName } = pendingAction;
         await clearOwnerPendingAction(from);
+
+        const actionType = String(type || pendingAction.action || "").toLowerCase().trim();
+        const rawActionPhone = pendingAction.phone || pendingAction.recipient || pendingAction.to || pendingAction.target || pendingAction.phoneNumber || pendingAction.phone_number || pendingAction.targetPhone;
+        const normalizedPhone = (rawActionPhone && /^(me|my|owner|admin)/i.test(String(rawActionPhone).trim())) ? "0547100951" : rawActionPhone;
+        const actionMessage = pendingAction.message || pendingAction.smsText || pendingAction.text || pendingAction.body || pendingAction.content || pendingAction.sms || smsText || "";
 
         // Gather all target references from pendingAction
         let targetRefs = [];
@@ -3208,20 +3526,94 @@ app.post("/webhook", async (req, res) => {
           }
         }
 
-        // 4. SEND CUSTOM SMS
-        if (type === "send_sms" && pendingAction.phone) {
-          const msg = smsText || pendingAction.smsText || pendingAction.message || "DATA 1 GH: Your order has been updated. Thank you!";
-          await sendAdminSms(msg, pendingAction.phone);
-          // Save confirmation in conversation memory
-          try {
-            const executionNote = {
-              role: "assistant",
-              text: `✅ SMS delivered to ${pendingAction.phone} with Sender ID D_1Gh: "${msg}"`
-            };
-            const updatedHistory = [...history.slice(-5), { role: "user", text }, executionNote];
-            await saveOwnerHistory(from, updatedHistory);
-          } catch (_) {}
-          return sendWhatsApp(from, `✅ *SMS DELIVERED BOSS!*\n\nRecipient: ${pendingAction.phone}\nSender ID: *D_1Gh*\nMessage: "${msg}"\n\nAnything else on your mind?`);
+        // 4. SEND CUSTOM SMS (Single Recipient)
+        if ((actionType === "send_sms" || actionType === "sms" || actionType === "custom_sms") && normalizedPhone) {
+          const targetPhone = normalizedPhone;
+          const msg = actionMessage || "DATA 1 GH: Your order has been updated. Thank you!";
+          const sender = pendingAction.sender || "D_1Gh";
+
+          const smsResult = await sendArkeselSms({
+            recipients: [targetPhone],
+            message: msg,
+            senderId: sender
+          });
+
+          if (smsResult.ok) {
+            try {
+              const executionNote = {
+                role: "assistant",
+                text: `✅ SMS delivered to ${targetPhone} with Sender ID ${smsResult.sender}: "${msg}"`
+              };
+              const updatedHistory = [...history.slice(-5), { role: "user", text }, executionNote];
+              await saveOwnerHistory(from, updatedHistory);
+            } catch (_) {}
+
+            return sendWhatsApp(from,
+              `✅ *SMS DELIVERED BOSS!*\n\n` +
+              `📱 *Recipient:* ${targetPhone}\n` +
+              `🆔 *Sender ID:* *${smsResult.sender}*\n` +
+              `💬 *Message:* "${msg}"\n\n` +
+              `Dispatched and confirmed through Arkesel gateway! Anything else on your mind?`
+            );
+          } else {
+            return sendWhatsApp(from,
+              `❌ *SMS DISPATCH FAILED BOSS!*\n\n` +
+              `📱 *Recipient:* ${targetPhone}\n` +
+              `⚠️ *Gateway Error:* ${smsResult.error || "Arkesel delivery error"}\n\n` +
+              `Please check your SMS credits balance or Arkesel API key in Admin Settings.`
+            );
+          }
+        }
+
+        // 4b. SEND BULK SMS (Multiple Recipients)
+        if (actionType === "bulk_sms" || actionType === "send_bulk_sms" || (Array.isArray(pendingAction.recipients) && pendingAction.recipients.length > 1)) {
+          let recipients = pendingAction.recipients;
+          if (!Array.isArray(recipients) || recipients.length === 0) {
+            recipients = await fetchBulkSmsRecipients(pendingAction.target || "all");
+          }
+
+          const msg = actionMessage;
+          if (!msg) {
+            return sendWhatsApp(from, "❌ Bulk SMS aborted boss: Message body cannot be empty.");
+          }
+
+          if (!recipients || recipients.length === 0) {
+            return sendWhatsApp(from, `❌ Bulk SMS aborted boss: No recipient phone numbers found for "${pendingAction.target || "all"}".`);
+          }
+
+          const bulkResult = await sendArkeselSms({
+            recipients,
+            message: msg,
+            senderId: pendingAction.sender || "D_1Gh"
+          });
+
+          if (bulkResult.ok) {
+            try {
+              const executionNote = {
+                role: "assistant",
+                text: `✅ Bulk SMS dispatched to ${bulkResult.totalSent} recipient(s) with Sender ID ${bulkResult.sender}: "${msg}"`
+              };
+              const updatedHistory = [...history.slice(-5), { role: "user", text }, executionNote];
+              await saveOwnerHistory(from, updatedHistory);
+            } catch (_) {}
+
+            return sendWhatsApp(from,
+              `✅ *BULK SMS DISPATCHED BOSS!*\n\n` +
+              `👥 *Total Recipients:* *${recipients.length}*\n` +
+              `📤 *Successfully Sent:* *${bulkResult.totalSent}*\n` +
+              (bulkResult.totalFailed > 0 ? `⚠️ *Failed:* *${bulkResult.totalFailed}*\n` : "") +
+              `🆔 *Sender ID:* *${bulkResult.sender}*\n` +
+              `💬 *Message:* "${msg}"\n\n` +
+              `All messages dispatched via Arkesel gateway!`
+            );
+          } else {
+            return sendWhatsApp(from,
+              `❌ *BULK SMS FAILED BOSS!*\n\n` +
+              `👥 *Target Recipients:* *${recipients.length}*\n` +
+              `⚠️ *Gateway Error:* ${bulkResult.error || "Arkesel gateway error"}\n\n` +
+              `Please verify your Arkesel API key or SMS credits balance.`
+            );
+          }
         }
 
         // 5. TOGGLE PRODUCT STOCK
@@ -3302,7 +3694,12 @@ app.post("/webhook", async (req, res) => {
           }
         }
 
-        return sendWhatsApp(from, "✅ Action performed bossu! System updated.");
+        console.warn("⚠️ Unhandled or incomplete pendingAction confirmed by owner:", JSON.stringify(pendingAction));
+        return sendWhatsApp(from,
+          `⚠️ *ACTION NOTICE BOSS:*\n\n` +
+          `I received your confirmation, but the staged action (${actionType || type || "unspecified"}) could not be executed because some required parameters were missing.\n\n` +
+          `Please text me the instruction directly (e.g. "Send SMS to 054... saying ..." or "Send bulk sms to all customers saying ...") and I will dispatch it cleanly!`
+        );
       }
 
       // ── CONTEXTUAL FALLBACK EXECUTION ──
@@ -3345,24 +3742,48 @@ app.post("/webhook", async (req, res) => {
 
       // ── DIRECT ACTION COMMANDS (PRE-PARSER) ──
       // Allows owner to text direct instructions without waiting for multi-model AI latency
-      const smsDirectMatch =
-        text.match(/^(?:send\s+)?(?:an\s+)?(?:custom\s+)?sms\s+(?:to\s+)?(0[2357]\d{8}|233\d{9})\s*(?::|\s+(?:saying|with message|that|message:))?\s*["“']?([^"”']+)["”']?$/i) ||
-        text.match(/^(?:text|sms)\s+(0[2357]\d{8}|233\d{9})\s*(?::|\s+(?:saying|with message|that|message:))?\s*["“']?([^"”']+)["”']?$/i);
+      const smsParsed = parseOwnerSmsCommand(text, from);
+      if (smsParsed) {
+        if (smsParsed.isBulk) {
+          const recipients = await fetchBulkSmsRecipients(smsParsed.target);
+          const count = recipients.length;
+          const actionData = {
+            type: "bulk_sms",
+            target: smsParsed.target,
+            recipients,
+            message: smsParsed.message,
+            smsText: smsParsed.message,
+            sender: "D_1Gh"
+          };
+          await setOwnerPendingAction(from, actionData);
 
-      if (smsDirectMatch) {
-        const targetPhone = smsDirectMatch[1].trim();
-        const targetText = smsDirectMatch[2].trim();
-        const actionData = { type: "send_sms", phone: targetPhone, smsText: targetText, sender: "D_1Gh" };
-        await setOwnerPendingAction(from, actionData);
+          return sendWhatsApp(from,
+            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+            `📋 *Task:* Send Bulk SMS via Arkesel\n` +
+            `👥 *Target Group:* ${smsParsed.target} (*${count} recipient${count === 1 ? "" : "s"}*)\n` +
+            `🆔 *Sender ID:* *D_1Gh*\n` +
+            `💬 *Message:* "${smsParsed.message}"\n` +
+            `💳 *Estimated SMS Units:* ~${count} credit(s)\n\n` +
+            (count > 0
+              ? `Bossu, should I go ahead and dispatch this bulk SMS to *${count}* recipients now? Reply *YES* to execute or *NO* to cancel.`
+              : `⚠️ Bossu, no active phone numbers found for "${smsParsed.target}". Reply *NO* to cancel or provide explicit numbers (e.g. 0541234567, 0592753424).`
+            )
+          );
+        } else {
+          const targetPhone = smsParsed.phone;
+          const targetText = smsParsed.message;
+          const actionData = { type: "send_sms", phone: targetPhone, message: targetText, smsText: targetText, sender: "D_1Gh" };
+          await setOwnerPendingAction(from, actionData);
 
-        return sendWhatsApp(from,
-          `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
-          `📋 *Task:* Send Customer SMS via Arkesel\n` +
-          `📱 *Recipient:* *${targetPhone}*\n` +
-          `🆔 *Sender ID:* *D_1Gh*\n` +
-          `💬 *Message:* "${targetText}"\n\n` +
-          `Bossu, should I go ahead and dispatch this SMS? Reply *YES* to execute or *NO* to cancel.`
-        );
+          return sendWhatsApp(from,
+            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+            `📋 *Task:* Send SMS via Arkesel\n` +
+            `📱 *Recipient:* *${targetPhone}*\n` +
+            `🆔 *Sender ID:* *D_1Gh*\n` +
+            `💬 *Message:* "${targetText}"\n\n` +
+            `Bossu, should I go ahead and dispatch this SMS? Reply *YES* to execute or *NO* to cancel.`
+          );
+        }
       }
 
       // Direct response if owner asks about store links or front end / admin links or data1gh.vercel.app
@@ -3707,13 +4128,18 @@ app.post("/webhook", async (req, res) => {
         "  4. Update store settings in the database: support phone, delivery ETA, service prices (Netflix, AFA, MashUp, WAEC, BECE), and toggles\n" +
         "  5. Re-dispatch/retry failed telecom dispatches via DataMart API wallet\n" +
         "  6. Resync live telecom carrier delivery status with DataMart\n" +
-        "  7. Send custom customer SMS via Arkesel using approved Sender ID D_1Gh\n" +
+        "  7. Send custom single customer SMS via Arkesel using approved Sender ID D_1Gh\n" +
+        "  7b. Send Bulk SMS to all customers, pending orders, or custom phone numbers via Arkesel\n" +
         "  8. Toggle product packages between IN STOCK and OUT OF STOCK\n" +
         "  9. Change product package prices on the store\n" +
         "  10. Resolve customer support live chats\n" +
         "  11. Update digital service orders (Netflix, MashUp *567*2#, AFA) and result checkers\n" +
-        "  CRITICAL SAFETY RULE: You must NEVER execute any destructive or external action automatically. Propose the exact action and ask for confirmation: 'Shall I go ahead and do this boss? Reply YES to confirm or NO to cancel'.\n" +
-        "  To stage an action in your response, use the format [SUGGEST_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\", ...}]\n" +
+        "  CRITICAL SAFETY RULE: You must NEVER execute any destructive or external action automatically, AND NEVER LIE about having executed an action before confirmation. Always propose/stage the exact action and ask for confirmation: 'Shall I go ahead and execute this now, bossu? Reply YES to confirm or NO to cancel'.\n" +
+        "  To stage an action in your response, use the format:\n" +
+        "    Single SMS: [SUGGEST_ACTION: {\"type\": \"send_sms\", \"phone\": \"0547100951\", \"message\": \"...\", \"sender\": \"D_1Gh\"}] (If owner says 'to me' or 'to my line', use phone '0547100951')\n" +
+        "    Bulk SMS: [SUGGEST_ACTION: {\"type\": \"bulk_sms\", \"target\": \"all\"|\"pending\"|\"today\"|\"054...,059...\", \"message\": \"...\", \"sender\": \"D_1Gh\"}]\n" +
+        "    Order Status: [SUGGEST_ACTION: {\"type\": \"update_order_status\", \"orders\": [\"ORD-...\"], \"status\": \"delivered\"|\"failed\"|\"processing\"}]\n" +
+        "    Other types: \"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- Approved SMS Sender ID for DATA 1 GH is 'D_1Gh'. Whenever sending customer SMS or alerts, use sender ID 'D_1Gh'.\n" +
         "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST (NEVER BEAT AROUND THE BUSH):\n" +
@@ -3960,22 +4386,49 @@ app.post("/webhook", async (req, res) => {
           );
         }
 
-        // Direct Action Command 3: Send SMS
-        const smsCmdMatch = text.match(/send\s+(?:an\s+)?sms\s+(?:to\s+)?(0[2357]\d{8}|233\d{9})\s+(?:saying|with message|that)\s+["']?([^"']+)["']?/i);
-        if (smsCmdMatch) {
-          const targetPhone = smsCmdMatch[1].trim();
-          const targetText = smsCmdMatch[2].trim();
-          const actionData = { type: "send_sms", phone: targetPhone, smsText: targetText, sender: "D_1Gh" };
-          await setOwnerPendingAction(from, actionData);
+        // Direct Action Command 3: Send Single or Bulk SMS
+        const smsFallback = parseOwnerSmsCommand(text, from);
+        if (smsFallback) {
+          if (smsFallback.isBulk) {
+            const recipients = await fetchBulkSmsRecipients(smsFallback.target);
+            const count = recipients.length;
+            const actionData = {
+              type: "bulk_sms",
+              target: smsFallback.target,
+              recipients,
+              message: smsFallback.message,
+              smsText: smsFallback.message,
+              sender: "D_1Gh"
+            };
+            await setOwnerPendingAction(from, actionData);
 
-          return sendWhatsApp(from,
-            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
-            `📋 *Task:* Send Customer SMS via Arkesel\n` +
-            `📱 *Recipient:* ${targetPhone}\n` +
-            `🆔 *Sender ID:* *D_1Gh*\n` +
-            `💬 *Message:* "${targetText}"\n\n` +
-            `Bossu, should I send this SMS? Reply *YES* to dispatch or *NO* to cancel.`
-          );
+            return sendWhatsApp(from,
+              `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+              `📋 *Task:* Send Bulk SMS via Arkesel\n` +
+              `👥 *Target Group:* ${smsFallback.target} (*${count} recipient${count === 1 ? "" : "s"}*)\n` +
+              `🆔 *Sender ID:* *D_1Gh*\n` +
+              `💬 *Message:* "${smsFallback.message}"\n` +
+              `💳 *Estimated SMS Units:* ~${count} credit(s)\n\n` +
+              (count > 0
+                ? `Bossu, should I go ahead and dispatch this bulk SMS to *${count}* recipients now? Reply *YES* to execute or *NO* to cancel.`
+                : `⚠️ Bossu, no active phone numbers found for "${smsFallback.target}". Reply *NO* to cancel or provide explicit numbers (e.g. 0541234567, 0592753424).`
+              )
+            );
+          } else {
+            const targetPhone = smsFallback.phone;
+            const targetText = smsFallback.message;
+            const actionData = { type: "send_sms", phone: targetPhone, message: targetText, smsText: targetText, sender: "D_1Gh" };
+            await setOwnerPendingAction(from, actionData);
+
+            return sendWhatsApp(from,
+              `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+              `📋 *Task:* Send SMS via Arkesel\n` +
+              `📱 *Recipient:* *${targetPhone}*\n` +
+              `🆔 *Sender ID:* *D_1Gh*\n` +
+              `💬 *Message:* "${targetText}"\n\n` +
+              `Bossu, should I send this SMS? Reply *YES* to dispatch or *NO* to cancel.`
+            );
+          }
         }
 
         // Direct Action Command 4: Stock toggle
