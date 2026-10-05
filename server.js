@@ -973,14 +973,18 @@ async function handleDirectDataPull(rawText, from, isOwner = false) {
   const text = String(rawText || "").trim();
   const lower = text.toLowerCase();
 
-  // Check if intent is to pull or list data
+  // Check if intent is to pull or list data or query orders/products
   const isPullIntent =
     /\b(pull|pull\s+me|fetch|show|list|display|give\s+me|get)\b/i.test(lower) &&
     /\b(site|database|db|price|prices|bundle|bundles|package|packages|product|products|order|orders|service|services|catalog|user|users|customer|customers|setting|settings|telecel|mtn|airteltigo|at)\b/i.test(lower);
 
   const isGeneralPullSite = /\b(pull\s+me\s+something\s+from\s+the\s+site|pull\s+from\s+the\s+site|pull\s+from\s+site\s+and\s+database|pull\s+database|pull\s+site)\b/i.test(lower);
 
-  if (!isPullIntent && !isGeneralPullSite) return null;
+  const isOrdersIntent =
+    /\b(order|orders|sales?|transactions?)\b/i.test(lower) &&
+    (/\b(pull|fetch|show|list|display|give\s+me|get|see|check|view|todays?|today|recent|only|paid|failed|pending|delivered)\b/i.test(lower) || /^(only\s+)?todays?\s+(paid\s+)?orders?$/i.test(lower.trim()));
+
+  if (!isPullIntent && !isGeneralPullSite && !isOrdersIntent) return null;
 
   // 1. PULL PRODUCTS / PRICES / BUNDLES
   if (/\b(price|prices|bundle|bundles|package|packages|product|products|catalog|data)\b/i.test(lower) || isGeneralPullSite) {
@@ -1042,7 +1046,13 @@ async function handleDirectDataPull(rawText, from, isOwner = false) {
   // 2. PULL ORDERS (Owner or filter by network / status)
   if (/\b(order|orders|sales?|transactions?)\b/i.test(lower)) {
     try {
-      let query = supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at").order("created_at", { ascending: false }).limit(10);
+      let query = supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at").order("created_at", { ascending: false }).limit(15);
+
+      if (/\b(today|todays)\b/i.test(lower)) {
+        const startOfDay = new Date();
+        startOfDay.setHours(0, 0, 0, 0);
+        query = query.gte("created_at", startOfDay.toISOString());
+      }
 
       if (/telecel|vodafone/i.test(lower)) query = query.ilike("network", "%telecel%");
       else if (/mtn|yello/i.test(lower)) query = query.ilike("network", "%mtn%");
@@ -1053,9 +1063,19 @@ async function handleDirectDataPull(rawText, from, isOwner = false) {
 
       const { data: ords } = await query;
       if (ords && ords.length > 0) {
-        let reply = `📋 *LATEST ORDERS IN DATABASE (${ords.length}):*\n\n`;
+        const total = ords.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+        let title = `LATEST ORDERS (${ords.length})`;
+        if (lower.includes("today") && lower.includes("paid")) {
+          title = `TODAY'S PAID ORDERS (${ords.length} orders | Total GH₵ ${total.toFixed(2)})`;
+        } else if (lower.includes("today")) {
+          title = `TODAY'S ORDERS (${ords.length} orders)`;
+        } else if (lower.includes("paid")) {
+          title = `RECENT PAID ORDERS (${ords.length} orders | Total GH₵ ${total.toFixed(2)})`;
+        }
+
+        let reply = `📋 *${title}:*\n\n`;
         ords.forEach((o, i) => {
-          const ds = o.delivery_status === "delivered" ? "Delivered ✅" : (o.delivery_status === "failed" ? "Failed ❌" : `${o.delivery_status} ⏳`);
+          const ds = o.delivery_status === "delivered" ? "Delivered ✅" : (o.delivery_status === "failed" ? "Failed ❌" : `${o.delivery_status || "In progress"} ⏳`);
           const ps = /paid/i.test(o.payment_status) ? "Paid 💰" : `${o.payment_status}`;
           reply += `${i + 1}. *${o.reference}*\n` +
             `   • ${o.capacity}GB ${o.network} → ${o.recipient_phone}\n` +
@@ -3384,6 +3404,8 @@ app.post("/webhook", async (req, res) => {
       let walletBalance = "";
       let arkeselSmsBalance = "";
       let systemData = "";
+      let liveCatalogText = "";
+      let recentOrdersSummary = "";
 
       let todayPaidCount = 0;
       let todayRevenue = 0;
@@ -3504,7 +3526,7 @@ app.post("/webhook", async (req, res) => {
         const telecelProducts = allProducts.filter(p => /telecel|vodafone/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
         const atProducts = allProducts.filter(p => /airtel|tigo|at/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
 
-        let liveCatalogText = "LIVE PRODUCT CATALOG & CURRENT STORE PRICES (FROM DATABASE):\n";
+        liveCatalogText = "LIVE PRODUCT CATALOG & CURRENT STORE PRICES (FROM DATABASE):\n";
         if (mtnProducts.length > 0) {
           liveCatalogText += "• MTN Data Bundles:\n" + mtnProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
         }
@@ -3515,7 +3537,6 @@ app.post("/webhook", async (req, res) => {
           liveCatalogText += "• AirtelTigo Data Bundles:\n" + atProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
         }
 
-        let recentOrdersSummary = "";
         if (todayOrders.length > 0) {
           recentOrdersSummary = `LATEST ORDERS TODAY (${todayOrders.length} orders):\n` +
             todayOrders.slice(0, 10).map((o, idx) => `  ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${o.amount} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status}`).join("\n") + "\n";
