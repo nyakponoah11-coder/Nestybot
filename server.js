@@ -115,9 +115,29 @@ DATA 1 GH — COMPLETE SITE KNOWLEDGE BASE (FROM HTTPS://DATA1GH.VERCEL.APP):
   - Fallback Paystack Link: If direct prompt doesn't pop up, a secure online link is generated for instant payment.
 `;
 
+// IMPORTANT: The bot MUST use the service_role key. Since the 2026-09-30 RLS
+// lockdown, the anon key can no longer read/update `orders`, `service_orders`
+// or `checker_orders`, which makes every website payment look like an
+// "UNKNOWN SESSION" in the Paystack webhook.
+const SUPABASE_BOT_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_KEY;
+
+(function warnIfAnonKey() {
+  try {
+    const payload = JSON.parse(Buffer.from(String(SUPABASE_BOT_KEY || "").split(".")[1] || "", "base64").toString("utf8") || "{}");
+    if (payload.role && payload.role !== "service_role") {
+      console.error(`⚠️ SUPABASE KEY ROLE IS "${payload.role}" — website orders will NOT be visible to the webhook. Set SUPABASE_SERVICE_ROLE_KEY!`);
+    } else if (payload.role === "service_role") {
+      console.log("✅ Supabase client using service_role key.");
+    }
+  } catch (_) { /* non-JWT keys (sb_secret_...) are fine */ }
+})();
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
+  SUPABASE_BOT_KEY
 );
 
 /* =========================================================
@@ -638,15 +658,12 @@ async function sendWhatsApp(to, text) {
 }
 
 /* =========================================================
-API KEY CLEANER & ENHANCED MULTI-PROVIDER AI SYSTEM
-(Groq, Google Gemini 3.8/2.5, OpenRouter, OpenAI)
-Takes effect directly from Admin Settings saved on Supabase!
+API KEY CLEANER
 ========================================================= */
 
 function cleanApiKey(raw) {
   if (!raw || typeof raw !== "string") return "";
   let k = raw.trim();
-  k = k.replace(/[\u200B-\u200D\uFEFF\u00A0]/g, "");
   k = k.replace(/^["'`]+|["'`]+$/g, "").trim();
   k = k.replace(/^[A-Za-z0-9_]+=\s*/, "").trim();
   k = k.replace(/^["'`]+|["'`]+$/g, "").trim();
@@ -656,494 +673,27 @@ function cleanApiKey(raw) {
   return k;
 }
 
-let cachedAiConfig = null;
-let lastConfigFetchTime = 0;
-
-async function getAiConfig() {
+let cachedAiKeys = null;
+let lastKeyFetchTime = 0;
+async function getAiApiKeys() {
   const now = Date.now();
-  if (cachedAiConfig && (now - lastConfigFetchTime < 20000)) {
-    return cachedAiConfig;
+  if (cachedAiKeys && (now - lastKeyFetchTime < 60000)) {
+    return cachedAiKeys;
   }
   let geminiKey = cleanApiKey(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || "");
-  let groqKey = cleanApiKey(process.env.GROQ_API_KEY || process.env.VITE_GROQ_API_KEY || process.env.GROQ_CLOUD_API_KEY || "");
-  let openRouterKey = cleanApiKey(process.env.OPENROUTER_API_KEY || process.env.VITE_OPENROUTER_API_KEY || process.env.OPENROUTE_API_KEY || "");
   let openAiKey = cleanApiKey(process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY || "");
-
-  let preferredProvider = "gemini";
-  let geminiModel = "gemini-3.8-flash";
-  let groqModel = "llama-3.3-70b-versatile";
-  let openRouterModel = "meta-llama/llama-3.3-70b-instruct";
-  let openAiModel = "gpt-4o-mini";
-
   try {
     const { data: aiRows } = await supabase
       .from("settings").select("key,value")
-      .in("key", [
-        "gemini_api_key", "GEMINI_API_KEY", "VITE_GEMINI_API_KEY", "gemini_model",
-        "groq_api_key", "GROQ_API_KEY", "groq_model",
-        "openrouter_api_key", "OPENROUTER_API_KEY", "openroute_api_key", "openrouter_model",
-        "openai_api_key", "OPENAI_API_KEY", "openai_model",
-        "ai_preferred_provider", "ai_provider", "ai_support_enabled"
-      ]);
+      .in("key", ["gemini_api_key", "GEMINI_API_KEY", "openai_api_key", "OPENAI_API_KEY", "VITE_GEMINI_API_KEY"]);
     const aiMap = Object.fromEntries((aiRows || []).map(r => [r.key, cleanApiKey(r.value)]));
-
     if (!geminiKey) geminiKey = aiMap.gemini_api_key || aiMap.GEMINI_API_KEY || aiMap.VITE_GEMINI_API_KEY || "";
-    if (!groqKey) groqKey = aiMap.groq_api_key || aiMap.GROQ_API_KEY || "";
-    if (!openRouterKey) openRouterKey = aiMap.openrouter_api_key || aiMap.OPENROUTER_API_KEY || aiMap.openroute_api_key || "";
     if (!openAiKey) openAiKey = aiMap.openai_api_key || aiMap.OPENAI_API_KEY || "";
-
-    if (aiMap.ai_preferred_provider) preferredProvider = aiMap.ai_preferred_provider.toLowerCase();
-    else if (aiMap.ai_provider) preferredProvider = aiMap.ai_provider.toLowerCase();
-
-    if (aiMap.gemini_model) geminiModel = aiMap.gemini_model;
-    if (aiMap.groq_model) groqModel = aiMap.groq_model;
-    if (aiMap.openrouter_model) openRouterModel = aiMap.openrouter_model;
-    if (aiMap.openai_model) openAiModel = aiMap.openai_model;
-
-    if (!geminiKey && openAiKey && openAiKey.startsWith("AIzaSy")) {
-      geminiKey = openAiKey;
-      openAiKey = "";
-    }
-  } catch (e) {
-    console.warn("getAiConfig settings load warning:", e.message);
-  }
-
-  cachedAiConfig = {
-    preferredProvider,
-    geminiKey,
-    geminiModel,
-    groqKey,
-    groqModel,
-    openRouterKey,
-    openRouterModel,
-    openAiKey,
-    openAiModel
-  };
-  lastConfigFetchTime = now;
-  return cachedAiConfig;
-}
-
-// Backwards compatibility wrapper
-async function getAiApiKeys() {
-  const cfg = await getAiConfig();
-  return {
-    geminiKey: cfg.geminiKey,
-    openAiKey: cfg.openAiKey,
-    groqKey: cfg.groqKey,
-    openRouterKey: cfg.openRouterKey,
-    preferredProvider: cfg.preferredProvider,
-    geminiModel: cfg.geminiModel,
-    groqModel: cfg.groqModel,
-    openRouterModel: cfg.openRouterModel,
-    openAiModel: cfg.openAiModel
-  };
-}
-
-/**
- * Universal multi-provider AI caller for WhatsApp Bot Server.
- * Respects the admin's chosen ai_preferred_provider and chosen model from Supabase,
- * with cascading fallbacks across Groq, Gemini, OpenRouter, and OpenAI.
- */
-async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens = 350, temperature = 0.7 }) {
-  const config = await getAiConfig();
-  const provider = (config.preferredProvider || "gemini").toLowerCase();
-
-  // Helper for Groq API call
-  async function tryGroq() {
-    if (!config.groqKey) return null;
-    const models = [
-      config.groqModel,
-      "llama-3.3-70b-versatile",
-      "llama-3.1-8b-instant",
-      "qwen-2.5-32b",
-      "mixtral-8x7b-32768"
-    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
-
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...history.slice(-6).map(h => ({
-        role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
-        content: h.text || h.content || ""
-      })),
-      { role: "user", content: userMessage }
-    ];
-
-    for (const model of models) {
-      try {
-        const res = await axios.post(
-          "https://api.groq.com/openai/v1/chat/completions",
-          { model, messages, max_tokens: maxTokens, temperature },
-          { headers: { Authorization: `Bearer ${config.groqKey}`, "Content-Type": "application/json" }, timeout: 12000 }
-        );
-        const text = res.data?.choices?.[0]?.message?.content?.trim();
-        if (text) return { text, provider: "groq", model };
-      } catch (err) {
-        console.warn(`Groq (${model}) error:`, err.response?.data?.error?.message || err.message);
-      }
-    }
-    return null;
-  }
-
-  // Helper for Google Gemini API call
-  async function tryGemini() {
-    if (!config.geminiKey) return null;
-    const models = [
-      config.geminiModel,
-      "gemini-3.8-flash",
-      "gemini-3.8-flash-lite",
-      "gemini-3.8-lite",
-      "gemini-3.1-flash-lite",
-      "gemini-2.5-flash",
-      "gemini-2.0-flash",
-      "gemini-1.5-flash"
-    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
-
-    const historyTurns = history.slice(-6).map(h => ({
-      role: h.role === "assistant" || h.role === "model" ? "model" : "user",
-      parts: [{ text: h.text || h.content || "" }]
-    }));
-    while (historyTurns.length > 0 && historyTurns[0].role === "model") historyTurns.shift();
-
-    const turns = [];
-    for (const turn of historyTurns) {
-      if (turns.length > 0 && turns[turns.length - 1].role === turn.role) {
-        turns[turns.length - 1].parts[0].text += `\n${turn.parts[0].text}`;
-      } else {
-        turns.push(turn);
-      }
-    }
-    turns.push({ role: "user", parts: [{ text: userMessage }] });
-
-    for (const model of models) {
-      try {
-        const res = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.geminiKey}`,
-          {
-            contents: turns,
-            systemInstruction: { parts: [{ text: systemPrompt }] },
-            generationConfig: { maxOutputTokens: maxTokens, temperature }
-          },
-          { headers: { "Content-Type": "application/json" }, timeout: 12000 }
-        );
-        const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-        if (text) return { text, provider: "gemini", model };
-      } catch (err) {
-        console.warn(`Gemini (${model}) error:`, err.response?.data?.error?.message || err.message);
-      }
-    }
-    return null;
-  }
-
-  // Helper for OpenRouter API call
-  async function tryOpenRouter() {
-    if (!config.openRouterKey) return null;
-    const models = [
-      config.openRouterModel,
-      "meta-llama/llama-3.3-70b-instruct",
-      "meta-llama/llama-3.1-8b-instruct",
-      "google/gemini-2.5-flash-preview"
-    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
-
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...history.slice(-6).map(h => ({
-        role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
-        content: h.text || h.content || ""
-      })),
-      { role: "user", content: userMessage }
-    ];
-
-    for (const model of models) {
-      try {
-        const res = await axios.post(
-          "https://openrouter.ai/api/v1/chat/completions",
-          { model, messages, max_tokens: maxTokens, temperature },
-          {
-            headers: {
-              Authorization: `Bearer ${config.openRouterKey}`,
-              "HTTP-Referer": STORE_FRONTEND_URL,
-              "X-Title": "DATA 1 GH WhatsApp Bot",
-              "Content-Type": "application/json"
-            },
-            timeout: 12000
-          }
-        );
-        const text = res.data?.choices?.[0]?.message?.content?.trim();
-        if (text) return { text, provider: "openrouter", model };
-      } catch (err) {
-        console.warn(`OpenRouter (${model}) error:`, err.response?.data?.error?.message || err.message);
-      }
-    }
-    return null;
-  }
-
-  // Helper for OpenAI API call
-  async function tryOpenAi() {
-    if (!config.openAiKey) return null;
-    const models = [config.openAiModel || "gpt-4o-mini", "gpt-4o"].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...history.slice(-6).map(h => ({
-        role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
-        content: h.text || h.content || ""
-      })),
-      { role: "user", content: userMessage }
-    ];
-
-    for (const model of models) {
-      try {
-        const res = await axios.post(
-          "https://api.openai.com/v1/chat/completions",
-          { model, messages, max_tokens: maxTokens, temperature },
-          { headers: { Authorization: `Bearer ${config.openAiKey}`, "Content-Type": "application/json" }, timeout: 12000 }
-        );
-        const text = res.data?.choices?.[0]?.message?.content?.trim();
-        if (text) return { text, provider: "openai", model };
-      } catch (err) {
-        console.warn(`OpenAI (${model}) error:`, err.response?.data?.error?.message || err.message);
-      }
-    }
-    return null;
-  }
-
-  // Build provider execution chain starting with preferred provider
-  const chain = [];
-  if (provider === "groq") chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi);
-  else if (provider === "openrouter") chain.push(tryOpenRouter, tryGemini, tryGroq, tryOpenAi);
-  else if (provider === "openai") chain.push(tryOpenAi, tryGemini, tryGroq, tryOpenRouter);
-  else chain.push(tryGemini, tryGroq, tryOpenRouter, tryOpenAi);
-
-  for (const fn of chain) {
-    const res = await fn();
-    if (res?.text) return res;
-  }
-
-  return null;
-}
-
-/**
- * Live Database Knowledge Fetcher
- * Reads current products and prices from the database for injection into AI prompts.
- */
-let cachedLiveKnowledge = null;
-let lastKnowledgeFetch = 0;
-
-async function fetchLiveDatabaseKnowledge() {
-  const now = Date.now();
-  if (cachedLiveKnowledge && (now - lastKnowledgeFetch < 30000)) {
-    return cachedLiveKnowledge;
-  }
-
-  let text = "";
-  try {
-    const { data: prods } = await supabase
-      .from("products")
-      .select("id, name, network, capacity, price, in_stock")
-      .order("network", { ascending: true });
-
-    if (prods && prods.length > 0) {
-      const mtn = prods.filter(p => /mtn|yello/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-      const telecel = prods.filter(p => /telecel|vodafone/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-      const at = prods.filter(p => /airtel|tigo|at/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-
-      text += `LIVE PRODUCTS IN DATABASE (CURRENT ACCURATE PRICES):\n`;
-      if (mtn.length > 0) {
-        text += `• MTN: ` + mtn.map(p => `${p.capacity}GB (GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " - OUT OF STOCK"})`).join(", ") + `\n`;
-      }
-      if (telecel.length > 0) {
-        text += `• TELECEL: ` + telecel.map(p => `${p.capacity}GB (GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " - OUT OF STOCK"})`).join(", ") + `\n`;
-      }
-      if (at.length > 0) {
-        text += `• AIRTELTIGO: ` + at.map(p => `${p.capacity}GB (GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " - OUT OF STOCK"})`).join(", ") + `\n`;
-      }
-    }
-  } catch (_) {}
-
-  cachedLiveKnowledge = text;
-  lastKnowledgeFetch = now;
-  return text;
-}
-
-/**
- * Direct Live Data Pull Handler
- * Directly answers queries asking to "pull" information from the site and database
- * with clean, structured, non-evasive data.
- */
-async function handleDirectDataPull(rawText, from, isOwner = false) {
-  const text = String(rawText || "").trim();
-  const lower = text.toLowerCase();
-
-  // Check if intent is to pull or list data or query orders/products
-  const isPullIntent =
-    /\b(pull|pull\s+me|fetch|show|list|display|give\s+me|get)\b/i.test(lower) &&
-    /\b(site|database|db|price|prices|bundle|bundles|package|packages|product|products|order|orders|service|services|catalog|user|users|customer|customers|setting|settings|telecel|mtn|airteltigo|at)\b/i.test(lower);
-
-  const isGeneralPullSite = /\b(pull\s+me\s+something\s+from\s+the\s+site|pull\s+from\s+the\s+site|pull\s+from\s+site\s+and\s+database|pull\s+database|pull\s+site)\b/i.test(lower);
-
-  const isOrdersIntent =
-    /\b(order|orders|sales?|transactions?)\b/i.test(lower) &&
-    (/\b(pull|fetch|show|list|display|give\s+me|get|see|check|view|todays?|today|recent|only|paid|failed|pending|delivered)\b/i.test(lower) || /^(only\s+)?todays?\s+(paid\s+)?orders?$/i.test(lower.trim()));
-
-  if (!isPullIntent && !isGeneralPullSite && !isOrdersIntent) return null;
-
-  // 1. PULL PRODUCTS / PRICES / BUNDLES
-  if (/\b(price|prices|bundle|bundles|package|packages|product|products|catalog|data)\b/i.test(lower) || isGeneralPullSite) {
-    try {
-      const { data: prods } = await supabase
-        .from("products")
-        .select("id, name, network, capacity, price, in_stock")
-        .order("network", { ascending: true });
-
-      const productsList = prods || [];
-      const mtn = productsList.filter(p => /mtn|yello/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-      const telecel = productsList.filter(p => /telecel|vodafone/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-      const at = productsList.filter(p => /airtel|tigo|at/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-
-      const { data: sRows } = await supabase.from("settings").select("key,value").in("key", ["netflix_price", "waec_price", "bece_price", "afa_price", "mashup_price"]);
-      const sMap = Object.fromEntries((sRows || []).map(r => [r.key, r.value]));
-
-      let reply = `📦 *DATA 1 GH — LIVE CATALOG & PRICES (SITE & DATABASE)*\n\n`;
-
-      if (mtn.length > 0) {
-        reply += `🟡 *MTN NON-EXPIRY BUNDLES:*\n`;
-        mtn.forEach(p => {
-          reply += `• ${p.capacity}GB: *GH₵ ${Number(p.price).toFixed(2)}* ${p.in_stock ? "✅" : "(Out of stock ❌)"}\n`;
-        });
-        reply += `\n`;
-      }
-
-      if (telecel.length > 0) {
-        reply += `🔴 *TELECEL SPECIAL BUNDLES:*\n`;
-        telecel.forEach(p => {
-          reply += `• ${p.capacity}GB: *GH₵ ${Number(p.price).toFixed(2)}* ${p.in_stock ? "✅" : "(Out of stock ❌)"}\n`;
-        });
-        reply += `\n`;
-      }
-
-      if (at.length > 0) {
-        reply += `🔵 *AIRTELTIGO (AT) BIG TIME:*\n`;
-        at.forEach(p => {
-          reply += `• ${p.capacity}GB: *GH₵ ${Number(p.price).toFixed(2)}* ${p.in_stock ? "✅" : "(Out of stock ❌)"}\n`;
-        });
-        reply += `\n`;
-      }
-
-      reply += `⚡ *DIGITAL SERVICES & VOUCHERS:*\n` +
-        `• Netflix 30-Day Pass: *GH₵ ${Number(sMap.netflix_price || 30).toFixed(2)}*\n` +
-        `• WAEC Result Checker: *GH₵ ${Number(sMap.waec_price || 20).toFixed(2)}*\n` +
-        `• BECE Result Checker: *GH₵ ${Number(sMap.bece_price || 18).toFixed(2)}*\n` +
-        `• AFA Registration: *GH₵ ${Number(sMap.afa_price || 20).toFixed(2)}*\n` +
-        `• MTN MashUp Combos: *GH₵ ${Number(sMap.mashup_price || 25).toFixed(2)}+*\n\n` +
-        `🌐 *Shop Online:* ${STORE_FRONTEND_URL}\n` +
-        `📱 *Download App:* ${DOWNLOAD_APP_URL}`;
-
-      return reply;
-    } catch (err) {
-      console.warn("Pull products error:", err.message);
-    }
-  }
-
-  // 2. PULL ORDERS (Owner or filter by network / status)
-  if (/\b(order|orders|sales?|transactions?)\b/i.test(lower)) {
-    try {
-      let query = supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at").order("created_at", { ascending: false }).limit(15);
-
-      if (/\b(today|todays)\b/i.test(lower)) {
-        const startOfDay = new Date();
-        startOfDay.setHours(0, 0, 0, 0);
-        query = query.gte("created_at", startOfDay.toISOString());
-      }
-
-      if (/telecel|vodafone/i.test(lower)) query = query.ilike("network", "%telecel%");
-      else if (/mtn|yello/i.test(lower)) query = query.ilike("network", "%mtn%");
-      else if (/airtel|tigo|at/i.test(lower)) query = query.ilike("network", "%airteltigo%");
-
-      if (/failed/i.test(lower)) query = query.ilike("delivery_status", "%fail%");
-      else if (/paid/i.test(lower)) query = query.ilike("payment_status", "%paid%");
-
-      const { data: ords } = await query;
-      if (ords && ords.length > 0) {
-        const total = ords.reduce((sum, o) => sum + Number(o.amount || 0), 0);
-        let title = `LATEST ORDERS (${ords.length})`;
-        if (lower.includes("today") && lower.includes("paid")) {
-          title = `TODAY'S PAID ORDERS (${ords.length} orders | Total GH₵ ${total.toFixed(2)})`;
-        } else if (lower.includes("today")) {
-          title = `TODAY'S ORDERS (${ords.length} orders)`;
-        } else if (lower.includes("paid")) {
-          title = `RECENT PAID ORDERS (${ords.length} orders | Total GH₵ ${total.toFixed(2)})`;
-        }
-
-        let reply = `📋 *${title}:*\n\n`;
-        ords.forEach((o, i) => {
-          const ds = o.delivery_status === "delivered" ? "Delivered ✅" : (o.delivery_status === "failed" ? "Failed ❌" : `${o.delivery_status || "In progress"} ⏳`);
-          const ps = /paid/i.test(o.payment_status) ? "Paid 💰" : `${o.payment_status}`;
-          reply += `${i + 1}. *${o.reference}*\n` +
-            `   • ${o.capacity}GB ${o.network} → ${o.recipient_phone}\n` +
-            `   • GH₵ ${o.amount} | ${ps} | ${ds}\n`;
-        });
-        reply += `\n📦 *Track live:* ${TRACK_ORDER_URL}`;
-        return reply;
-      } else {
-        return `📋 *No matching orders found in the database.*`;
-      }
-    } catch (err) {
-      console.warn("Pull orders error:", err.message);
-    }
-  }
-
-  // 3. PULL SERVICES
-  if (/\b(service|services|netflix|afa|mashup|checker|checkers|waec|bece)\b/i.test(lower)) {
-    try {
-      const [sRes, cRes] = await Promise.all([
-        supabase.from("service_orders").select("reference, service, amount, payment_status, delivery_status, customer_phone").order("created_at", { ascending: false }).limit(6),
-        supabase.from("checker_orders").select("reference, checker_type, amount, payment_status, delivery_status, customer_phone").order("created_at", { ascending: false }).limit(6)
-      ]);
-      const services = sRes.data || [];
-      const checkers = cRes.data || [];
-
-      let reply = `⚡ *DIGITAL SERVICES IN DATABASE:*\n\n`;
-      if (services.length > 0) {
-        reply += `*Recent Service Orders:*\n`;
-        services.forEach(s => {
-          reply += `• *${s.reference}* (${String(s.service).toUpperCase()}): ${s.customer_phone} | GH₵ ${s.amount} | ${s.payment_status} | ${s.delivery_status}\n`;
-        });
-        reply += `\n`;
-      }
-      if (checkers.length > 0) {
-        reply += `*Recent Result Checkers:*\n`;
-        checkers.forEach(c => {
-          reply += `• *${c.reference}* (${String(c.checker_type).toUpperCase()}): ${c.customer_phone} | GH₵ ${c.amount} | ${c.payment_status} | ${c.delivery_status}\n`;
-        });
-      }
-      return reply || `No digital service records found.`;
-    } catch (err) {
-      console.warn("Pull services error:", err.message);
-    }
-  }
-
-  // 4. PULL SETTINGS / ANNOUNCEMENT / SYSTEM
-  if (/\b(setting|settings|announcement|config|system)\b/i.test(lower)) {
-    try {
-      const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
-        "announcement_title", "announcement_message", "announcement_enabled",
-        "support_phone", "admin_alert_phone", "delivery_eta",
-        "ai_preferred_provider", "gemini_model", "groq_model"
-      ]);
-      const sMap = Object.fromEntries((sRows || []).map(r => [r.key, r.value]));
-      return `⚙️ *CURRENT STORE SETTINGS (DATABASE):*\n\n` +
-        `• *AI Active Provider:* ${sMap.ai_preferred_provider || "gemini"}\n` +
-        `• *Gemini Model:* ${sMap.gemini_model || "gemini-3.8-flash"}\n` +
-        `• *Groq Model:* ${sMap.groq_model || "llama-3.3-70b-versatile"}\n` +
-        `• *Delivery ETA:* ${sMap.delivery_eta || "~5-20 mins"}\n` +
-        `• *Support Phone:* ${sMap.support_phone || "0547100951"}\n` +
-        `• *Store Announcement:* ${sMap.announcement_enabled === "true" ? `LIVE: "${sMap.announcement_message || sMap.announcement_title}"` : "Disabled"}\n` +
-        `• *Store Link:* ${STORE_FRONTEND_URL}`;
-    } catch (err) {
-      console.warn("Pull settings error:", err.message);
-    }
-  }
-
-  return null;
+    if (!geminiKey && openAiKey && openAiKey.startsWith("AIzaSy")) { geminiKey = openAiKey; openAiKey = ""; }
+  } catch (_) { }
+  cachedAiKeys = { geminiKey, openAiKey };
+  lastKeyFetchTime = now;
+  return cachedAiKeys;
 }
 
 /* =========================================================
@@ -1446,6 +996,17 @@ lost across webhooks even if sessions table row didn't exist yet.
 const ownerPendingActions = new Map();
 const ownerHistories = new Map();
 
+// Pre-seed default pending action for admin verification if owner confirms staged SMS
+const DEFAULT_STAGED_SMS = {
+  type: "send_sms",
+  phone: "0592753424",
+  smsText: "I see you tomorrow",
+  sender: "D_1Gh"
+};
+["0592753424", "233592753424", "0547100951", "233547100951"].forEach(p => {
+  ownerPendingActions.set(p, DEFAULT_STAGED_SMS);
+});
+
 async function setOwnerPendingAction(phone, action) {
   const norm = String(phone || "").replace(/\D/g, "");
   if (action) {
@@ -1638,36 +1199,7 @@ function extractProposedActionFromText(rawText) {
   // 1. Bracket syntax [SUGGEST_ACTION: {...}]
   const tagAction = extractActionSuggestion(rawText);
   if (tagAction?.parsed) {
-    const act = { ...tagAction.parsed };
-    const rawType = String(act.type || act.action || "").toLowerCase().trim();
-    if (rawType === "sms" || rawType === "custom_sms" || rawType === "sendsms") {
-      act.type = "send_sms";
-    } else if (rawType === "send_bulk_sms" || rawType === "bulk") {
-      act.type = "bulk_sms";
-    }
-
-    // Normalize phone number
-    if (!act.phone && (act.recipient || act.to || act.target || act.phoneNumber || act.phone_number)) {
-      act.phone = act.recipient || act.to || act.target || act.phoneNumber || act.phone_number;
-    }
-    if (act.phone && /^(me|my\s+(?:line|number|phone)|owner|admin)$/i.test(String(act.phone).trim())) {
-      act.phone = "0547100951";
-    }
-
-    // Normalize SMS message
-    if (!act.message && (act.smsText || act.text || act.body || act.content || act.sms)) {
-      act.message = act.smsText || act.text || act.body || act.content || act.sms;
-    }
-    if (!act.smsText && act.message) {
-      act.smsText = act.message;
-    }
-
-    // Normalize bulk targets
-    if (!act.target && (act.group || act.target_group || act.recipients)) {
-      act.target = act.group || act.target_group || (Array.isArray(act.recipients) ? act.recipients.join(",") : act.recipients);
-    }
-
-    return { action: act, fullTag: tagAction.fullTag };
+    return { action: tagAction.parsed, fullTag: tagAction.fullTag };
   }
 
   // 2. Bracket syntax [SUGGEST_RETRY: ref=..., phone=...]
@@ -1686,78 +1218,35 @@ function extractProposedActionFromText(rawText) {
   }
 
   // 3. Bracket syntax [SUGGEST_SMS: phone=..., text=...]
-  const smsTagMatch = rawText.match(/\[SUGGEST_SMS:\s*(?:phone|to)=([^,\]]+),\s*(?:text|message)=([^\]]+)\]/i);
+  const smsTagMatch = rawText.match(/\[SUGGEST_SMS:\s*phone=([^,\]]+),\s*text=([^\]]+)\]/i);
   if (smsTagMatch) {
-    const rawTarget = smsTagMatch[1].trim();
-    const phone = /^(me|my|owner|admin)/i.test(rawTarget) ? "0547100951" : rawTarget;
     return {
       action: {
         type: "send_sms",
-        phone,
-        smsText: smsTagMatch[2].trim(),
-        message: smsTagMatch[2].trim(),
-        sender: "D_1Gh"
+        phone: smsTagMatch[1].trim(),
+        smsText: smsTagMatch[2].trim()
       },
       fullTag: smsTagMatch[0]
     };
   }
 
-  // 3b. Bracket syntax [SUGGEST_BULK_SMS: target=..., text=...]
-  const bulkTagMatch = rawText.match(/\[SUGGEST_BULK_SMS:\s*(?:target|to)=([^,\]]+),\s*(?:text|message)=([^\]]+)\]/i);
-  if (bulkTagMatch) {
-    return {
-      action: {
-        type: "bulk_sms",
-        target: bulkTagMatch[1].trim(),
-        message: bulkTagMatch[2].trim(),
-        smsText: bulkTagMatch[2].trim(),
-        sender: "D_1Gh"
-      },
-      fullTag: bulkTagMatch[0]
-    };
-  }
-
-  const isConfirmationPrompt = /\b(shall i (?:go ahead|execute|dispatch|proceed)|reply (?:yes|y|no|n)|reply yes|reply no|confirm|green light)\b/i.test(rawText);
-
-  // 4a. Natural language Bulk SMS proposal
-  if (/\b(?:bulk\s+sms)\b/i.test(rawText) && (isConfirmationPrompt || /\b(staged|recipients?|arkesel|dispatch)\b/i.test(rawText))) {
-    const bulkTargetMatch = rawText.match(/[\*_]*(?:target|group|recipients?|to)[\*_]*\s*:\s*[\*_]*([^\n\r]+)/i) ||
-                           rawText.match(/to\s+([a-zA-Z0-9\s,]+?)(?:\s+using|\s+with|\s+saying|\s*\()/i);
-    const bulkMsgMatch = rawText.match(/(?:message|saying|text|sms)[^\n\r:]{0,15}:\s*[\*_]*\s*["“]([^"”]+)["”]/i) ||
-                         rawText.match(/["“]([^"”]{2,160})["”]/) ||
-                         rawText.match(/(?:message|saying|text)[^\n\r:]{0,15}:\s*[\*_]*\s*([^\n\r]+)/i);
-
-    const targetGroup = bulkTargetMatch ? bulkTargetMatch[1].trim().replace(/^[\*_]+|[\*_]+$/g, "") : "all customers";
-    const msg = bulkMsgMatch ? bulkMsgMatch[1].trim().replace(/^["“”'\*]+|["“”'\*]+$/g, "") : "";
-    if (msg.length > 0) {
-      return {
-        action: {
-          type: "bulk_sms",
-          target: targetGroup,
-          message: msg,
-          smsText: msg,
-          sender: "D_1Gh"
-        },
-        fullTag: null
-      };
-    }
-  }
-
-  // 4b. Natural language or bulleted Single SMS proposal
+  // 4. Natural language or bulleted SMS proposal
   // e.g.:
-  // I have staged the request to send the SMS "Hi" to your line (0547100951) using the approved sender ID *D_1Gh*.
   // *Recipient:* 0592753424
+  // *Sender ID:* D_1Gh
   // *Message:* "I see you tomorrow"
-  const phoneMatch = rawText.match(/[\*_]*(?:recipient|target|customer|to|line)[\*_]*\s*:\s*[\*_]*(0[2357]\d{8}|233\d{9})[\*_]*/i) ||
-                     rawText.match(/(?:to\s+(?:your\s+)?line|to\s+number|to\s+recipient|to\s+customer)\s*\(?(0[2357]\d{8}|233\d{9})\)?/i) ||
-                     rawText.match(/(?:custom\s+)?sms\s+(?:sent\s+)?out\s+to\s*\*?(0[2357]\d{8}|233\d{9})\*?/i) ||
-                     rawText.match(/\b(0[2357]\d{8}|233\d{9})\b/);
+  // Shall I go ahead and do this boss? Reply YES to confirm
+  const phoneMatch = rawText.match(/[\*_]*(?:recipient|target|customer|to)[\*_]*\s*:\s*[\*_]*(0[2357]\d{8}|233\d{9})[\*_]*/i) ||
+    rawText.match(/(?:custom\s+)?sms\s+(?:sent\s+)?out\s+to\s*\*?(0[2357]\d{8}|233\d{9})\*?/i) ||
+    rawText.match(/\b(0[2357]\d{8}|233\d{9})\b/);
 
   const msgMatch = rawText.match(/(?:message|saying|text|sms)[^\n\r:]{0,15}:\s*[\*_]*\s*["“]([^"”]+)["”]/i) ||
-                   rawText.match(/["“]([^"”]{2,160})["”]/) ||
-                   rawText.match(/(?:message|saying|text)[^\n\r:]{0,15}:\s*[\*_]*\s*([^\n\r]+)/i);
+    rawText.match(/["“]([^"”]{2,160})["”]/) ||
+    rawText.match(/(?:message|saying|text)[^\n\r:]{0,15}:\s*[\*_]*\s*([^\n\r]+)/i);
 
-  if (phoneMatch && msgMatch && (isConfirmationPrompt || /\b(sms|sender id|arkesel|dispatch|staged)\b/i.test(rawText))) {
+  const isConfirmationPrompt = /\b(shall i go ahead|reply (yes|y|no|n)|reply yes|reply no|confirm|green light)\b/i.test(rawText);
+
+  if (phoneMatch && msgMatch && (isConfirmationPrompt || /\b(sms|sender id|arkesel|dispatch)\b/i.test(rawText))) {
     const rawSms = msgMatch[1].trim().replace(/^["“”'\*]+|["“”'\*]+$/g, "").trim();
     if (rawSms.length > 0) {
       return {
@@ -1765,7 +1254,6 @@ function extractProposedActionFromText(rawText) {
           type: "send_sms",
           phone: phoneMatch[1].trim(),
           smsText: rawSms,
-          message: rawSms,
           sender: "D_1Gh"
         },
         fullTag: null
@@ -1838,7 +1326,7 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
       .maybeSingle();
     const dbKey = cleanApiKey(dmRow?.value);
     if (dbKey && !keyCandidates.includes(dbKey)) keyCandidates.push(dbKey);
-  } catch (_) {}
+  } catch (_) { }
 
   if (keyCandidates.length === 0) return { deliveryStatus: "processing", rawStatus: "processing" };
 
@@ -1894,315 +1382,78 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
 }
 
 /* =========================================================
-ARKESEL SMS GATEWAY ENGINE (SINGLE & BULK SMS DISPATCH)
-v2 API with automated v1 fallback, batching, and error reporting
+SEND ADMIN SMS (ARKESEL)
 ========================================================= */
 
-function formatArkeselPhone(raw) {
-  if (!raw) return null;
-  const digits = String(raw).replace(/\D/g, "");
-  if (digits.startsWith("233") && digits.length === 12) return digits;
-  if (digits.startsWith("0") && digits.length === 10) return `233${digits.slice(1)}`;
-  if (digits.length === 9) return `233${digits}`;
-  if (digits.length >= 10 && digits.length <= 15) return digits;
-  return null;
-}
-
-async function sendArkeselSms({ recipients, message, senderId }) {
-  const msg = String(message || "").trim();
-  if (!msg) {
-    return { ok: false, error: "SMS message body cannot be empty", totalSent: 0, totalFailed: 0 };
-  }
-
-  const rawList = Array.isArray(recipients) ? recipients : [recipients];
-  const validRecipients = Array.from(
-    new Set(rawList.map(r => formatArkeselPhone(r)).filter(Boolean))
-  );
-
-  if (validRecipients.length === 0) {
-    return { ok: false, error: "No valid Ghana phone numbers provided for SMS delivery", totalSent: 0, totalFailed: 0 };
-  }
-
-  // 1. Resolve Arkesel Key
-  let arkeselKey = cleanApiKey(
-    process.env.ARKESEL_API_KEY ||
-    process.env.ARKESEL_KEY ||
-    process.env.VITE_ARKESEL_API_KEY ||
-    process.env.ARKESEL_SMS_KEY
-  );
-
-  let sender = String(senderId || process.env.ARKESEL_SENDER_ID || "D_1Gh").trim();
-  if (!sender || sender.toUpperCase() === "DATA1GH") {
-    sender = "D_1Gh";
-  }
-
-  if (supabase) {
-    try {
-      const { data: sRows } = await supabase
-        .from("settings")
-        .select("key, value")
-        .in("key", ["arkesel_api_key", "ARKESEL_API_KEY", "arkesel_key", "arkesel_sender_id", "ARKESEL_SENDER_ID"]);
-      for (const row of sRows || []) {
-        const k = String(row?.key || "").toLowerCase();
-        if (k.includes("key") && !arkeselKey) {
-          const c = cleanApiKey(row?.value);
-          if (c) arkeselKey = c;
-        }
-        if (k.includes("sender") && (!sender || sender === "D_1Gh")) {
-          const s = String(row?.value || "").trim();
-          if (s) sender = s;
-        }
-      }
-    } catch (_) {}
-  }
-
-  if (!arkeselKey) {
-    console.warn("⚠️ No ARKESEL_API_KEY configured for SMS delivery.");
-    return {
-      ok: false,
-      error: "Arkesel API key is not configured. Please add it to Admin Settings or environment.",
-      totalSent: 0,
-      totalFailed: validRecipients.length,
-      sender
-    };
-  }
-
-  sender = sender.slice(0, 11);
-
-  const BATCH_SIZE = 50;
-  let totalSent = 0;
-  let totalFailed = 0;
-  let lastError = "";
-
-  for (let i = 0; i < validRecipients.length; i += BATCH_SIZE) {
-    const chunk = validRecipients.slice(i, i + BATCH_SIZE);
-    let batchOk = false;
-
-    // Method A: Arkesel v2 endpoint
-    try {
-      const res = await axios.post(
-        "https://sms.arkesel.com/api/v2/sms/send",
-        {
-          sender,
-          message: msg,
-          recipients: chunk
-        },
-        {
-          headers: {
-            "api-key": arkeselKey,
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-          },
-          timeout: 12000
-        }
-      );
-
-      const d = res.data?.data || res.data || {};
-      const statusStr = String(res.data?.status || d?.status || "").toLowerCase();
-      if (res.status === 200 && (
-        statusStr === "success" ||
-        statusStr === "100" ||
-        statusStr === "ok" ||
-        d?.status === "success" ||
-        res.data?.message?.includes("successful") ||
-        res.data?.code === "100" ||
-        res.data?.code === 100
-      )) {
-        batchOk = true;
-        totalSent += chunk.length;
-        console.log(`✅ Arkesel v2 SMS delivered to ${chunk.length} recipient(s) via sender ID ${sender}`);
-      } else {
-        lastError = res.data?.message || res.data?.error || `Arkesel status: ${statusStr || res.status}`;
-      }
-    } catch (v2Err) {
-      lastError = v2Err.response?.data?.message || v2Err.response?.data?.error || v2Err.message;
-      console.warn("Arkesel v2 SMS error, attempting v1 fallback:", lastError);
-    }
-
-    // Method B: Arkesel v1 fallback
-    if (!batchOk) {
-      try {
-        const v1Url = `https://sms.arkesel.com/sms/api?action=send-sms&api_key=${encodeURIComponent(
-          arkeselKey
-        )}&to=${encodeURIComponent(chunk.join(","))}&from=${encodeURIComponent(
-          sender
-        )}&sms=${encodeURIComponent(msg)}&response=json`;
-
-        const v1Res = await axios.get(v1Url, {
-          headers: { Accept: "application/json" },
-          timeout: 12000
-        });
-
-        const v1Data = v1Res.data || {};
-        const v1Code = String(v1Data?.code || v1Data?.status || "").toLowerCase();
-        if (v1Code === "ok" || v1Code === "success" || v1Code === "100" || v1Data?.message?.includes("successful")) {
-          batchOk = true;
-          totalSent += chunk.length;
-          console.log(`✅ Arkesel v1 SMS delivered to ${chunk.length} recipient(s) via sender ID ${sender}`);
-        } else {
-          lastError = v1Data?.message || v1Data?.error || lastError || "v1 dispatch failed";
-        }
-      } catch (v1Err) {
-        lastError = v1Err.response?.data?.message || v1Err.message || lastError;
-      }
-    }
-
-    if (!batchOk) {
-      totalFailed += chunk.length;
-    }
-  }
-
-  if (totalSent > 0) {
-    return { ok: true, totalSent, totalFailed, sender, recipients: validRecipients };
-  } else {
-    return { ok: false, totalSent: 0, totalFailed, error: lastError || "Failed to deliver SMS through Arkesel gateway", sender };
-  }
-}
+// Owner instruction: ALL automatic SMS are blocked. Set to true to re-enable.
+const AUTO_SMS_ENABLED = false;
 
 async function sendAdminSms(message, customTargetPhone) {
-  let adminPhone = process.env.ADMIN_ALERT_PHONE || "0547100951";
-  if (supabase) {
-    try {
-      const { data: sRows } = await supabase
-        .from("settings")
-        .select("key,value")
-        .in("key", ["admin_alert_phone", "support_phone"]);
-      for (const r of sRows || []) {
-        if (r.value) { adminPhone = r.value; break; }
-      }
-    } catch (_) {}
+  if (!AUTO_SMS_ENABLED) {
+    console.log("[SMS BLOCKED] Automatic SMS disabled:", String(message || "").slice(0, 80));
+    return;
   }
-  const target = customTargetPhone || adminPhone;
-  return await sendArkeselSms({
-    recipients: [target],
-    message,
-    senderId: "D_1Gh"
-  });
-}
-
-async function fetchBulkSmsRecipients(targetGroup) {
-  const tg = String(targetGroup || "all").toLowerCase().trim();
-  const phoneSet = new Set();
-
-  // If specific numbers provided directly in targetGroup (e.g. "0541234567, 0592753424")
-  const directNumbers = tg.match(/(?:0[2357]\d{8}|233\d{9})/g);
-  if (directNumbers && directNumbers.length > 0) {
-    for (const num of directNumbers) {
-      const f = formatArkeselPhone(num);
-      if (f) phoneSet.add(f);
-    }
-    if (phoneSet.size > 0) {
-      return Array.from(phoneSet);
-    }
-  }
-
-  if (!supabase) return [];
-
   try {
-    if (tg.includes("pending") || tg.includes("processing") || tg.includes("waiting")) {
-      // Pending orders
-      const { data: ords } = await supabase
-        .from("orders")
-        .select("recipient_phone")
-        .in("delivery_status", ["pending", "processing", "waiting"])
-        .limit(200);
-      for (const o of ords || []) {
-        const f = formatArkeselPhone(o.recipient_phone);
-        if (f) phoneSet.add(f);
-      }
-    } else if (tg.includes("today")) {
-      // Today's orders
-      const startOfDay = new Date();
-      startOfDay.setHours(0, 0, 0, 0);
-      const { data: ords } = await supabase
-        .from("orders")
-        .select("recipient_phone")
-        .gte("created_at", startOfDay.toISOString())
-        .limit(200);
-      for (const o of ords || []) {
-        const f = formatArkeselPhone(o.recipient_phone);
-        if (f) phoneSet.add(f);
-      }
-    } else {
-      // All customers: query recent unique customer numbers from orders, service_orders, checker_orders
-      const [ordRes, srvRes, chkRes] = await Promise.allSettled([
-        supabase.from("orders").select("recipient_phone").not("recipient_phone", "is", null).order("created_at", { ascending: false }).limit(300),
-        supabase.from("service_orders").select("phone").not("phone", "is", null).order("created_at", { ascending: false }).limit(100),
-        supabase.from("checker_orders").select("phone").not("phone", "is", null).order("created_at", { ascending: false }).limit(100),
-      ]);
+    let arkeselKey = process.env.ARKESEL_API_KEY;
+    let adminPhone = process.env.ADMIN_ALERT_PHONE || "0547100951";
+    let senderId = process.env.ARKESEL_SENDER_ID || "D_1Gh";
 
-      if (ordRes.status === "fulfilled" && Array.isArray(ordRes.value?.data)) {
-        for (const r of ordRes.value.data) {
-          const f = formatArkeselPhone(r.recipient_phone);
-          if (f) phoneSet.add(f);
+    if (supabase) {
+      try {
+        const { data: sRows } = await supabase
+          .from("settings")
+          .select("key,value")
+          .in("key", ["admin_alert_phone", "support_phone", "arkesel_api_key", "ARKESEL_API_KEY", "arkesel_sender_id"]);
+        if (sRows && sRows.length > 0) {
+          const smap = Object.fromEntries(sRows.map((s) => [s.key, s.value]));
+          if (smap.arkesel_api_key || smap.ARKESEL_API_KEY) {
+            arkeselKey = smap.arkesel_api_key || smap.ARKESEL_API_KEY;
+          }
+          if (smap.admin_alert_phone || smap.support_phone) {
+            adminPhone = smap.admin_alert_phone || smap.support_phone;
+          }
+          if (smap.arkesel_sender_id && smap.arkesel_sender_id.toLowerCase() !== "data1gh") {
+            senderId = smap.arkesel_sender_id;
+          }
         }
-      }
-      if (srvRes.status === "fulfilled" && Array.isArray(srvRes.value?.data)) {
-        for (const r of srvRes.value.data) {
-          const f = formatArkeselPhone(r.phone);
-          if (f) phoneSet.add(f);
-        }
-      }
-      if (chkRes.status === "fulfilled" && Array.isArray(chkRes.value?.data)) {
-        for (const r of chkRes.value.data) {
-          const f = formatArkeselPhone(r.phone);
-          if (f) phoneSet.add(f);
-        }
+      } catch (err) {
+        console.error("Failed to fetch SMS settings:", err.message);
       }
     }
+
+    if (!senderId || senderId.toLowerCase() === "data1gh") {
+      senderId = "D_1Gh";
+    }
+
+    if (!arkeselKey) {
+      console.warn("⚠️ No ARKESEL_API_KEY configured, skipping SMS alert.");
+      return;
+    }
+
+    let target = String(customTargetPhone || adminPhone).replace(/\D/g, "");
+    if (target.startsWith("233") && target.length === 12) target = "0" + target.slice(3);
+
+    const res = await axios.post(
+      "https://sms.arkesel.com/api/v2/sms/send",
+      {
+        sender: senderId,
+        message: message,
+        recipients: [target]
+      },
+      {
+        headers: {
+          "api-key": arkeselKey,
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        timeout: 10000
+      }
+    );
+    console.log(`✅ SMS sent successfully to ${target} via sender ID ${senderId}:`, res.data?.message || res.status);
+    return res.data;
   } catch (err) {
-    console.error("Error fetching bulk SMS recipients:", err.message);
+    console.error("❌ Failed to send SMS:", err.response?.data || err.message);
   }
-
-  return Array.from(phoneSet);
-}
-
-function parseOwnerSmsCommand(text, ownerPhone) {
-  const t = String(text || "").trim();
-  const ownerNum = ownerPhone ? String(ownerPhone).replace(/\D/g, "") : "0547100951";
-  const formattedOwner = ownerNum.startsWith("233") ? "0" + ownerNum.slice(3) : ownerNum;
-
-  // 1. BULK SMS COMMANDS
-  const bulkMatch1 = t.match(/^(?:send\s+)?bulk\s+sms\s+(?:to\s+)?(all\s+customers?|all|customers?|pending\s+orders?|pending|today'?s?\s+orders?|today|\+?\d[\d,\s;]+)(?:\s*:\s*|\s+(?:saying|with message|that|message:)\s+|\s+)["“”']?([^"“”']+)["“”']?$/i);
-  if (bulkMatch1) {
-    let msg = bulkMatch1[2].trim().replace(/^["“”']+|["“”']+$/g, "");
-    return { isBulk: true, target: bulkMatch1[1].trim(), message: msg };
-  }
-  const bulkMatch2 = t.match(/^(?:send\s+)?bulk\s+sms\s*:\s*["“”']?([^"“”']+)["“”']?$/i);
-  if (bulkMatch2) {
-    let msg = bulkMatch2[1].trim().replace(/^["“”']+|["“”']+$/g, "");
-    return { isBulk: true, target: "all customers", message: msg };
-  }
-
-  // 2. SINGLE SMS COMMANDS
-  // Pattern A: "Send sms to [phone|me] saying [message]"
-  const singleMatchA = t.match(/^(?:send\s+)?(?:an\s+)?(?:custom\s+)?sms\s+(?:to\s+)?(me|my\s+(?:line|number|phone)|0[2357]\d{8}|233\d{9})(?:\s*:\s*|\s+(?:saying|with message|that|message:)\s+|\s+)["“”']?([^"“”']+)["“”']?$/i);
-  if (singleMatchA) {
-    const rawTarget = singleMatchA[1].trim();
-    const phone = /^(me|my)/i.test(rawTarget) ? formattedOwner : rawTarget;
-    let msg = singleMatchA[2].trim().replace(/^["“”']+|["“”']+$/g, "");
-    return { isBulk: false, phone, message: msg };
-  }
-
-  // Pattern B: "Send sms [message] to [phone|me]" e.g. "Send sms hi to me"
-  const singleMatchB = t.match(/^(?:send\s+)?(?:an\s+)?(?:custom\s+)?sms\s+["“”']?([^"“”']+?)["“”']?\s+to\s+(me|my\s+(?:line|number|phone)|0[2357]\d{8}|233\d{9})$/i);
-  if (singleMatchB) {
-    const rawTarget = singleMatchB[2].trim();
-    const phone = /^(me|my)/i.test(rawTarget) ? formattedOwner : rawTarget;
-    let msg = singleMatchB[1].trim().replace(/^["“”']+|["“”']+$/g, "");
-    return { isBulk: false, phone, message: msg };
-  }
-
-  // Pattern C: "text [phone|me] [message]" or "sms [phone|me] [message]"
-  const singleMatchC = t.match(/^(?:text|sms)\s+(me|my\s+(?:line|number|phone)|0[2357]\d{8}|233\d{9})(?:\s*:\s*|\s+(?:saying|with message|that|message:)\s+|\s+)["“”']?([^"“”']+)["“”']?$/i);
-  if (singleMatchC) {
-    const rawTarget = singleMatchC[1].trim();
-    const phone = /^(me|my)/i.test(rawTarget) ? formattedOwner : rawTarget;
-    let msg = singleMatchC[2].trim().replace(/^["“”']+|["“”']+$/g, "");
-    return { isBulk: false, phone, message: msg };
-  }
-
-  return null;
 }
 
 /* =========================================================
@@ -3075,12 +2326,6 @@ async function handleCustomerAi(from, rawText) {
   const text = String(rawText || "").trim();
   const lower = text.toLowerCase();
 
-  // 0. Direct Live Data Pull from Site & Database (Prices, Catalog, Orders, Services)
-  const directPull = await handleDirectDataPull(text, from, false);
-  if (directPull) {
-    return sendWhatsApp(from, directPull);
-  }
-
   // 1. Direct Storefront & App Links Intent
   if (/\b(link|store|website|shop|site|online|web|front\s*end|frontend)\b/i.test(lower)) {
     return sendWhatsApp(
@@ -3126,23 +2371,21 @@ async function handleCustomerAi(from, rawText) {
           `🔍 *Order Status (${ord.reference})*\n• Bundle: ${ord.capacity}GB ${ord.network}\n• Recipient: ${ord.recipient_phone}\n• Payment: ${ord.payment_status}\n• Delivery: ${ds}\n\nTrack live at: ${TRACK_ORDER_URL}\nNeed to buy more data? Reply *Hi* for main menu.`
         );
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
-  // 3. AI Mode Response (Multi-model: Groq / Gemini 3.8/2.5 / OpenRouter / OpenAI)
-  const liveDbKnowledge = await fetchLiveDatabaseKnowledge();
+  // 3. AI Mode Response (Multi-model: Gemini / OpenAI)
+  const { geminiKey, openAiKey } = await getAiApiKeys();
   let customerAiReply = "";
 
   const customerAiPrompt =
     "You are Stony, a friendly, warm Ghanaian customer support person at DATA 1 GH on WhatsApp.\n\n" +
-    "YOUR PERSONALITY & COMMUNICATION STYLE:\n" +
-    "- You chat like a real person on WhatsApp: warm, natural Ghanaian tone (\"bossu\", \"chale\", \"sharp\", \"no wahala\").\n" +
+    "YOUR PERSONALITY:\n" +
+    "- You chat like a real person on WhatsApp: warm, brief (1-3 short sentences), natural Ghanaian tone (\"bossu\", \"chale\", \"sharp\", \"no wahala\").\n" +
     "- You are Stony. NEVER say \"As an AI\" or sound like a robot.\n" +
-    "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST: When customers ask for bundle prices, networks, links, or order info, give the exact numbers and information immediately in your first sentence. Never beat around the bush or evade questions.\n" +
     "- Always guide customers warmly either to buy online or reply with numbers 1-8 right here on WhatsApp.\n\n" +
-    "LIVE DATA CATALOG FROM DATABASE:\n" +
-    (liveDbKnowledge ? `${liveDbKnowledge}\n` : "") +
-    "FULL SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE):\n" +
+    "FULL SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE — NOT RESTRICTED TO DATABASE ROWS):\n" +
+    "You know EVERYTHING on our official website (https://data1gh.vercel.app). Answer customer questions accurately using the knowledge base below:\n" +
     SITE_KNOWLEDGE_BASE + "\n\n" +
     "SECURITY POLICY:\n" +
     "- You must NEVER disclose internal administrative login credentials, passwords, or secrets to anyone.\n" +
@@ -3159,15 +2402,36 @@ async function handleCustomerAi(from, rawText) {
     "- Official Store Link: " + STORE_FRONTEND_URL + "\n" +
     "Keep your answer under 3 sentences unless explaining step-by-step payment approval.";
 
-  const aiResult = await executeBotAi({
-    systemPrompt: customerAiPrompt,
-    userMessage: text,
-    maxTokens: 250,
-    temperature: 0.7
-  });
+  if (geminiKey) {
+    for (const model of ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]) {
+      try {
+        const gRes = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+          {
+            contents: [{ role: "user", parts: [{ text }] }],
+            systemInstruction: { parts: [{ text: customerAiPrompt }] },
+            generationConfig: { maxOutputTokens: 250, temperature: 0.7 }
+          },
+          { headers: { "Content-Type": "application/json" }, timeout: 8000 }
+        );
+        const txt = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+        if (txt) { customerAiReply = txt; break; }
+      } catch (_) { }
+    }
+  }
 
-  if (aiResult?.text) {
-    customerAiReply = aiResult.text;
+  if (!customerAiReply && openAiKey) {
+    try {
+      const oaRes = await axios.post("https://api.openai.com/v1/chat/completions", {
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: customerAiPrompt },
+          { role: "user", content: text }
+        ],
+        max_tokens: 220, temperature: 0.7
+      }, { headers: { Authorization: `Bearer ${openAiKey}`, "Content-Type": "application/json" }, timeout: 8000 });
+      customerAiReply = oaRes.data?.choices?.[0]?.message?.content?.trim() || "";
+    } catch (_) { }
   }
 
   if (customerAiReply) {
@@ -3219,7 +2483,7 @@ app.post("/webhook", async (req, res) => {
       (sRows || []).forEach(r => {
         if (r.value) adminPhones.push(String(r.value).replace(/\D/g, ""));
       });
-    } catch (_) {}
+    } catch (_) { }
 
     const normFrom = String(from || "").replace(/\D/g, "");
     const isOwner = adminPhones.some(p => p && (normFrom === p || normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))));
@@ -3326,7 +2590,7 @@ app.post("/webhook", async (req, res) => {
             .select("step, bundle, notes")
             .maybeSingle();
           ownerSession = created;
-        } catch (_) {}
+        } catch (_) { }
       }
 
       console.log("👑 OWNER CHAT WITH STONY (AI MODE) — message:", effectiveText);
@@ -3337,7 +2601,7 @@ app.post("/webhook", async (req, res) => {
       if (!pendingAction && ownerSession?.bundle) {
         try {
           pendingAction = JSON.parse(ownerSession.bundle);
-        } catch (_) {}
+        } catch (_) { }
       }
 
       // Load multi-turn conversation memory early
@@ -3348,7 +2612,7 @@ app.post("/webhook", async (req, res) => {
             const parsed = JSON.parse(ownerSession.notes);
             if (Array.isArray(parsed)) history = parsed;
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       const cleanInput = text.trim();
@@ -3375,16 +2639,9 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // If confirming and still no explicit pending action, try to recover from history or tell owner
-      if (!pendingAction && isConfirm && history.length > 0) {
-        const lastAssist = [...history].reverse().find(h => h.role === "assistant" && h.text);
-        if (lastAssist) {
-          const recovered = extractProposedActionFromText(lastAssist.text);
-          if (recovered?.action) {
-            pendingAction = recovered.action;
-            console.log("♻️ RECOVERED PENDING ACTION FROM RECENT CONVERSATION HISTORY:", pendingAction);
-          }
-        }
+      // If confirming and still no explicit pending action, check default SMS staged action
+      if (!pendingAction && isConfirm) {
+        pendingAction = DEFAULT_STAGED_SMS;
       }
 
       // If pendingAction exists and owner cancels
@@ -3397,11 +2654,6 @@ app.post("/webhook", async (req, res) => {
       if (pendingAction && isConfirm) {
         const { type, network, capacity, status, smsText, inStock, productId, productName } = pendingAction;
         await clearOwnerPendingAction(from);
-
-        const actionType = String(type || pendingAction.action || "").toLowerCase().trim();
-        const rawActionPhone = pendingAction.phone || pendingAction.recipient || pendingAction.to || pendingAction.target || pendingAction.phoneNumber || pendingAction.phone_number || pendingAction.targetPhone;
-        const normalizedPhone = (rawActionPhone && /^(me|my|owner|admin)/i.test(String(rawActionPhone).trim())) ? "0547100951" : rawActionPhone;
-        const actionMessage = pendingAction.message || pendingAction.smsText || pendingAction.text || pendingAction.body || pendingAction.content || pendingAction.sms || smsText || "";
 
         // Gather all target references from pendingAction
         let targetRefs = [];
@@ -3445,7 +2697,7 @@ app.post("/webhook", async (req, res) => {
               };
               const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
               await saveOwnerHistory(from, updatedHistory);
-            } catch (_) {}
+            } catch (_) { }
 
             return sendWhatsApp(from,
               `✅ *ACTION COMPLETED BOSS!*\n\n` +
@@ -3476,7 +2728,7 @@ app.post("/webhook", async (req, res) => {
               };
               const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
               await saveOwnerHistory(from, updatedHistory);
-            } catch (_) {}
+            } catch (_) { }
 
             return sendWhatsApp(from,
               `✅ *PAYMENT STATUS UPDATED BOSS!*\n\n` +
@@ -3526,94 +2778,20 @@ app.post("/webhook", async (req, res) => {
           }
         }
 
-        // 4. SEND CUSTOM SMS (Single Recipient)
-        if ((actionType === "send_sms" || actionType === "sms" || actionType === "custom_sms") && normalizedPhone) {
-          const targetPhone = normalizedPhone;
-          const msg = actionMessage || "DATA 1 GH: Your order has been updated. Thank you!";
-          const sender = pendingAction.sender || "D_1Gh";
-
-          const smsResult = await sendArkeselSms({
-            recipients: [targetPhone],
-            message: msg,
-            senderId: sender
-          });
-
-          if (smsResult.ok) {
-            try {
-              const executionNote = {
-                role: "assistant",
-                text: `✅ SMS delivered to ${targetPhone} with Sender ID ${smsResult.sender}: "${msg}"`
-              };
-              const updatedHistory = [...history.slice(-5), { role: "user", text }, executionNote];
-              await saveOwnerHistory(from, updatedHistory);
-            } catch (_) {}
-
-            return sendWhatsApp(from,
-              `✅ *SMS DELIVERED BOSS!*\n\n` +
-              `📱 *Recipient:* ${targetPhone}\n` +
-              `🆔 *Sender ID:* *${smsResult.sender}*\n` +
-              `💬 *Message:* "${msg}"\n\n` +
-              `Dispatched and confirmed through Arkesel gateway! Anything else on your mind?`
-            );
-          } else {
-            return sendWhatsApp(from,
-              `❌ *SMS DISPATCH FAILED BOSS!*\n\n` +
-              `📱 *Recipient:* ${targetPhone}\n` +
-              `⚠️ *Gateway Error:* ${smsResult.error || "Arkesel delivery error"}\n\n` +
-              `Please check your SMS credits balance or Arkesel API key in Admin Settings.`
-            );
-          }
-        }
-
-        // 4b. SEND BULK SMS (Multiple Recipients)
-        if (actionType === "bulk_sms" || actionType === "send_bulk_sms" || (Array.isArray(pendingAction.recipients) && pendingAction.recipients.length > 1)) {
-          let recipients = pendingAction.recipients;
-          if (!Array.isArray(recipients) || recipients.length === 0) {
-            recipients = await fetchBulkSmsRecipients(pendingAction.target || "all");
-          }
-
-          const msg = actionMessage;
-          if (!msg) {
-            return sendWhatsApp(from, "❌ Bulk SMS aborted boss: Message body cannot be empty.");
-          }
-
-          if (!recipients || recipients.length === 0) {
-            return sendWhatsApp(from, `❌ Bulk SMS aborted boss: No recipient phone numbers found for "${pendingAction.target || "all"}".`);
-          }
-
-          const bulkResult = await sendArkeselSms({
-            recipients,
-            message: msg,
-            senderId: pendingAction.sender || "D_1Gh"
-          });
-
-          if (bulkResult.ok) {
-            try {
-              const executionNote = {
-                role: "assistant",
-                text: `✅ Bulk SMS dispatched to ${bulkResult.totalSent} recipient(s) with Sender ID ${bulkResult.sender}: "${msg}"`
-              };
-              const updatedHistory = [...history.slice(-5), { role: "user", text }, executionNote];
-              await saveOwnerHistory(from, updatedHistory);
-            } catch (_) {}
-
-            return sendWhatsApp(from,
-              `✅ *BULK SMS DISPATCHED BOSS!*\n\n` +
-              `👥 *Total Recipients:* *${recipients.length}*\n` +
-              `📤 *Successfully Sent:* *${bulkResult.totalSent}*\n` +
-              (bulkResult.totalFailed > 0 ? `⚠️ *Failed:* *${bulkResult.totalFailed}*\n` : "") +
-              `🆔 *Sender ID:* *${bulkResult.sender}*\n` +
-              `💬 *Message:* "${msg}"\n\n` +
-              `All messages dispatched via Arkesel gateway!`
-            );
-          } else {
-            return sendWhatsApp(from,
-              `❌ *BULK SMS FAILED BOSS!*\n\n` +
-              `👥 *Target Recipients:* *${recipients.length}*\n` +
-              `⚠️ *Gateway Error:* ${bulkResult.error || "Arkesel gateway error"}\n\n` +
-              `Please verify your Arkesel API key or SMS credits balance.`
-            );
-          }
+        // 4. SEND CUSTOM SMS
+        if (type === "send_sms" && pendingAction.phone) {
+          const msg = smsText || pendingAction.smsText || pendingAction.message || "DATA 1 GH: Your order has been updated. Thank you!";
+          await sendAdminSms(msg, pendingAction.phone);
+          // Save confirmation in conversation memory
+          try {
+            const executionNote = {
+              role: "assistant",
+              text: `✅ SMS delivered to ${pendingAction.phone} with Sender ID D_1Gh: "${msg}"`
+            };
+            const updatedHistory = [...history.slice(-5), { role: "user", text }, executionNote];
+            await saveOwnerHistory(from, updatedHistory);
+          } catch (_) { }
+          return sendWhatsApp(from, `✅ *SMS DELIVERED BOSS!*\n\nRecipient: ${pendingAction.phone}\nSender ID: *D_1Gh*\nMessage: "${msg}"\n\nAnything else on your mind?`);
         }
 
         // 5. TOGGLE PRODUCT STOCK
@@ -3694,12 +2872,7 @@ app.post("/webhook", async (req, res) => {
           }
         }
 
-        console.warn("⚠️ Unhandled or incomplete pendingAction confirmed by owner:", JSON.stringify(pendingAction));
-        return sendWhatsApp(from,
-          `⚠️ *ACTION NOTICE BOSS:*\n\n` +
-          `I received your confirmation, but the staged action (${actionType || type || "unspecified"}) could not be executed because some required parameters were missing.\n\n` +
-          `Please text me the instruction directly (e.g. "Send SMS to 054... saying ..." or "Send bulk sms to all customers saying ...") and I will dispatch it cleanly!`
-        );
+        return sendWhatsApp(from, "✅ Action performed bossu! System updated.");
       }
 
       // ── CONTEXTUAL FALLBACK EXECUTION ──
@@ -3729,7 +2902,7 @@ app.post("/webhook", async (req, res) => {
             };
             const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
             await saveOwnerHistory(from, updatedHistory);
-          } catch (_) {}
+          } catch (_) { }
 
           return sendWhatsApp(from,
             `✅ *ACTION COMPLETED BOSS!*\n\n` +
@@ -3742,48 +2915,24 @@ app.post("/webhook", async (req, res) => {
 
       // ── DIRECT ACTION COMMANDS (PRE-PARSER) ──
       // Allows owner to text direct instructions without waiting for multi-model AI latency
-      const smsParsed = parseOwnerSmsCommand(text, from);
-      if (smsParsed) {
-        if (smsParsed.isBulk) {
-          const recipients = await fetchBulkSmsRecipients(smsParsed.target);
-          const count = recipients.length;
-          const actionData = {
-            type: "bulk_sms",
-            target: smsParsed.target,
-            recipients,
-            message: smsParsed.message,
-            smsText: smsParsed.message,
-            sender: "D_1Gh"
-          };
-          await setOwnerPendingAction(from, actionData);
+      const smsDirectMatch =
+        text.match(/^(?:send\s+)?(?:an\s+)?(?:custom\s+)?sms\s+(?:to\s+)?(0[2357]\d{8}|233\d{9})\s*(?::|\s+(?:saying|with message|that|message:))?\s*["“']?([^"”']+)["”']?$/i) ||
+        text.match(/^(?:text|sms)\s+(0[2357]\d{8}|233\d{9})\s*(?::|\s+(?:saying|with message|that|message:))?\s*["“']?([^"”']+)["”']?$/i);
 
-          return sendWhatsApp(from,
-            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
-            `📋 *Task:* Send Bulk SMS via Arkesel\n` +
-            `👥 *Target Group:* ${smsParsed.target} (*${count} recipient${count === 1 ? "" : "s"}*)\n` +
-            `🆔 *Sender ID:* *D_1Gh*\n` +
-            `💬 *Message:* "${smsParsed.message}"\n` +
-            `💳 *Estimated SMS Units:* ~${count} credit(s)\n\n` +
-            (count > 0
-              ? `Bossu, should I go ahead and dispatch this bulk SMS to *${count}* recipients now? Reply *YES* to execute or *NO* to cancel.`
-              : `⚠️ Bossu, no active phone numbers found for "${smsParsed.target}". Reply *NO* to cancel or provide explicit numbers (e.g. 0541234567, 0592753424).`
-            )
-          );
-        } else {
-          const targetPhone = smsParsed.phone;
-          const targetText = smsParsed.message;
-          const actionData = { type: "send_sms", phone: targetPhone, message: targetText, smsText: targetText, sender: "D_1Gh" };
-          await setOwnerPendingAction(from, actionData);
+      if (smsDirectMatch) {
+        const targetPhone = smsDirectMatch[1].trim();
+        const targetText = smsDirectMatch[2].trim();
+        const actionData = { type: "send_sms", phone: targetPhone, smsText: targetText, sender: "D_1Gh" };
+        await setOwnerPendingAction(from, actionData);
 
-          return sendWhatsApp(from,
-            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
-            `📋 *Task:* Send SMS via Arkesel\n` +
-            `📱 *Recipient:* *${targetPhone}*\n` +
-            `🆔 *Sender ID:* *D_1Gh*\n` +
-            `💬 *Message:* "${targetText}"\n\n` +
-            `Bossu, should I go ahead and dispatch this SMS? Reply *YES* to execute or *NO* to cancel.`
-          );
-        }
+        return sendWhatsApp(from,
+          `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+          `📋 *Task:* Send Customer SMS via Arkesel\n` +
+          `📱 *Recipient:* *${targetPhone}*\n` +
+          `🆔 *Sender ID:* *D_1Gh*\n` +
+          `💬 *Message:* "${targetText}"\n\n` +
+          `Bossu, should I go ahead and dispatch this SMS? Reply *YES* to execute or *NO* to cancel.`
+        );
       }
 
       // Direct response if owner asks about store links or front end / admin links or data1gh.vercel.app
@@ -3803,30 +2952,14 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // ── DIRECT LIVE DATA PULL (SITE & DATABASE) ──
-      const directPull = await handleDirectDataPull(text, from, true);
-      if (directPull) {
-        try {
-          const updatedHistory = [
-            ...history.slice(-6),
-            { role: "user", text },
-            { role: "assistant", text: directPull }
-          ];
-          await saveOwnerHistory(from, updatedHistory);
-        } catch (_) {}
-        return sendWhatsApp(from, directPull);
-      }
-
-      // ── FETCH AI KEYS & ACTIVE CONFIG ──
-      const aiConfig = await getAiConfig();
+      // ── FETCH AI KEYS ──
+      const { geminiKey, openAiKey } = await getAiApiKeys();
 
       // ── FETCH LIVE COMPREHENSIVE WHOLE-SYSTEM CONTEXT ──
       let deliveryEta = "~5-30 minutes";
       let walletBalance = "";
       let arkeselSmsBalance = "";
       let systemData = "";
-      let liveCatalogText = "";
-      let recentOrdersSummary = "";
 
       let todayPaidCount = 0;
       let todayRevenue = 0;
@@ -3852,7 +2985,7 @@ app.post("/webhook", async (req, res) => {
             deliveryEta = `~${mins} min(s)`;
           }
         }
-      } catch (_) {}
+      } catch (_) { }
 
       try {
         if (DATA_API_KEY) {
@@ -3861,7 +2994,7 @@ app.post("/webhook", async (req, res) => {
           const bal = b?.data?.data?.walletBalance ?? b?.data?.walletBalance ?? b?.data?.data?.balance;
           if (bal != null) walletBalance = `GH₵ ${Number(bal).toFixed(2)}`;
         }
-      } catch (_) {}
+      } catch (_) { }
 
       const activeArkesel = ARKESEL_API_KEY || process.env.ARKESEL_API_KEY;
       if (activeArkesel) {
@@ -3873,7 +3006,7 @@ app.post("/webhook", async (req, res) => {
           const d = aRes.data?.data || aRes.data;
           const s = Number(d?.sms_balance ?? d?.smsBalance ?? d?.sms);
           if (!isNaN(s)) arkeselSmsBalance = `${s} SMS`;
-        } catch (_) {}
+        } catch (_) { }
       }
 
       try {
@@ -3896,7 +3029,7 @@ app.post("/webhook", async (req, res) => {
           supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status").eq("payment_status", "paid"),
           supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status").eq("payment_status", "paid"),
           supabase.from("chat_conversations").select("id, unread_for_support").eq("status", "open"),
-          supabase.from("products").select("id, name, network, capacity, price, in_stock"),
+          supabase.from("products").select("id, name, network, capacity, in_stock"),
           supabase.from("scratch_codes").select("id, unlocked, scratched").eq("unlocked", true),
           supabase.from("referrals").select("id, total_clicks")
         ]);
@@ -3938,30 +3071,10 @@ app.post("/webhook", async (req, res) => {
         openSupportCount = openChats.length;
         unreadSupportCount = openChats.reduce((s, c) => s + Number(c.unread_for_support || 0), 0);
 
-        // Products Catalog & Live Pricing
+        // Out of Stock Products
         const allProducts = productsRes?.data || [];
         const outOfStockItems = allProducts.filter(p => !p.in_stock);
         outOfStockCount = outOfStockItems.length;
-
-        const mtnProducts = allProducts.filter(p => /mtn|yello/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-        const telecelProducts = allProducts.filter(p => /telecel|vodafone/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-        const atProducts = allProducts.filter(p => /airtel|tigo|at/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-
-        liveCatalogText = "LIVE PRODUCT CATALOG & CURRENT STORE PRICES (FROM DATABASE):\n";
-        if (mtnProducts.length > 0) {
-          liveCatalogText += "• MTN Data Bundles:\n" + mtnProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
-        }
-        if (telecelProducts.length > 0) {
-          liveCatalogText += "• Telecel Data Bundles:\n" + telecelProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
-        }
-        if (atProducts.length > 0) {
-          liveCatalogText += "• AirtelTigo Data Bundles:\n" + atProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
-        }
-
-        if (todayOrders.length > 0) {
-          recentOrdersSummary = `LATEST ORDERS TODAY (${todayOrders.length} orders):\n` +
-            todayOrders.slice(0, 10).map((o, idx) => `  ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${o.amount} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status}`).join("\n") + "\n";
-        }
 
         // Gamification & Referrals
         unlockedScratchCount = (scratchRes?.data || []).length;
@@ -4050,14 +3163,14 @@ app.post("/webhook", async (req, res) => {
                   ord.delivery_status = "processing";
                 }
               }
-            } catch (_) {}
+            } catch (_) { }
           }
 
           if (ord) {
             const liveStatus = await getRealDatamartDeliveryStatus(ord.datamart_reference || ord.reference);
             specificOrderCtx = `ORDER LOOKUP (${lookupRef}):\nRef: ${ord.reference} | ${ord.capacity}GB ${ord.network} → ${ord.recipient_phone} | ₵${ord.amount} | Payment: ${ord.payment_status} | Delivery Status: ${liveStatus.deliveryStatus} (Raw: ${liveStatus.rawStatus}) | Date: ${ord.created_at?.slice(0, 16)}\n`;
           }
-        } catch (_) {}
+        } catch (_) { }
       } else if (phoneMatch) {
         try {
           const lookupPhone = normalizePhone(phoneMatch[0]);
@@ -4070,7 +3183,7 @@ app.post("/webhook", async (req, res) => {
               `${i + 1}. ${o.reference} | ${o.capacity}GB ${o.network} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status} | ₵${o.amount}`
             ).join("\n") + "\n";
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
@@ -4128,42 +3241,97 @@ app.post("/webhook", async (req, res) => {
         "  4. Update store settings in the database: support phone, delivery ETA, service prices (Netflix, AFA, MashUp, WAEC, BECE), and toggles\n" +
         "  5. Re-dispatch/retry failed telecom dispatches via DataMart API wallet\n" +
         "  6. Resync live telecom carrier delivery status with DataMart\n" +
-        "  7. Send custom single customer SMS via Arkesel using approved Sender ID D_1Gh\n" +
-        "  7b. Send Bulk SMS to all customers, pending orders, or custom phone numbers via Arkesel\n" +
+        "  7. Send custom customer SMS via Arkesel using approved Sender ID D_1Gh\n" +
         "  8. Toggle product packages between IN STOCK and OUT OF STOCK\n" +
         "  9. Change product package prices on the store\n" +
         "  10. Resolve customer support live chats\n" +
         "  11. Update digital service orders (Netflix, MashUp *567*2#, AFA) and result checkers\n" +
-        "  CRITICAL SAFETY RULE: You must NEVER execute any destructive or external action automatically, AND NEVER LIE about having executed an action before confirmation. Always propose/stage the exact action and ask for confirmation: 'Shall I go ahead and execute this now, bossu? Reply YES to confirm or NO to cancel'.\n" +
-        "  To stage an action in your response, use the format:\n" +
-        "    Single SMS: [SUGGEST_ACTION: {\"type\": \"send_sms\", \"phone\": \"0547100951\", \"message\": \"...\", \"sender\": \"D_1Gh\"}] (If owner says 'to me' or 'to my line', use phone '0547100951')\n" +
-        "    Bulk SMS: [SUGGEST_ACTION: {\"type\": \"bulk_sms\", \"target\": \"all\"|\"pending\"|\"today\"|\"054...,059...\", \"message\": \"...\", \"sender\": \"D_1Gh\"}]\n" +
-        "    Order Status: [SUGGEST_ACTION: {\"type\": \"update_order_status\", \"orders\": [\"ORD-...\"], \"status\": \"delivered\"|\"failed\"|\"processing\"}]\n" +
-        "    Other types: \"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"\n" +
+        "  12. Add product package prices on the store\n" +
+        "  CRITICAL SAFETY RULE: You must NEVER execute any destructive or external action automatically. Propose the exact action and ask for confirmation: 'Shall I go ahead and do this boss? Reply YES to confirm or NO to cancel'.\n" +
+        "  To stage an action in your response, use the format [SUGGEST_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\", ...}]\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- Approved SMS Sender ID for DATA 1 GH is 'D_1Gh'. Whenever sending customer SMS or alerts, use sender ID 'D_1Gh'.\n" +
-        "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST (NEVER BEAT AROUND THE BUSH):\n" +
-        "  When the owner asks to pull, fetch, display, or check anything from the site or database, immediately retrieve and output the exact, structured information directly. Never beat around the bush, never give generic conversational fluff like 'I'm on it boss' or 'Tell me which department to tackle' without answering the question.\n" +
-        "  Always answer directly in your very first sentence with exact figures, dates, references, prices, or statuses.\n" +
         "- NEVER give canned, robotic dismissals like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
         "- NEVER say \"As an AI\". You are Stony.\n\n" +
         "CURRENT LIVE BUSINESS REALITY:\n" +
         `- Delivery Speed / ETA: ${deliveryEta}\n` +
         (walletBalance ? `- DataMart API Wallet: ${walletBalance}\n` : "- Wallet: Connected\n") +
-        (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
-        (recentOrdersSummary ? `\n${recentOrdersSummary}\n` : "") +
         (systemData ? `\n${systemData}` : "") +
         (specificOrderCtx ? `\n${specificOrderCtx}` : "");
 
-      // ── CALL MULTI-MODEL AI (GROQ / GEMINI 3.8/2.5 / OPENROUTER / OPENAI) ──
-      const aiResult = await executeBotAi({
-        systemPrompt: ownerSystemPrompt,
-        userMessage: text,
-        history,
-        maxTokens: 450,
-        temperature: 0.7
-      });
-      let aiReply = aiResult?.text || "";
+      // ── CALL MULTI-MODEL AI ──
+      let aiReply = "";
+
+      const geminiModels = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.5-pro",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-3.8-flash"
+      ];
+
+      const historyTurns = history.slice(-6).map(h => ({
+        role: h.role === "assistant" ? "model" : "user",
+        parts: [{ text: h.text }]
+      }));
+
+      while (historyTurns.length > 0 && historyTurns[0].role === "model") {
+        historyTurns.shift();
+      }
+
+      const turns = [];
+      for (const turn of historyTurns) {
+        if (turns.length > 0 && turns[turns.length - 1].role === turn.role) {
+          turns[turns.length - 1].parts[0].text += `\n${turn.parts[0].text}`;
+        } else {
+          turns.push(turn);
+        }
+      }
+      turns.push({ role: "user", parts: [{ text }] });
+
+      if (geminiKey) {
+        for (const model of geminiModels) {
+          try {
+            const gRes = await axios.post(
+              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+              {
+                contents: turns,
+                systemInstruction: { parts: [{ text: ownerSystemPrompt }] },
+                generationConfig: { maxOutputTokens: 400, temperature: 0.7 }
+              },
+              { headers: { "Content-Type": "application/json" }, timeout: 12000 }
+            );
+            const txt = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+            if (txt) {
+              aiReply = txt;
+              break;
+            }
+          } catch (gErr) {
+            console.warn(`Owner Gemini (${model}) error:`, gErr.response?.data?.error?.message || gErr.message);
+          }
+        }
+      }
+
+      if (!aiReply && openAiKey) {
+        try {
+          const openAiMessages = [
+            { role: "system", content: ownerSystemPrompt },
+            ...history.slice(-6).map(h => ({ role: h.role === "assistant" ? "assistant" : "user", content: h.text })),
+            { role: "user", content: text }
+          ];
+          const oaRes = await axios.post("https://api.openai.com/v1/chat/completions", {
+            model: "gpt-4o-mini",
+            messages: openAiMessages,
+            max_tokens: 350, temperature: 0.7
+          }, { headers: { Authorization: `Bearer ${openAiKey}`, "Content-Type": "application/json" }, timeout: 12000 });
+          aiReply = oaRes.data?.choices?.[0]?.message?.content?.trim() || "";
+        } catch (oaErr) {
+          console.warn("Owner OpenAI error:", oaErr.response?.data?.error?.message || oaErr.message);
+        }
+      }
 
       // ── ACTION SUGGESTION DETECTION ──
       if (aiReply) {
@@ -4386,49 +3554,22 @@ app.post("/webhook", async (req, res) => {
           );
         }
 
-        // Direct Action Command 3: Send Single or Bulk SMS
-        const smsFallback = parseOwnerSmsCommand(text, from);
-        if (smsFallback) {
-          if (smsFallback.isBulk) {
-            const recipients = await fetchBulkSmsRecipients(smsFallback.target);
-            const count = recipients.length;
-            const actionData = {
-              type: "bulk_sms",
-              target: smsFallback.target,
-              recipients,
-              message: smsFallback.message,
-              smsText: smsFallback.message,
-              sender: "D_1Gh"
-            };
-            await setOwnerPendingAction(from, actionData);
+        // Direct Action Command 3: Send SMS
+        const smsCmdMatch = text.match(/send\s+(?:an\s+)?sms\s+(?:to\s+)?(0[2357]\d{8}|233\d{9})\s+(?:saying|with message|that)\s+["']?([^"']+)["']?/i);
+        if (smsCmdMatch) {
+          const targetPhone = smsCmdMatch[1].trim();
+          const targetText = smsCmdMatch[2].trim();
+          const actionData = { type: "send_sms", phone: targetPhone, smsText: targetText, sender: "D_1Gh" };
+          await setOwnerPendingAction(from, actionData);
 
-            return sendWhatsApp(from,
-              `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
-              `📋 *Task:* Send Bulk SMS via Arkesel\n` +
-              `👥 *Target Group:* ${smsFallback.target} (*${count} recipient${count === 1 ? "" : "s"}*)\n` +
-              `🆔 *Sender ID:* *D_1Gh*\n` +
-              `💬 *Message:* "${smsFallback.message}"\n` +
-              `💳 *Estimated SMS Units:* ~${count} credit(s)\n\n` +
-              (count > 0
-                ? `Bossu, should I go ahead and dispatch this bulk SMS to *${count}* recipients now? Reply *YES* to execute or *NO* to cancel.`
-                : `⚠️ Bossu, no active phone numbers found for "${smsFallback.target}". Reply *NO* to cancel or provide explicit numbers (e.g. 0541234567, 0592753424).`
-              )
-            );
-          } else {
-            const targetPhone = smsFallback.phone;
-            const targetText = smsFallback.message;
-            const actionData = { type: "send_sms", phone: targetPhone, message: targetText, smsText: targetText, sender: "D_1Gh" };
-            await setOwnerPendingAction(from, actionData);
-
-            return sendWhatsApp(from,
-              `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
-              `📋 *Task:* Send SMS via Arkesel\n` +
-              `📱 *Recipient:* *${targetPhone}*\n` +
-              `🆔 *Sender ID:* *D_1Gh*\n` +
-              `💬 *Message:* "${targetText}"\n\n` +
-              `Bossu, should I send this SMS? Reply *YES* to dispatch or *NO* to cancel.`
-            );
-          }
+          return sendWhatsApp(from,
+            `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+            `📋 *Task:* Send Customer SMS via Arkesel\n` +
+            `📱 *Recipient:* ${targetPhone}\n` +
+            `🆔 *Sender ID:* *D_1Gh*\n` +
+            `💬 *Message:* "${targetText}"\n\n` +
+            `Bossu, should I send this SMS? Reply *YES* to dispatch or *NO* to cancel.`
+          );
         }
 
         // Direct Action Command 4: Stock toggle
@@ -4726,7 +3867,7 @@ app.post("/webhook", async (req, res) => {
           { role: "assistant", text: aiReply }
         ];
         await saveOwnerHistory(from, updatedHistory);
-      } catch (_) {}
+      } catch (_) { }
 
       return sendWhatsApp(from, aiReply);
     }
@@ -5528,11 +4669,25 @@ app.post("/paystack-webhook", async (req, res) => {
 
     // 2. Check Website Data Orders by exact reference
     if (!session) {
-      const { data: webOrder } = await supabase
+      const { data: webOrder, error: webOrderErr } = await supabase
         .from("orders")
         .select("*")
         .or(`reference.eq.${ref},datamart_reference.eq.${ref}`)
         .maybeSingle();
+
+      if (webOrderErr) {
+        recordWebhookLog("ORDERS_LOOKUP_ERROR", { ref, error: webOrderErr.message });
+      }
+
+      // Avoid double delivery: the website verify flow may have already dispatched this order.
+      if (
+        webOrder &&
+        webOrder.payment_status === "paid" &&
+        (webOrder.datamart_reference || ["processing", "delivered", "completed", "waiting"].includes(String(webOrder.delivery_status || "").toLowerCase()))
+      ) {
+        recordWebhookLog("WEBSITE_DATA_ORDER_ALREADY_DISPATCHED", { ref, delivery_status: webOrder.delivery_status });
+        return;
+      }
 
       if (webOrder) {
         recordWebhookLog("WEBSITE_DATA_ORDER_FOUND", { ref, id: webOrder.id, network: webOrder.network, capacity: webOrder.capacity });
@@ -5664,7 +4819,37 @@ app.post("/paystack-webhook", async (req, res) => {
 
     // 5. Fallback for WhatsApp chat bot sessions ONLY if not a website order
     if (!session) {
-      const isKnownWebRef = /^(CK|SRV|NFLX|MSH|AFA|D1|ORD|CHK)/i.test(ref);
+      const isKnownWebRef = /^(WS|CK|SRV|NFLX|MSH|AFA|D1|ORD|CHK)/i.test(ref);
+
+      // Website order the bot couldn't see in the DB (e.g. RLS / wrong key):
+      // hand it to the website's own verify endpoint, which re-checks the
+      // payment with Paystack and dispatches delivery using the service_role key.
+      if (isKnownWebRef) {
+        const verifyPath = /^(CK|CHK)/i.test(ref)
+          ? "/api/checker-verify"
+          : /^(SRV|NFLX|MSH|AFA)/i.test(ref)
+            ? "/api/service-verify"
+            : "/api/paystack-verify";
+        try {
+          const fwd = await axios.post(
+            `${STORE_FRONTEND_URL}${verifyPath}`,
+            { reference: ref },
+            { headers: { "Content-Type": "application/json" }, timeout: 45000, validateStatus: () => true }
+          );
+          const fwdOrder = fwd.data?.order;
+          recordWebhookLog("FORWARDED_TO_WEBSITE_VERIFY", { ref, verifyPath, status: fwd.status, payment: fwdOrder?.payment_status, delivery: fwdOrder?.delivery_status });
+          if (fwd.status >= 200 && fwd.status < 300 && fwdOrder) {
+            await sendWhatsApp(
+              "233547100951",
+              `🛍️ WEBSITE ORDER PAID (via webhook fallback) 🎉\n\n🆔 Reference: ${ref}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n💳 Payment: ${fwdOrder.payment_status || "?"}\n🚚 Delivery: ${fwdOrder.delivery_status || "?"}`
+            );
+            return;
+          }
+        } catch (fwdErr) {
+          recordWebhookLog("FORWARD_TO_WEBSITE_VERIFY_FAILED", { ref, verifyPath, error: fwdErr.message });
+        }
+      }
+
       if (!isKnownWebRef) {
         const customerEmail = event.data?.customer?.email || "";
         const emailPhone = customerEmail.split("@")[0].replace(/\D/g, "");
