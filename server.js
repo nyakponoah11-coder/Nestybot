@@ -2749,6 +2749,12 @@ async function handleCustomerAi(from, rawText) {
   const text = String(rawText || "").trim();
   const lower = text.toLowerCase();
 
+  // 0. Direct Live Data Pull from Site & Database (Prices, Catalog, Orders, Services)
+  const directPull = await handleDirectDataPull(text, from, false);
+  if (directPull) {
+    return sendWhatsApp(from, directPull);
+  }
+
   // 1. Direct Storefront & App Links Intent
   if (/\b(link|store|website|shop|site|online|web|front\s*end|frontend)\b/i.test(lower)) {
     return sendWhatsApp(
@@ -2797,18 +2803,20 @@ async function handleCustomerAi(from, rawText) {
     } catch (_) {}
   }
 
-  // 3. AI Mode Response (Multi-model: Gemini / OpenAI)
-  const { geminiKey, openAiKey } = await getAiApiKeys();
+  // 3. AI Mode Response (Multi-model: Groq / Gemini 3.8/2.5 / OpenRouter / OpenAI)
+  const liveDbKnowledge = await fetchLiveDatabaseKnowledge();
   let customerAiReply = "";
 
   const customerAiPrompt =
     "You are Stony, a friendly, warm Ghanaian customer support person at DATA 1 GH on WhatsApp.\n\n" +
-    "YOUR PERSONALITY:\n" +
-    "- You chat like a real person on WhatsApp: warm, brief (1-3 short sentences), natural Ghanaian tone (\"bossu\", \"chale\", \"sharp\", \"no wahala\").\n" +
+    "YOUR PERSONALITY & COMMUNICATION STYLE:\n" +
+    "- You chat like a real person on WhatsApp: warm, natural Ghanaian tone (\"bossu\", \"chale\", \"sharp\", \"no wahala\").\n" +
     "- You are Stony. NEVER say \"As an AI\" or sound like a robot.\n" +
+    "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST: When customers ask for bundle prices, networks, links, or order info, give the exact numbers and information immediately in your first sentence. Never beat around the bush or evade questions.\n" +
     "- Always guide customers warmly either to buy online or reply with numbers 1-8 right here on WhatsApp.\n\n" +
-    "FULL SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE — NOT RESTRICTED TO DATABASE ROWS):\n" +
-    "You know EVERYTHING on our official website (https://data1gh.vercel.app). Answer customer questions accurately using the knowledge base below:\n" +
+    "LIVE DATA CATALOG FROM DATABASE:\n" +
+    (liveDbKnowledge ? `${liveDbKnowledge}\n` : "") +
+    "FULL SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE):\n" +
     SITE_KNOWLEDGE_BASE + "\n\n" +
     "SECURITY POLICY:\n" +
     "- You must NEVER disclose internal administrative login credentials, passwords, or secrets to anyone.\n" +
@@ -2825,36 +2833,15 @@ async function handleCustomerAi(from, rawText) {
     "- Official Store Link: " + STORE_FRONTEND_URL + "\n" +
     "Keep your answer under 3 sentences unless explaining step-by-step payment approval.";
 
-  if (geminiKey) {
-    for (const model of ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]) {
-      try {
-        const gRes = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-          {
-            contents: [{ role: "user", parts: [{ text }] }],
-            systemInstruction: { parts: [{ text: customerAiPrompt }] },
-            generationConfig: { maxOutputTokens: 250, temperature: 0.7 }
-          },
-          { headers: { "Content-Type": "application/json" }, timeout: 8000 }
-        );
-        const txt = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-        if (txt) { customerAiReply = txt; break; }
-      } catch (_) {}
-    }
-  }
+  const aiResult = await executeBotAi({
+    systemPrompt: customerAiPrompt,
+    userMessage: text,
+    maxTokens: 250,
+    temperature: 0.7
+  });
 
-  if (!customerAiReply && openAiKey) {
-    try {
-      const oaRes = await axios.post("https://api.openai.com/v1/chat/completions", {
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: customerAiPrompt },
-          { role: "user", content: text }
-        ],
-        max_tokens: 220, temperature: 0.7
-      }, { headers: { Authorization: `Bearer ${openAiKey}`, "Content-Type": "application/json" }, timeout: 8000 });
-      customerAiReply = oaRes.data?.choices?.[0]?.message?.content?.trim() || "";
-    } catch (_) {}
+  if (aiResult?.text) {
+    customerAiReply = aiResult.text;
   }
 
   if (customerAiReply) {
@@ -3375,8 +3362,22 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // ── FETCH AI KEYS ──
-      const { geminiKey, openAiKey } = await getAiApiKeys();
+      // ── DIRECT LIVE DATA PULL (SITE & DATABASE) ──
+      const directPull = await handleDirectDataPull(text, from, true);
+      if (directPull) {
+        try {
+          const updatedHistory = [
+            ...history.slice(-6),
+            { role: "user", text },
+            { role: "assistant", text: directPull }
+          ];
+          await saveOwnerHistory(from, updatedHistory);
+        } catch (_) {}
+        return sendWhatsApp(from, directPull);
+      }
+
+      // ── FETCH AI KEYS & ACTIVE CONFIG ──
+      const aiConfig = await getAiConfig();
 
       // ── FETCH LIVE COMPREHENSIVE WHOLE-SYSTEM CONTEXT ──
       let deliveryEta = "~5-30 minutes";
@@ -3452,7 +3453,7 @@ app.post("/webhook", async (req, res) => {
           supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status").eq("payment_status", "paid"),
           supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status").eq("payment_status", "paid"),
           supabase.from("chat_conversations").select("id, unread_for_support").eq("status", "open"),
-          supabase.from("products").select("id, name, network, capacity, in_stock"),
+          supabase.from("products").select("id, name, network, capacity, price, in_stock"),
           supabase.from("scratch_codes").select("id, unlocked, scratched").eq("unlocked", true),
           supabase.from("referrals").select("id, total_clicks")
         ]);
@@ -3494,10 +3495,31 @@ app.post("/webhook", async (req, res) => {
         openSupportCount = openChats.length;
         unreadSupportCount = openChats.reduce((s, c) => s + Number(c.unread_for_support || 0), 0);
 
-        // Out of Stock Products
+        // Products Catalog & Live Pricing
         const allProducts = productsRes?.data || [];
         const outOfStockItems = allProducts.filter(p => !p.in_stock);
         outOfStockCount = outOfStockItems.length;
+
+        const mtnProducts = allProducts.filter(p => /mtn|yello/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
+        const telecelProducts = allProducts.filter(p => /telecel|vodafone/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
+        const atProducts = allProducts.filter(p => /airtel|tigo|at/i.test(p.network || p.name || "")).sort((a,b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
+
+        let liveCatalogText = "LIVE PRODUCT CATALOG & CURRENT STORE PRICES (FROM DATABASE):\n";
+        if (mtnProducts.length > 0) {
+          liveCatalogText += "• MTN Data Bundles:\n" + mtnProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
+        }
+        if (telecelProducts.length > 0) {
+          liveCatalogText += "• Telecel Data Bundles:\n" + telecelProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
+        }
+        if (atProducts.length > 0) {
+          liveCatalogText += "• AirtelTigo Data Bundles:\n" + atProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
+        }
+
+        let recentOrdersSummary = "";
+        if (todayOrders.length > 0) {
+          recentOrdersSummary = `LATEST ORDERS TODAY (${todayOrders.length} orders):\n` +
+            todayOrders.slice(0, 10).map((o, idx) => `  ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${o.amount} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status}`).join("\n") + "\n";
+        }
 
         // Gamification & Referrals
         unlockedScratchCount = (scratchRes?.data || []).length;
@@ -3673,87 +3695,28 @@ app.post("/webhook", async (req, res) => {
         "  To stage an action in your response, use the format [SUGGEST_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\", ...}]\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- Approved SMS Sender ID for DATA 1 GH is 'D_1Gh'. Whenever sending customer SMS or alerts, use sender ID 'D_1Gh'.\n" +
+        "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST (NEVER BEAT AROUND THE BUSH):\n" +
+        "  When the owner asks to pull, fetch, display, or check anything from the site or database, immediately retrieve and output the exact, structured information directly. Never beat around the bush, never give generic conversational fluff like 'I'm on it boss' or 'Tell me which department to tackle' without answering the question.\n" +
+        "  Always answer directly in your very first sentence with exact figures, dates, references, prices, or statuses.\n" +
         "- NEVER give canned, robotic dismissals like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
         "- NEVER say \"As an AI\". You are Stony.\n\n" +
         "CURRENT LIVE BUSINESS REALITY:\n" +
         `- Delivery Speed / ETA: ${deliveryEta}\n` +
         (walletBalance ? `- DataMart API Wallet: ${walletBalance}\n` : "- Wallet: Connected\n") +
+        (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
+        (recentOrdersSummary ? `\n${recentOrdersSummary}\n` : "") +
         (systemData ? `\n${systemData}` : "") +
         (specificOrderCtx ? `\n${specificOrderCtx}` : "");
 
-      // ── CALL MULTI-MODEL AI ──
-      let aiReply = "";
-
-      const geminiModels = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-2.5-pro",
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-3.6-flash",
-        "gemini-3.8-flash"
-      ];
-
-      const historyTurns = history.slice(-6).map(h => ({
-        role: h.role === "assistant" ? "model" : "user",
-        parts: [{ text: h.text }]
-      }));
-
-      while (historyTurns.length > 0 && historyTurns[0].role === "model") {
-        historyTurns.shift();
-      }
-
-      const turns = [];
-      for (const turn of historyTurns) {
-        if (turns.length > 0 && turns[turns.length - 1].role === turn.role) {
-          turns[turns.length - 1].parts[0].text += `\n${turn.parts[0].text}`;
-        } else {
-          turns.push(turn);
-        }
-      }
-      turns.push({ role: "user", parts: [{ text }] });
-
-      if (geminiKey) {
-        for (const model of geminiModels) {
-          try {
-            const gRes = await axios.post(
-              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-              {
-                contents: turns,
-                systemInstruction: { parts: [{ text: ownerSystemPrompt }] },
-                generationConfig: { maxOutputTokens: 400, temperature: 0.7 }
-              },
-              { headers: { "Content-Type": "application/json" }, timeout: 12000 }
-            );
-            const txt = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-            if (txt) {
-              aiReply = txt;
-              break;
-            }
-          } catch (gErr) {
-            console.warn(`Owner Gemini (${model}) error:`, gErr.response?.data?.error?.message || gErr.message);
-          }
-        }
-      }
-
-      if (!aiReply && openAiKey) {
-        try {
-          const openAiMessages = [
-            { role: "system", content: ownerSystemPrompt },
-            ...history.slice(-6).map(h => ({ role: h.role === "assistant" ? "assistant" : "user", content: h.text })),
-            { role: "user", content: text }
-          ];
-          const oaRes = await axios.post("https://api.openai.com/v1/chat/completions", {
-            model: "gpt-4o-mini",
-            messages: openAiMessages,
-            max_tokens: 350, temperature: 0.7
-          }, { headers: { Authorization: `Bearer ${openAiKey}`, "Content-Type": "application/json" }, timeout: 12000 });
-          aiReply = oaRes.data?.choices?.[0]?.message?.content?.trim() || "";
-        } catch (oaErr) {
-          console.warn("Owner OpenAI error:", oaErr.response?.data?.error?.message || oaErr.message);
-        }
-      }
+      // ── CALL MULTI-MODEL AI (GROQ / GEMINI 3.8/2.5 / OPENROUTER / OPENAI) ──
+      const aiResult = await executeBotAi({
+        systemPrompt: ownerSystemPrompt,
+        userMessage: text,
+        history,
+        maxTokens: 450,
+        temperature: 0.7
+      });
+      let aiReply = aiResult?.text || "";
 
       // ── ACTION SUGGESTION DETECTION ──
       if (aiReply) {
