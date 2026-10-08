@@ -44,7 +44,8 @@ DATA 1 GH — COMPLETE SITE KNOWLEDGE BASE (FROM HTTPS://DATA1GH.VERCEL.APP):
 • Real-Time Order Tracker: ${TRACK_ORDER_URL}
 • Digital Services Portal: ${SERVICES_URL}
 • Approved SMS Sender ID: D_1Gh
-• Support Phone: 0547100951 / 0594641841
+• Support Phone: 0547100951
+• WhatsApp Bot Number: +233 20 059 8553 (0200598553)
 
 2. DATA BUNDLES CATALOG & PRICING (NON-EXPIRY, FAST DELIVERY 5-30 MINS):
 • MTN Non-Expiry Data Bundles:
@@ -690,7 +691,7 @@ async function getAiConfig() {
   let openAiKey = cleanApiKey(process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY || "");
 
   let preferredProvider = "gemini";
-  let geminiModel = "gemini-3.8-flash";
+  let geminiModel = "gemini-2.5-flash";
   let groqModel = "llama-3.3-70b-versatile";
   let openRouterModel = "meta-llama/llama-3.3-70b-instruct";
   let openAiModel = "gpt-4o-mini";
@@ -810,9 +811,9 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
     const models = [
       config.geminiModel,
       "gemini-3.8-flash",
-      "gemini-3.8-flash-lite",
-      "gemini-3.8-lite",
-      "gemini-3.1-flash-lite",
+      "gemini-3.7-flash",
+      "gemini-3.6-flash",
+      "gemini-3.1-pro",
       "gemini-2.5-flash",
       "gemini-2.0-flash",
       "gemini-1.5-flash"
@@ -836,18 +837,57 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
 
     for (const model of models) {
       try {
+        const cleanModel = model.replace(/^models\//, "");
         const res = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.geminiKey}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${encodeURIComponent(config.geminiKey)}`,
           {
             contents: turns,
             systemInstruction: { parts: [{ text: systemPrompt }] },
             generationConfig: { maxOutputTokens: maxTokens, temperature }
           },
-          { headers: { "Content-Type": "application/json" }, timeout: 12000 }
+          {
+            headers: {
+              "Content-Type": "application/json",
+              "x-goog-api-key": config.geminiKey
+            },
+            timeout: 12000
+          }
         );
         const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-        if (text) return { text, provider: "gemini", model };
+        if (text) return { text, provider: "gemini", model: cleanModel };
       } catch (err) {
+        // Try Interactions API fallback if recommended or 404
+        try {
+          const cleanModel = model.replace(/^models\//, "");
+          const intRes = await axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/interactions?key=${encodeURIComponent(config.geminiKey)}`,
+            {
+              model: cleanModel,
+              input: userMessage,
+              system_instruction: systemPrompt
+            },
+            {
+              headers: {
+                "Content-Type": "application/json",
+                "x-goog-api-key": config.geminiKey
+              },
+              timeout: 12000
+            }
+          );
+          let reply = "";
+          const d = intRes.data;
+          if (Array.isArray(d?.outputs)) {
+            const block = d.outputs.find(o => o?.type === "text" || o?.text);
+            reply = block?.text || d.outputs[0]?.text || "";
+          } else if (typeof d?.output_text === "string") {
+            reply = d.output_text;
+          } else if (typeof d?.text === "string") {
+            reply = d.text;
+          }
+          if (reply && reply.trim()) {
+            return { text: reply.trim(), provider: "gemini", model: cleanModel };
+          }
+        } catch (_) {}
         console.warn(`Gemini (${model}) error:`, err.response?.data?.error?.message || err.message);
       }
     }
@@ -2534,7 +2574,10 @@ async function generateFullAdminReport() {
 
     const shopName = settingsMap["shop_name"] || "DATA 1 GH";
     const supportPhone = settingsMap["support_phone"] || settingsMap["admin_alert_phone"] || "0547100951";
-    const botUrl = settingsMap["whatsapp_bot_url"] || "0594641841";
+    const rawBotUrl = settingsMap["whatsapp_bot_url"] || "";
+    const botUrl = (!rawBotUrl || rawBotUrl.includes("594641841") || rawBotUrl.includes("U6W5JLVZV72WO1") || rawBotUrl.includes("SRFE5G7CWA4CL1"))
+      ? "https://wa.me/233200598553"
+      : rawBotUrl;
     const siteUrl = STORE_FRONTEND_URL;
 
     // Products
