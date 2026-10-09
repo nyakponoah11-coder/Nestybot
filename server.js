@@ -1533,33 +1533,31 @@ lost across webhooks even if sessions table row didn't exist yet.
 const ownerPendingActions = new Map();
 const ownerHistories = new Map();
 
-// Pre-seed default pending action for admin verification if owner confirms staged SMS
-const DEFAULT_STAGED_SMS = {
-  type: "send_sms",
-  phone: "0592753424",
-  smsText: "I see you tomorrow",
-  sender: "D_1Gh"
-};
-["0592753424", "233592753424", "0547100951", "233547100951"].forEach(p => {
-  ownerPendingActions.set(p, DEFAULT_STAGED_SMS);
-});
-
 async function setOwnerPendingAction(phone, action) {
   const norm = String(phone || "").replace(/\D/g, "");
+  const targetPhones = [String(phone), norm, "233592753424", "0592753424", "233547100951", "0547100951"].filter(Boolean);
+  const uniquePhones = [...new Set(targetPhones)];
+
   if (action) {
-    ownerPendingActions.set(norm, action);
-    ownerPendingActions.set(String(phone), action);
+    if (!action.createdAt) action.createdAt = Date.now();
+    for (const p of uniquePhones) {
+      ownerPendingActions.set(p, action);
+    }
   } else {
-    ownerPendingActions.delete(norm);
-    ownerPendingActions.delete(String(phone));
+    for (const p of uniquePhones) {
+      ownerPendingActions.delete(p);
+    }
   }
+
   try {
-    await supabase.from("sessions").upsert({
-      phone: String(phone),
-      bundle: action ? JSON.stringify(action) : null,
-      step: 99,
-      updated_at: new Date().toISOString()
-    }, { onConflict: "phone" });
+    for (const p of uniquePhones) {
+      await supabase.from("sessions").upsert({
+        phone: p,
+        bundle: action ? JSON.stringify(action) : null,
+        step: 99,
+        updated_at: new Date().toISOString()
+      }, { onConflict: "phone" });
+    }
   } catch (err) {
     console.warn("⚠️ Failed upserting owner pendingAction:", err.message);
   }
@@ -1736,7 +1734,9 @@ function extractProposedActionFromText(rawText) {
   // 1. Bracket syntax [SUGGEST_ACTION: {...}]
   const tagAction = extractActionSuggestion(rawText);
   if (tagAction?.parsed) {
-    return { action: tagAction.parsed, fullTag: tagAction.fullTag };
+    const act = tagAction.parsed;
+    if (!act.createdAt) act.createdAt = Date.now();
+    return { action: act, fullTag: tagAction.fullTag };
   }
 
   // 2. Bracket syntax [SUGGEST_RETRY: ref=..., phone=...]
@@ -1748,7 +1748,8 @@ function extractProposedActionFromText(rawText) {
         ref: retryMatch[1].trim(),
         phone: retryMatch[2].trim(),
         network: retryMatch[3] ? retryMatch[3].trim().toUpperCase() : "YELLO",
-        capacity: retryMatch[4] ? retryMatch[4].trim() : "1"
+        capacity: retryMatch[4] ? retryMatch[4].trim() : "1",
+        createdAt: Date.now()
       },
       fullTag: retryMatch[0]
     };
@@ -1761,44 +1762,69 @@ function extractProposedActionFromText(rawText) {
       action: {
         type: "send_sms",
         phone: smsTagMatch[1].trim(),
-        smsText: smsTagMatch[2].trim()
+        smsText: smsTagMatch[2].trim(),
+        isExplicitSms: true,
+        createdAt: Date.now()
       },
       fullTag: smsTagMatch[0]
     };
   }
 
-  // 4. Natural language or bulleted SMS proposal
+  const isConfirmationPrompt = /\b(shall i go ahead|reply (yes|y|no|n)|reply yes|reply no|confirm|green light|proceed now|publish this)\b/i.test(rawText);
+
+  // 4. Natural language STORE ANNOUNCEMENT proposal (HIGH PRIORITY)
   // e.g.:
-  // *Recipient:* 0592753424
-  // *Sender ID:* D_1Gh
-  // *Message:* "I see you tomorrow"
-  // Shall I go ahead and do this boss? Reply YES to confirm
-  const phoneMatch = rawText.match(/[\*_]*(?:recipient|target|customer|to)[\*_]*\s*:\s*[\*_]*(0[2357]\d{8}|233\d{9})[\*_]*/i) ||
-                     rawText.match(/(?:custom\s+)?sms\s+(?:sent\s+)?out\s+to\s*\*?(0[2357]\d{8}|233\d{9})\*?/i) ||
-                     rawText.match(/\b(0[2357]\d{8}|233\d{9})\b/);
+  // Bossu, I'm setting up the website announcement popup update now...
+  // * Title: Delivery Notice
+  // * Message: Deliveries are actively ongoing! Please disregard the delivery tracker status for now...
+  // * Status: Active (Visible on site)
+  // Shall I go ahead and publish this announcement to the website now boss? Reply YES to confirm
+  const isAnnouncement =
+    /\b(announcement|announcement\s*popup|website\s*announcement|publish\s+this\s+announcement|store\s*announcement)\b/i.test(rawText);
 
-  const msgMatch = rawText.match(/(?:message|saying|text|sms)[^\n\r:]{0,15}:\s*[\*_]*\s*["“]([^"”]+)["”]/i) ||
-                   rawText.match(/["“]([^"”]{2,160})["”]/) ||
-                   rawText.match(/(?:message|saying|text)[^\n\r:]{0,15}:\s*[\*_]*\s*([^\n\r]+)/i);
+  if (isAnnouncement && isConfirmationPrompt) {
+    const titleMatch =
+      rawText.match(/[\*_]*(?:title|headline|header)[\*_]*\s*:\s*[\*_]*([^\n\r*]+)/i) ||
+      rawText.match(/(?:title|headline|header)\s+is\s+["“]?([^"”\n\r]+)["”]?/i);
+    const msgMatch =
+      rawText.match(/[\*_]*(?:message|text|content|notice)[\*_]*\s*:\s*[\*_]*["“]([^"”]+)["”]/i) ||
+      rawText.match(/[\*_]*(?:message|text|content|notice)[\*_]*\s*:\s*[\*_]*([^\n\r]+)/i);
 
-  const isConfirmationPrompt = /\b(shall i go ahead|reply (yes|y|no|n)|reply yes|reply no|confirm|green light)\b/i.test(rawText);
+    const title = titleMatch ? titleMatch[1].trim().replace(/^["“”'\*]+|["“”'\*]+$/g, "").trim() : "Delivery Notice";
+    const message = msgMatch ? msgMatch[1].trim().replace(/^["“”'\*]+|["“”'\*]+$/g, "").trim() : "";
+    const enabled = !/\b(off|disable|disabled|hidden|turn\s*off)\b/i.test(rawText);
 
-  if (phoneMatch && msgMatch && (isConfirmationPrompt || /\b(sms|sender id|arkesel|dispatch)\b/i.test(rawText))) {
-    const rawSms = msgMatch[1].trim().replace(/^["“”'\*]+|["“”'\*]+$/g, "").trim();
-    if (rawSms.length > 0) {
-      return {
-        action: {
-          type: "send_sms",
-          phone: phoneMatch[1].trim(),
-          smsText: rawSms,
-          sender: "D_1Gh"
-        },
-        fullTag: null
-      };
-    }
+    return {
+      action: {
+        type: "update_announcement",
+        title,
+        message,
+        enabled,
+        createdAt: Date.now()
+      },
+      fullTag: null
+    };
   }
 
-  // 5. Order status update proposal
+  // 5. Natural language RESYNC proposal
+  // e.g.:
+  // I'm setting up a full resync with DataMart for all 6 stuck orders right now...
+  // Shall I go ahead and execute this resync with DataMart now boss? Reply YES to confirm
+  const isResync = /\b(resync|re-sync|sync\s+with\s+datamart|resync\s+with\s+datamart|resync\s+(?:all\s+)?(?:\d+\s+)?stuck\s+orders)\b/i.test(rawText);
+  if (isResync && isConfirmationPrompt) {
+    const refsInText = extractOrderReferences(rawText);
+    return {
+      action: {
+        type: "resync_order",
+        refs: refsInText,
+        all_stuck: refsInText.length === 0,
+        createdAt: Date.now()
+      },
+      fullTag: null
+    };
+  }
+
+  // 6. Natural language Order status update proposal
   const refsInText = extractOrderReferences(rawText);
   if (refsInText.length > 0 && isConfirmationPrompt && /\b(delivered|failed|status|update)\b/i.test(rawText)) {
     const status = /\b(failed)\b/i.test(rawText) ? "failed" : "delivered";
@@ -1807,36 +1833,67 @@ function extractProposedActionFromText(rawText) {
         type: "update_order_status",
         orders: refsInText,
         status,
-        send_sms: false
+        send_sms: false,
+        createdAt: Date.now()
       },
       fullTag: null
     };
   }
 
-  // 6. Retry proposal
+  // 7. Natural language Retry proposal
   if (refsInText.length > 0 && isConfirmationPrompt && /\b(retry|re-dispatch)\b/i.test(rawText)) {
     const pMatch = rawText.match(/\b(0[2357]\d{8}|233\d{9})\b/);
     return {
       action: {
         type: "retry_order",
         ref: refsInText[0],
-        phone: pMatch ? pMatch[1] : undefined
+        phone: pMatch ? pMatch[1] : undefined,
+        createdAt: Date.now()
       },
       fullTag: null
     };
   }
 
-  // 7. Stock toggle proposal
+  // 8. Natural language Stock toggle proposal
   const stockMatch = rawText.match(/\b(mark|put|set)\s+(.+?)\s+(in stock|out of stock)\b/i);
   if (stockMatch && isConfirmationPrompt) {
     return {
       action: {
         type: "toggle_stock",
         productName: stockMatch[2].trim(),
-        inStock: /in stock/i.test(stockMatch[3])
+        inStock: /in stock/i.test(stockMatch[3]),
+        createdAt: Date.now()
       },
       fullTag: null
     };
+  }
+
+  // 9. Natural language EXPLICIT Customer SMS proposal
+  // MUST have explicit SMS intent (e.g. "send sms", "dispatch sms", "arkesel", "text the customer")
+  // AND explicit recipient line. Never match announcements or random quoted text!
+  const explicitSmsIntent = /\b(send\s+(?:an?\s+)?(?:custom\s+)?sms|dispatch\s+(?:an?\s+)?sms|arkesel\s+sms|text\s+(?:the\s+)?customer)\b/i.test(rawText);
+  const explicitRecipientMatch =
+    rawText.match(/[\*_]*(?:recipient|target\s*phone|send\s*to|customer\s*phone)[\*_]*\s*:\s*[\*_]*(0[2357]\d{8}|233\d{9})[\*_]*/i) ||
+    rawText.match(/sms\s+(?:sent\s+)?out\s+to\s*\*?(0[2357]\d{8}|233\d{9})\*?/i);
+  const explicitMsgMatch =
+    rawText.match(/[\*_]*(?:message|sms\s*text|text\s*to\s*send)[\*_]*\s*:\s*[\*_]*["“]([^"”]+)["”]/i) ||
+    rawText.match(/[\*_]*(?:message|sms\s*text|text\s*to\s*send)[\*_]*\s*:\s*[\*_]*([^\n\r]+)/i);
+
+  if (explicitSmsIntent && explicitRecipientMatch && explicitMsgMatch && isConfirmationPrompt) {
+    const rawSms = explicitMsgMatch[1].trim().replace(/^["“”'\*]+|["“”'\*]+$/g, "").trim();
+    if (rawSms.length > 0) {
+      return {
+        action: {
+          type: "send_sms",
+          phone: explicitRecipientMatch[1].trim(),
+          smsText: rawSms,
+          sender: "D_1Gh",
+          isExplicitSms: true,
+          createdAt: Date.now()
+        },
+        fullTag: null
+      };
+    }
   }
 
   return null;
@@ -3140,6 +3197,16 @@ app.post("/webhook", async (req, res) => {
         } catch (_) {}
       }
 
+      // Drop stale actions (> 10 mins) or untracked legacy actions without createdAt
+      if (pendingAction) {
+        const isStale = !pendingAction.createdAt || (Date.now() - pendingAction.createdAt > 10 * 60 * 1000);
+        if (isStale) {
+          console.log("🧹 Discarding expired or untracked legacy pendingAction:", pendingAction.type);
+          pendingAction = null;
+          await clearOwnerPendingAction(from);
+        }
+      }
+
       // Load multi-turn conversation memory early
       let history = ownerHistories.get(normFrom) || ownerHistories.get(String(from)) || [];
       if (!history || history.length === 0) {
@@ -3231,36 +3298,47 @@ app.post("/webhook", async (req, res) => {
 
       const isCancel = /\b(no|nope|cancel|nah|stop|abort|don'?t|leave it|ignore)\b/i.test(cleanInput);
 
-      // Recognize confirmation broadly (keywords, "Yes go ahead", "they received it", "update status", "yes update", etc.)
-      const isConfirm = !isCancel && (
-        /^(yes|yeah|yep|ok|okay|sure|yh|y|sharp|confirm|proceed|go|done|execute|apply)(\b|\s|$)/i.test(cleanInput) ||
-        /\b(go ahead|do it|proceed|confirm|execute|apply|please do|send it|make it|update it|sharp|green light)\b/i.test(cleanInput) ||
-        /\b(they have (received|recieve)|they (received|recieve)|recieved?|delivered|landed|got it)\b/i.test(cleanInput) ||
-        /\b(update (the )?status|update (it|them|both|orders?)|mark (it|them|both)? (as )?delivered|go ahead and update|yes update|confirm update|proceed with update|do (the )?update|update now)\b/i.test(cleanInput) ||
-        (/\b(update|deliver|delivered|reciev|receiv|proceed|apply|mark)\b/i.test(cleanInput) && !isCancel)
-      );
+      // Check if the input is a brand new instruction or command (e.g. "Update the announcement...", "Check balance...", "Send SMS...")
+      // A new command must NEVER be mistaken for a confirmation ("Yes") of an old staged action!
+      const isNewCommand =
+        /^(?:update|change|set|turn\s*(?:on|off)|enable|disable|send|dispatch|resync|retry|check|mark|show|how|what|why|who|is|can|please\s+(?:update|change|set|send))\s+/i.test(cleanInput) ||
+        cleanInput.length > 55;
 
-      // If pendingAction was missing from sessions.bundle, recover it from recent assistant turn in history
+      // When the owner issues a new command, immediately clear any pending proposal so it never executes unexpectedly!
+      if (isNewCommand && pendingAction) {
+        console.log("🧹 Owner issued a brand new command — clearing previous pending action:", pendingAction.type);
+        pendingAction = null;
+        await clearOwnerPendingAction(from);
+      }
+
+      // An actual confirmation MUST explicitly state confirmation
+      const isExplicitConfirmWord =
+        /^(?:yes|yeah|yep|ok|okay|sure|yh|y|sharp|confirm|proceed|go\s*ahead|do\s*it|execute|apply|please\s*do|green\s*light|done)(?:[\s!,.]|$)/i.test(cleanInput) ||
+        /\b(go\s*ahead|do\s*it|please\s*do|green\s*light|proceed\s*with\s*it|yes\s*update|confirm\s*update)\b/i.test(cleanInput);
+
+      const isConfirm = !isCancel && !isNewCommand && isExplicitConfirmWord;
+
+      // If pendingAction was missing from memory, recover it ONLY from the immediate previous assistant message if it was asking for confirmation
       if (!pendingAction && isConfirm && history.length > 0) {
         const lastAssist = [...history].reverse().find(h => h.role === "assistant" && h.text);
-        if (lastAssist) {
+        if (lastAssist?.text && /\b(shall i go ahead|reply (yes|y|no|n)|reply yes|confirm|execute|cancel)\b/i.test(lastAssist.text)) {
           const recovered = extractProposedActionFromText(lastAssist.text);
           if (recovered?.action) {
             pendingAction = recovered.action;
-            console.log("♻️ RECOVERED PENDING ACTION FROM RECENT CONVERSATION HISTORY:", pendingAction);
+            console.log("♻️ RECOVERED PENDING ACTION FROM RECENT CONVERSATION PROPOSAL:", pendingAction);
           }
         }
-      }
-
-      // If confirming and still no explicit pending action, check default SMS staged action
-      if (!pendingAction && isConfirm) {
-        pendingAction = DEFAULT_STAGED_SMS;
       }
 
       // If pendingAction exists and owner cancels
       if (pendingAction && isCancel) {
         await clearOwnerPendingAction(from);
         return sendWhatsApp(from, "Sharp, cancelled that action bossu! No changes were made to the database. What else is on your mind?");
+      }
+
+      // If owner confirmed but there is NO staged action waiting, do NOT execute any random or default action!
+      if (!pendingAction && isConfirm) {
+        return sendWhatsApp(from, "Sharp bossu! There are no pending actions waiting for confirmation right now. Tell me what you'd like me to update or execute! (e.g. update an announcement, check stuck orders, resync carrier, or change package prices)");
       }
 
       // If owner is confirming AND has pendingAction
@@ -3352,21 +3430,59 @@ app.post("/webhook", async (req, res) => {
           }
         }
 
-        // 2. RESYNC ORDER
-        if (type === "resync_order" && targetRefs.length > 0) {
-          const r = targetRefs[0];
-          try {
-            const live = await getRealDatamartDeliveryStatus(r);
-            if (live?.deliveryStatus) {
-              await supabase.from("orders").update({
-                delivery_status: live.deliveryStatus,
-                datamart_status: live.rawStatus,
-                updated_at: new Date().toISOString()
-              }).eq("reference", r);
+        // 2. RESYNC ORDER (Specific or Bulk Stuck Orders)
+        if (type === "resync_order") {
+          let refsToSync = [...targetRefs];
+          if (refsToSync.length === 0) {
+            try {
+              const { data: stuck } = await supabase
+                .from("orders")
+                .select("reference, recipient_phone, network, capacity, delivery_status")
+                .in("delivery_status", ["processing", "waiting", "pending"])
+                .order("created_at", { ascending: false })
+                .limit(20);
+              if (stuck && stuck.length > 0) {
+                refsToSync = stuck.map(o => o.reference).filter(Boolean);
+              }
+            } catch (_) {}
+          }
+
+          if (refsToSync.length > 0) {
+            const results = [];
+            for (const r of refsToSync) {
+              try {
+                const live = await getRealDatamartDeliveryStatus(r);
+                if (live?.deliveryStatus) {
+                  await supabase.from("orders").update({
+                    delivery_status: live.deliveryStatus,
+                    datamart_status: live.rawStatus,
+                    updated_at: new Date().toISOString()
+                  }).eq("reference", r);
+                  results.push(`• *${r}*: ${live.deliveryStatus.toUpperCase()} (${live.rawStatus || "Checked"})`);
+                } else {
+                  results.push(`• *${r}*: Checked`);
+                }
+              } catch (err) {
+                results.push(`• *${r}*: Error (${err.message})`);
+              }
             }
-            return sendWhatsApp(from, `✅ *RESYNC COMPLETE!*\n\nOrder *${r}* live network status:\n• Delivery Status: *${live?.deliveryStatus || "Updated"}*\n• Raw: ${live?.rawStatus || "Checked"}\n\nDatabase has been updated.`);
-          } catch (err) {
-            return sendWhatsApp(from, `❌ Resync error: ${err.message}`);
+
+            const repText = `✅ *RESYNC COMPLETE BOSS!*\n\nLive network status from DataMart (${refsToSync.length} orders):\n${results.join("\n")}\n\nDatabase has been updated! What else would you like me to tackle?`;
+            try {
+              const executionNote = { role: "assistant", text: repText };
+              const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
+              await saveOwnerHistory(from, updatedHistory);
+            } catch (_) {}
+
+            return sendWhatsApp(from, repText);
+          } else {
+            const repText = `✅ *RESYNC CHECK COMPLETE BOSS!*\n\nI checked the live queue: There are currently no stuck or pending orders in the system! All recent orders are already settled. What else is on your mind?`;
+            try {
+              const executionNote = { role: "assistant", text: repText };
+              const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
+              await saveOwnerHistory(from, updatedHistory);
+            } catch (_) {}
+            return sendWhatsApp(from, repText);
           }
         }
 
@@ -3394,6 +3510,17 @@ app.post("/webhook", async (req, res) => {
         // 4. SEND CUSTOM SMS
         if (type === "send_sms" && pendingAction.phone) {
           const msg = smsText || pendingAction.smsText || pendingAction.message || "DATA 1 GH: Your order has been updated. Thank you!";
+          
+          // Safety guard: ensure this isn't an accidental announcement or resync misclassification
+          if (/\b(announcement|delivery notice|disregard|deliveries are actively ongoing)\b/i.test(msg) || !pendingAction.isExplicitSms) {
+            console.warn("⚠️ Blocked accidental SMS dispatch: message looks like announcement or was not explicitly staged as SMS:", msg);
+            if (/\b(announcement|delivery notice)\b/i.test(msg) || pendingAction.title) {
+              const title = pendingAction.title || "Delivery Notice";
+              await updateStoreAnnouncement({ title, message: msg, enabled: true });
+              return sendWhatsApp(from, `✅ *STORE ANNOUNCEMENT UPDATED!*\n\n📢 *Title:* ${title}\n💬 *Message:* "${msg}"\n⚡ *Status:* LIVE ON SHOP ✅\n\nVisitors on https://data1gh.vercel.app will see this immediately!`);
+            }
+          }
+
           await sendAdminSms(msg, pendingAction.phone);
           // Save confirmation in conversation memory
           try {
@@ -3457,17 +3584,24 @@ app.post("/webhook", async (req, res) => {
 
         // 10. UPDATE STORE ANNOUNCEMENT
         if (type === "update_announcement") {
-          const title = pendingAction.title || "Store Announcement";
+          const title = pendingAction.title || "Delivery Notice";
           const message = pendingAction.message || pendingAction.announcement || "";
           const enabled = pendingAction.enabled !== undefined ? Boolean(pendingAction.enabled) : true;
           await updateStoreAnnouncement({ title, message, enabled });
-          return sendWhatsApp(from,
+          const repText =
             `✅ *STORE ANNOUNCEMENT UPDATED!*\n\n` +
             `📢 *Title:* ${title}\n` +
             (message ? `💬 *Message:* "${message}"\n` : "") +
             `⚡ *Status:* ${enabled ? "LIVE ON SHOP ✅" : "OFF ❌"}\n\n` +
-            `Visitors on https://data1gh.vercel.app will see this immediately!`
-          );
+            `Visitors on https://data1gh.vercel.app will see this immediately!`;
+
+          try {
+            const executionNote = { role: "assistant", text: repText };
+            const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
+            await saveOwnerHistory(from, updatedHistory);
+          } catch (_) {}
+
+          return sendWhatsApp(from, repText);
         }
 
         // 11. UPDATE STORE SETTING ("the rest")
@@ -3890,13 +4024,21 @@ app.post("/webhook", async (req, res) => {
         "  4. Update store settings in the database: support phone, delivery ETA, service prices (Netflix, AFA, MashUp, WAEC, BECE), and toggles\n" +
         "  5. Re-dispatch/retry failed telecom dispatches via DataMart API wallet\n" +
         "  6. Resync live telecom carrier delivery status with DataMart\n" +
-        "  7. Send custom customer SMS via Arkesel using approved Sender ID D_1Gh\n" +
+        "  7. Send custom customer SMS via Arkesel using approved Sender ID D_1Gh (ONLY when owner specifically instructs to send an SMS)\n" +
         "  8. Toggle product packages between IN STOCK and OUT OF STOCK\n" +
         "  9. Change product package prices on the store\n" +
         "  10. Resolve customer support live chats\n" +
         "  11. Update digital service orders (Netflix, MashUp *567*2#, AFA) and result checkers\n" +
-        "  CRITICAL SAFETY RULE: You must NEVER execute any destructive or external action automatically. Propose the exact action and ask for confirmation: 'Shall I go ahead and do this boss? Reply YES to confirm or NO to cancel'.\n" +
-        "  To stage an action in your response, use the format [SUGGEST_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\", ...}]\n" +
+        "  CRITICAL SAFETY RULE & THE YES CONTINUUM:\n" +
+        "  You must NEVER execute any destructive or operational action automatically without confirmation.\n" +
+        "  Whenever you propose an action and ask 'Shall I go ahead and do this boss? Reply YES to confirm or NO to cancel', you MUST ALWAYS append the bracket tag at the end so the system stages the exact action:\n" +
+        "  • Announcement: [SUGGEST_ACTION: {\"type\": \"update_announcement\", \"title\": \"...\", \"message\": \"...\", \"enabled\": true}]\n" +
+        "  • Resync DataMart: [SUGGEST_ACTION: {\"type\": \"resync_order\", \"all_stuck\": true}]\n" +
+        "  • Order Status: [SUGGEST_ACTION: {\"type\": \"update_order_status\", \"orders\": [\"...\"], \"status\": \"delivered\"}]\n" +
+        "  • Stock: [SUGGEST_ACTION: {\"type\": \"toggle_stock\", \"productName\": \"...\", \"inStock\": true}]\n" +
+        "  • Price: [SUGGEST_ACTION: {\"type\": \"update_product_price\", \"productId\": \"...\", \"price\": 25}]\n" +
+        "  • SMS: ONLY when the owner specifically told you to send a customer SMS: [SUGGEST_ACTION: {\"type\": \"send_sms\", \"phone\": \"...\", \"smsText\": \"...\"}]\n" +
+        "  STRICT ANTI-SMS-GHOSTING RULE: NEVER propose or dispatch customer SMS when discussing announcements, resyncing, or orders. Never replay or quote historical test SMS messages (like 'I see you tomorrow'). Follow the exact flow the owner is currently requesting.\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- Approved SMS Sender ID for DATA 1 GH is 'D_1Gh'. Whenever sending customer SMS or alerts, use sender ID 'D_1Gh'.\n" +
         "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST (NEVER BEAT AROUND THE BUSH):\n" +
@@ -4031,7 +4173,7 @@ app.post("/webhook", async (req, res) => {
 
         // Direct Action Command 1b: Announcement Update
         const annToggleMatch = cmdText.match(/(?:turn\s*(?:on|off)|enable|disable)\s+(?:the\s+)?announcement/i);
-        const annMsgMatch = cmdText.match(/(?:update|change|set)\s+(?:the\s+)?announcement(?:\s+(?:message|text|to|:))?\s*["“']?([^"”']+)["”']?/i);
+        const annMsgMatch = cmdText.match(/(?:update|change|set)\s+(?:the\s+)?announcement(?:\s+(?:message|text|to|that|saying|:))?\s*["“']?([^"”']+)["”']?/i);
 
         if (annToggleMatch) {
           const enable = /\b(on|enable)\b/i.test(annToggleMatch[0]);
