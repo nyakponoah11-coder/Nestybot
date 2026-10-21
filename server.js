@@ -754,25 +754,6 @@ let lastConfigFetchTime = 0;
 function normalizeGeminiModel(model) {
   let m = (model || "").trim().replace(/^models\//, "");
   if (!m) return "gemini-3.8-flash";
-  if (
-    m === "gemini-2.5-flash" ||
-    m === "gemini-2.0-flash" ||
-    m === "gemini-1.5-flash" ||
-    m === "gemini-pro" ||
-    m === "gemini-2.0-flash-thinking"
-  ) {
-    return "gemini-3.8-flash";
-  }
-  if (
-    m === "gemini-2.5-pro" ||
-    m === "gemini-2.0-pro" ||
-    m === "gemini-1.5-pro"
-  ) {
-    return "gemini-3.1-pro-preview";
-  }
-  if (m === "gemini-2.5-flash-lite") {
-    return "gemini-3.1-flash-lite";
-  }
   return m;
 }
 
@@ -904,16 +885,20 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
 
   // Helper for Google Gemini API call
   async function tryGemini() {
-    if (!config.geminiKey) return null;
-    const requestedModel = normalizeGeminiModel(config.geminiModel);
+    if (!config.geminiKey) {
+      console.warn("⚠️ [tryGemini] config.geminiKey is missing. Set GEMINI_API_KEY in Render or Supabase settings.");
+      return null;
+    }
+    const requestedModel = normalizeGeminiModel(config.geminiModel) || "gemini-3.8-flash";
     const models = [
       requestedModel,
       "gemini-3.8-flash",
-      "gemini-3.7-flash",
-      "gemini-3.6-flash",
-      "gemini-3.1-flash-lite",
-      "gemini-flash-latest",
-      "gemini-3.1-pro-preview"
+      "gemini-2.0-flash",
+      "gemini-1.5-flash",
+      "gemini-2.5-flash",
+      "gemini-1.5-flash-latest",
+      "gemini-1.5-pro",
+      "gemini-pro"
     ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
     const historyTurns = history.slice(-6).map(h => ({
@@ -947,7 +932,7 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
               "Content-Type": "application/json",
               "x-goog-api-key": config.geminiKey
             },
-            timeout: 12000
+            timeout: 50000
           }
         );
         const parts = res.data?.candidates?.[0]?.content?.parts || [];
@@ -969,7 +954,7 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
                 "Content-Type": "application/json",
                 "x-goog-api-key": config.geminiKey
               },
-              timeout: 12000
+              timeout: 50000
             }
           );
           let reply = "";
@@ -1472,6 +1457,25 @@ function extractOrderReferences(input) {
   }
 
   return [...new Set(matches.map(m => m.replace(/[*_#`"']/g, "").trim()).filter(Boolean))];
+}
+
+function formatGhanaTime(date) {
+  if (!date) return "";
+  try {
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return String(date);
+    return d.toLocaleString("en-GB", {
+      timeZone: "Africa/Accra",
+      weekday: "short",
+      day: "2-digit",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true
+    });
+  } catch (_) {
+    return String(date);
+  }
 }
 
 async function updateOrderDeliveryStatusSafely(ref, newStatus) {
@@ -3005,12 +3009,16 @@ async function generateFullAdminReport() {
       }
     });
 
+    // Resolve API keys from env and settingsMap
+    const activeDatamartKey = cleanApiKey(DATA_API_KEY || process.env.DATA_API_KEY || settingsMap["datamart_api_key"] || settingsMap["DATA_API_KEY"] || settingsMap["dm_api_key"]);
+    const activeArkeselKey = cleanApiKey(ARKESEL_API_KEY || process.env.ARKESEL_API_KEY || settingsMap["arkesel_api_key"] || settingsMap["ARKESEL_API_KEY"]);
+
     // Check DataMart developer API for bot purchases
     let dmPurchases = [];
-    if (DATA_API_KEY) {
+    if (activeDatamartKey) {
       try {
         const dmRes = await axios.get(`${DATAMART_BASE}/transactions?page=1&limit=100`, {
-          headers: { "x-api-key": DATA_API_KEY },
+          headers: { "x-api-key": activeDatamartKey },
           timeout: 4000
         });
         const rows = dmRes.data?.data?.transactions || dmRes.data?.transactions || [];
@@ -3071,10 +3079,10 @@ async function generateFullAdminReport() {
 
     // Balances
     let walletBalance = "Connected";
-    if (DATA_API_KEY) {
+    if (activeDatamartKey) {
       try {
         const bRes = await axios.get(`${DATAMART_BASE}/user/balance`, {
-          headers: { "x-api-key": DATA_API_KEY },
+          headers: { "x-api-key": activeDatamartKey },
           timeout: 4000
         });
         const bal = bRes?.data?.data?.walletBalance ?? bRes?.data?.walletBalance ?? bRes?.data?.data?.balance;
@@ -3085,7 +3093,6 @@ async function generateFullAdminReport() {
     }
 
     let arkeselSms = null;
-    const activeArkeselKey = ARKESEL_API_KEY || settingsMap["arkesel_api_key"];
     if (activeArkeselKey) {
       try {
         const aRes = await axios.get("https://sms.arkesel.com/api/v2/clients/balance-details", {
@@ -4167,37 +4174,44 @@ app.post("/webhook", async (req, res) => {
       let unlockedScratchCount = 0;
       let activePromotersCount = 0;
 
+      // 1. Resolve API keys from env and settings table
+      let settingsMap = {};
       try {
-        if (DATA_API_KEY) {
+        const { data: sRows } = await supabase.from("settings").select("key, value");
+        (sRows || []).forEach(r => { if (r.key) settingsMap[r.key] = r.value || ""; });
+      } catch (_) {}
+
+      const activeDatamartKey = cleanApiKey(DATA_API_KEY || process.env.DATA_API_KEY || settingsMap["datamart_api_key"] || settingsMap["DATA_API_KEY"] || settingsMap["dm_api_key"]);
+      const activeArkeselKey = cleanApiKey(ARKESEL_API_KEY || process.env.ARKESEL_API_KEY || settingsMap["arkesel_api_key"] || settingsMap["ARKESEL_API_KEY"]);
+
+      if (activeDatamartKey) {
+        try {
           const t = await axios.get("https://api.datamartgh.shop/api/developer/delivery-tracker",
-            { headers: { "X-API-Key": DATA_API_KEY }, timeout: 4000 }).catch(() => null);
+            { headers: { "X-API-Key": activeDatamartKey }, timeout: 4000 }).catch(() => null);
           const td = t?.data?.data || {};
           if (td?.lastDelivered?.placedAt && td?.lastDelivered?.deliveredAt) {
             const mins = Math.max(1, Math.round((new Date(td.lastDelivered.deliveredAt) - new Date(td.lastDelivered.placedAt)) / 60000));
             deliveryEta = `~${mins} min(s)`;
           }
-        }
-      } catch (_) {}
+        } catch (_) {}
 
-      try {
-        if (DATA_API_KEY) {
+        try {
           const b = await axios.get(`${DATAMART_BASE}/user/balance`,
-            { headers: { "x-api-key": DATA_API_KEY }, timeout: 4000 }).catch(() => null);
+            { headers: { "x-api-key": activeDatamartKey }, timeout: 4000 }).catch(() => null);
           const bal = b?.data?.data?.walletBalance ?? b?.data?.walletBalance ?? b?.data?.data?.balance;
           if (bal != null) walletBalance = `GH₵ ${Number(bal).toFixed(2)}`;
-        }
-      } catch (_) {}
+        } catch (_) {}
+      }
 
-      const activeArkesel = ARKESEL_API_KEY || process.env.ARKESEL_API_KEY;
-      if (activeArkesel) {
+      if (activeArkeselKey) {
         try {
           const aRes = await axios.get("https://sms.arkesel.com/api/v2/clients/balance-details", {
-            headers: { "api-key": activeArkesel },
+            headers: { "api-key": activeArkeselKey },
             timeout: 3000
           });
           const d = aRes.data?.data || aRes.data;
           const s = Number(d?.sms_balance ?? d?.smsBalance ?? d?.sms);
-          if (!isNaN(s)) arkeselSmsBalance = `${s} SMS`;
+          if (!isNaN(s)) arkeselSmsBalance = `${s} SMS credits`;
         } catch (_) {}
       }
 
@@ -4209,6 +4223,7 @@ app.post("/webhook", async (req, res) => {
         const [
           allOrdersRes,
           todayOrdersRes,
+          recentOrdersRes,
           servicesRes,
           checkersRes,
           chatsRes,
@@ -4218,8 +4233,9 @@ app.post("/webhook", async (req, res) => {
         ] = await Promise.all([
           supabase.from("orders").select("id, amount, payment_status, delivery_status, created_at").limit(500),
           supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at").gte("created_at", startOfDay.toISOString()).order("created_at", { ascending: false }),
-          supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status").eq("payment_status", "paid"),
-          supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status").eq("payment_status", "paid"),
+          supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at").order("created_at", { ascending: false }).limit(6),
+          supabase.from("service_orders").select("id, reference, service, amount, payment_status, delivery_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
+          supabase.from("checker_orders").select("id, reference, checker_type, amount, payment_status, delivery_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
           supabase.from("chat_conversations").select("id, unread_for_support").eq("status", "open"),
           supabase.from("products").select("id, name, network, capacity, price, in_stock"),
           supabase.from("scratch_codes").select("id, unlocked, scratched").eq("unlocked", true),
@@ -4246,8 +4262,18 @@ app.post("/webhook", async (req, res) => {
         pendingOrdersList = pending.slice(0, 5);
         failedOrdersList = failed.slice(0, 5);
 
+        // Recent orders
+        const recentOrders = recentOrdersRes?.data || [];
+        if (recentOrders.length > 0) {
+          recentOrdersSummary = `MOST RECENT STORE ORDERS IN DATABASE:\n` +
+            recentOrders.map((o, idx) => {
+              const dt = formatGhanaTime(o.created_at);
+              return `  ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Paid: ${o.payment_status} | Delivery: ${o.delivery_status} | Time: ${dt}`;
+            }).join("\n") + "\n";
+        }
+
         // Digital Services
-        const paidServices = servicesRes?.data || [];
+        const paidServices = (servicesRes?.data || []).filter(s => s.payment_status === "paid" || /complet|success/i.test(s.delivery_status || ""));
         const netflixOrders = paidServices.filter(s => s.service === "netflix");
         const mashupOrders = paidServices.filter(s => s.service === "mashup");
         const afaOrders = paidServices.filter(s => s.service === "afa");
@@ -4256,7 +4282,7 @@ app.post("/webhook", async (req, res) => {
         afaCount = afaOrders.length;
 
         // Checkers
-        checkerCount = (checkersRes?.data || []).length;
+        checkerCount = (checkersRes?.data || []).filter(c => c.payment_status === "paid" || /complet|success/i.test(c.delivery_status || "")).length;
 
         // Support Chats
         const openChats = chatsRes?.data || [];
@@ -4281,11 +4307,6 @@ app.post("/webhook", async (req, res) => {
         }
         if (atProducts.length > 0) {
           liveCatalogText += "• AirtelTigo Data Bundles:\n" + atProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
-        }
-
-        if (todayOrders.length > 0) {
-          recentOrdersSummary = `LATEST ORDERS TODAY (${todayOrders.length} orders):\n` +
-            todayOrders.slice(0, 10).map((o, idx) => `  ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${o.amount} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status}`).join("\n") + "\n";
         }
 
         // Gamification & Referrals
@@ -4316,28 +4337,17 @@ app.post("/webhook", async (req, res) => {
           anomalies.push(`${outOfStockCount} package(s) marked OUT OF STOCK: ${outOfStockItems.slice(0, 3).map(p => `${p.network || ""} ${p.capacity || p.name || ""}`).join(", ")}`);
         }
 
-        // Build comprehensive whole-system briefing
-        systemData += `WHOLE-SYSTEM LIVE STATUS (ALL 13 CORE PILLARS):\n`;
-        systemData += `1. Data Bundles Today: ${paid.length} paid orders | ₵${todayRevenue.toFixed(2)} sales | All-time sales: ~₵${allGross.toFixed(2)}\n`;
-        if (stuckOrders.length > 0) {
-          systemData += `   ⚠️ STUCK ORDERS ALERT: ${stuckOrders.length} order(s) processing > 15 mins without delivery confirmation!\n`;
-        }
-        if (failed.length > 0) {
-          systemData += `   ⚠️ Failed Orders (${failed.length}): ${failed.slice(0, 3).map(o => `${o.reference} (${o.capacity}GB ${o.network} to ${o.recipient_phone})`).join(", ")}\n`;
-        }
-        if (pending.length > 0) {
-          systemData += `   ⏳ In-Progress Deliveries (${pending.length}): ${pending.slice(0, 3).map(o => o.reference).join(", ")}\n`;
-        }
-        systemData += `2. DataMart API & Wallet: ${walletBalance || "Connected"} | Speed: ${deliveryEta}\n`;
-        systemData += `3. Arkesel Bulk SMS: ${arkeselSmsBalance || "Active"} available\n`;
-        systemData += `4. Netflix 30-Day Subscriptions: ${netflixCount} active passes (IMAP code retrieval active)\n`;
-        systemData += `5. MTN MashUp Combos: ${mashupOrders.length} total (${pendingMashupCount} awaiting manual *567*2# dispatch)\n`;
-        systemData += `6. AFA Registrations: ${afaCount} registered\n`;
-        systemData += `7. WAEC Result Checkers: ${checkerCount} sold\n`;
-        systemData += `8. Live Customer Support: ${openSupportCount} open chats (${unreadSupportCount} unread messages waiting)\n`;
-        systemData += `9. Product Catalog: ${outOfStockCount > 0 ? `⚠️ ${outOfStockCount} package(s) OUT OF STOCK!` : "All packages in stock ✅"}\n`;
-        systemData += `10. Scratch & Win: ${unlockedScratchCount} cards unlocked\n`;
-        systemData += `11. Affiliates & Promoters: ${activePromotersCount} registered\n`;
+        systemData = `LIVE STORE OPERATIONS SUMMARY:\n` +
+          `• Today's Orders: ${paid.length} paid | Sales: GH₵ ${todayRevenue.toFixed(2)} (All-time recorded: ~GH₵ ${allGross.toFixed(2)})\n` +
+          `• DataMart API Wallet: ${walletBalance || "Live connection active"} | Speed: ${deliveryEta}\n` +
+          `• Arkesel Bulk SMS: ${arkeselSmsBalance || "Operational"}\n` +
+          `• In-Progress Deliveries: ${pending.length} order(s)\n` +
+          `• Stuck Deliveries (>15 mins): ${stuckOrders.length}\n` +
+          `• Failed Orders: ${failed.length}\n` +
+          `• Open Visitor Chats: ${openSupportCount} (${unreadSupportCount} unread)\n` +
+          `• Digital Services: ${netflixCount} Netflix passes, ${pendingMashupCount} MashUp awaiting dialing, ${afaCount} AFA, ${checkerCount} WAEC/BECE checkers\n` +
+          `• Catalog Stock: ${outOfStockCount > 0 ? `${outOfStockCount} packages OUT OF STOCK` : "All packages in stock ✅"}`;
+
         if (anomalies.length > 0) {
           systemData += `\n🚨 ACTIVE SYSTEM WARNINGS:\n` + anomalies.map(a => `• ${a}`).join("\n");
         }
@@ -4400,8 +4410,8 @@ app.post("/webhook", async (req, res) => {
 
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
       const ownerSystemPrompt =
-        "You are Stony, the owner's personal AI business assistant, digital co-pilot, and whole-system commercial partner at DATA 1 GH.\n" +
-        "You are having a private conversation directly with the business owner on WhatsApp.\n\n" +
+        "You are Stony, the owner's personal AI business assistant, digital co-pilot, and commercial partner at DATA 1 GH.\n" +
+        "You are having a direct, private WhatsApp conversation with the business owner.\n\n" +
         "OFFICIAL STORE LINKS & ACCESS:\n" +
         `- Storefront (Shop / Front end): ${STORE_FRONTEND_URL}\n` +
         `- Admin Dashboard / Portal: ${ADMIN_DASHBOARD_URL}\n` +
@@ -4423,28 +4433,16 @@ app.post("/webhook", async (req, res) => {
         "  1. Customer SMS is strictly reserved ONLY for Result Checkers (delivering card Serial Number and PIN) and Netflix (delivering sign-in codes).\n" +
         "  2. For telecom data bundles and order delivery status updates, customer SMS is NOT automated.\n" +
         "  3. Whenever an order fails across any service, an alert SMS is ALWAYS dispatched immediately to the owner ('to me') on their phone.\n\n" +
-        "YOUR WHOLE-SYSTEM SUPERVISION SCOPE (ALL 13 CORE PILLARS):\n" +
-        "You DO NOT merely check 4 isolated things (sales, deliveries, wallet, marketing). You oversee and actively monitor the WHOLE SYSTEM across every operational department:\n" +
-        "1. Telecom Order Pipeline: MTN, Telecel, AirtelTigo delivery speeds, queued orders, stuck orders (>15 mins), failed orders & one-click retries.\n" +
-        "2. Financials & Cash Flow: Gross sales (all-time & today), per-network revenue, Paystack MoMo reconciliations, underpaid/pending orders.\n" +
-        "3. DataMart API & Wallet: Live wallet balance, low-balance warning (< GH₵ 50) so automated dispatch never stops.\n" +
-        "4. Arkesel Bulk SMS Gateway: SMS units balance, notification health for receipts & alerts.\n" +
-        "5. Netflix 30-Day Subscriptions: Active subscriber count, single-use vouchers, IMAP email sign-in code retrieval status.\n" +
-        "6. MTN MashUp Manual Queue: Combos awaiting manual phone dialing via *567*2#.\n" +
-        "7. AFA Registrations: Farmer Alliance registrations, approval status.\n" +
-        "8. WAEC / BECE / WASSCE Result Checkers: Inventory stock, voucher sales, instant PIN issuance.\n" +
-        "9. Live Customer Support: Open website visitor chats, unread messages, customer escalation issues.\n" +
-        "10. Product Catalog Stock: In-stock vs out-of-stock data packages in database.\n" +
-        "11. Affiliate & Referral Network: Registered promoters, link clicks, commission liability.\n" +
-        "12. Gamification & Retention: Scratch & Win cards, Lucky Spin claims.\n" +
-        "13. System Integrity & Security: Anomaly alerts, database sync, webhook health.\n\n" +
-        "PERSONALITY & CONVERSATIONAL VIBE:\n" +
-        "- Talk like a trusted, intelligent, senior personal assistant and Ghanaian digital business partner.\n" +
-        "- Be natural, sharp, warm, and collaborative. Use natural Ghanaian vibe (\"bossu\", \"chale\", \"sharp\", \"no wahala\").\n" +
-        "- Mutual conversation: Actively engage with what the owner says. Discuss topics back and forth, brainstorm ideas, give reasoned opinions.\n" +
-        "- When the owner asks whether you can perform or what you monitor, confirm you oversee the whole system across all 13 pillars and give an exact breakdown.\n" +
-        "- When the owner asks what happens after payment is successful or if you still perform/monitor after payment, explain how you actively supervise the entire post-payment lifecycle 24/7 (MoMo/Paystack reconciliation, automated DataMart dispatch, polling until delivered bypassing fake 200 OKs, low wallet balance warnings < GH₵ 50, admin WhatsApp alerts, stuck order anomaly detection >15 mins, and customer care readiness — with NO automated customer SMS sent).\n" +
-        "- Proactively bring up any active warnings (low wallet, stuck orders, unread chats, out-of-stock items, pending MashUp manual dial) in your replies!\n" +
+        "PERSONALITY & CONVERSATIONAL STYLE (AUTHENTIC GHANAIAN PARTNER — ZERO PROMPT DUMPING):\n" +
+        "- Talk like a real, smart Ghanaian human partner and co-pilot ('bossu', 'chale', 'sharp', 'no wahala'). Do NOT sound like an AI, an academic textbook, or a prompt template.\n" +
+        "- CRITICAL RULE — NEVER DUMP THE 13-PILLAR ESSAY: Under NO circumstances should you output a massive, rigid, academic 13-pillar breakdown when the owner asks general questions like 'Are you sure?', 'Can you perform?', 'How is the system?', 'Is everything running?', or casual greetings.\n" +
+        "- KEEP CASUAL REPLIES BRIEF & NATURAL (1 TO 3 SHORT PARAGRAPHS / 2 TO 5 SENTENCES): Answer the question directly with real facts.\n" +
+        "- ALWAYS USE REAL LIVE NUMBERS FROM 'CURRENT LIVE BUSINESS REALITY' BELOW: Mention the actual DataMart balance (e.g. GH₵ 142.50 or whatever is loaded), actual SMS balance, and recent orders.\n" +
+        "- If the owner asks 'Is the system okay?' or 'How are things?', reply conversationally like:\n" +
+        "  'Everything is running smooth bossu! DataMart wallet is at GH₵ [bal], Arkesel has [sms] SMS credits, and delivery speed is ~[eta]. [N] orders today (or: sales are quiet today, last order was Ref [ref] for [pkg] to [phone] at [time]). No stuck orders right now. What would you like to check or tweak?'\n" +
+        "- ONLY provide an extensive multi-department breakdown if the owner explicitly requests a 'full audit', 'deep report', or 'detailed system breakdown'.\n" +
+        "- If today has 0 orders so far, state it naturally without making the business look dead: mention when the last order came in from the recent orders list so the owner knows the system is live and tracking properly.\n" +
+        "- When the owner asks what happens after payment is successful or if you still perform/monitor after payment, explain naturally how you supervise the post-payment lifecycle 24/7 (MoMo reconciliation, automated DataMart dispatch, polling until delivered bypassing fake 200 OKs, low wallet balance warnings < GH₵ 50, admin WhatsApp alerts, stuck order anomaly detection >15 mins — with NO automated customer SMS sent).\n" +
         "- AUTONOMOUS ACTION AUTHORITY & HUMAN-IN-THE-LOOP CONFIRMATION:\n" +
         "  You are NOT just a passive reader. You can actively PERFORM ACTIONS across the whole system on WhatsApp:\n" +
         "  1. Update order delivery status to ANY state: delivered, processing, pending, waiting, failed, cancelled, refunded, completed (single or batch) — NO SMS IS SENT\n" +
@@ -4473,10 +4471,11 @@ app.post("/webhook", async (req, res) => {
         "- NEVER say \"As an AI\". You are Stony.\n\n" +
         "CURRENT LIVE BUSINESS REALITY:\n" +
         `- Delivery Speed / ETA: ${deliveryEta}\n` +
-        (walletBalance ? `- DataMart API Wallet: ${walletBalance}\n` : "- Wallet: Connected\n") +
-        (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
+        (walletBalance ? `- DataMart API Wallet: ${walletBalance}\n` : "- DataMart API Wallet: Active\n") +
+        (arkeselSmsBalance ? `- Arkesel SMS Balance: ${arkeselSmsBalance}\n` : "") +
         (recentOrdersSummary ? `\n${recentOrdersSummary}\n` : "") +
-        (systemData ? `\n${systemData}` : "") +
+        (systemData ? `\n${systemData}\n` : "") +
+        (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
         (specificOrderCtx ? `\n${specificOrderCtx}` : "");
 
       // ── CALL MULTI-MODEL AI (GROQ / GEMINI 3.8/2.5 / OPENROUTER / OPENAI) ──
@@ -6482,7 +6481,7 @@ app.get("/admin-data", async (req, res) => {
 
 /* =========================================================
 START SERVER
-========================================================= */ 
+========================================================= */
 
 app.get("/health", (req, res) => {
   res.status(200).send("Bot is alive!");
