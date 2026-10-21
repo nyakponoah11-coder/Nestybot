@@ -763,12 +763,14 @@ async function getAiConfig() {
     return cachedAiConfig;
   }
   let geminiKey = cleanApiKey(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || "");
+  let grokKey = cleanApiKey(process.env.GROK_API_KEY || process.env.XAI_API_KEY || "");
   let groqKey = cleanApiKey(process.env.GROQ_API_KEY || process.env.VITE_GROQ_API_KEY || process.env.GROQ_CLOUD_API_KEY || "");
   let openRouterKey = cleanApiKey(process.env.OPENROUTER_API_KEY || process.env.VITE_OPENROUTER_API_KEY || process.env.OPENROUTE_API_KEY || "");
   let openAiKey = cleanApiKey(process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY || "");
 
   let preferredProvider = "gemini";
   let geminiModel = normalizeGeminiModel(process.env.GEMINI_MODEL || "gemini-3.8-flash");
+  let grokModel = "grok-2-latest";
   let groqModel = "llama-3.3-70b-versatile";
   let openRouterModel = "meta-llama/llama-3.3-70b-instruct";
   let openAiModel = "gpt-4o-mini";
@@ -778,6 +780,7 @@ async function getAiConfig() {
       .from("settings").select("key,value")
       .in("key", [
         "gemini_api_key", "GEMINI_API_KEY", "VITE_GEMINI_API_KEY", "gemini_model", "GEMINI_MODEL",
+        "grok_api_key", "GROK_API_KEY", "xai_api_key", "XAI_API_KEY", "grok_model", "GROK_MODEL",
         "groq_api_key", "GROQ_API_KEY", "groq_model", "GROQ_MODEL",
         "openrouter_api_key", "OPENROUTER_API_KEY", "openroute_api_key", "openrouter_model",
         "openai_api_key", "OPENAI_API_KEY", "openai_model",
@@ -786,15 +789,19 @@ async function getAiConfig() {
     const aiMap = Object.fromEntries((aiRows || []).map(r => [r.key, cleanApiKey(r.value)]));
 
     if (!geminiKey) geminiKey = aiMap.gemini_api_key || aiMap.GEMINI_API_KEY || aiMap.VITE_GEMINI_API_KEY || "";
+    if (!grokKey) grokKey = aiMap.grok_api_key || aiMap.GROK_API_KEY || aiMap.xai_api_key || aiMap.XAI_API_KEY || "";
     if (!groqKey) groqKey = aiMap.groq_api_key || aiMap.GROQ_API_KEY || "";
     if (!openRouterKey) openRouterKey = aiMap.openrouter_api_key || aiMap.OPENROUTER_API_KEY || aiMap.openroute_api_key || "";
     if (!openAiKey) openAiKey = aiMap.openai_api_key || aiMap.OPENAI_API_KEY || "";
+
+    if (groqKey && groqKey.startsWith("xai-") && !grokKey) grokKey = groqKey;
 
     if (aiMap.ai_preferred_provider) preferredProvider = aiMap.ai_preferred_provider.toLowerCase();
     else if (aiMap.primary_ai_provider) preferredProvider = aiMap.primary_ai_provider.toLowerCase();
     else if (aiMap.ai_provider) preferredProvider = aiMap.ai_provider.toLowerCase();
 
     if (aiMap.gemini_model || aiMap.GEMINI_MODEL) geminiModel = normalizeGeminiModel(aiMap.gemini_model || aiMap.GEMINI_MODEL);
+    if (aiMap.grok_model || aiMap.GROK_MODEL) grokModel = aiMap.grok_model || aiMap.GROK_MODEL;
     if (aiMap.groq_model || aiMap.GROQ_MODEL) groqModel = aiMap.groq_model || aiMap.GROQ_MODEL;
     if (aiMap.openrouter_model) openRouterModel = aiMap.openrouter_model;
     if (aiMap.openai_model) openAiModel = aiMap.openai_model;
@@ -811,6 +818,8 @@ async function getAiConfig() {
     preferredProvider,
     geminiKey,
     geminiModel,
+    grokKey,
+    grokModel,
     groqKey,
     groqModel,
     openRouterKey,
@@ -827,11 +836,13 @@ async function getAiApiKeys() {
   const cfg = await getAiConfig();
   return {
     geminiKey: cfg.geminiKey,
+    grokKey: cfg.grokKey,
     openAiKey: cfg.openAiKey,
     groqKey: cfg.groqKey,
     openRouterKey: cfg.openRouterKey,
     preferredProvider: cfg.preferredProvider,
     geminiModel: cfg.geminiModel,
+    grokModel: cfg.grokModel,
     groqModel: cfg.groqModel,
     openRouterModel: cfg.openRouterModel,
     openAiModel: cfg.openAiModel
@@ -841,15 +852,51 @@ async function getAiApiKeys() {
 /**
  * Universal multi-provider AI caller for WhatsApp Bot Server.
  * Respects the admin's chosen ai_preferred_provider and chosen model from Supabase,
- * with cascading fallbacks across Groq, Gemini, OpenRouter, and OpenAI.
+ * with cascading fallbacks across xAI Grok, Google Gemini 3.8/2.5, Groq, OpenRouter, and OpenAI.
  */
 async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens = 350, temperature = 0.7 }) {
   const config = await getAiConfig();
   const provider = (config.preferredProvider || "gemini").toLowerCase();
 
+  // Helper for xAI Grok API call
+  async function tryGrok() {
+    const k = config.grokKey || (config.groqKey && config.groqKey.startsWith("xai-") ? config.groqKey : "");
+    if (!k) return null;
+    const models = [
+      config.grokModel || "grok-2-latest",
+      "grok-2-latest",
+      "grok-beta",
+      "grok-2-1212"
+    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...history.slice(-6).map(h => ({
+        role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
+        content: h.text || h.content || ""
+      })),
+      { role: "user", content: userMessage }
+    ];
+
+    for (const model of models) {
+      try {
+        const res = await axios.post(
+          "https://api.x.ai/v1/chat/completions",
+          { model, messages, max_tokens: maxTokens, temperature },
+          { headers: { Authorization: `Bearer ${k}`, "Content-Type": "application/json" }, timeout: 15000 }
+        );
+        const text = res.data?.choices?.[0]?.message?.content?.trim();
+        if (text) return { text, provider: "grok", model };
+      } catch (err) {
+        console.warn(`xAI Grok (${model}) error:`, err.response?.data?.error?.message || err.message);
+      }
+    }
+    return null;
+  }
+
   // Helper for Groq API call
   async function tryGroq() {
-    if (!config.groqKey) return null;
+    if (!config.groqKey || config.groqKey.startsWith("xai-")) return null;
     const models = [
       config.groqModel,
       "llama-3.3-70b-versatile",
@@ -1051,10 +1098,11 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
 
   // Build provider execution chain starting with preferred provider
   const chain = [];
-  if (provider === "groq") chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi);
-  else if (provider === "openrouter") chain.push(tryOpenRouter, tryGemini, tryGroq, tryOpenAi);
-  else if (provider === "openai") chain.push(tryOpenAi, tryGemini, tryGroq, tryOpenRouter);
-  else chain.push(tryGemini, tryGroq, tryOpenRouter, tryOpenAi);
+  if (provider === "grok") chain.push(tryGrok, tryGemini, tryGroq, tryOpenRouter, tryOpenAi);
+  else if (provider === "groq") chain.push(tryGroq, tryGrok, tryGemini, tryOpenRouter, tryOpenAi);
+  else if (provider === "openrouter") chain.push(tryOpenRouter, tryGemini, tryGrok, tryGroq, tryOpenAi);
+  else if (provider === "openai") chain.push(tryOpenAi, tryGemini, tryGrok, tryGroq, tryOpenRouter);
+  else chain.push(tryGemini, tryGrok, tryGroq, tryOpenRouter, tryOpenAi);
 
   for (const fn of chain) {
     const res = await fn();
@@ -1190,8 +1238,18 @@ async function handleDirectDataPull(rawText, from, isOwner = false) {
   if (/\b(order|orders|sales?|transactions?)\b/i.test(lower)) {
     try {
       let query = supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at").order("created_at", { ascending: false }).limit(15);
+      const isToday = /\b(today|todays)\b/i.test(lower);
+      const isYesterday = /\b(yesterday|yesterdays)\b/i.test(lower);
 
-      if (/\b(today|todays)\b/i.test(lower)) {
+      if (isYesterday) {
+        const startOfYesterday = new Date();
+        startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+        startOfYesterday.setHours(0, 0, 0, 0);
+        const endOfYesterday = new Date();
+        endOfYesterday.setDate(endOfYesterday.getDate() - 1);
+        endOfYesterday.setHours(23, 59, 59, 999);
+        query = query.gte("created_at", startOfYesterday.toISOString()).lte("created_at", endOfYesterday.toISOString());
+      } else if (isToday) {
         const startOfDay = new Date();
         startOfDay.setHours(0, 0, 0, 0);
         query = query.gte("created_at", startOfDay.toISOString());
@@ -1208,10 +1266,12 @@ async function handleDirectDataPull(rawText, from, isOwner = false) {
       if (ords && ords.length > 0) {
         const total = ords.reduce((sum, o) => sum + Number(o.amount || 0), 0);
         let title = `LATEST ORDERS (${ords.length})`;
-        if (lower.includes("today") && lower.includes("paid")) {
+        if (isYesterday) {
+          title = `YESTERDAY'S ORDERS (${ords.length} orders | Total GH₵ ${total.toFixed(2)})`;
+        } else if (lower.includes("today") && lower.includes("paid")) {
           title = `TODAY'S PAID ORDERS (${ords.length} orders | Total GH₵ ${total.toFixed(2)})`;
         } else if (lower.includes("today")) {
-          title = `TODAY'S ORDERS (${ords.length} orders)`;
+          title = `TODAY'S ORDERS (${ords.length} orders | Total GH₵ ${total.toFixed(2)})`;
         } else if (lower.includes("paid")) {
           title = `RECENT PAID ORDERS (${ords.length} orders | Total GH₵ ${total.toFixed(2)})`;
         }
@@ -1220,13 +1280,39 @@ async function handleDirectDataPull(rawText, from, isOwner = false) {
         ords.forEach((o, i) => {
           const ds = o.delivery_status === "delivered" ? "Delivered ✅" : (o.delivery_status === "failed" ? "Failed ❌" : `${o.delivery_status || "In progress"} ⏳`);
           const ps = /paid/i.test(o.payment_status) ? "Paid 💰" : `${o.payment_status}`;
+          const dt = formatGhanaTime(o.created_at);
           reply += `${i + 1}. *${o.reference}*\n` +
             `   • ${o.capacity}GB ${o.network} → ${o.recipient_phone}\n` +
-            `   • GH₵ ${o.amount} | ${ps} | ${ds}\n`;
+            `   • GH₵ ${o.amount} | ${ps} | ${ds}\n` +
+            (dt ? `   • Placed: ${dt}\n` : "");
         });
         reply += `\n📦 *Track live:* ${TRACK_ORDER_URL}`;
         return reply;
       } else {
+        if (isToday) {
+          // If 0 orders today (e.g. past midnight), fetch the latest orders across the database so the owner sees real activity!
+          const { data: recentOrders } = await supabase
+            .from("orders")
+            .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at")
+            .order("created_at", { ascending: false })
+            .limit(5);
+
+          if (recentOrders && recentOrders.length > 0) {
+            let reply = `📋 *TODAY'S ORDERS:* 0 orders placed so far today (since 12:00 AM).\n\n` +
+              `*Here are your most recent orders in the database:*\n\n`;
+            recentOrders.forEach((o, i) => {
+              const ds = o.delivery_status === "delivered" ? "Delivered ✅" : (o.delivery_status === "failed" ? "Failed ❌" : `${o.delivery_status || "In progress"} ⏳`);
+              const ps = /paid/i.test(o.payment_status) ? "Paid 💰" : `${o.payment_status}`;
+              const dt = formatGhanaTime(o.created_at);
+              reply += `${i + 1}. *${o.reference}*\n` +
+                `   • ${o.capacity}GB ${o.network} → ${o.recipient_phone}\n` +
+                `   • GH₵ ${o.amount} | ${ps} | ${ds}\n` +
+                (dt ? `   • Placed: ${dt}\n` : "");
+            });
+            reply += `\n📦 *Track live:* ${TRACK_ORDER_URL}`;
+            return reply;
+          }
+        }
         return `📋 *No matching orders found in the database.*`;
       }
     } catch (err) {
@@ -1941,6 +2027,214 @@ async function getOrderFullDetails(query) {
     });
   }
   return results;
+}
+
+async function executeOwnerDirectAction(type, payload = {}) {
+  const cleanType = String(type || "").toLowerCase().trim();
+
+  try {
+    // 1. Update Order Delivery Status
+    if (cleanType === "update_order_status") {
+      const refs = [];
+      if (payload.reference) refs.push(payload.reference);
+      if (payload.ref) refs.push(payload.ref);
+      if (payload.order_id) refs.push(payload.order_id);
+      if (Array.isArray(payload.orders)) refs.push(...payload.orders);
+      if (Array.isArray(payload.references)) refs.push(...payload.references);
+      const targetStatus = payload.delivery_status || payload.status || "delivered";
+      const updated = [];
+      for (const r of refs) {
+        const ok = await updateOrderDeliveryStatusSafely(r, targetStatus);
+        if (ok) updated.push(r);
+      }
+      return updated.length > 0
+        ? `Order(s) ${updated.join(", ")} marked as ${targetStatus.toUpperCase()} live in the database!`
+        : `Delivery status updated to ${targetStatus.toUpperCase()}.`;
+    }
+
+    // 2. Update Order Payment Status
+    if (cleanType === "update_payment_status") {
+      const refs = [];
+      if (payload.reference) refs.push(payload.reference);
+      if (payload.ref) refs.push(payload.ref);
+      if (payload.order_id) refs.push(payload.order_id);
+      if (Array.isArray(payload.orders)) refs.push(...payload.orders);
+      const targetStatus = payload.payment_status || payload.status || "paid";
+      const updated = [];
+      for (const r of refs) {
+        const ok = await updateOrderPaymentStatusSafely(r, targetStatus);
+        if (ok) updated.push(r);
+      }
+      return updated.length > 0
+        ? `Payment status for ${updated.join(", ")} updated to ${targetStatus.toUpperCase()}!`
+        : `Payment status marked as ${targetStatus.toUpperCase()}.`;
+    }
+
+    // 3. Update Product Price
+    if (cleanType === "update_product_price") {
+      const newPrice = parseFloat(payload.price || payload.new_price);
+      if (!isNaN(newPrice) && newPrice > 0) {
+        let q = supabase.from("products").update({ price: newPrice, updated_at: new Date().toISOString() });
+        if (payload.product_id) q = q.eq("id", payload.product_id);
+        else if (payload.network && payload.capacity) {
+          q = q.ilike("network", `%${payload.network}%`).eq("capacity", String(payload.capacity).replace(/\D/g, ""));
+        } else if (payload.name) {
+          q = q.ilike("name", `%${payload.name}%`);
+        }
+        await q;
+        return `Product price updated to GH₵ ${newPrice.toFixed(2)} on the site!`;
+      }
+    }
+
+    // 4. Toggle Product Stock
+    if (cleanType === "toggle_product_stock" || cleanType === "toggle_stock") {
+      const inStock = Boolean(payload.in_stock);
+      let q = supabase.from("products").update({ in_stock: inStock, updated_at: new Date().toISOString() });
+      if (payload.product_id) q = q.eq("id", payload.product_id);
+      else if (payload.name) q = q.ilike("name", `%${payload.name}%`);
+      await q;
+      return `Product stock toggled to ${inStock ? "IN STOCK" : "OUT OF STOCK"} on the site!`;
+    }
+
+    // 5. Send Customer SMS
+    if (cleanType === "send_sms") {
+      const phone = payload.phone || payload.recipient;
+      const msg = payload.message || payload.smsText;
+      if (phone && msg) {
+        await sendAdminSms(msg, phone);
+        return `SMS sent to ${phone} with Sender ID D_1Gh.`;
+      }
+    }
+
+    // 6. Broadcast SMS
+    if (cleanType === "broadcast_sms") {
+      const msg = payload.message || payload.smsText;
+      if (msg) {
+        const targetGroup = String(payload.target_group || "customers").toLowerCase();
+        let phones = [];
+        if (targetGroup.includes("agent")) {
+          const { data: agRows } = await supabase.from("agents").select("phone");
+          phones = (agRows || []).map(a => a.phone).filter(Boolean);
+        } else {
+          const { data: ords } = await supabase.from("orders").select("recipient_phone").limit(300);
+          phones = (ords || []).map(o => o.recipient_phone).filter(Boolean);
+        }
+        let sentCount = 0;
+        for (const p of phones.slice(0, 100)) {
+          try {
+            await sendAdminSms(msg, p);
+            sentCount++;
+          } catch (_) {}
+        }
+        return `Broadcast SMS sent to ${sentCount} recipient(s) via D_1Gh!`;
+      }
+    }
+
+    // 7. Generate Free Data Vouchers
+    if (cleanType === "generate_vouchers") {
+      const count = parseInt(payload.count, 10) || 5;
+      const net = payload.network || "MTN";
+      const cap = payload.capacity || "1";
+      const res = await generateFreeDataVouchersSafely(count, net, cap);
+      return `Generated ${res.codes.length} free data voucher(s) (${cap}GB ${net}): ${res.codes.join(", ")}`;
+    }
+
+    // 8. Toggle Free Data Campaign
+    if (cleanType === "toggle_free_data") {
+      const active = Boolean(payload.active);
+      await toggleFreeDataCampaign(active);
+      return `Free data giveaway campaign is now ${active ? "ACTIVE on storefront" : "DISABLED"}!`;
+    }
+
+    // 9. Credit Agent Wallet
+    if (cleanType === "credit_agent") {
+      const target = payload.phone || payload.agent_id || payload.target;
+      const amt = parseFloat(payload.amount);
+      const res = await creditAgentWalletSafely(target, amt);
+      if (res) {
+        return `Agent ${res.agent.name || res.agent.phone} credited with GH₵ ${res.credited.toFixed(2)} (New balance: GH₵ ${res.newBalance.toFixed(2)}).`;
+      }
+      return `Could not find agent "${target}".`;
+    }
+
+    // 10. Update Announcement
+    if (cleanType === "update_announcement") {
+      await updateStoreAnnouncement({
+        title: payload.title || "Store Notice",
+        message: payload.message || payload.announcement || "",
+        enabled: payload.enabled !== undefined ? Boolean(payload.enabled) : true,
+      });
+      return "Storefront announcement banner updated live!";
+    }
+
+    // 11. Change Theme Color
+    if (cleanType === "change_theme_color") {
+      const color = payload.color || "gold";
+      await updateSiteThemeColor(color);
+      return `Store theme color switched to ${color.toUpperCase()}!`;
+    }
+
+    // 12. Update Setting
+    if (cleanType === "update_setting") {
+      const k = payload.key;
+      const v = payload.value !== undefined ? payload.value : "";
+      if (k) {
+        await updateStoreSetting(k, v);
+        return `Store setting "${k}" updated to "${v}"!`;
+      }
+    }
+
+    // 13. Resync Order
+    if (cleanType === "resync_order" || cleanType === "resync_datamart") {
+      const ref = payload.reference || payload.ref;
+      if (ref) {
+        const live = await getRealDatamartDeliveryStatus(ref);
+        if (live?.deliveryStatus) {
+          await supabase.from("orders").update({
+            delivery_status: live.deliveryStatus,
+            datamart_status: live.rawStatus,
+            updated_at: new Date().toISOString()
+          }).eq("reference", ref);
+          return `Order ${ref} carrier status: ${live.deliveryStatus}.`;
+        }
+      }
+    }
+
+    // 14. Digital Services
+    if (cleanType === "update_service_status") {
+      const ref = payload.reference || payload.ref;
+      const st = payload.status || payload.delivery_status || "delivered";
+      if (ref) {
+        await supabase.from("service_orders").update({ delivery_status: st, updated_at: new Date().toISOString() }).or(`reference.ilike.%${ref}%`);
+        return `Digital service order ${ref} marked as ${st.toUpperCase()}!`;
+      }
+    }
+
+    // 15. Checkers
+    if (cleanType === "update_checker_status") {
+      const ref = payload.reference || payload.ref;
+      const st = payload.status || payload.delivery_status || "delivered";
+      if (ref) {
+        await supabase.from("checker_orders").update({ delivery_status: st, updated_at: new Date().toISOString() }).or(`reference.ilike.%${ref}%`);
+        return `Result checker order ${ref} marked as ${st.toUpperCase()}!`;
+      }
+    }
+
+    // 16. Support Chat
+    if (cleanType === "resolve_support_chat") {
+      const cId = payload.conversation_id || payload.conversationId;
+      let q = supabase.from("chat_conversations").update({ status: "resolved", unread_for_support: 0, updated_at: new Date().toISOString() });
+      if (cId) q = q.eq("id", cId);
+      else q = q.eq("status", "open");
+      await q;
+      return "Customer support chat marked as resolved!";
+    }
+  } catch (e) {
+    console.warn("executeOwnerDirectAction error:", e.message);
+    return `Action execution encountered an issue: ${e.message}`;
+  }
+
+  return "Action executed.";
 }
 
 function extractActionSuggestion(rawText) {
@@ -4478,7 +4772,59 @@ app.post("/webhook", async (req, res) => {
         (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
         (specificOrderCtx ? `\n${specificOrderCtx}` : "");
 
-      // ── CALL MULTI-MODEL AI (GROQ / GEMINI 3.8/2.5 / OPENROUTER / OPENAI) ──
+      // ── STEP 1: TALK TO THE SITE ADMIN AI CO-PILOT (FIRST PRIORITY) ──
+      // This routes the WhatsApp conversation directly to the AI configured on the admin site
+      // (Grok and Gemini) so the co-pilot can execute anything requested on the live website!
+      let siteCoPilotHandled = false;
+      try {
+        const siteBase = process.env.SITE_URL || STORE_FRONTEND_URL || "https://data1gh.vercel.app";
+        const siteAiEndpoint = `${siteBase.replace(/\/+$/, "")}/api/admin?fn=admin-ai`;
+        const siteResp = await axios.post(
+          siteAiEndpoint,
+          {
+            action: "aiCoPilotChat",
+            message: text,
+            history: history.slice(-8).map(h => ({
+              role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
+              content: h.text || h.content || ""
+            })),
+            source: "whatsapp",
+            phone: String(from),
+          },
+          {
+            headers: { "Content-Type": "application/json" },
+            timeout: 15000,
+          }
+        );
+
+        if (siteResp.data && siteResp.data.ok && siteResp.data.reply) {
+          siteCoPilotHandled = true;
+          let replyText = siteResp.data.reply;
+          if (siteResp.data.staged_action) {
+            try {
+              await setOwnerPendingAction(from, siteResp.data.staged_action);
+            } catch (_) {}
+          }
+          replyText = sanitizeSecretsFromText(replyText)
+            .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony")
+            .replace(/\bdatamart\b/gi, "DataMart");
+
+          try {
+            const updatedHistory = [
+              ...history.slice(-6),
+              { role: "user", text },
+              { role: "assistant", text: replyText }
+            ];
+            await saveOwnerHistory(from, updatedHistory);
+          } catch (_) {}
+
+          return sendWhatsApp(from, replyText);
+        }
+      } catch (siteErr) {
+        console.log("Site Co-Pilot bridge deferred to in-bot engine fallback:", siteErr.message);
+      }
+
+      // ── STEP 2: IN-BOT CO-PILOT ENGINE (FALLBACK USING CONFIGURED GROK & GEMINI) ──
       const aiResult = await executeBotAi({
         systemPrompt: ownerSystemPrompt,
         userMessage: text,
@@ -4488,7 +4834,22 @@ app.post("/webhook", async (req, res) => {
       });
       let aiReply = aiResult?.text || "";
 
-      // ── ACTION SUGGESTION DETECTION ──
+      // Check if AI emitted direct execution tag [EXECUTE_ACTION: {...}]
+      const execActionMatch = aiReply.match(/\[EXECUTE_ACTION:\s*(\{[\s\S]*?\})\]/i);
+      if (execActionMatch) {
+        try {
+          const actionObj = JSON.parse(execActionMatch[1]);
+          aiReply = aiReply.replace(execActionMatch[0], "").trim();
+          const execRes = await executeOwnerDirectAction(actionObj.action_type || actionObj.type, actionObj.payload || actionObj);
+          if (execRes) {
+            aiReply += `\n\n✅ Done bossu! ${execRes}`;
+          }
+        } catch (err) {
+          console.warn("Failed executing action tag in bot:", err.message);
+        }
+      }
+
+      // ── ACTION SUGGESTION DETECTION [SUGGEST_ACTION: {...}] ──
       if (aiReply) {
         const proposed = extractProposedActionFromText(aiReply);
         if (proposed?.action) {
@@ -4507,6 +4868,7 @@ app.post("/webhook", async (req, res) => {
 
         // Clean up any remaining suggestion tags so no raw internal syntax leaks
         aiReply = aiReply.replace(/\[SUGGEST_[A-Z_]+:[^\]]*\]/gi, "").trim();
+        aiReply = aiReply.replace(/\[EXECUTE_[A-Z_]+:[^\]]*\]/gi, "").trim();
       }
 
       // ── SMART CONVERSATIONAL PERSONAL ASSISTANT FALLBACK & DIRECT COMMANDS ──
