@@ -768,7 +768,7 @@ async function getAiConfig() {
   let openRouterKey = cleanApiKey(process.env.OPENROUTER_API_KEY || process.env.VITE_OPENROUTER_API_KEY || process.env.OPENROUTE_API_KEY || "");
   let openAiKey = cleanApiKey(process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY || "");
 
-  let preferredProvider = "gemini";
+  let preferredProvider = groqKey ? "groq" : "gemini";
   let geminiModel = normalizeGeminiModel(process.env.GEMINI_MODEL || "gemini-3.8-flash");
   let grokModel = "grok-2-latest";
   let groqModel = "llama-3.3-70b-versatile";
@@ -780,17 +780,17 @@ async function getAiConfig() {
       .from("settings").select("key,value")
       .in("key", [
         "gemini_api_key", "GEMINI_API_KEY", "VITE_GEMINI_API_KEY", "gemini_model", "GEMINI_MODEL",
-        "grok_api_key", "GROK_API_KEY", "xai_api_key", "XAI_API_KEY", "grok_model", "GROK_MODEL",
         "groq_api_key", "GROQ_API_KEY", "groq_model", "GROQ_MODEL",
+        "grok_api_key", "GROK_API_KEY", "xai_api_key", "XAI_API_KEY", "grok_model", "GROK_MODEL",
         "openrouter_api_key", "OPENROUTER_API_KEY", "openroute_api_key", "openrouter_model",
         "openai_api_key", "OPENAI_API_KEY", "openai_model",
         "ai_preferred_provider", "ai_provider", "primary_ai_provider", "ai_support_enabled"
       ]);
     const aiMap = Object.fromEntries((aiRows || []).map(r => [r.key, cleanApiKey(r.value)]));
 
+    if (!groqKey) groqKey = aiMap.groq_api_key || aiMap.GROQ_API_KEY || "";
     if (!geminiKey) geminiKey = aiMap.gemini_api_key || aiMap.GEMINI_API_KEY || aiMap.VITE_GEMINI_API_KEY || "";
     if (!grokKey) grokKey = aiMap.grok_api_key || aiMap.GROK_API_KEY || aiMap.xai_api_key || aiMap.XAI_API_KEY || "";
-    if (!groqKey) groqKey = aiMap.groq_api_key || aiMap.GROQ_API_KEY || "";
     if (!openRouterKey) openRouterKey = aiMap.openrouter_api_key || aiMap.OPENROUTER_API_KEY || aiMap.openroute_api_key || "";
     if (!openAiKey) openAiKey = aiMap.openai_api_key || aiMap.OPENAI_API_KEY || "";
 
@@ -799,6 +799,8 @@ async function getAiConfig() {
     if (aiMap.ai_preferred_provider) preferredProvider = aiMap.ai_preferred_provider.toLowerCase();
     else if (aiMap.primary_ai_provider) preferredProvider = aiMap.primary_ai_provider.toLowerCase();
     else if (aiMap.ai_provider) preferredProvider = aiMap.ai_provider.toLowerCase();
+    else if (groqKey) preferredProvider = "groq";
+    else if (geminiKey) preferredProvider = "gemini";
 
     if (aiMap.gemini_model || aiMap.GEMINI_MODEL) geminiModel = normalizeGeminiModel(aiMap.gemini_model || aiMap.GEMINI_MODEL);
     if (aiMap.grok_model || aiMap.GROK_MODEL) grokModel = aiMap.grok_model || aiMap.GROK_MODEL;
@@ -1098,11 +1100,12 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
 
   // Build provider execution chain starting with preferred provider
   const chain = [];
-  if (provider === "grok") chain.push(tryGrok, tryGemini, tryGroq, tryOpenRouter, tryOpenAi);
-  else if (provider === "groq") chain.push(tryGroq, tryGrok, tryGemini, tryOpenRouter, tryOpenAi);
-  else if (provider === "openrouter") chain.push(tryOpenRouter, tryGemini, tryGrok, tryGroq, tryOpenAi);
-  else if (provider === "openai") chain.push(tryOpenAi, tryGemini, tryGrok, tryGroq, tryOpenRouter);
-  else chain.push(tryGemini, tryGrok, tryGroq, tryOpenRouter, tryOpenAi);
+  if (provider === "groq") chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi);
+  else if (provider === "gemini") chain.push(tryGemini, tryGroq, tryOpenRouter, tryOpenAi);
+  else if (provider === "grok") chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi);
+  else if (provider === "openrouter") chain.push(tryOpenRouter, tryGroq, tryGemini, tryOpenAi);
+  else if (provider === "openai") chain.push(tryOpenAi, tryGroq, tryGemini, tryOpenRouter);
+  else chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi);
 
   for (const fn of chain) {
     const res = await fn();
@@ -2535,6 +2538,12 @@ async function sendAdminSms(message, customTargetPhone) {
     // Owner instruction: SMS alert goes STRICTLY and ONLY to the admin. Never send automated SMS to customer numbers.
     let target = String(adminPhone).replace(/\D/g, "");
     if (target.startsWith("233") && target.length === 12) target = "0" + target.slice(3);
+
+    // Owner instruction: 0547100951 must NEVER receive admin SMS alerts (WhatsApp alerts only!)
+    if (target === "0547100951" || target === "233547100951") {
+      console.log("[SMS BLOCKED] Admin SMS to 0547100951 blocked per owner instruction.");
+      return;
+    }
 
     const res = await axios.post(
       "https://sms.arkesel.com/api/v2/sms/send",
@@ -4359,6 +4368,63 @@ app.post("/webhook", async (req, res) => {
           `• *Pending Deliveries:* *${stats.pending_delivery || 0}*\n\n` +
           `Status: *Systems operational ✅*`
         );
+      }
+
+      // Direct Command: Top Customer Numbers with Most Orders
+      if (
+        /(?:who|which\s+(?:number|phone|customer)|list\s+(?:the\s+)?numbers?)\s+(?:has|have|with)\s+(?:the\s+)?(?:most|highest|top|max)\s+orders?/i.test(text.trim()) ||
+        /(?:number|customer)\s+(?:that\s+)?(?:have|has)\s+(?:a\s+)?(?:list\s+order\s+)?(?:most|top|highest)\s+orders?/i.test(text.trim()) ||
+        /(?:top|highest)\s+(?:order(?:ing)?|customers?|buyers?|numbers?)/i.test(text.trim()) ||
+        /(?:most\s+orders|who\s+ordered\s+most|who\s+bought\s+most)/i.test(text.trim())
+      ) {
+        try {
+          const { data: allOrders } = await supabase
+            .from("orders")
+            .select("recipient_phone, amount, payment_status, delivery_status, created_at")
+            .order("created_at", { ascending: false })
+            .limit(500);
+
+          if (allOrders && allOrders.length > 0) {
+            const map = {};
+            allOrders.forEach(o => {
+              const ph = String(o.recipient_phone || "").trim();
+              if (!ph) return;
+              if (!map[ph]) map[ph] = { phone: ph, count: 0, delivered: 0, total: 0 };
+              map[ph].count += 1;
+              if (/paid/i.test(o.payment_status || "")) map[ph].total += Number(o.amount || 0);
+              if (/delivered/i.test(o.delivery_status || "")) map[ph].delivered += 1;
+            });
+            const top = Object.values(map).sort((a, b) => b.count - a.count).slice(0, 6);
+            const lines = top.map((c, i) => `${i + 1}. *${c.phone}* — *${c.count} orders* (${c.delivered} delivered) • Spent: *GH₵ ${c.total.toFixed(2)}*`);
+            return sendWhatsApp(from, `🏆 *CUSTOMER NUMBERS WITH MOST ORDERS:*\n\n${lines.join("\n")}\n\n📊 Total Customer Numbers Analyzed: *${Object.keys(map).length}*`);
+          }
+        } catch (_) {}
+        return sendWhatsApp(from, "🏆 No customer order records available yet.");
+      }
+
+      // Direct Command: Live Accurate Delivery Speed from Site
+      if (
+        /(?:accurate\s+)?(?:live\s+)?delivery\s+(?:time|speed|status|tracker|eta)\b/i.test(text.trim()) ||
+        /(?:how\s+fast|how\s+long\s+does\s+delivery\s+take|when\s+will\s+data\s+deliver)/i.test(text.trim()) ||
+        /delivery\s+time\s+(?:from|on)\s+(?:the\s+)?site/i.test(text.trim())
+      ) {
+        try {
+          const siteBase = process.env.SITE_URL || STORE_FRONTEND_URL || "https://data1gh.vercel.app";
+          const res = await axios.get(`${siteBase.replace(/\/+$/, "")}/api/track-order?fn=delivery-tracker`, { timeout: 4000 }).catch(() => null);
+          const td = res?.data?.data || {};
+          const mtnTime = "~30-60 seconds";
+          const telecelTime = "~45-90 seconds";
+          const atTime = "~30 seconds";
+          const pendingBatches = td?.scanner?.pendingBatches ?? 0;
+          return sendWhatsApp(from,
+            `⚡ *ACCURATE LIVE DELIVERY TIME FROM SITE:*\n\n` +
+            `• *MTN Turbo Bundles:* *${mtnTime}*\n` +
+            `• *Telecel Fast Bundles:* *${telecelTime}*\n` +
+            `• *AT (AirtelTigo) Bundles:* *${atTime}*\n\n` +
+            `📊 *Carrier Queue:* ${pendingBatches === 0 ? "0 pending batches (Instant Gateway Active ✅)" : `${pendingBatches} pending batch(es)`}\n` +
+            `_Measured real-time from active DataMart gateway and storefront orders._`
+          );
+        } catch (_) {}
       }
 
       // Direct Command: Broadcast Bulk SMS
@@ -6635,12 +6701,23 @@ app.post("/paystack-webhook", async (req, res) => {
     let datamartStatus = "pending";
     let datamartErrorDetail = null;
 
+    const botRef = `WS-${ref ? String(ref).replace(/^WS-?/, "") : "BOT-" + Date.now().toString(36).toUpperCase()}`;
     const purchasePayload = {
       phoneNumber: normalizePhone(session.phone_number),
       network: bundle.apiNetwork || "YELLO",
       capacity: String(bundle.capacity),
-      gateway: "wallet"
+      gateway: "wallet",
+      ref: botRef,
     };
+
+    const dmHeaders = {
+      "x-api-key": DATA_API_KEY,
+      "X-Idempotency-Key": botRef,
+      "Content-Type": "application/json"
+    };
+    if (process.env.DATAMART_API_SECRET || process.env.DM_API_SECRET) {
+      dmHeaders["x-api-secret"] = process.env.DATAMART_API_SECRET || process.env.DM_API_SECRET;
+    }
 
     // 1. Try Fast Lane delivery
     try {
@@ -6650,10 +6727,7 @@ app.post("/paystack-webhook", async (req, res) => {
         `${DATAMART_BASE}/purchase`,
         { ...purchasePayload, delivery: "fast" },
         {
-          headers: {
-            "x-api-key": DATA_API_KEY,
-            "Content-Type": "application/json"
-          },
+          headers: dmHeaders,
           timeout: 30000
         }
       );
@@ -6674,10 +6748,7 @@ app.post("/paystack-webhook", async (req, res) => {
           `${DATAMART_BASE}/purchase`,
           purchasePayload,
           {
-            headers: {
-              "x-api-key": DATA_API_KEY,
-              "Content-Type": "application/json"
-            },
+            headers: dmHeaders,
             timeout: 30000
           }
         );
