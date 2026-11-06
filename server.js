@@ -7163,12 +7163,8 @@ app.post("/paystack-webhook", async (req, res) => {
           .update(orderUpdatePayload)
           .eq("id", webOrder.id);
 
-        // Send alert to admin about web sale
-        const statusLabel = verifiedDelivery === "delivered" ? "✅ Delivered to phone!" : "⏳ In Progress (Sent to DataMart)";
-        await sendAdminWhatsApp(
-          `🛍️ NEW WEBSITE DATA ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📶 Network: ${webOrder.network || "Data"}\n📦 Capacity: ${capacity}GB\n📱 Recipient: ${phone}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n\nStatus: ${statusLabel}`
-        );
-        sendAdminSms(`[DataEase] Web Data Order Paid: ₵${paidAmount.toFixed(2)} (${capacity}GB ${webOrder.network || "Data"} to ${phone}). Status: ${verifiedDelivery === "delivered" ? "Delivered" : "In Progress"}. Ref: ${ref}`).catch(() => { });
+        // Website orders are officially alerted by the website backend (sendPaymentReceivedNotification)
+        // with the full store name, payment channel, and timestamp. Suppress duplicate alert here.
         return;
       }
     }
@@ -7192,11 +7188,7 @@ app.post("/paystack-webhook", async (req, res) => {
           })
           .eq("reference", ref);
 
-        const serviceName = webService.service === "netflix" ? "🎬 NETFLIX 30-DAY ACCESS" : webService.service === "mashup" ? "📦 MASHUP BUNDLE" : "✨ AFA REGISTRATION";
-        await sendAdminWhatsApp(
-          `🎉 NEW WEBSITE ${serviceName} PAID!\n\n🆔 Reference: ${ref}\n📱 Phone: ${webService.customer_phone || "N/A"}\n💰 Amount: ₵${paidAmount.toFixed(2)}`
-        );
-        sendAdminSms(`[DataEase] Web ${webService.service?.toUpperCase()} Paid: ₵${paidAmount.toFixed(2)} by ${webService.customer_phone || "N/A"}. Ref: ${ref}`).catch(() => { });
+        // Website service orders are alerted by the website backend with store & customer details
         return;
       }
     }
@@ -7219,10 +7211,7 @@ app.post("/paystack-webhook", async (req, res) => {
           })
           .eq("reference", ref);
 
-        await sendAdminWhatsApp(
-          `🎓 NEW ${webChecker.checker_type || "WAEC"} RESULT CHECKER ORDER PAID! 🎉\n\n🆔 Reference: ${ref}\n📱 Phone: ${webChecker.customer_phone || "N/A"}\n💰 Amount: ₵${paidAmount.toFixed(2)}`
-        );
-        sendAdminSms(`[DataEase] Checker Order Paid: ₵${paidAmount.toFixed(2)} (${webChecker.checker_type || "WAEC"} by ${webChecker.customer_phone || "N/A"}). Ref: ${ref}`).catch(() => { });
+        // Website checker orders are alerted by the website backend with store & customer details
         return;
       }
     }
@@ -7249,9 +7238,7 @@ app.post("/paystack-webhook", async (req, res) => {
           const fwdOrder = fwd.data?.order;
           recordWebhookLog("FORWARDED_TO_WEBSITE_VERIFY", { ref, verifyPath, status: fwd.status, payment: fwdOrder?.payment_status, delivery: fwdOrder?.delivery_status });
           if (fwd.status >= 200 && fwd.status < 300 && fwdOrder) {
-            await sendAdminWhatsApp(
-              `🛍️ WEBSITE ORDER PAID (via webhook fallback) 🎉\n\n🆔 Reference: ${ref}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n💳 Payment: ${fwdOrder.payment_status || "?"}\n🚚 Delivery: ${fwdOrder.delivery_status || "?"}`
-            );
+            // Handled and alerted by website verify endpoint
             return;
           }
         } catch (fwdErr) {
@@ -7739,6 +7726,137 @@ app.get("/admin-data", async (req, res) => {
     res.json({ error: e.message });
   }
 });
+
+/* =========================================================
+AUTOMATED DATAMART DELIVERY MONITOR & CONFIRMATION ALERTS
+========================================================= */
+
+async function notifyOrderDelivered(order) {
+  if (!order || !order.reference) return;
+  const ref = order.reference;
+
+  // Deduplication: prevent sending delivery alert multiple times
+  const notes = String(order.notes || "");
+  if (notes.includes("[delivery_confirmed_sent]")) return;
+
+  try {
+    await supabase.from("orders").update({
+      notes: `${notes} [delivery_confirmed_sent]`.trim(),
+    }).eq("reference", ref);
+  } catch (_) {}
+
+  const rawPhone = order.recipient_phone || order.phone_number || "N/A";
+  const cleanPhone = rawPhone.startsWith("233") ? "0" + rawPhone.slice(3) : rawPhone;
+  const itemDesc = `${order.capacity || ""}GB ${order.network || ""} Data`.trim() || "Data Bundle";
+  const shopName = order.store_name
+    ? (/agent/i.test(order.store_name) ? order.store_name : `${order.store_name} (Agent Store)`)
+    : "DataOne GH";
+  const amount = Number(order.amount || 0).toFixed(2);
+  const now = new Date();
+  const dateStr = now.toLocaleDateString("en-GB", { timeZone: "Africa/Accra" });
+  const timeStr = now.toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" });
+
+  const deliveredText =
+`📦 *DATA ORDER DELIVERED!* ✅
+━━━━━━━━━━━━━━━━━━━━━
+🏪 *Shop:* ${shopName}
+🆔 *Ref:* ${ref}
+📶 *Item:* ${itemDesc}
+📱 *Recipient:* ${cleanPhone}
+💰 *Amount:* GHS ${amount}
+⚡ *Status:* ✅ Delivered to Phone (DataMart)
+⏰ *Delivered At:* ${dateStr} ${timeStr}`;
+
+  await sendAdminWhatsApp(deliveredText);
+
+  // If order belongs to an Agent Store, also notify the Agent
+  if (order.agent_id) {
+    try {
+      const { data: ag } = await supabase
+        .from("agents")
+        .select("whatsapp_phone, phone, store_name, business_name")
+        .eq("id", order.agent_id)
+        .maybeSingle();
+
+      const agPhone = ag?.whatsapp_phone || ag?.phone;
+      if (agPhone) {
+        const agStore = ag?.store_name || ag?.business_name || order.store_name || "Your Store";
+        await sendWhatsApp(
+          agPhone,
+          `🎉 *ORDER DELIVERED TO YOUR CUSTOMER!* 📦\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nGood news! An order from *${agStore}* has been successfully delivered by the network!\n\n🆔 *Order Ref:* ${ref}\n📶 *Item:* ${itemDesc}\n📱 *Recipient:* ${cleanPhone}\n⚡ *Status:* ✅ Delivered to Phone (DataMart)\n⏰ *Time:* ${dateStr} ${timeStr}\n\nKeep sharing your store link to grow your daily sales!\n👉 View Dashboard: https://data1gh.com/agent/dashboard`
+        );
+      }
+    } catch (_) {}
+  }
+
+  // If customer ordered on the WhatsApp bot, notify them too
+  if (order.whatsapp_phone) {
+    try {
+      await sendWhatsApp(
+        order.whatsapp_phone,
+        `✅ *YOUR DATA HAS LANDED!* 🎉\n━━━━━━━━━━━━━━━━━━━━━\nYour data bundle has been successfully delivered by the network! 📶\n\n🆔 *Order Ref:* ${ref}\n📦 *Bundle:* ${itemDesc}\n📱 *Delivered To:* ${cleanPhone}\n\nEnjoy your browsing! Reply *HI* to buy again.`
+      );
+    } catch (_) {}
+  }
+}
+
+let isDeliveryWatcherRunning = false;
+async function runActiveDeliveryWatcher() {
+  if (isDeliveryWatcherRunning) return;
+  isDeliveryWatcherRunning = true;
+  try {
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: pendingOrders, error } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("payment_status", "paid")
+      .in("delivery_status", ["processing", "pending", "waiting", "in_progress"])
+      .gte("created_at", twentyFourHoursAgo)
+      .limit(20);
+
+    if (error || !Array.isArray(pendingOrders) || pendingOrders.length === 0) {
+      isDeliveryWatcherRunning = false;
+      return;
+    }
+
+    for (const ord of pendingOrders) {
+      try {
+        const queryTarget = ord.datamart_reference || ord.reference;
+        if (!queryTarget) continue;
+
+        const live = await getRealDatamartDeliveryStatus(queryTarget);
+        if (live && (live.deliveryStatus === "delivered" || live.rawStatus === "delivered" || live.rawStatus === "completed")) {
+          await supabase.from("orders").update({
+            delivery_status: "delivered",
+            datamart_status: live.rawStatus || "delivered",
+            updated_at: new Date().toISOString(),
+          }).eq("id", ord.id);
+
+          try {
+            data1db.getClient().from("orders").update({
+              delivery_status: "delivered",
+              datamart_status: live.rawStatus || "delivered",
+            }).eq("id", ord.id);
+          } catch (_) {}
+
+          await notifyOrderDelivered({
+            ...ord,
+            delivery_status: "delivered",
+            datamart_status: live.rawStatus || "delivered",
+          });
+        }
+      } catch (_) {}
+    }
+  } catch (err) {
+    console.warn("Delivery watcher exception:", err.message);
+  } finally {
+    isDeliveryWatcherRunning = false;
+  }
+}
+
+// Check every 60 seconds for orders that just completed delivery on DataMart
+setInterval(runActiveDeliveryWatcher, 60000);
+setTimeout(runActiveDeliveryWatcher, 10000);
 
 /* =========================================================
 START SERVER
