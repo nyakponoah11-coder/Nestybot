@@ -2254,6 +2254,52 @@ async function creditAgentWalletSafely(phoneOrId, amount) {
   }
 }
 
+async function debitAgentWalletSafely(phoneOrId, amount) {
+  const numAmt = parseFloat(amount);
+  if (isNaN(numAmt) || numAmt <= 0) return null;
+  const cleanTarget = String(phoneOrId || "").replace(/\D/g, "");
+
+  try {
+    const { data: agents } = await supabase.from("agents").select("*");
+    const target = (agents || []).find(a =>
+      a.id === phoneOrId ||
+      (cleanTarget && a.phone && String(a.phone).replace(/\D/g, "").endsWith(cleanTarget.slice(-9))) ||
+      (a.name && a.name.toLowerCase().includes(String(phoneOrId).toLowerCase())) ||
+      (a.store_name && a.store_name.toLowerCase().includes(String(phoneOrId).toLowerCase()))
+    );
+
+    if (!target) return null;
+
+    const currentBal = Number(target.wallet_balance || 0);
+    const newBal = Math.max(0, currentBal - numAmt);
+    await supabase.from("agents").update({ wallet_balance: newBal }).eq("id", target.id);
+    return { agent: target, debited: numAmt, newBalance: newBal };
+  } catch (err) {
+    console.warn("debitAgentWalletSafely error:", err.message);
+    return null;
+  }
+}
+
+async function setAgentStatusSafely(phoneOrId, status) {
+  const cleanTarget = String(phoneOrId || "").replace(/\D/g, "");
+  try {
+    const { data: agents } = await supabase.from("agents").select("*");
+    const target = (agents || []).find(a =>
+      a.id === phoneOrId ||
+      (cleanTarget && a.phone && String(a.phone).replace(/\D/g, "").endsWith(cleanTarget.slice(-9))) ||
+      (a.name && a.name.toLowerCase().includes(String(phoneOrId).toLowerCase())) ||
+      (a.store_name && a.store_name.toLowerCase().includes(String(phoneOrId).toLowerCase()))
+    );
+
+    if (!target) return null;
+    await supabase.from("agents").update({ status }).eq("id", target.id);
+    return { agent: target, status };
+  } catch (err) {
+    console.warn("setAgentStatusSafely error:", err.message);
+    return null;
+  }
+}
+
 /* =========================================================
 FULL ORDER DETAILS INSPECTOR
 ========================================================= */
@@ -3917,6 +3963,199 @@ app.post("/webhook", async (req, res) => {
     const normFrom = String(from || "").replace(/\D/g, "");
     const isOwner = adminPhones.some(p => p && (normFrom === p || normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))));
 
+    // Check if sender is a Registered Agent / Reseller
+    let matchedAgent = null;
+    try {
+      const { data: agentRows } = await supabase
+        .from("agents")
+        .select("id, name, phone, whatsapp_number, store_name, store_slug, wallet_balance, total_earnings, custom_domain");
+      if (agentRows && agentRows.length > 0) {
+        matchedAgent = agentRows.find((a) => {
+          const p1 = (a.phone || "").replace(/\D/g, "");
+          const p2 = (a.whatsapp_number || "").replace(/\D/g, "");
+          return (
+            (p1 && (normFrom === p1 || normFrom.endsWith(p1.slice(-9)) || p1.endsWith(normFrom.slice(-9)))) ||
+            (p2 && (normFrom === p2 || normFrom.endsWith(p2.slice(-9)) || p2.endsWith(normFrom.slice(-9))))
+          );
+        });
+      }
+    } catch (_) { }
+
+    /* =====================================================
+    AGENT STORE CO-PILOT (RESELLER WHATSAPP ASSISTANT)
+    ===================================================== */
+    if (!isOwner && matchedAgent) {
+      const cleanCmd = text.trim();
+      const lowerCmd = cleanCmd.toLowerCase();
+      const storeDomain = (matchedAgent.custom_domain || "https://gooddata1.vercel.app").replace(/\/+$/, "");
+      const storefrontUrl = `${storeDomain}/s/${matchedAgent.store_slug}`;
+      const dashboardUrl = `${storeDomain}/agent/dashboard`;
+
+      // 1. Root admin security check
+      const isRootAdminAction = /\b(credit\s+agent|broadcast|bulk\s+sms|blast\s+sms|turn\s+(?:on|off)\s+free\s+data|free\s+data\s+code|change\s+base\s+price|admin\s+password|admin\s+login|secret\s+key)\b/i.test(cleanCmd);
+      if (isRootAdminAction) {
+        return sendWhatsApp(
+          from,
+          `⚠️ *MAIN ADMINISTRATOR PRIVILEGE REQUIRED*\n\nThis command is reserved for Master Administrators.\n\nAs the verified Store Partner for *${matchedAgent.store_name}*, you have full Store Co-Pilot control over your shop:\n• *balance* - Check wallet balance & today's profit\n• *orders* - View latest customer sales\n• *link* - Get your live customer storefront link\n• *referrals* - View 5GB customer reward milestones\n\nReply *menu* to explore your Co-Pilot!`
+        );
+      }
+
+      // 2. Help / Menu
+      if (/^(menu|help|hi|hello|start|hey|copilot|co-pilot)$/i.test(lowerCmd)) {
+        return sendWhatsApp(
+          from,
+          `🏪 *Welcome to your Store Co-Pilot, ${matchedAgent.name}!*\n` +
+          `📍 *Store:* ${matchedAgent.store_name}\n` +
+          `💰 *Wallet Balance:* GH₵ ${Number(matchedAgent.wallet_balance || 0).toFixed(2)}\n` +
+          `📈 *Total Profit Earned:* GH₵ ${Number(matchedAgent.total_earnings || 0).toFixed(2)}\n\n` +
+          `*Quick Commands:*\n` +
+          `📊 *balance* - Check wallet, profit & today's sales\n` +
+          `📦 *orders* - View your 5 latest storefront orders\n` +
+          `🔗 *link* - Get your customer storefront URL\n` +
+          `🎁 *referrals* - Check customer 5GB reward promoters\n` +
+          `⚡ *track [ref]* - Track any order reference\n\n` +
+          `💬 _Or just ask me any question about your store, pricing, or orders!_`
+        );
+      }
+
+      // 3. Balance & Profits
+      if (/\b(balance|wallet|earnings|profit|revenue|how much)\b/i.test(lowerCmd)) {
+        const todayDate = new Date().toISOString().split("T")[0];
+        let todayCount = 0;
+        let todayProfit = 0;
+        let totalSalesCount = 0;
+
+        try {
+          const { data: ords } = await supabase
+            .from("orders")
+            .select("id, amount, base_price, created_at, status, payment_status")
+            .or(`agent_id.eq.${matchedAgent.id},notes.ilike.%[agent:${matchedAgent.id}]%`);
+
+          if (ords) {
+            totalSalesCount = ords.length;
+            ords.forEach((o) => {
+              const isToday = (o.created_at || "").startsWith(todayDate);
+              const p = o.amount && o.base_price ? Math.max(0, Number(o.amount) - Number(o.base_price)) : 0;
+              if (isToday) {
+                todayCount++;
+                todayProfit += p;
+              }
+            });
+          }
+        } catch (_) {}
+
+        return sendWhatsApp(
+          from,
+          `📊 *STORE FINANCIAL REPORT*\n` +
+          `🏪 *${matchedAgent.store_name}*\n\n` +
+          `💰 *Available Wallet Balance:* GH₵ ${Number(matchedAgent.wallet_balance || 0).toFixed(2)}\n` +
+          `📈 *All-Time Profit Earned:* GH₵ ${Number(matchedAgent.total_earnings || 0).toFixed(2)}\n` +
+          `📅 *Today's Sales:* ${todayCount} orders (+GH₵ ${todayProfit.toFixed(2)} profit)\n` +
+          `🛍️ *Total Store Sales:* ${totalSalesCount} orders\n\n` +
+          `💳 To withdraw to your Mobile Money, visit your portal:\n` +
+          `👉 ${dashboardUrl}`
+        );
+      }
+
+      // 4. Storefront Orders
+      if (/\b(orders?|sales?|my orders|recent orders|latest orders)\b/i.test(lowerCmd)) {
+        try {
+          const { data: ords } = await supabase
+            .from("orders")
+            .select("id, reference, network, capacity, amount, base_price, recipient_phone, delivery_status, status, payment_status, created_at")
+            .or(`agent_id.eq.${matchedAgent.id},notes.ilike.%[agent:${matchedAgent.id}]%`)
+            .order("created_at", { ascending: false })
+            .limit(5);
+
+          if (!ords || ords.length === 0) {
+            return sendWhatsApp(
+              from,
+              `📦 *STORE ORDERS*\n` +
+              `🏪 *${matchedAgent.store_name}*\n\n` +
+              `You have no customer orders yet.\n` +
+              `Share your storefront link to start making sales:\n` +
+              `👉 ${storefrontUrl}`
+            );
+          } else {
+            const list = ords.map((o, idx) => {
+              const profit = o.amount && o.base_price ? Math.max(0, Number(o.amount) - Number(o.base_price)) : 0;
+              const deliv = (o.delivery_status || o.status || "pending").toUpperCase();
+              const dateStr = o.created_at ? new Date(o.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Africa/Accra" }) : "";
+              return `${idx + 1}️⃣ *${o.network || "DATA"} ${o.capacity || ""}* (${o.recipient_phone || "Customer"})\n   💵 GH₵ ${Number(o.amount || 0).toFixed(2)} | Profit: *+GH₵ ${profit.toFixed(2)}*\n   ⏱️ ${dateStr} | Status: ${deliv === "DELIVERED" ? "✅ DELIVERED" : "⏳ " + deliv}`;
+            }).join("\n\n");
+
+            return sendWhatsApp(
+              from,
+              `📦 *LATEST STORE ORDERS (Last 5)*\n` +
+              `🏪 *${matchedAgent.store_name}*\n\n` +
+              list +
+              `\n\n💡 Reply *balance* to check your current withdrawable wallet.`
+            );
+          }
+        } catch (_) {
+          return sendWhatsApp(from, `⚠️ Could not retrieve store orders right now. Please try again.`);
+        }
+      }
+
+      // 5. Store Link
+      if (/\b(link|store|storefront|my link|website|url)\b/i.test(lowerCmd)) {
+        return sendWhatsApp(
+          from,
+          `🔗 *YOUR OFFICIAL STOREFRONT LINK*\n` +
+          `🏪 *${matchedAgent.store_name}*\n\n` +
+          `Share this link directly with your customers:\n` +
+          `👉 ${storefrontUrl}\n\n` +
+          `✨ *Benefits:*\n` +
+          `• Instant customer self-service with MoMo checkout\n` +
+          `• Automated bundle delivery directly to the buyer's phone\n` +
+          `• Your profit is credited to your wallet in real time!`
+        );
+      }
+
+      // 6. Referrals & 5GB Free Data Rewards
+      if (/\b(referral|referrals|promoter|promoters|5gb|milestone|bonus)\b/i.test(lowerCmd)) {
+        let referralsList = [];
+        try {
+          const { data: refSetting } = await supabase
+            .from("settings")
+            .select("value")
+            .eq("key", `agent_referrals_${matchedAgent.id}`)
+            .maybeSingle();
+
+          if (refSetting?.value) {
+            referralsList = typeof refSetting.value === "string" ? JSON.parse(refSetting.value) : refSetting.value;
+          }
+        } catch (_) {}
+
+        const totalPromoters = referralsList.length;
+        const totalReferredOrders = referralsList.reduce((sum, r) => sum + (r.total_qualified_orders || 0), 0);
+        const completedRewards = referralsList.filter((r) => (r.total_qualified_orders || 0) >= 5);
+
+        let listDetail = "";
+        if (referralsList.length > 0) {
+          listDetail = referralsList.slice(0, 5).map((r) => {
+            const count = r.total_qualified_orders || 0;
+            const isReady = count >= 5;
+            return `• *${r.customer_phone}* (${r.referral_code || "Code"}): ${count}/5 orders ${isReady ? "🏆 (5GB READY!)" : ""}`;
+          }).join("\n");
+        } else {
+          listDetail = "_No customer promoters have registered on your store yet._";
+        }
+
+        return sendWhatsApp(
+          from,
+          `🎁 *CUSTOMER REFERRALS & 5GB REWARDS*\n` +
+          `🏪 *${matchedAgent.store_name}*\n\n` +
+          `👥 *Registered Promoters:* ${totalPromoters}\n` +
+          `🛍️ *Total Referred Orders:* ${totalReferredOrders}\n` +
+          `🏆 *Completed 5GB Rewards:* ${completedRewards.length}\n\n` +
+          `*Promoter Progress:*\n` +
+          listDetail +
+          `\n\nℹ️ Once a promoter hits 5 friends, Main Admin is notified to manually issue their 5GB reward!`
+        );
+      }
+    }
+
     /* =====================================================
     SECURITY FIREWALL: UNAUTHORIZED ADMIN ATTEMPTS & TAMPERING
     If any unauthorized number attempts admin commands, dashboard,
@@ -3929,7 +4168,7 @@ app.post("/webhook", async (req, res) => {
       /^(admin|dashboard|report)$/i.test(text) ||
       /\b(update\s+order|order\s+status|delivery\s+status|payment\s+status|mark\s+delivered|mark\s+paid|change\s+price|toggle\s+stock|send\s+sms|generate\s+voucher|free\s+data\s+code|turn\s+(?:on|off)\s+free\s+data|credit\s+agent|list\s+agents|change\s+color|change\s+theme|update\s+announcement|admin\s+password|admin\s+login|secret\s+key|resync\s+order|retry\s+order|stuck\s+order|issue\s+radar)\b/i.test(text);
 
-    if (!isOwner && isAdminIntent) {
+    if (!isOwner && !matchedAgent && isAdminIntent) {
       console.warn("🚨 UNAUTHORIZED ADMIN COMMAND ATTEMPT FROM:", from, text);
       await sendSecurityIntrusionAlert(from, text, "Unauthorized phone attempted administrative command/tampering");
       return await sendWhatsApp(
@@ -4027,11 +4266,21 @@ app.post("/webhook", async (req, res) => {
     const activeMode = getUserMode(from, currentSession);
     const isInBotCheckoutStep = Boolean(currentSession && currentSession.step > 1 && currentSession.step < 99);
 
+    // If Owner is messaging, Owner Co-Pilot ALWAYS takes precedence unless the owner specifically entered a digit 1-8 to test customer menus
+    const ownerTestingMenuDigit = isOwner && isMainMenuNumber;
+    const shouldEnterOwnerAi = isOwner && !ownerTestingMenuDigit && (activeMode === "ai" || startsWithStony || !/^(menu|customer)$/i.test(text.trim()));
+
     /* =====================================================
     STONY OWNER AI — Personal Business Assistant & Co-Pilot
     Active whenever user is Owner (or mode is 'ai' / started with Stony)
     ===================================================== */
-    if (isOwner && (!isInBotCheckoutStep || startsWithStony) && (activeMode === "ai" || startsWithStony || !/^(1|2|3|4|5|6|7|8|menu)$/i.test(text.trim()))) {
+    if (shouldEnterOwnerAi) {
+      // Auto-clear any stuck customer checkout step for owner so they are NEVER blocked
+      if (isInBotCheckoutStep) {
+        try {
+          await supabase.from("sessions").update({ step: 99, bundle: null }).eq("phone", from);
+        } catch (_) {}
+      }
       let ownerSession = currentSession;
       if (!ownerSession) {
         try {
@@ -4587,9 +4836,167 @@ app.post("/webhook", async (req, res) => {
       }
 
       // Direct Command: List Agents
-      if (/^(?:list|check|show|view)\s+agents?\b/i.test(text.trim()) || text.trim().toLowerCase() === "agents") {
-        const agentsSummary = await listAllAgentsSummary();
-        return sendWhatsApp(from, `💼 *REGISTERED AGENTS DIRECTORY*\n\n${agentsSummary}\n\n💡 _Tip: Say "credit agent [phone] with [amount]" to top up an agent's wallet!_`);
+      if (/^(?:list|check|show|view)\s+agents?\b/i.test(text.trim()) || text.trim().toLowerCase() === "agents" || text.trim().toLowerCase() === "all agents") {
+        try {
+          const { data: agents } = await supabase
+            .from("agents")
+            .select("id, name, phone, store_name, store_slug, wallet_balance, total_earnings, status")
+            .order("created_at", { ascending: false })
+            .limit(25);
+
+          if (agents && agents.length > 0) {
+            const listText = agents.map((a, i) => {
+              const statusBadge = a.status === "suspended" ? "⛔ SUSPENDED" : "✅ Active";
+              return `${i + 1}. *${a.store_name || a.name || "Store"}* (${a.phone || "No phone"})\n   • Owner: ${a.name || "Partner"} | ${statusBadge}\n   • Balance: *GH₵ ${Number(a.wallet_balance || 0).toFixed(2)}* | Earned: *GH₵ ${Number(a.total_earnings || 0).toFixed(2)}*`;
+            }).join("\n\n");
+
+            return sendWhatsApp(
+              from,
+              `💼 *REGISTERED AGENTS DIRECTORY (${agents.length})*\n\n` +
+              listText +
+              `\n\n💡 *Admin Commands:*\n` +
+              `• *check agent [name/phone]*\n` +
+              `• *credit agent [name/phone] with [amount]*\n` +
+              `• *debit agent [name/phone] with [amount]*\n` +
+              `• *suspend agent [name/phone]*\n` +
+              `• *activate agent [name/phone]*\n` +
+              `• *agent referrals*`
+            );
+          }
+        } catch (_) {}
+        return sendWhatsApp(from, "💼 No agents registered yet in database.");
+      }
+
+      // Direct Command: Inspect / Check Specific Agent
+      const inspectAgentMatch = text.match(/(?:check|inspect|view|info|details\s+on)\s+agent\s+(.+)/i);
+      if (inspectAgentMatch) {
+        const targetQuery = inspectAgentMatch[1].trim();
+        const { data: agents } = await supabase.from("agents").select("*");
+        const cleanT = targetQuery.replace(/\D/g, "");
+
+        const matched = (agents || []).find((a) => {
+          if (a.id && a.id.toLowerCase() === targetQuery.toLowerCase()) return true;
+          if (a.store_slug && a.store_slug.toLowerCase() === targetQuery.toLowerCase()) return true;
+          if (a.store_name && a.store_name.toLowerCase().includes(targetQuery.toLowerCase())) return true;
+          if (a.name && a.name.toLowerCase().includes(targetQuery.toLowerCase())) return true;
+          const p1 = (a.phone || "").replace(/\D/g, "");
+          const p2 = (a.whatsapp_number || "").replace(/\D/g, "");
+          if (cleanT && cleanT.length >= 7) {
+            if (p1 && (p1 === cleanT || p1.endsWith(cleanT.slice(-9)) || cleanT.endsWith(p1.slice(-9)))) return true;
+            if (p2 && (p2 === cleanT || p2.endsWith(cleanT.slice(-9)) || cleanT.endsWith(p2.slice(-9)))) return true;
+          }
+          return false;
+        });
+
+        if (!matched) {
+          return sendWhatsApp(from, `❌ Agent "${targetQuery}" not found. Type *list agents* to view all registered agents.`);
+        }
+
+        const todayDate = new Date().toISOString().split("T")[0];
+        let todaySales = 0;
+        let todayProfit = 0;
+        let totalOrders = 0;
+
+        try {
+          const { data: ords } = await supabase
+            .from("orders")
+            .select("id, amount, base_price, created_at")
+            .or(`agent_id.eq.${matched.id},notes.ilike.%[agent:${matched.id}]%`);
+
+          if (ords) {
+            totalOrders = ords.length;
+            ords.forEach((o) => {
+              const isToday = (o.created_at || "").startsWith(todayDate);
+              const p = o.amount && o.base_price ? Math.max(0, Number(o.amount) - Number(o.base_price)) : 0;
+              if (isToday) {
+                todaySales++;
+                todayProfit += p;
+              }
+            });
+          }
+        } catch (_) {}
+
+        let promotersCount = 0;
+        let completed5gb = 0;
+        try {
+          const { data: refRow } = await supabase
+            .from("settings")
+            .select("value")
+            .eq("key", `agent_referrals_${matched.id}`)
+            .maybeSingle();
+
+          if (refRow?.value) {
+            const list = typeof refRow.value === "string" ? JSON.parse(refRow.value) : refRow.value;
+            if (Array.isArray(list)) {
+              promotersCount = list.length;
+              completed5gb = list.filter((r) => (r.total_qualified_orders || 0) >= 5).length;
+            }
+          }
+        } catch (_) {}
+
+        const statusLabel = matched.status === "suspended" ? "⛔ SUSPENDED (STORE BLOCKED)" : "✅ ACTIVE";
+
+        return sendWhatsApp(
+          from,
+          `🔍 *AGENT PROFILE & STORE INTEL*\n` +
+          `🏪 *${matched.store_name || "Store"}*\n\n` +
+          `• *Owner Name:* ${matched.name || "N/A"}\n` +
+          `• *Email:* ${matched.email || "No email"}\n` +
+          `• *Phone Number:* ${matched.phone || "N/A"}\n` +
+          `• *WhatsApp:* ${matched.whatsapp_number || matched.phone || "N/A"}\n` +
+          `• *Account Status:* *${statusLabel}*\n` +
+          `• *Store URL:* https://gooddata1.vercel.app/s/${matched.store_slug}\n\n` +
+          `💰 *Wallet Balance:* *GH₵ ${Number(matched.wallet_balance || 0).toFixed(2)}*\n` +
+          `📈 *All-Time Profit:* *GH₵ ${Number(matched.total_earnings || 0).toFixed(2)}*\n` +
+          `📅 *Today's Sales:* ${todaySales} orders (+GH₵ ${todayProfit.toFixed(2)} profit)\n` +
+          `🛍️ *Lifetime Sales:* ${totalOrders} orders placed\n` +
+          `🎁 *5GB Promoters:* ${promotersCount} registered (${completed5gb} completed 5 friends)\n\n` +
+          `💡 *Quick Actions:*\n` +
+          `• *credit agent ${matched.phone} with 20*\n` +
+          `• *debit agent ${matched.phone} with 10*\n` +
+          (matched.status === "suspended"
+            ? `• *activate agent ${matched.phone}*`
+            : `• *suspend agent ${matched.phone}*`)
+        );
+      }
+
+      // Direct Command: Suspend Agent
+      const suspendMatch = text.match(/(?:suspend|block|freeze)\s+agent\s+(.+)/i);
+      if (suspendMatch) {
+        const target = suspendMatch[1].trim();
+        const res = await setAgentStatusSafely(target, "suspended");
+        if (res) {
+          return sendWhatsApp(
+            from,
+            `⛔ *AGENT STORE SUSPENDED BOSS!*\n\n` +
+            `• *Agent:* ${res.agent.store_name} (${res.agent.name})\n` +
+            `• *Phone:* ${res.agent.phone}\n` +
+            `• *Status:* ⛔ SUSPENDED\n\n` +
+            `Their storefront has been frozen. To unfreeze anytime, reply:\n` +
+            `*activate agent ${res.agent.phone}*`
+          );
+        } else {
+          return sendWhatsApp(from, `❌ Could not find an agent matching "${target}". Use *list agents* to see all agents.`);
+        }
+      }
+
+      // Direct Command: Activate Agent
+      const activateMatch = text.match(/(?:activate|unsuspend|unblock|unfreeze)\s+agent\s+(.+)/i);
+      if (activateMatch) {
+        const target = activateMatch[1].trim();
+        const res = await setAgentStatusSafely(target, "active");
+        if (res) {
+          return sendWhatsApp(
+            from,
+            `✅ *AGENT STORE ACTIVATED BOSS!*\n\n` +
+            `• *Agent:* ${res.agent.store_name} (${res.agent.name})\n` +
+            `• *Phone:* ${res.agent.phone}\n` +
+            `• *Status:* ✅ ACTIVE\n\n` +
+            `Storefront is live and processing orders!`
+          );
+        } else {
+          return sendWhatsApp(from, `❌ Could not find an agent matching "${target}". Use *list agents* to see all agents.`);
+        }
       }
 
       // Direct Command: Credit Agent Wallet
@@ -4609,6 +5016,73 @@ app.post("/webhook", async (req, res) => {
           );
         } else {
           return sendWhatsApp(from, `❌ Could not find an agent matching *${target}*. Use "list agents" to see all registered agents.`);
+        }
+      }
+
+      // Direct Command: Debit Agent Wallet
+      const debitMatch = text.match(/(?:debit|deduct)\s+agent\s+([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*)?(\d+(?:\.\d+)?)/i);
+      if (debitMatch) {
+        const target = debitMatch[1].trim();
+        const amt = parseFloat(debitMatch[2]);
+        const debRes = await debitAgentWalletSafely(target, amt);
+        if (debRes) {
+          return sendWhatsApp(from,
+            `✅ *AGENT WALLET DEDUCTED BOSS!*\n\n` +
+            `• *Agent:* ${debRes.agent.name || debRes.agent.store_name || "Agent"}\n` +
+            `• *Phone:* ${debRes.agent.phone}\n` +
+            `• *Amount Deducted:* *GH₵ ${debRes.debited.toFixed(2)}*\n` +
+            `• *New Balance:* *GH₵ ${debRes.newBalance.toFixed(2)}*`
+          );
+        } else {
+          return sendWhatsApp(from, `❌ Could not find an agent matching *${target}*. Use "list agents" to see all registered agents.`);
+        }
+      }
+
+      // Direct Command: Agent Referrals & 5GB Free Data Rewards
+      if (/(?:agent\s+referrals?|admin\s+referrals?|5gb\s+winners?|referral\s+winners?)/i.test(text.trim())) {
+        try {
+          const { data: rows } = await supabase
+            .from("settings")
+            .select("key, value")
+            .like("key", "agent_referrals_%");
+
+          let allPromoters = [];
+          (rows || []).forEach((row) => {
+            if (!row.value) return;
+            try {
+              const parsed = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+              if (Array.isArray(parsed)) allPromoters.push(...parsed);
+            } catch (_) {}
+          });
+
+          const readyRewards = allPromoters.filter((r) => (r.total_qualified_orders || 0) >= 5 && !r.reward_claimed);
+          const totalReferredOrders = allPromoters.reduce((sum, r) => sum + (r.total_qualified_orders || 0), 0);
+
+          let winnersList = "";
+          if (readyRewards.length > 0) {
+            winnersList =
+              `\n🏆 *PROMOTERS WAITING FOR 5GB REWARD (${readyRewards.length}):*\n` +
+              readyRewards
+                .map(
+                  (w, idx) =>
+                    `${idx + 1}️⃣ *${w.customer_phone}* (${w.agent_name || "Store"})\n   • Code: *${w.referral_code}* | Orders: *${w.total_qualified_orders}/5*\n   • Reward: 5GB Free Data (Manual send)`
+                )
+                .join("\n\n");
+          } else {
+            winnersList = `\n_No promoters currently waiting for 5GB rewards._`;
+          }
+
+          return sendWhatsApp(
+            from,
+            `🎁 *AGENT CUSTOMER REFERRALS & 5GB REWARDS*\n\n` +
+            `• *Total Registered Promoters:* *${allPromoters.length}*\n` +
+            `• *Total Referred Customer Sales:* *${totalReferredOrders} orders*\n` +
+            `• *Pending 5GB Rewards to Fulfill:* *${readyRewards.length} winners*\n` +
+            winnersList +
+            `\n\n💡 Manage and mark rewards fulfilled anytime at:\n👉 https://data1gh.com/admin/referrals`
+          );
+        } catch (_) {
+          return sendWhatsApp(from, `⚠️ Could not load customer referrals list.`);
         }
       }
 
@@ -4652,6 +5126,7 @@ app.post("/webhook", async (req, res) => {
 
       // Direct Command: Live Accurate Delivery Speed from Site
       if (
+        /^(?:delivery\s*time|delivery\s*speed|delivery|speed|eta)$/i.test(text.trim()) ||
         /(?:accurate\s+)?(?:live\s+)?delivery\s+(?:time|speed|status|tracker|eta)\b/i.test(text.trim()) ||
         /(?:how\s+fast|how\s+long\s+does\s+delivery\s+take|when\s+will\s+data\s+deliver)/i.test(text.trim()) ||
         /delivery\s+time\s+(?:from|on)\s+(?:the\s+)?site/i.test(text.trim())
