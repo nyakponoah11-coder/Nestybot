@@ -1064,7 +1064,7 @@ function normalizeGeminiModel(model) {
 
 async function getAiConfig() {
   const now = Date.now();
-  if (cachedAiConfig && (now - lastConfigFetchTime < 20000)) {
+  if (cachedAiConfig && (now - lastConfigFetchTime < 10000)) {
     return cachedAiConfig;
   }
   let geminiKey = cleanApiKey(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || "");
@@ -1074,11 +1074,14 @@ async function getAiConfig() {
   let openAiKey = cleanApiKey(process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY || "");
 
   let preferredProvider = groqKey ? "groq" : "gemini";
-  let geminiModel = normalizeGeminiModel(process.env.GEMINI_MODEL || "gemini-3.8-flash");
+  let geminiModel = normalizeGeminiModel(process.env.GEMINI_MODEL || "gemini-2.5-flash");
   let grokModel = "grok-2-latest";
   let groqModel = "llama-3.3-70b-versatile";
   let openRouterModel = "meta-llama/llama-3.3-70b-instruct";
   let openAiModel = "gpt-4o-mini";
+  let copilotCustomInstructions = "";
+  let copilotTriggerRules = "";
+  let aiSystemInstructions = "";
 
   try {
     const { data: aiRows } = await supabase
@@ -1089,7 +1092,8 @@ async function getAiConfig() {
         "grok_api_key", "GROK_API_KEY", "xai_api_key", "XAI_API_KEY", "grok_model", "GROK_MODEL",
         "openrouter_api_key", "OPENROUTER_API_KEY", "openroute_api_key", "openrouter_model",
         "openai_api_key", "OPENAI_API_KEY", "openai_model",
-        "ai_preferred_provider", "ai_provider", "primary_ai_provider", "ai_support_enabled"
+        "ai_preferred_provider", "ai_provider", "primary_ai_provider", "ai_support_enabled",
+        "copilot_custom_instructions", "copilot_trigger_rules", "ai_system_instructions"
       ]);
     const aiMap = Object.fromEntries((aiRows || []).map(r => [r.key, cleanApiKey(r.value)]));
 
@@ -1101,8 +1105,8 @@ async function getAiConfig() {
 
     if (groqKey && groqKey.startsWith("xai-") && !grokKey) grokKey = groqKey;
 
-    if (aiMap.ai_preferred_provider) preferredProvider = aiMap.ai_preferred_provider.toLowerCase();
-    else if (aiMap.primary_ai_provider) preferredProvider = aiMap.primary_ai_provider.toLowerCase();
+    if (aiMap.primary_ai_provider) preferredProvider = aiMap.primary_ai_provider.toLowerCase();
+    else if (aiMap.ai_preferred_provider) preferredProvider = aiMap.ai_preferred_provider.toLowerCase();
     else if (aiMap.ai_provider) preferredProvider = aiMap.ai_provider.toLowerCase();
     else if (groqKey) preferredProvider = "groq";
     else if (geminiKey) preferredProvider = "gemini";
@@ -1112,6 +1116,10 @@ async function getAiConfig() {
     if (aiMap.groq_model || aiMap.GROQ_MODEL) groqModel = aiMap.groq_model || aiMap.GROQ_MODEL;
     if (aiMap.openrouter_model) openRouterModel = aiMap.openrouter_model;
     if (aiMap.openai_model) openAiModel = aiMap.openai_model;
+
+    copilotCustomInstructions = aiMap.copilot_custom_instructions || "";
+    copilotTriggerRules = aiMap.copilot_trigger_rules || "";
+    aiSystemInstructions = aiMap.ai_system_instructions || "";
 
     if (!geminiKey && openAiKey && openAiKey.startsWith("AIzaSy")) {
       geminiKey = openAiKey;
@@ -1132,7 +1140,10 @@ async function getAiConfig() {
     openRouterKey,
     openRouterModel,
     openAiKey,
-    openAiModel
+    openAiModel,
+    copilotCustomInstructions,
+    copilotTriggerRules,
+    aiSystemInstructions
   };
   lastConfigFetchTime = now;
   return cachedAiConfig;
@@ -1282,7 +1293,7 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
               "Content-Type": "application/json",
               "x-goog-api-key": config.geminiKey
             },
-            timeout: 7000
+            timeout: 15000
           }
         );
         const parts = res.data?.candidates?.[0]?.content?.parts || [];
@@ -1371,14 +1382,48 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
     return null;
   }
 
+  // Ultimate Free Open LLM fallback so AI never returns null
+  async function tryFreeOpenLLM() {
+    try {
+      const messages = [
+        { role: "system", content: systemPrompt },
+        ...history.slice(-4).map(h => ({
+          role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
+          content: h.text || h.content || ""
+        })),
+        { role: "user", content: userMessage }
+      ];
+      const res = await axios.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          model: "google/gemini-2.0-flash-exp:free",
+          messages,
+          max_tokens: Math.min(Number(maxTokens || 600), 1024),
+          temperature
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "HTTP-Referer": STORE_FRONTEND_URL,
+            "X-Title": "DATA 1 GH",
+          },
+          timeout: 15000,
+        }
+      );
+      const text = res.data?.choices?.[0]?.message?.content?.trim();
+      if (text) return { text, provider: "open-llm", model: "gemini-free" };
+    } catch (_) {}
+    return null;
+  }
+
   // Build provider execution chain starting with preferred provider
   const chain = [];
-  if (provider === "groq") chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi);
-  else if (provider === "gemini") chain.push(tryGemini, tryGroq, tryOpenRouter, tryOpenAi);
-  else if (provider === "grok") chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi);
-  else if (provider === "openrouter") chain.push(tryOpenRouter, tryGroq, tryGemini, tryOpenAi);
-  else if (provider === "openai") chain.push(tryOpenAi, tryGroq, tryGemini, tryOpenRouter);
-  else chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi);
+  if (provider === "groq") chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi, tryFreeOpenLLM);
+  else if (provider === "gemini") chain.push(tryGemini, tryGroq, tryOpenRouter, tryOpenAi, tryFreeOpenLLM);
+  else if (provider === "grok") chain.push(tryGrok, tryGroq, tryGemini, tryOpenRouter, tryOpenAi, tryFreeOpenLLM);
+  else if (provider === "openrouter") chain.push(tryOpenRouter, tryGroq, tryGemini, tryOpenAi, tryFreeOpenLLM);
+  else if (provider === "openai") chain.push(tryOpenAi, tryGroq, tryGemini, tryOpenRouter, tryFreeOpenLLM);
+  else chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi, tryFreeOpenLLM);
 
   for (const fn of chain) {
     const res = await fn();
@@ -2468,6 +2513,33 @@ async function executeOwnerDirectAction(type, payload = {}) {
       return `Could not find agent "${target}".`;
     }
 
+    // 9b. Debit Agent Wallet
+    if (cleanType === "debit_agent") {
+      const target = payload.phone || payload.agent_id || payload.target;
+      const amt = parseFloat(payload.amount);
+      const res = await debitAgentWalletSafely(target, amt);
+      if (res) {
+        return `Agent ${res.agent.name || res.agent.phone} debited with GH₵ ${res.debited.toFixed(2)} (New balance: GH₵ ${res.newBalance.toFixed(2)}).`;
+      }
+      return `Could not find agent "${target}".`;
+    }
+
+    // 9c. Set Agent Status
+    if (cleanType === "set_agent_status") {
+      const target = payload.phone || payload.agent_id || payload.target;
+      const st = String(payload.status || "active").toLowerCase();
+      const res = await setAgentStatusSafely(target, st);
+      if (res) {
+        return `Agent ${res.agent.name || res.agent.phone} status set to ${st.toUpperCase()}.`;
+      }
+      return `Could not find agent "${target}".`;
+    }
+
+    // 9d. List All Agents
+    if (cleanType === "list_agents" || cleanType === "query_agents") {
+      return await listAllAgentsSummary();
+    }
+
     // 10. Update Announcement
     if (cleanType === "update_announcement") {
       await updateStoreAnnouncement({
@@ -2539,6 +2611,53 @@ async function executeOwnerDirectAction(type, payload = {}) {
       else q = q.eq("status", "open");
       await q;
       return "Customer support chat marked as resolved!";
+    }
+
+    // 17. Flash Sale Toggle
+    if (cleanType === "toggle_flash_sale") {
+      const active = Boolean(payload.active);
+      const val = active ? "true" : "false";
+      await supabase.from("settings").upsert({ key: "flash_sale_active", value: val }, { onConflict: "key" });
+      if (payload.discount_percentage) {
+        await supabase.from("settings").upsert({ key: "flash_sale_discount", value: String(payload.discount_percentage) }, { onConflict: "key" });
+      }
+      return `Flash Sale is now ${active ? "ACTIVE on storefront" : "TURNED OFF"}!`;
+    }
+
+    // 18. Query Top Customers
+    if (cleanType === "query_top_customers") {
+      const { data: ords } = await supabase
+        .from("orders")
+        .select("recipient_phone, amount, payment_status")
+        .eq("payment_status", "paid")
+        .limit(500);
+      const phoneMap = {};
+      (ords || []).forEach(o => {
+        const p = (o.recipient_phone || "").replace(/\D/g, "");
+        if (p.length >= 9) {
+          if (!phoneMap[p]) phoneMap[p] = { count: 0, total: 0 };
+          phoneMap[p].count += 1;
+          phoneMap[p].total += Number(o.amount || 0);
+        }
+      });
+      const sorted = Object.entries(phoneMap).sort((a, b) => b[1].count - a[1].count).slice(0, 5);
+      const lines = sorted.map(([phone, d], i) => `${i + 1}. *0${phone.slice(-9)}* — ${d.count} orders (GH₵ ${d.total.toFixed(2)})`);
+      return `Top Customers:\n${lines.join("\n")}`;
+    }
+
+    // 19. Look Up Phone Orders
+    if (cleanType === "lookup_phone" || cleanType === "query_orders") {
+      const phone = String(payload.phone || payload.recipient || "").replace(/\D/g, "");
+      const last9 = phone.slice(-9);
+      const { data: ords } = await supabase
+        .from("orders")
+        .select("reference, network, capacity, amount, delivery_status, payment_status, created_at")
+        .ilike("recipient_phone", `%${last9}%`)
+        .order("created_at", { ascending: false })
+        .limit(5);
+      if (!ords || ords.length === 0) return `No orders found for phone 0${last9}.`;
+      const lines = ords.map((o, i) => `${i + 1}. *${o.reference}* — ${o.capacity}GB ${o.network} (GH₵ ${Number(o.amount || 0).toFixed(2)}) | Delivery: *${(o.delivery_status || "pending").toUpperCase()}* | Paid: *${o.payment_status}*`);
+      return `Orders for 0${last9}:\n${lines.join("\n")}`;
     }
   } catch (e) {
     console.warn("executeOwnerDirectAction error:", e.message);
@@ -5313,22 +5432,29 @@ app.post("/webhook", async (req, res) => {
           chatsRes,
           productsRes,
           scratchRes,
-          referralsRes
+          referralsRes,
+          agentsRes
         ] = await Promise.all([
-          supabase.from("orders").select("id, amount, payment_status, delivery_status, created_at").limit(500),
-          supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at").gte("created_at", startOfDay.toISOString()).order("created_at", { ascending: false }),
-          supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at").order("created_at", { ascending: false }).limit(6),
+          supabase.from("orders").select("id, amount, payment_status, delivery_status, created_at, agent_id, agent_slug").limit(500),
+          supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, agent_slug").gte("created_at", startOfDay.toISOString()).order("created_at", { ascending: false }),
+          supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, agent_slug").order("created_at", { ascending: false }).limit(6),
           supabase.from("service_orders").select("id, reference, service, amount, payment_status, delivery_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
           supabase.from("checker_orders").select("id, reference, checker_type, amount, payment_status, delivery_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
           supabase.from("chat_conversations").select("id, unread_for_support").eq("status", "open"),
           supabase.from("products").select("id, name, network, capacity, price, in_stock"),
           supabase.from("scratch_codes").select("id, unlocked, scratched").eq("unlocked", true),
-          supabase.from("referrals").select("id, total_clicks")
+          supabase.from("referrals").select("id, total_clicks"),
+          supabase.from("agents").select("id, name, phone, store_name, store_slug, wallet_balance, status, created_at").order("created_at", { ascending: false })
         ]);
 
         const allOrders = allOrdersRes?.data || [];
         const allPaid = allOrders.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
         const allGross = allPaid.reduce((s, o) => s + Number(o.amount || 0), 0);
+
+        // Reseller Agent metrics
+        const allAgents = agentsRes?.data || [];
+        const activeAgents = allAgents.filter(a => a.status === "active" || !a.status);
+        const totalAgentWallets = allAgents.reduce((s, a) => s + Number(a.wallet_balance || 0), 0);
 
         // Stuck orders: paid MoMo, not delivered, not failed, created > 15 mins ago
         stuckOrders = allOrders.filter(o =>
@@ -5421,8 +5547,13 @@ app.post("/webhook", async (req, res) => {
           anomalies.push(`${outOfStockCount} package(s) marked OUT OF STOCK: ${outOfStockItems.slice(0, 3).map(p => `${p.network || ""} ${p.capacity || p.name || ""}`).join(", ")}`);
         }
 
+        const todayAgentOrders = paid.filter(o => o.agent_id || o.agent_slug);
+        const todayAgentRevenue = todayAgentOrders.reduce((s, o) => s + Number(o.amount || 0), 0);
+
         systemData = `LIVE STORE OPERATIONS SUMMARY:\n` +
           `• Today's Orders: ${paid.length} paid | Sales: GH₵ ${todayRevenue.toFixed(2)} (All-time recorded: ~GH₵ ${allGross.toFixed(2)})\n` +
+          `• Reseller Agents: ${allAgents.length} registered (${activeAgents.length} active) | Total Agent Wallets: GH₵ ${totalAgentWallets.toFixed(2)} | Agent Orders Today: ${todayAgentOrders.length} (GH₵ ${todayAgentRevenue.toFixed(2)})\n` +
+          (allAgents.length > 0 ? `  - Active Agent Stores: ${allAgents.slice(0, 5).map(a => `${a.store_name || a.name || "Agent"} (₵${Number(a.wallet_balance || 0).toFixed(2)})`).join(", ")}\n` : "") +
           `• DataMart API Wallet: ${walletBalance || "Live connection active"} | Speed: ${deliveryEta}\n` +
           `• Arkesel Bulk SMS: ${arkeselSmsBalance || "Operational"}\n` +
           `• In-Progress Deliveries: ${pending.length} order(s)\n` +
@@ -5499,6 +5630,8 @@ app.post("/webhook", async (req, res) => {
         "OFFICIAL STORE LINKS & ACCESS:\n" +
         `- Storefront (Shop / Front end): ${STORE_FRONTEND_URL}\n` +
         `- Admin Dashboard / Portal: ${ADMIN_DASHBOARD_URL}\n` +
+        `- Reseller Agent Portal / Dashboard: ${STORE_FRONTEND_URL}/agent/dashboard\n` +
+        `- Reseller Agent Storefronts: ${STORE_FRONTEND_URL}/s/[slug]\n` +
         `- Android Mobile App (APK): ${DOWNLOAD_APP_URL}\n` +
         `- Real-time Order Tracking: ${TRACK_ORDER_URL}\n` +
         `- Digital Services Portal: ${SERVICES_URL}\n\n` +
@@ -5543,8 +5676,8 @@ app.post("/webhook", async (req, res) => {
         "  12. Generate Free Data Vouchers / codes on demand directly into the database\n" +
         "  13. Toggle the Free Data Giveaway Campaign active or off on the storefront\n" +
         "  14. Change the website color scheme / theme (e.g. blue, emerald, purple, dark mode, light mode)\n" +
-        "  15. Credit Agent Wallets and list registered sales agents\n" +
-        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\", ...}] at the end of your reply.\n" +
+        "  15. Full Reseller Agent Network Operations: Credit agent wallet, debit agent wallet, suspend/activate agent accounts, list registered agents, and view agent store sales\n" +
+        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\", ...}] at the end of your reply.\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- Approved SMS Sender ID for DATA 1 GH is 'D_1Gh'. Whenever sending customer SMS or alerts, use sender ID 'D_1Gh'.\n" +
         "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST (NEVER BEAT AROUND THE BUSH):\n" +
@@ -5560,6 +5693,16 @@ app.post("/webhook", async (req, res) => {
         (systemData ? `\n${systemData}\n` : "") +
         (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
         (specificOrderCtx ? `\n${specificOrderCtx}` : "");
+
+      if (aiConfig.copilotCustomInstructions) {
+        ownerSystemPrompt += `\n\nADMIN CO-PILOT CUSTOM INSTRUCTIONS (CONFIGURED ON WEBSITE):\n${aiConfig.copilotCustomInstructions}\n`;
+      }
+      if (aiConfig.copilotTriggerRules) {
+        ownerSystemPrompt += `\n\nADMIN CO-PILOT BEHAVIOR RULES (CONFIGURED ON WEBSITE):\n${aiConfig.copilotTriggerRules}\n`;
+      }
+      if (aiConfig.aiSystemInstructions) {
+        ownerSystemPrompt += `\n\nGLOBAL STORE AI INSTRUCTIONS:\n${aiConfig.aiSystemInstructions}\n`;
+      }
 
       const siteBase = process.env.SITE_URL || STORE_FRONTEND_URL || "https://www.data1gh.com";
       const siteAiEndpoint = `${siteBase.replace(/\/+$/, "")}/api/admin?fn=admin-ai`;
@@ -5584,6 +5727,69 @@ app.post("/webhook", async (req, res) => {
       const cmdText = (effectiveText || text).trim();
       const lt = cmdText.toLowerCase();
       const orderRefsInText = extractOrderReferences(cmdText);
+
+      // Direct Action Command 0a: Credit Agent Wallet
+      const creditAgentMatch = cmdText.match(/(?:credit|fund|top\s*up)\s+(?:agent\s+)?([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i);
+      if (creditAgentMatch) {
+        const target = creditAgentMatch[1].trim();
+        const amt = parseFloat(creditAgentMatch[2]);
+        if (!isNaN(amt) && amt > 0) {
+          const res = await creditAgentWalletSafely(target, amt);
+          if (res) {
+            await syncActionToSite("credit_agent", { phone: target, amount: amt });
+            return sendWhatsApp(from,
+              `✅ *AGENT WALLET CREDITED BOSS!*\n\n` +
+              `👤 *Agent:* *${res.agent.name || res.agent.store_name || res.agent.phone}*\n` +
+              `📱 *Phone:* ${res.agent.phone || "N/A"}\n` +
+              `🏪 *Store:* ${res.agent.store_name || "N/A"}\n` +
+              `💵 *Credited:* +GH₵ ${res.credited.toFixed(2)}\n` +
+              `💰 *New Wallet Balance:* *GH₵ ${res.newBalance.toFixed(2)}* live in database!`
+            );
+          } else {
+            return sendWhatsApp(from, `⚠️ Could not find registered agent "${target}". Use "list agents" to see all agents.`);
+          }
+        }
+      }
+
+      // Direct Action Command 0b: Debit Agent Wallet
+      const debitAgentMatch = cmdText.match(/(?:debit|deduct|remove)\s+(?:from\s+)?(?:agent\s+)?([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i);
+      if (debitAgentMatch) {
+        const target = debitAgentMatch[1].trim();
+        const amt = parseFloat(debitAgentMatch[2]);
+        if (!isNaN(amt) && amt > 0) {
+          const res = await debitAgentWalletSafely(target, amt);
+          if (res) {
+            return sendWhatsApp(from,
+              `✅ *AGENT WALLET DEBITED BOSS!*\n\n` +
+              `👤 *Agent:* *${res.agent.name || res.agent.store_name || res.agent.phone}*\n` +
+              `💵 *Debited:* -GH₵ ${res.debited.toFixed(2)}\n` +
+              `💰 *New Wallet Balance:* *GH₵ ${res.newBalance.toFixed(2)}* live in database!`
+            );
+          } else {
+            return sendWhatsApp(from, `⚠️ Could not find registered agent "${target}".`);
+          }
+        }
+      }
+
+      // Direct Action Command 0c: List All Agents
+      if (/^(?:list|show|view|all|get)\s+(?:all\s+)?agents\b/i.test(lt) || /^(?:how many agents|agent list|agents summary|who are the agents)\b/i.test(lt)) {
+        const summary = await listAllAgentsSummary();
+        return sendWhatsApp(from, `👥 *REGISTERED RESELLER AGENTS*\n\n${summary}\n\n💡 *Quick Controls:*\n• Credit: "Credit agent [phone/name] with [amount]"\n• Debit: "Debit agent [phone/name] with [amount]"\n• Status: "Suspend agent [phone]" or "Activate agent [phone]"`);
+      }
+
+      // Direct Action Command 0d: Suspend / Activate Agent
+      const statusAgentMatch = cmdText.match(/(suspend|block|deactivate|activate|unblock|enable)\s+agent\s+([A-Za-z0-9_.-]+)/i);
+      if (statusAgentMatch) {
+        const actionType = statusAgentMatch[1].toLowerCase();
+        const newStatus = /suspend|block|deactivate/.test(actionType) ? "suspended" : "active";
+        const target = statusAgentMatch[2].trim();
+        const res = await setAgentStatusSafely(target, newStatus);
+        if (res) {
+          return sendWhatsApp(from, `✅ *AGENT STATUS UPDATED BOSS!*\n\n👤 *Agent:* *${res.agent.name || res.agent.store_name || res.agent.phone}*\n⚡ *Status:* *${newStatus.toUpperCase()}* live in database!`);
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not find agent "${target}".`);
+        }
+      }
 
       // Direct Action Command 1a: Payment Status Update
       const paymentCmdMatch =
@@ -5853,15 +6059,14 @@ app.post("/webhook", async (req, res) => {
               "x-admin-bot": "true",
               "x-admin-key": process.env.ADMIN_API_KEY || "data1gh-secure-admin",
             },
-            timeout: 12000,
+            timeout: 25000,
           }
         );
 
         if (
           siteResp.data &&
           siteResp.data.ok &&
-          siteResp.data.reply &&
-          (siteResp.data.executed || siteResp.data.provider !== "fallback")
+          siteResp.data.reply
         ) {
           let replyText = siteResp.data.reply;
           if (siteResp.data.staged_action) {
@@ -5892,12 +6097,12 @@ app.post("/webhook", async (req, res) => {
         console.log("Site Co-Pilot bridge deferred to in-bot engine fallback:", siteErr.message);
       }
 
-      // ── STEP 2: IN-BOT CO-PILOT ENGINE (FALLBACK USING CONFIGURED GROK & GEMINI) ──
+      // ── STEP 2: IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──
       const aiResult = await executeBotAi({
         systemPrompt: ownerSystemPrompt,
         userMessage: text,
         history,
-        maxTokens: 450,
+        maxTokens: 800,
         temperature: 0.7
       });
       let aiReply = aiResult?.text || "";
@@ -5969,46 +6174,17 @@ app.post("/webhook", async (req, res) => {
 
         // 3b. Whole-system capabilities check / scope question (e.g. "will the ai perform", "only this that it can do", "it should be montring the whole system")
         else if (/\b(perform|only this|what can you do|capabilities|scope|whole system|montr|supervise|oversee)\b/i.test(lt)) {
-          aiReply = `Yes bossu! I don't just do daily sales, deliveries, wallet, and marketing — I monitor and supervise the ENTIRE system 24/7 across all 13 core pillars:\n\n` +
-            `1. 📶 Telecom Data Pipeline (MTN, Telecel, AT delivery speeds: ${deliveryEta})\n` +
-            `2. 💰 Financials & Cash Flow (${todayPaidCount} orders today, ₵${todayRevenue.toFixed(2)} sales)\n` +
-            `3. 💳 DataMart API & Wallet (${walletBalance || "Connected"} — auto-alert if < ₵50)\n` +
-            `4. ✉️ Arkesel Bulk SMS Gateway (${arkeselSmsBalance || "Active"} credits for alerts & receipts)\n` +
-            `5. 📺 Netflix 30-Day Subscriptions (${netflixCount} active subscriber passes & IMAP pipeline)\n` +
-            `6. 📱 MTN MashUp Manual Queue (${pendingMashupCount} awaiting manual *567*2# dispatch)\n` +
-            `7. 🪪 AFA Farmer Alliance Registrations (${afaCount} registered)\n` +
-            `8. 🎓 WAEC Result Checkers (${checkerCount} vouchers sold)\n` +
-            `9. 💬 Live Customer Support (${openSupportCount} open chats, ${unreadSupportCount > 0 ? `⚠️ ${unreadSupportCount} unread!` : "all cleared"})\n` +
-            `10. 📦 Product Catalog & Stock (${outOfStockCount > 0 ? `⚠️ ${outOfStockCount} items OUT OF STOCK` : "All items in stock ✅"})\n` +
-            `11. 🤝 Affiliate & Referral Network (${activePromotersCount} registered promoters)\n` +
-            `12. 🎁 Gamification & Retention (${unlockedScratchCount} scratch cards unlocked)\n` +
-            `13. 🛡️ System Integrity & Security (stuck order detection & health monitoring)\n\n` +
-            `Everything is under watch boss! Which department do you want us to tackle?`;
+          aiReply = `I supervise the whole live store 24/7 bossu! Sales (₵${todayRevenue.toFixed(2)} today across ${todayPaidCount} orders), DataMart wallet (${walletBalance || "Active"}), Arkesel SMS (${arkeselSmsBalance || "Operational"}), delivery speed (~${deliveryEta}), and customer support chats (${openSupportCount} active). You can command me to update order statuses, adjust prices, toggle stock, trigger retries, or send custom SMS right from here! What specific action or update do you want us to run?`;
         }
 
         // 3c. Post-Payment Lifecycle & Whole-System Oversight (e.g. "still after payment successful", "after payment")
         else if (/\b(after payment|payment succe|post[- ]payment|still after|what happens after)\b/i.test(lt)) {
-          aiReply = `Yes bossu! Absolutely! Even AFTER payment is successful, I continue monitoring and managing the entire operation 24/7:\n\n` +
-            `1. ⚡ Instant Payment Verification: Paystack and MoMo webhooks confirm the transaction and reconcile the exact amount against price.\n` +
-            `2. 🚀 Automated DataMart Fast-Lane Dispatch: The bundle is submitted immediately to the network supplier API with zero manual delay.\n` +
-            `3. ⏱️ Active Delivery Verification (Bypassing fake 200 OKs): I actively poll telecom delivery status until it confirms 'delivered'. If an order is stuck in 'processing' for >15 mins, I flag it as an anomaly for an instant 1-click retry.\n` +
-            `4. 💳 Wallet Auto-Check: After every purchase, I recalculate the DataMart developer wallet balance and alert you if it drops below GH₵ 50 so dispatch never halts.\n` +
-            `5. 🔔 Instant Alerts: You get an instant sale notification on WhatsApp and the database updates live (automated customer SMS is turned off).\n` +
-            `6. 🎁 Growth & Retention: I update customer Scratch & Win progress (towards 5/5 orders) and credit affiliate referral commissions.\n` +
-            `7. 💬 Customer Care Readiness: When customers ask in support about their paid order, I pull their live network status using their phone number or reference to answer them instantly.\n\n` +
-            `Everything is supervised 24/7 bossu! Which order or department do you want us to inspect?`;
+          aiReply = `Yes bossu! Immediately payment confirms, the order routes into automated DataMart dispatch. I monitor the network delivery speed (~${deliveryEta}), poll until it's confirmed delivered, safeguard your wallet balance, and alert you if anything flags stuck. Everything moves hands-free!`;
         }
 
         // 4. Whole-System Overview / Health Check
         else if (/\b(system|whole|everything|monitor|audit|health|overview|check all)\b/i.test(lt)) {
-          aiReply = `🌐 *Whole-System Health Monitor:*\n` +
-            `• Data Bundles: *${todayPaidCount} paid today* (₵${todayRevenue.toFixed(2)}) | Delivery: *${deliveryEta}*\n` +
-            `• Balances: DataMart *${walletBalance || "Connected"}* | Arkesel SMS *${arkeselSmsBalance || "Active"}*\n` +
-            `• Digital Services: *${netflixCount} Netflix* active | *${pendingMashupCount} MashUp* pending manual | *${afaCount} AFA* registered\n` +
-            `• WAEC Checkers: *${checkerCount}* sold\n` +
-            `• Support Chats: *${openSupportCount} open* (${unreadSupportCount > 0 ? `⚠️ ${unreadSupportCount} unread!` : "all cleared"})\n` +
-            `• Catalog: ${outOfStockCount > 0 ? `⚠️ ${outOfStockCount} items OUT OF STOCK` : "All packages in stock ✅"}\n\n` +
-            `Everything is under watch boss! What area do you want to inspect?`;
+          aiReply = `🌐 *Store Status:* Delivery ETA is *${deliveryEta}*. DataMart wallet: *${walletBalance || "Connected"}*. Arkesel SMS: *${arkeselSmsBalance || "Active"}*. Today: *${todayPaidCount} orders* (GH₵ ${todayRevenue.toFixed(2)}). Support chats: *${openSupportCount}* (${unreadSupportCount > 0 ? `⚠️ ${unreadSupportCount} unread` : "all clear"}). All systems operational boss!`;
         }
 
         // 5. Digital Services: Netflix
@@ -6031,6 +6207,12 @@ app.post("/webhook", async (req, res) => {
         // 8. Result Checkers (WAEC / BECE / WASSCE)
         else if (/\b(checker|waec|bece|wassce|novdec|result)\b/i.test(lt)) {
           aiReply = `🎓 *WAEC Result Checkers:* We have sold *${checkerCount} checker voucher(s)*. Instant PIN and serial issuance is active directly on the website portal!`;
+        }
+
+        // 8b. Reseller Agents & Agent Stores
+        else if (/\b(agent|agents|reseller|resellers|agent wallet|agent store)\b/i.test(lt)) {
+          const summary = await listAllAgentsSummary();
+          aiReply = `👥 *Reseller Agent Network:*\n\n${summary}\n\n💡 You can credit any agent by texting: "Credit agent [name/phone] with [amount]".`;
         }
 
         // 9. Live Customer Support Chats
@@ -7764,7 +7946,7 @@ async function notifyOrderDelivered(order) {
 📶 *Item:* ${itemDesc}
 📱 *Recipient:* ${cleanPhone}
 💰 *Amount:* GHS ${amount}
-⚡ *Status:* ✅ Delivered to Phone (DataMart)
+⚡ *Status:* ✅ Delivered to Phone
 ⏰ *Delivered At:* ${dateStr} ${timeStr}`;
 
   await sendAdminWhatsApp(deliveredText);
@@ -7783,7 +7965,7 @@ async function notifyOrderDelivered(order) {
         const agStore = ag?.store_name || ag?.business_name || order.store_name || "Your Store";
         await sendWhatsApp(
           agPhone,
-          `🎉 *ORDER DELIVERED TO YOUR CUSTOMER!* 📦\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nGood news! An order from *${agStore}* has been successfully delivered by the network!\n\n🆔 *Order Ref:* ${ref}\n📶 *Item:* ${itemDesc}\n📱 *Recipient:* ${cleanPhone}\n⚡ *Status:* ✅ Delivered to Phone (DataMart)\n⏰ *Time:* ${dateStr} ${timeStr}\n\nKeep sharing your store link to grow your daily sales!\n👉 View Dashboard: https://data1gh.com/agent/dashboard`
+          `🎉 *ORDER DELIVERED TO YOUR CUSTOMER!* 📦\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nGood news! An order from *${agStore}* has been successfully delivered by the network!\n\n🆔 *Order Ref:* ${ref}\n📶 *Item:* ${itemDesc}\n📱 *Recipient:* ${cleanPhone}\n⚡ *Status:* ✅ Delivered to Phone\n⏰ *Time:* ${dateStr} ${timeStr}\n\nKeep sharing your store link to grow your daily sales!\n👉 View Dashboard: https://data1gh.com/agent/dashboard`
         );
       }
     } catch (_) {}
