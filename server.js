@@ -1073,7 +1073,7 @@ function normalizeGeminiModel(model) {
 
 async function getAiConfig() {
   const now = Date.now();
-  if (cachedAiConfig && (now - lastConfigFetchTime < 10000)) {
+  if (cachedAiConfig && (now - lastConfigFetchTime < 30000)) {
     return cachedAiConfig;
   }
   let geminiKey = cleanApiKey(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || "");
@@ -5635,7 +5635,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
-      const ownerSystemPrompt =
+      let ownerSystemPrompt =
         "You are Stony, the owner's personal AI business assistant, digital co-pilot, and commercial partner at DATA 1 GH.\n" +
         "You are having a direct, private WhatsApp conversation with the business owner.\n\n" +
         "OFFICIAL STORE LINKS & ACCESS:\n" +
@@ -7992,7 +7992,7 @@ async function runActiveDeliveryWatcher() {
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data: pendingOrders, error } = await supabase
       .from("orders")
-      .select("*")
+      .select("id, reference, datamart_reference, recipient_phone, whatsapp_phone, network, capacity, amount, delivery_status, payment_status")
       .eq("payment_status", "paid")
       .in("delivery_status", ["processing", "pending", "waiting", "in_progress"])
       .gte("created_at", twentyFourHoursAgo)
