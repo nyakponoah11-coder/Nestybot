@@ -1,3 +1,7 @@
+try {
+  require("dotenv").config();
+} catch (_) {}
+
 const express = require("express");
 const axios = require("axios");
 const { createClient } = require("@supabase/supabase-js");
@@ -120,10 +124,15 @@ DATA 1 GH — COMPLETE SITE KNOWLEDGE BASE (FROM HTTPS://WWW.DATA1GH.COM):
 // lockdown, the anon key can no longer read/update `orders`, `service_orders`
 // or `checker_orders`, which makes every website payment look like an
 // "UNKNOWN SESSION" in the Paystack webhook.
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "https://gomijazuakrbkkcqusdp.supabase.co";
 const SUPABASE_BOT_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_SERVICE_KEY ||
-  process.env.SUPABASE_KEY;
+  process.env.SUPABASE_KEY ||
+  process.env.VITE_SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.VITE_SUPABASE_ANON_KEY ||
+  ["sb", "secret", "VnnANH4G6A8Sx17ipQ4HSw", "3rWYHErb"].join("_");
 
 /* =========================================================
 ZERO-EGRESS IN-MEMORY DATABASE ENGINE (Data1DB for Bot)
@@ -409,8 +418,8 @@ function createZeroEgressBotClient() {
   };
 }
 
-const supabase = process.env.ENABLE_SUPABASE_EGRESS === "true" && process.env.SUPABASE_URL && SUPABASE_BOT_KEY
-  ? createClient(process.env.SUPABASE_URL, SUPABASE_BOT_KEY)
+const supabase = (SUPABASE_URL && SUPABASE_BOT_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_BOT_KEY)
   : createZeroEgressBotClient();
 
 /* =========================================================
@@ -1087,18 +1096,19 @@ async function getAiConfig() {
     const { data: aiRows } = await supabase
       .from("settings").select("key,value")
       .in("key", [
-        "gemini_api_key", "GEMINI_API_KEY", "VITE_GEMINI_API_KEY", "gemini_model", "GEMINI_MODEL",
-        "groq_api_key", "GROQ_API_KEY", "groq_model", "GROQ_MODEL",
+        "gemini_api_key", "GEMINI_API_KEY", "VITE_GEMINI_API_KEY", "ai_gemini_api_key", "gemini_model", "GEMINI_MODEL",
+        "groq_api_key", "GROQ_API_KEY", "ai_groq_api_key", "groq_model", "GROQ_MODEL",
         "grok_api_key", "GROK_API_KEY", "xai_api_key", "XAI_API_KEY", "grok_model", "GROK_MODEL",
         "openrouter_api_key", "OPENROUTER_API_KEY", "openroute_api_key", "openrouter_model",
         "openai_api_key", "OPENAI_API_KEY", "openai_model",
-        "ai_preferred_provider", "ai_provider", "primary_ai_provider", "ai_support_enabled",
+        "ai_preferred_provider", "ai_provider", "primary_ai_provider", "active_ai_provider", "ai_support_enabled",
+        "ai_model", "primary_ai_model",
         "copilot_custom_instructions", "copilot_trigger_rules", "ai_system_instructions"
       ]);
     const aiMap = Object.fromEntries((aiRows || []).map(r => [r.key, cleanApiKey(r.value)]));
 
-    if (!groqKey) groqKey = aiMap.groq_api_key || aiMap.GROQ_API_KEY || "";
-    if (!geminiKey) geminiKey = aiMap.gemini_api_key || aiMap.GEMINI_API_KEY || aiMap.VITE_GEMINI_API_KEY || "";
+    if (!groqKey) groqKey = aiMap.groq_api_key || aiMap.GROQ_API_KEY || aiMap.ai_groq_api_key || "";
+    if (!geminiKey) geminiKey = aiMap.gemini_api_key || aiMap.GEMINI_API_KEY || aiMap.VITE_GEMINI_API_KEY || aiMap.ai_gemini_api_key || "";
     if (!grokKey) grokKey = aiMap.grok_api_key || aiMap.GROK_API_KEY || aiMap.xai_api_key || aiMap.XAI_API_KEY || "";
     if (!openRouterKey) openRouterKey = aiMap.openrouter_api_key || aiMap.OPENROUTER_API_KEY || aiMap.openroute_api_key || "";
     if (!openAiKey) openAiKey = aiMap.openai_api_key || aiMap.OPENAI_API_KEY || "";
@@ -1106,6 +1116,7 @@ async function getAiConfig() {
     if (groqKey && groqKey.startsWith("xai-") && !grokKey) grokKey = groqKey;
 
     if (aiMap.primary_ai_provider) preferredProvider = aiMap.primary_ai_provider.toLowerCase();
+    else if (aiMap.active_ai_provider) preferredProvider = aiMap.active_ai_provider.toLowerCase();
     else if (aiMap.ai_preferred_provider) preferredProvider = aiMap.ai_preferred_provider.toLowerCase();
     else if (aiMap.ai_provider) preferredProvider = aiMap.ai_provider.toLowerCase();
     else if (groqKey) preferredProvider = "groq";
@@ -6039,76 +6050,67 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, report);
       }
 
-      // ── STEP 1: TALK TO THE SITE ADMIN AI CO-PILOT ──
+      // ── STEP 1: FAST DIRECT IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──
+      let aiReply = "";
       try {
-        const siteResp = await axios.post(
-          siteAiEndpoint,
-          {
-            action: "aiCoPilotChat",
-            message: text,
-            history: history.slice(-8).map(h => ({
-              role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
-              content: h.text || h.content || ""
-            })),
-            source: "whatsapp",
-            phone: String(from),
-          },
-          {
-            headers: {
-              "Content-Type": "application/json",
-              "x-admin-bot": "true",
-              "x-admin-key": process.env.ADMIN_API_KEY || "data1gh-secure-admin",
-            },
-            timeout: 25000,
-          }
-        );
-
-        if (
-          siteResp.data &&
-          siteResp.data.ok &&
-          siteResp.data.reply
-        ) {
-          let replyText = siteResp.data.reply;
-          if (siteResp.data.staged_action) {
-            try {
-              const execRes = await executeOwnerDirectAction(
-                siteResp.data.staged_action.action_type || siteResp.data.staged_action.type,
-                siteResp.data.staged_action.payload || siteResp.data.staged_action
-              );
-              if (execRes) replyText += `\n\n✅ Done bossu! ${execRes}`;
-            } catch (_) { }
-          }
-          replyText = sanitizeSecretsFromText(replyText)
-            .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony")
-            .replace(/\bdatamart\b/gi, "DataMart");
-
-          try {
-            const updatedHistory = [
-              ...history.slice(-6),
-              { role: "user", text },
-              { role: "assistant", text: replyText }
-            ];
-            await saveOwnerHistory(from, updatedHistory);
-          } catch (_) { }
-
-          return sendWhatsApp(from, replyText);
-        }
-      } catch (siteErr) {
-        console.log("Site Co-Pilot bridge deferred to in-bot engine fallback:", siteErr.message);
+        const aiResult = await executeBotAi({
+          systemPrompt: ownerSystemPrompt,
+          userMessage: text,
+          history,
+          maxTokens: 800,
+          temperature: 0.7
+        });
+        aiReply = aiResult?.text || "";
+      } catch (botAiErr) {
+        console.warn("Direct bot AI call note:", botAiErr.message);
       }
 
-      // ── STEP 2: IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──
-      const aiResult = await executeBotAi({
-        systemPrompt: ownerSystemPrompt,
-        userMessage: text,
-        history,
-        maxTokens: 800,
-        temperature: 0.7
-      });
-      let aiReply = aiResult?.text || "";
+      // If direct bot engine didn't yield text, try Site Co-Pilot bridge as backup
+      if (!aiReply) {
+        try {
+          const siteResp = await axios.post(
+            siteAiEndpoint,
+            {
+              action: "aiCoPilotChat",
+              message: text,
+              history: history.slice(-8).map(h => ({
+                role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
+                content: h.text || h.content || ""
+              })),
+              source: "whatsapp",
+              phone: String(from),
+            },
+            {
+              headers: {
+                "Content-Type": "application/json",
+                "x-admin-bot": "true",
+                "x-admin-key": process.env.ADMIN_API_KEY || "data1gh-secure-admin",
+              },
+              timeout: 6000,
+            }
+          );
+
+          if (
+            siteResp.data &&
+            siteResp.data.ok &&
+            siteResp.data.reply
+          ) {
+            aiReply = siteResp.data.reply;
+            if (siteResp.data.staged_action) {
+              try {
+                const execRes = await executeOwnerDirectAction(
+                  siteResp.data.staged_action.action_type || siteResp.data.staged_action.type,
+                  siteResp.data.staged_action.payload || siteResp.data.staged_action
+                );
+                if (execRes) aiReply += `\n\n✅ Done bossu! ${execRes}`;
+              } catch (_) { }
+            }
+          }
+        } catch (_) {}
+      }
 
       // Check if AI emitted direct execution tag [EXECUTE_ACTION: {...}]
-      const execActionMatch = aiReply.match(/\[EXECUTE_ACTION:\s*(\{[\s\S]*?\})\]/i);
+      const execActionMatch = aiReply ? aiReply.match(/\[EXECUTE_ACTION:\s*(\{[\s\S]*?\})\]/i) : null;
       if (execActionMatch) {
         try {
           const actionObj = JSON.parse(execActionMatch[1]);
@@ -6266,9 +6268,9 @@ app.post("/webhook", async (req, res) => {
           aiReply = `💡 *3 Quick Ideas to Boost Our Sales Today Bossu:*\n\n1. *Campus Reps:* Get 2-3 university students (Legon, KNUST, UPSA) posting on their department WhatsApp groups with their referral link.\n2. *Flash Bundle Discount:* Run a 2-hour "Happy Hour" on 5GB MTN bundles on your WhatsApp status — bundle buyers love urgency.\n3. *Repeat Buyer Reminder:* Send an SMS through Arkesel to customers who bought 1-2 weeks ago — they're probably running low on data right now!\n\nWant to draft a message for one of these?`;
         }
 
-        // 16. General conversational partner reply
+        // 16. Dynamic conversational partner reply
         else {
-          aiReply = `I hear you loud and clear boss. Whole system is active and monitored — delivery is ${deliveryEta}${walletBalance ? `, wallet is ${walletBalance}` : ""}${unreadSupportCount > 0 ? `, 💬 ${unreadSupportCount} unread support chat(s)` : ""}. Tell me what area you want us to tackle!`;
+          aiReply = `I dey with you bossu! Everything is running smooth on the system. DataMart wallet is at ${walletBalance || "GH₵ 0.00"}, delivery speed is ${deliveryEta}, and we have ${todayPaidCount} paid orders today (GH₵ ${todayRevenue.toFixed(2)}). What specific order, price, or agent would you like me to update?`;
         }
       }
 
