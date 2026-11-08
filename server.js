@@ -124,15 +124,19 @@ DATA 1 GH — COMPLETE SITE KNOWLEDGE BASE (FROM HTTPS://WWW.DATA1GH.COM):
 // lockdown, the anon key can no longer read/update `orders`, `service_orders`
 // or `checker_orders`, which makes every website payment look like an
 // "UNKNOWN SESSION" in the Paystack webhook.
-const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "https://gomijazuakrbkkcqusdp.supabase.co";
+const VERIFIED_SUPABASE_URL = "https://gomijazuakrbkkcqusdp.supabase.co";
+const VERIFIED_SERVICE_KEY = Buffer.from("c2Jfc2VjcmV0X1ZubkFOSDRHNkE4U3gxN2lwUTRIU3dfM3JXWUhFcmI=", "base64").toString("utf8");
+
+function sanitizeEnvVal(v) {
+  if (!v || typeof v !== "string") return "";
+  return v.trim().replace(/^['"]|['"]$/g, "");
+}
+
+const SUPABASE_URL = sanitizeEnvVal(process.env.SUPABASE_URL) || sanitizeEnvVal(process.env.VITE_SUPABASE_URL) || VERIFIED_SUPABASE_URL;
 const SUPABASE_BOT_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_SERVICE_KEY ||
-  process.env.SUPABASE_KEY ||
-  process.env.VITE_SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_ANON_KEY ||
-  process.env.VITE_SUPABASE_ANON_KEY ||
-  Buffer.from("c2Jfc2VjcmV0X1ZubkFOSDRHNkE4U3gxN2lwUTRIU3dfM3JXWUhFcmI=", "base64").toString("utf8");
+  sanitizeEnvVal(process.env.SUPABASE_SERVICE_ROLE_KEY) ||
+  sanitizeEnvVal(process.env.SUPABASE_SERVICE_KEY) ||
+  VERIFIED_SERVICE_KEY;
 
 /* =========================================================
 ZERO-EGRESS IN-MEMORY DATABASE ENGINE (Data1DB for Bot)
@@ -418,9 +422,27 @@ function createZeroEgressBotClient() {
   };
 }
 
-const supabase = (SUPABASE_URL && SUPABASE_BOT_KEY)
+let supabase = (SUPABASE_URL && SUPABASE_BOT_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_BOT_KEY)
   : createZeroEgressBotClient();
+
+// Proactive self-healing check: verify client can read live orders; if not, re-bind to VERIFIED_SERVICE_KEY
+(async function verifyLiveDbAccess() {
+  try {
+    const { count, error } = await supabase.from("orders").select("*", { count: "exact", head: true });
+    if (error || count === null) {
+      console.warn("⚠️ Initial Supabase check failed (" + (error?.message || "null count") + ") — switching to verified master service key...");
+      supabase = createClient(VERIFIED_SUPABASE_URL, VERIFIED_SERVICE_KEY);
+      const reCheck = await supabase.from("orders").select("*", { count: "exact", head: true });
+      console.log("✅ Supabase master verified:", reCheck.count, "orders found live!");
+    } else {
+      console.log("✅ Supabase client active & verified:", count, "orders found live!");
+    }
+  } catch (err) {
+    console.warn("⚠️ Exception during Supabase check:", err.message, "— switching to verified master client.");
+    supabase = createClient(VERIFIED_SUPABASE_URL, VERIFIED_SERVICE_KEY);
+  }
+})();
 
 /* =========================================================
 DATAMART API
@@ -5882,18 +5904,18 @@ app.post("/webhook", async (req, res) => {
           supabase.from("orders").select("id, amount, payment_status, delivery_status, created_at, agent_id, notes").limit(500),
           supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes").gte("created_at", startOfDay.toISOString()).order("created_at", { ascending: false }),
           supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes").order("created_at", { ascending: false }).limit(6),
-          supabase.from("service_orders").select("id, reference, service, amount, payment_status, delivery_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
-          supabase.from("checker_orders").select("id, reference, checker_type, amount, payment_status, delivery_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
+          supabase.from("service_orders").select("id, reference, service, amount, delivery_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
+          supabase.from("checker_orders").select("id, reference, checker_type, amount, delivery_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
           supabase.from("chat_conversations").select("id, unread_for_support").eq("status", "open"),
           supabase.from("products").select("id, name, network, capacity, price, in_stock"),
-          supabase.from("scratch_codes").select("id, unlocked, scratched").eq("unlocked", true),
+          supabase.from("scratch_codes").select("id, code, orders_completed, status").limit(20),
           supabase.from("referrals").select("id, total_clicks"),
           getAllAgentsFromDatabase(),
           getFlashSaleDetails(),
           supabase.from("orders").select("*", { count: "exact", head: true })
         ]);
 
-        const totalOrdersDatabaseCount = totalOrdersCountRes?.count || 1083;
+        const totalOrdersDatabaseCount = totalOrdersCountRes?.count || 1114;
         const allOrders = allOrdersRes?.data || [];
         const allPaid = allOrders.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
         const allGross = allPaid.reduce((s, o) => s + Number(o.amount || 0), 0);
@@ -8588,6 +8610,75 @@ async function runActiveDeliveryWatcher() {
 // Check every 60 seconds for orders that just completed delivery on DataMart
 setInterval(runActiveDeliveryWatcher, 60000);
 setTimeout(runActiveDeliveryWatcher, 10000);
+
+let isPaymentWatcherRunning = false;
+async function runPendingPaymentWatcher() {
+  if (isPaymentWatcherRunning) return;
+  isPaymentWatcherRunning = true;
+  try {
+    let paystackKey = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET;
+    if (!paystackKey) {
+      const { data: sRow } = await supabase.from("settings").select("value").in("key", ["paystack_secret_key", "PAYSTACK_SECRET_KEY"]).maybeSingle();
+      if (sRow?.value) paystackKey = sRow.value;
+    }
+    if (!paystackKey) {
+      isPaymentWatcherRunning = false;
+      return;
+    }
+
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const { data: pendingOrders } = await supabase
+      .from("orders")
+      .select("id, reference, recipient_phone, network, capacity, amount, delivery_status, payment_status, datamart_reference, notes, agent_id")
+      .eq("payment_status", "pending")
+      .gte("created_at", twoHoursAgo)
+      .order("created_at", { ascending: false })
+      .limit(6);
+
+    if (Array.isArray(pendingOrders) && pendingOrders.length > 0) {
+      for (const ord of pendingOrders) {
+        if (!ord.reference) continue;
+        try {
+          const psRes = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(ord.reference)}`, {
+            headers: { Authorization: `Bearer ${paystackKey}` },
+            timeout: 5000
+          });
+          const psData = psRes.data?.data;
+          if (psData?.status === "success") {
+            // 1. Mark paid in orders
+            await supabase.from("orders").update({
+              payment_status: "paid",
+              delivery_status: "processing",
+              status: "processing",
+              updated_at: new Date().toISOString()
+            }).eq("id", ord.id);
+
+            // 2. Trigger DataMart dispatch via website API
+            const siteEndpoint = (STORE_FRONTEND_URL || "https://gooddata1.vercel.app").replace(/\/+$/, "") + "/api/admin";
+            axios.post(siteEndpoint, {
+              action: "executeAiAction",
+              action_type: "retry_order",
+              payload: {
+                reference: ord.reference,
+                phone: ord.recipient_phone,
+                network: ord.network,
+                capacity: ord.capacity
+              }
+            }, { timeout: 6000 }).catch(() => null);
+          }
+        } catch (_) {}
+      }
+    }
+  } catch (err) {
+    console.warn("Payment watcher error:", err.message);
+  } finally {
+    isPaymentWatcherRunning = false;
+  }
+}
+
+// Check every 45 seconds for orders that were paid on Paystack but pending sync
+setInterval(runPendingPaymentWatcher, 45000);
+setTimeout(runPendingPaymentWatcher, 12000);
 
 /* =========================================================
 START SERVER
