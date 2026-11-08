@@ -2046,6 +2046,28 @@ OWNER STATE PERSISTENCE (IN-MEMORY CACHE + SUPABASE UPSERT)
 Guarantees pending actions and conversation history are never
 lost across webhooks even if sessions table row didn't exist yet.
 ========================================================= */
+/* =========================================================
+SYNC ACTION TO SITE BACKEND
+========================================================= */
+async function syncActionToSite(action_type, payload, phone = "") {
+  try {
+    const siteBase = process.env.SITE_URL || STORE_FRONTEND_URL || "https://www.data1gh.com";
+    const siteAiEndpoint = `${siteBase.replace(/\/+$/, "")}/api/admin?fn=admin-ai`;
+    await axios.post(
+      siteAiEndpoint,
+      { action: "executeAiAction", action_type, payload, phone: String(phone) },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-bot": "true",
+          "x-admin-key": process.env.ADMIN_API_KEY || "data1gh-secure-admin",
+        },
+        timeout: 5000,
+      }
+    );
+  } catch (_) { }
+}
+
 const ownerPendingActions = new Map();
 const ownerHistories = new Map();
 
@@ -6265,9 +6287,10 @@ app.post("/webhook", async (req, res) => {
       }
 
       // Direct Action Command 0a_toggle: Enable / Turn on Flash Sale
-      const enableFlashMatch = cmdText.match(/(?:turn\s*on|enable|start|activate)\s+flash\s*sale(?:\s+(?:for\s+)?(\d+)\s*(?:hours?|hrs?))?/i);
+      const enableFlashMatch = cmdText.match(/(?:turn\s*on|enable|start|activate|switch\s*on|put\s*on)\s+(?:the\s+)?flash\s*sale(?:\s+(?:for\s+)?(\d+)\s*(?:hours?|hrs?))?|(?:turn|switch)\s+(?:the\s+)?flash\s*sale\s+on(?:\s+(?:for\s+)?(\d+)\s*(?:hours?|hrs?))?|\bflash\s*sale\s+(?:on|start|activate)(?:\s+(?:for\s+)?(\d+)\s*(?:hours?|hrs?))?/i);
       if (enableFlashMatch) {
-        const hours = enableFlashMatch[1] ? parseInt(enableFlashMatch[1], 10) : 2;
+        const rawHours = enableFlashMatch[1] || enableFlashMatch[2] || enableFlashMatch[3];
+        const hours = rawHours ? parseInt(rawHours, 10) : 2;
         const res = await toggleFlashSale(true, hours);
         if (res?.enabled) {
           return sendWhatsApp(from,
@@ -6276,11 +6299,13 @@ app.post("/webhook", async (req, res) => {
             `⏳ *Active Until:* *${res.endTime?.replace("T", " ")}*\n\n` +
             `💡 Customers can now purchase MTN Flash bundles directly on the site!`
           );
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not toggle flash sale. Please verify database connection.`);
         }
       }
 
       // Direct Action Command 0a_disable: Disable / Turn off Flash Sale
-      if (/(?:turn\s*off|disable|stop|end|deactivate|pause)\s+flash\s*sale/i.test(lt)) {
+      if (/(?:turn\s*off|disable|stop|end|deactivate|pause|switch\s*off|put\s*off)\s+(?:the\s+)?flash\s*sale|(?:turn|switch)\s+(?:the\s+)?flash\s*sale\s+off|\bflash\s*sale\s+(?:off|stop|deactivate|pause)\b/i.test(lt)) {
         await toggleFlashSale(false);
         return sendWhatsApp(from,
           `🔒 *FLASH SALE TURNED OFF BOSS!*\n\n` +
@@ -6290,7 +6315,7 @@ app.post("/webhook", async (req, res) => {
 
       // Direct Action Command 0a: Flash Sale Status, Prices & Orders
       if (/\b(?:flash\s*sale\s*orders?|flash\s*orders?|any\s+flash\s*sale|flash\s*sale\s*prices?|how\s+much\s+is\s+flash\s*sale|is\s+flash\s*sale\s*active|flash\s*sale)\b/i.test(lt) &&
-          !/\b(turn|set|switch|disable|enable)\b/i.test(lt)) {
+          !/\b(turn|set|switch|disable|enable|start|stop|activate|deactivate|off|on)\b/i.test(lt)) {
         const summary = await listFlashSaleOrdersSummary();
         return sendWhatsApp(from, summary);
       }
@@ -6790,7 +6815,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         // 8a. Flash Sale Orders & Campaign
-        else if (/\b(flash\s*sale|flash\s*orders?|flash\s*prices?)\b/i.test(lt)) {
+        else if (/\b(flash\s*orders?|flash\s*sale\s*orders?|flash\s*prices?|flash\s*revenue)\b/i.test(lt) || (/\bflash\s*sale\b/i.test(lt) && !/\b(turn|enable|disable|start|stop|activate|deactivate|off|on)\b/i.test(lt))) {
           aiReply = await listFlashSaleOrdersSummary();
         }
 
