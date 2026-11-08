@@ -2071,10 +2071,10 @@ async function syncActionToSite(action_type, payload, phone = "") {
 /* =========================================================
 GET LIVE DELIVERY ETA FROM DATAMART TRACKER
 ========================================================= */
-async function getLiveDeliveryEta() {
+async function getLiveDeliveryEta(customKey, customSecret) {
   try {
-    const key = activeDatamartKey || VERIFIED_DATAMART_KEY;
-    const secret = activeDatamartSecret || VERIFIED_DATAMART_SECRET;
+    const key = customKey || process.env.DATA_API_KEY || DATA_API_KEY || VERIFIED_DATAMART_KEY;
+    const secret = customSecret || process.env.DATAMART_API_SECRET || process.env.DATA_API_SECRET || VERIFIED_DATAMART_SECRET;
     const headers = {
       "x-api-key": key,
       "X-API-Key": key,
@@ -2111,9 +2111,11 @@ async function getLiveDeliveryEta() {
     if (mins != null) {
       return mins <= 1 ? "under 60 seconds (⚡ Instant FastLane)" : `~${mins} minute(s)`;
     }
-  } catch (_) { }
+  } catch (err) {
+    console.warn("getLiveDeliveryEta error:", err.message);
+  }
 
-  return "~16-20 minute(s)";
+  return "~20 minute(s)";
 }
 
 const ownerPendingActions = new Map();
@@ -5882,7 +5884,7 @@ app.post("/webhook", async (req, res) => {
           walletBalance = `GH₵ ${recorded.toFixed(2)}`;
         }
       }
-      deliveryEta = await getLiveDeliveryEta();
+      deliveryEta = await getLiveDeliveryEta(activeDatamartKey, activeDatamartSecret);
 
       if (activeDatamartKey) {
         // Fetch Live DataMart Wallet Balance
