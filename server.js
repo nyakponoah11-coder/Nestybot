@@ -21,6 +21,7 @@ const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_ID = process.env.PHONE_ID;
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET;
 const DATA_API_KEY = process.env.DATA_API_KEY;
+const DATAMART_API_SECRET = process.env.DATAMART_API_SECRET || process.env.DATA_API_SECRET || "";
 const AFA_API_KEY = process.env.AFA_API_KEY;
 const ARKESEL_API_KEY = process.env.ARKESEL_API_KEY;
 const STORE_FRONTEND_URL = process.env.SITE_URL || "https://www.data1gh.com";
