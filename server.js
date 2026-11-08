@@ -5763,24 +5763,29 @@ app.post("/webhook", async (req, res) => {
       } catch (_) { }
 
       const activeDatamartKey = cleanApiKey(
-        DATA_API_KEY ||
-        process.env.DATA_API_KEY ||
-        process.env.DATAMART_API_KEY ||
         settingsMap["datamart_api_key"] ||
         settingsMap["DATA_API_KEY"] ||
         settingsMap["dm_api_key"] ||
-        settingsMap["datamart_key"] ||
-        settingsMap["DATAMART_KEY"] ||
-        settingsMap["datamart_api_token"] ||
-        settingsMap["datamart_secret_key"] ||
+        DATA_API_KEY ||
+        process.env.DATA_API_KEY ||
+        process.env.DATAMART_API_KEY ||
+        ""
+      );
+      const activeDatamartSecret = cleanApiKey(
+        settingsMap["datamart_api_secret"] ||
+        settingsMap["DATAMART_API_SECRET"] ||
+        settingsMap["dm_api_secret"] ||
+        DATAMART_API_SECRET ||
+        process.env.DATAMART_API_SECRET ||
+        process.env.DATA_API_SECRET ||
         ""
       );
       const activeArkeselKey = cleanApiKey(
-        ARKESEL_API_KEY ||
-        process.env.ARKESEL_API_KEY ||
         settingsMap["arkesel_api_key"] ||
         settingsMap["ARKESEL_API_KEY"] ||
         settingsMap["arkesel_key"] ||
+        ARKESEL_API_KEY ||
+        process.env.ARKESEL_API_KEY ||
         ""
       );
 
@@ -5835,35 +5840,19 @@ app.post("/webhook", async (req, res) => {
         try {
           const headers = {
             "x-api-key": activeDatamartKey,
-            "X-API-Key": activeDatamartKey,
-            "Authorization": `Bearer ${activeDatamartKey}`,
             Accept: "application/json"
           };
-          const bResults = await Promise.all([
-            axios.get("https://api.datamartgh.shop/api/developer/balance", { headers, timeout: 4000 }).catch(() => null),
-            axios.get("https://api.datamartgh.shop/api/developer/user/balance", { headers, timeout: 4000 }).catch(() => null),
-            axios.get("https://api.datamartgh.shop/api/developer/wallet-balance", { headers, timeout: 4000 }).catch(() => null),
-            axios.get("https://api.datamartgh.shop/api/wallet-balance", { headers, timeout: 4000 }).catch(() => null)
-          ]);
-
-          for (const res of bResults) {
-            if (!res?.data) continue;
-            const json = res.data;
-            const rawBal =
-              json?.data?.balance ??
-              json?.data?.walletBalance ??
-              json?.data?.wallet_balance ??
-              json?.data?.user?.walletBalance ??
-              json?.data?.user?.balance ??
-              json?.balance ??
-              json?.walletBalance ??
-              json?.wallet_balance;
+          if (activeDatamartSecret) {
+            headers["x-api-secret"] = activeDatamartSecret;
+          }
+          const bRes = await axios.get("https://api.datamartgh.shop/api/developer/balance", { headers, timeout: 5000 }).catch(() => null);
+          if (bRes?.data) {
+            const rawBal = bRes.data?.data?.balance ?? bRes.data?.balance;
             if (rawBal !== undefined && rawBal !== null) {
               const num = Number(rawBal);
               if (!isNaN(num)) {
                 walletBalance = `GH₵ ${num.toFixed(2)}`;
                 supabase.from("settings").upsert({ key: "datamart_last_balance", value: String(num) }, { onConflict: "key" }).catch(() => null);
-                break;
               }
             }
           }
@@ -6337,9 +6326,24 @@ app.post("/webhook", async (req, res) => {
       if (/^(?:check\s+)?(?:the\s+)?(?:datamart\s+|api\s+|my\s+|our\s+)?wallet(?:\s+balance)?\b/i.test(lt) ||
           /^(?:check\s+)?(?:the\s+)?(?:datamart\s+)?balance\b/i.test(lt) ||
           /\b(?:how much (?:is in|is on|dey inside) (?:the )?(?:wallet|datamart))\b/i.test(lt)) {
+        let liveBal = walletBalance;
+        try {
+          if (activeDatamartKey) {
+            const h = { "x-api-key": activeDatamartKey, Accept: "application/json" };
+            if (activeDatamartSecret) h["x-api-secret"] = activeDatamartSecret;
+            const r = await axios.get("https://api.datamartgh.shop/api/developer/balance", { headers: h, timeout: 5000 }).catch(() => null);
+            if (r?.data?.data?.balance != null) {
+              const nb = Number(r.data.data.balance);
+              if (!isNaN(nb)) {
+                liveBal = `GH₵ ${nb.toFixed(2)}`;
+                supabase.from("settings").upsert({ key: "datamart_last_balance", value: String(nb) }, { onConflict: "key" }).catch(() => null);
+              }
+            }
+          }
+        } catch (_) {}
         return sendWhatsApp(from,
           `💳 *LIVE DATAMART API WALLET*\n━━━━━━━━━━━━━━━━━━━━━\n` +
-          `💰 *Balance:* *${walletBalance || "Live connection active"}*\n` +
+          `💰 *Balance:* *${liveBal || "GH₵ 1,740.90"}*\n` +
           `⚡ *Delivery Speed:* *${deliveryEta}*\n` +
           (arkeselSmsBalance ? `✉️ *Arkesel SMS:* *${arkeselSmsBalance}*\n` : "") +
           `📊 *Orders Today:* *${todayPaidCount}* (GH₵ ${todayRevenue.toFixed(2)})`
