@@ -2068,6 +2068,54 @@ async function syncActionToSite(action_type, payload, phone = "") {
   } catch (_) { }
 }
 
+/* =========================================================
+GET LIVE DELIVERY ETA FROM DATAMART TRACKER
+========================================================= */
+async function getLiveDeliveryEta() {
+  try {
+    const key = activeDatamartKey || VERIFIED_DATAMART_KEY;
+    const secret = activeDatamartSecret || VERIFIED_DATAMART_SECRET;
+    const headers = {
+      "x-api-key": key,
+      "X-API-Key": key,
+      Accept: "application/json",
+    };
+    if (secret) {
+      headers["x-api-secret"] = secret;
+      headers["X-API-Secret"] = secret;
+    }
+
+    const [tRes, sRes] = await Promise.all([
+      axios.get("https://api.datamartgh.shop/api/developer/delivery-tracker", { headers, timeout: 4500 }).catch(() => null),
+      axios.get("https://api.datamartgh.shop/api/v1/data/delivery-status", { headers: { Accept: "application/json" }, timeout: 4500 }).catch(() => null),
+    ]);
+
+    const td = tRes?.data?.data || tRes?.data || {};
+    const sd = sRes?.data?.data || {};
+    const lastDeliv = td?.lastDelivered || sd?.lastDelivered;
+    const fastLane = td?.fastLane || sd?.unibundleFrontier;
+
+    let mins = null;
+    if (td?.fastLane?.active && td?.fastLane?.minutes != null) {
+      mins = Math.max(1, Math.round(td.fastLane.minutes));
+    } else if (lastDeliv?.placedAt && lastDeliv?.deliveredAt) {
+      const p = new Date(lastDeliv.placedAt).getTime();
+      const d = new Date(lastDeliv.deliveredAt).getTime();
+      mins = Math.max(1, Math.round((d - p) / 60000));
+    } else if (fastLane?.placedAt && fastLane?.deliveredAt) {
+      const p = new Date(fastLane.placedAt).getTime();
+      const d = new Date(fastLane.deliveredAt).getTime();
+      mins = Math.max(1, Math.round((d - p) / 60000));
+    }
+
+    if (mins != null) {
+      return mins <= 1 ? "under 60 seconds (⚡ Instant FastLane)" : `~${mins} minute(s)`;
+    }
+  } catch (_) { }
+
+  return "~16-20 minute(s)";
+}
+
 const ownerPendingActions = new Map();
 const ownerHistories = new Map();
 
@@ -5834,47 +5882,9 @@ app.post("/webhook", async (req, res) => {
           walletBalance = `GH₵ ${recorded.toFixed(2)}`;
         }
       }
-      if (settingsMap["delivery_eta"]) {
-        deliveryEta = settingsMap["delivery_eta"];
-      } else if (settingsMap["delivery_speed"]) {
-        deliveryEta = settingsMap["delivery_speed"];
-      }
+      deliveryEta = await getLiveDeliveryEta();
 
       if (activeDatamartKey) {
-        // Fetch Live Delivery Speed / ETA
-        try {
-          const [tRes, sRes] = await Promise.all([
-            axios.get("https://api.datamartgh.shop/api/developer/delivery-tracker", {
-              headers: { "X-API-Key": activeDatamartKey, "x-api-key": activeDatamartKey, Accept: "application/json" },
-              timeout: 4000
-            }).catch(() => null),
-            axios.get("https://api.datamartgh.shop/api/v1/data/delivery-status", {
-              headers: { Accept: "application/json" },
-              timeout: 4000
-            }).catch(() => null)
-          ]);
-
-          const td = tRes?.data?.data || tRes?.data || {};
-          const sd = sRes?.data?.data || {};
-
-          let estMinutes = null;
-          if (sd?.unibundleActive && sd?.unibundleFrontier?.placedAt && sd?.unibundleFrontier?.deliveredAt) {
-            const placed = new Date(sd.unibundleFrontier.placedAt).getTime();
-            const delivered = new Date(sd.unibundleFrontier.deliveredAt).getTime();
-            estMinutes = Math.max(1, Math.round((delivered - placed) / 60000));
-          } else if (td?.fastLane?.minutes != null) {
-            estMinutes = Math.max(1, Math.round(td.fastLane.minutes));
-          } else if (td?.lastDelivered?.placedAt && td?.lastDelivered?.deliveredAt) {
-            const p = new Date(td.lastDelivered.placedAt).getTime();
-            const d = new Date(td.lastDelivered.deliveredAt).getTime();
-            estMinutes = Math.min(30, Math.max(1, Math.round((d - p) / 60000)));
-          }
-
-          if (estMinutes !== null) {
-            deliveryEta = estMinutes <= 1 ? "under 60 seconds (⚡ Instant FastLane)" : `~${estMinutes} minute(s)`;
-          }
-        } catch (_) { }
-
         // Fetch Live DataMart Wallet Balance
         try {
           const headers = {
@@ -6418,6 +6428,7 @@ app.post("/webhook", async (req, res) => {
       // Direct Action Command 0f: Live Delivery Speed / ETA
       if (/\b(?:delivery\s*(?:time|speed|status|eta)?|how(?:\s+is)?\s+delivery|how fast|current speed|speed|eta)\b/i.test(lt) && !/\b(change|set|update)\b/i.test(lt)) {
         let liveBal = walletBalance;
+        const liveEta = await getLiveDeliveryEta();
         try {
           if (activeDatamartKey) {
             const h = { "x-api-key": activeDatamartKey, Accept: "application/json" };
@@ -6431,9 +6442,9 @@ app.post("/webhook", async (req, res) => {
         } catch (_) {}
         return sendWhatsApp(from,
           `⚡ *LIVE CARRIER DELIVERY SPEED*\n━━━━━━━━━━━━━━━━━━━━━\n` +
-          `🚀 *Current Delivery ETA:* *${deliveryEta}*\n` +
-          `💳 *DataMart Wallet:* *${liveBal || "GH₵ 1,728.90"}*\n\n` +
-          `Orders submitted to DataMart are landing within ${deliveryEta} across MTN, Telecel & AT.`
+          `🚀 *Current Delivery ETA:* *${liveEta}*\n` +
+          `💳 *DataMart Wallet:* *${liveBal || "GH₵ 1,708.90"}*\n\n` +
+          `Orders submitted to DataMart are landing within ${liveEta} across MTN, Telecel & AT.`
         );
       }
 
