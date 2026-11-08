@@ -2834,12 +2834,21 @@ async function executeOwnerDirectAction(type, payload = {}) {
       }
     }
 
+    // 3b. Pause / Resume Store Orders
+    if (cleanType === "pause_orders" || cleanType === "toggle_store_orders") {
+      const paused = payload.paused !== undefined ? Boolean(payload.paused) : true;
+      await supabase.from("settings").upsert({ key: "orders_paused", value: paused ? "true" : "false" }, { onConflict: "key" });
+      await syncActionToSite("update_setting", { key: "orders_paused", value: paused ? "true" : "false" }).catch(() => null);
+      return paused ? "Store orders are now PAUSED on the website!" : "Store orders are now RESUMED on the website!";
+    }
+
     // 4. Toggle Product Stock
     if (cleanType === "toggle_product_stock" || cleanType === "toggle_stock") {
       const inStock = Boolean(payload.in_stock);
       let q = supabase.from("products").update({ in_stock: inStock, updated_at: new Date().toISOString() });
       if (payload.product_id) q = q.eq("id", payload.product_id);
       else if (payload.name) q = q.ilike("name", `%${payload.name}%`);
+      else q = q.neq("id", "00000000-0000-0000-0000-000000000000");
       await q;
       return `Product stock toggled to ${inStock ? "IN STOCK" : "OUT OF STOCK"} on the site!`;
     }
@@ -6310,6 +6319,29 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from,
           `🔒 *FLASH SALE TURNED OFF BOSS!*\n\n` +
           `The Flash Sale has been disabled on the storefront. Products will now sell at their regular prices.`
+        );
+      }
+
+      // Direct Action Command 0a_pause_orders: Pause Store Orders
+      if (/\b(?:pause\s*orders?|stop\s*orders?|disable\s*orders?|close\s*shop|turn\s*off\s*orders?|stop\s*taking\s*orders?|hold\s*orders?|freeze\s*orders?)\b/i.test(lt)) {
+        await supabase.from("settings").upsert({ key: "orders_paused", value: "true" }, { onConflict: "key" });
+        await syncActionToSite("update_setting", { key: "orders_paused", value: "true" }).catch(() => null);
+        return sendWhatsApp(from,
+          `⏸️ *STORE ORDERS PAUSED BOSS!*\n\n` +
+          `The store checkout & order buttons are now *PAUSED* on the website.\n\n` +
+          `📢 Customers will see an alert notifying them that ordering is temporarily on hold.\n\n` +
+          `💡 When ready, simply say *"Resume orders"* or *"Turn on orders"* to open the store again!`
+        );
+      }
+
+      // Direct Action Command 0a_resume_orders: Resume Store Orders
+      if (/\b(?:resume\s*orders?|open\s*shop|enable\s*orders?|turn\s*on\s*orders?|start\s*taking\s*orders?|unpause\s*orders?|unfreeze\s*orders?)\b/i.test(lt)) {
+        await supabase.from("settings").upsert({ key: "orders_paused", value: "false" }, { onConflict: "key" });
+        await syncActionToSite("update_setting", { key: "orders_paused", value: "false" }).catch(() => null);
+        return sendWhatsApp(from,
+          `▶️ *STORE ORDERS RESUMED BOSS!*\n\n` +
+          `🔥 Checkout and order buttons are now *ACTIVE & OPEN* on the storefront!\n\n` +
+          `Customers can now purchase data packages normally.`
         );
       }
 
