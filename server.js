@@ -4110,6 +4110,7 @@ async function generateFullAdminReport() {
 
     // Resolve API keys from env and settingsMap
     const activeDatamartKey = cleanApiKey(DATA_API_KEY || process.env.DATA_API_KEY || settingsMap["datamart_api_key"] || settingsMap["DATA_API_KEY"] || settingsMap["dm_api_key"]);
+    const activeDatamartSecret = cleanApiKey(process.env.DATAMART_API_SECRET || settingsMap["datamart_api_secret"] || settingsMap["DATAMART_API_SECRET"] || settingsMap["dm_api_secret"] || "");
     const activeArkeselKey = cleanApiKey(ARKESEL_API_KEY || process.env.ARKESEL_API_KEY || settingsMap["arkesel_api_key"] || settingsMap["ARKESEL_API_KEY"]);
 
     // Check DataMart developer API for bot purchases
@@ -4180,13 +4181,19 @@ async function generateFullAdminReport() {
     let walletBalance = "Connected";
     if (activeDatamartKey) {
       try {
-        const bRes = await axios.get(`${DATAMART_BASE}/user/balance`, {
-          headers: { "x-api-key": activeDatamartKey },
-          timeout: 4000
+        const headers = { "x-api-key": activeDatamartKey, Accept: "application/json" };
+        if (activeDatamartSecret) headers["x-api-secret"] = activeDatamartSecret;
+        const bRes = await axios.get("https://api.datamartgh.shop/api/developer/balance", {
+          headers,
+          timeout: 5000
         });
-        const bal = bRes?.data?.data?.walletBalance ?? bRes?.data?.walletBalance ?? bRes?.data?.data?.balance;
+        const bal = bRes?.data?.data?.balance ?? bRes?.data?.balance ?? bRes?.data?.data?.walletBalance;
         if (bal !== undefined && bal !== null) {
-          walletBalance = `GH₵ ${Number(bal).toFixed(2)}`;
+          const num = Number(bal);
+          if (!isNaN(num)) {
+            walletBalance = `GH₵ ${num.toFixed(2)}`;
+            supabase.from("settings").upsert({ key: "datamart_last_balance", value: String(num) }, { onConflict: "key" }).catch(() => null);
+          }
         }
       } catch { }
     }
