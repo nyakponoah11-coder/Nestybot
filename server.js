@@ -127,17 +127,17 @@ DATA 1 GH — COMPLETE SITE KNOWLEDGE BASE (FROM HTTPS://WWW.DATA1GH.COM):
 // "UNKNOWN SESSION" in the Paystack webhook.
 const VERIFIED_SUPABASE_URL = "https://gomijazuakrbkkcqusdp.supabase.co";
 const VERIFIED_SERVICE_KEY = Buffer.from("c2Jfc2VjcmV0X1ZubkFOSDRHNkE4U3gxN2lwUTRIU3dfM3JXWUhFcmI=", "base64").toString("utf8");
+const VERIFIED_DATAMART_KEY = "836d191d47c4c1a6ac0fa47eaab4d5da550034056732db23e80f38632a889ee8";
+const VERIFIED_DATAMART_SECRET = "5CNIgdcHstmB2vAvePCTm5RpCg3sodoK";
 
 function sanitizeEnvVal(v) {
   if (!v || typeof v !== "string") return "";
   return v.trim().replace(/^['"]|['"]$/g, "");
 }
 
-const SUPABASE_URL = sanitizeEnvVal(process.env.SUPABASE_URL) || sanitizeEnvVal(process.env.VITE_SUPABASE_URL) || VERIFIED_SUPABASE_URL;
-const SUPABASE_BOT_KEY =
-  sanitizeEnvVal(process.env.SUPABASE_SERVICE_ROLE_KEY) ||
-  sanitizeEnvVal(process.env.SUPABASE_SERVICE_KEY) ||
-  VERIFIED_SERVICE_KEY;
+// Ensure WhatsApp bot ALWAYS binds to master live production Supabase instance
+const SUPABASE_URL = VERIFIED_SUPABASE_URL;
+const SUPABASE_BOT_KEY = VERIFIED_SERVICE_KEY;
 
 /* =========================================================
 ZERO-EGRESS IN-MEMORY DATABASE ENGINE (Data1DB for Bot)
@@ -4110,8 +4110,8 @@ async function generateFullAdminReport() {
     });
 
     // Resolve API keys from env and settingsMap
-    const activeDatamartKey = cleanApiKey(DATA_API_KEY || process.env.DATA_API_KEY || settingsMap["datamart_api_key"] || settingsMap["DATA_API_KEY"] || settingsMap["dm_api_key"]);
-    const activeDatamartSecret = cleanApiKey(process.env.DATAMART_API_SECRET || settingsMap["datamart_api_secret"] || settingsMap["DATAMART_API_SECRET"] || settingsMap["dm_api_secret"] || "");
+    const activeDatamartKey = cleanApiKey(settingsMap["datamart_api_key"] || settingsMap["DATA_API_KEY"] || settingsMap["dm_api_key"] || process.env.DATA_API_KEY || DATA_API_KEY || VERIFIED_DATAMART_KEY);
+    const activeDatamartSecret = cleanApiKey(settingsMap["datamart_api_secret"] || settingsMap["DATAMART_API_SECRET"] || settingsMap["dm_api_secret"] || process.env.DATAMART_API_SECRET || DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET);
     const activeArkeselKey = cleanApiKey(ARKESEL_API_KEY || process.env.ARKESEL_API_KEY || settingsMap["arkesel_api_key"] || settingsMap["ARKESEL_API_KEY"]);
 
     // Check DataMart developer API for bot purchases
@@ -5774,19 +5774,19 @@ app.post("/webhook", async (req, res) => {
         settingsMap["datamart_api_key"] ||
         settingsMap["DATA_API_KEY"] ||
         settingsMap["dm_api_key"] ||
-        DATA_API_KEY ||
         process.env.DATA_API_KEY ||
         process.env.DATAMART_API_KEY ||
-        ""
+        DATA_API_KEY ||
+        VERIFIED_DATAMART_KEY
       );
       const activeDatamartSecret = cleanApiKey(
         settingsMap["datamart_api_secret"] ||
         settingsMap["DATAMART_API_SECRET"] ||
         settingsMap["dm_api_secret"] ||
-        DATAMART_API_SECRET ||
         process.env.DATAMART_API_SECRET ||
         process.env.DATA_API_SECRET ||
-        ""
+        DATAMART_API_SECRET ||
+        VERIFIED_DATAMART_SECRET
       );
       const activeArkeselKey = cleanApiKey(
         settingsMap["arkesel_api_key"] ||
@@ -8718,8 +8718,8 @@ app.get("/status", async (req, res) => {
     const { data: setRows } = await supabase.from("settings").select("key, value");
     const setMap = Object.fromEntries((setRows || []).map(r => [r.key, r.value]));
 
-    const dmKey = cleanApiKey(DATA_API_KEY || process.env.DATA_API_KEY || setMap["datamart_api_key"]);
-    const dmSecret = cleanApiKey(DATAMART_API_SECRET || process.env.DATAMART_API_SECRET || setMap["datamart_api_secret"]);
+    const dmKey = cleanApiKey(setMap["datamart_api_key"] || DATA_API_KEY || process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY);
+    const dmSecret = cleanApiKey(setMap["datamart_api_secret"] || DATAMART_API_SECRET || process.env.DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET);
     let liveBal = "N/A";
     let dmHttp = null;
     let dmErr = null;
