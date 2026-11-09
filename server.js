@@ -54,43 +54,33 @@ DATA 1 GH — COMPLETE SITE KNOWLEDGE BASE (FROM HTTPS://WWW.DATA1GH.COM):
 
 2. DATA BUNDLES CATALOG & PRICING (NON-EXPIRY, FAST DELIVERY 5-30 MINS):
 • MTN Non-Expiry Data Bundles:
-  - 1GB: GH₵ 4.50
-  - 2GB: GH₵ 9.50
+  - 1GB: GH₵ 4.20
+  - 2GB: GH₵ 8.90
   - 3GB: GH₵ 13.50
-  - 4GB: GH₵ 18.50
+  - 4GB: GH₵ 18.00
   - 5GB: GH₵ 23.50
-  - 6GB: GH₵ 27.00
+  - 6GB: GH₵ 26.80
   - 8GB: GH₵ 35.50
-  - 10GB: GH₵ 44.00
-  - 15GB: GH₵ 63.50
-  - 20GB: GH₵ 83.50
-  - 25GB: GH₵ 103.50
-  - 40GB: GH₵ 160.50
-  - 50GB: GH₵ 206.50
+  - 10GB: GH₵ 44.50
+  - 15GB: GH₵ 67.50
+  - 20GB: GH₵ 85.80
+  - 25GB: GH₵ 102.50
+  - 30GB: GH₵ 122.50
+  - 40GB: GH₵ 165.00
+  - 50GB: GH₵ 212.00
   - Delivery: Drops automatically within 5-30 mins after MoMo payment confirmation.
 • AirtelTigo (AT) Big Time Data:
   - 1GB: GH₵ 4.50
-  - 2GB: GH₵ 11.00
-  - 3GB: GH₵ 15.00
-  - 4GB: GH₵ 18.00
-  - 5GB: GH₵ 23.00
-  - 6GB: GH₵ 27.00
-  - 8GB: GH₵ 35.00
-  - 10GB: GH₵ 44.00
-  - 15GB: GH₵ 62.00
-  - 25GB: GH₵ 106.00
-  - 30GB: GH₵ 121.00
+  - 2GB: GH₵ 8.50
+  - 3GB: GH₵ 13.00
+  - 5GB: GH₵ 21.00
+  - 10GB: GH₵ 42.00
 • Telecel Special Bundles:
-  - 10GB: GH₵ 38.50
-  - 12GB: GH₵ 45.50
-  - 15GB: GH₵ 56.40
-  - 20GB: GH₵ 27.90
-  - 25GB: GH₵ 100.50
-  - 30GB: GH₵ 110.00
-  - 35GB: GH₵ 133.40
-  - 40GB: GH₵ 145.00
-  - 45GB: GH₵ 160.80
-  - 50GB: GH₵ 180.00
+  - 1GB: GH₵ 4.50
+  - 2GB: GH₵ 9.00
+  - 3GB: GH₵ 13.50
+  - 5GB: GH₵ 22.00
+  - 10GB: GH₵ 43.00
 
 3. DIGITAL SERVICES & VOUCHERS:
 • Netflix 30-Day Subscriptions (GH₵ 30):
@@ -472,47 +462,36 @@ PACKAGES
 
 const PACKAGES = {
   MTN: {
-    "1": { price: 4.50, capacity: "1", apiNetwork: "YELLO" },
-    "2": { price: 9.50, capacity: "2", apiNetwork: "YELLO" },
+    "1": { price: 4.20, capacity: "1", apiNetwork: "YELLO" },
+    "2": { price: 8.90, capacity: "2", apiNetwork: "YELLO" },
     "3": { price: 13.50, capacity: "3", apiNetwork: "YELLO" },
-    "4": { price: 18.50, capacity: "4", apiNetwork: "YELLO" },
+    "4": { price: 18.00, capacity: "4", apiNetwork: "YELLO" },
     "5": { price: 23.50, capacity: "5", apiNetwork: "YELLO" },
-    "6": { price: 27.50, capacity: "6", apiNetwork: "YELLO" },
+    "6": { price: 26.80, capacity: "6", apiNetwork: "YELLO" },
     "7": { price: 35.50, capacity: "8", apiNetwork: "YELLO" },
-    "8": { price: 44.00, capacity: "10", apiNetwork: "YELLO" },
-    "9": { price: 63.50, capacity: "15", apiNetwork: "YELLO" },
-    "10": { price: 83.50, capacity: "20", apiNetwork: "YELLO" },
-    "11": { price: 103.50, capacity: "25", apiNetwork: "YELLO" },
-    "12": { price: 160.50, capacity: "40", apiNetwork: "YELLO" },
-    "13": { price: 206.50, capacity: "50", apiNetwork: "YELLO" }
+    "8": { price: 44.50, capacity: "10", apiNetwork: "YELLO" },
+    "9": { price: 67.50, capacity: "15", apiNetwork: "YELLO" },
+    "10": { price: 85.80, capacity: "20", apiNetwork: "YELLO" },
+    "11": { price: 102.50, capacity: "25", apiNetwork: "YELLO" },
+    "12": { price: 122.50, capacity: "30", apiNetwork: "YELLO" },
+    "13": { price: 165.00, capacity: "40", apiNetwork: "YELLO" },
+    "14": { price: 212.00, capacity: "50", apiNetwork: "YELLO" }
   },
 
   AIRTELTIGO: {
-    "1": { price: 4.50, capacity: "1", apiNetwork: "YELLO" },
-    "2": { price: 11.00, capacity: "2", apiNetwork: "YELLO" },
-    "3": { price: 15.00, capacity: "3", apiNetwork: "YELLO" },
-    "4": { price: 18.00, capacity: "4", apiNetwork: "YELLO" },
-    "5": { price: 23.00, capacity: "5", apiNetwork: "YELLO" },
-    "6": { price: 27.00, capacity: "6", apiNetwork: "YELLO" },
-    "7": { price: 35.00, capacity: "8", apiNetwork: "YELLO" },
-    "8": { price: 44.00, capacity: "10", apiNetwork: "YELLO" },
-    "9": { price: 62.00, capacity: "15", apiNetwork: "YELLO" },
-    "10": { price: 106.00, capacity: "25", apiNetwork: "YELLO" },
-    "11": { price: 121.00, capacity: "30", apiNetwork: "YELLO" }
+    "1": { price: 4.50, capacity: "1", apiNetwork: "AT_PREMIUM" },
+    "2": { price: 8.50, capacity: "2", apiNetwork: "AT_PREMIUM" },
+    "3": { price: 13.00, capacity: "3", apiNetwork: "AT_PREMIUM" },
+    "4": { price: 21.00, capacity: "5", apiNetwork: "AT_PREMIUM" },
+    "5": { price: 42.00, capacity: "10", apiNetwork: "AT_PREMIUM" }
   },
 
   TELECEL: {
-    "1": { price: 38.50, capacity: "10", apiNetwork: "YELLO" },
-    "2": { price: 45.50, capacity: "12", apiNetwork: "YELLO" },
-    "3": { price: 56.40, capacity: "15", apiNetwork: "YELLO" },
-    "4": { price: 27.90, capacity: "20", apiNetwork: "YELLO" },
-    "5": { price: 100.50, capacity: "25", apiNetwork: "YELLO" },
-    "6": { price: 110.00, capacity: "30", apiNetwork: "YELLO" },
-    "7": { price: 133.40, capacity: "35", apiNetwork: "YELLO" },
-    "8": { price: 145.00, capacity: "40", apiNetwork: "YELLO" },
-    "9": { price: 160.80, capacity: "45", apiNetwork: "YELLO" },
-    "10": { price: 180.00, capacity: "50", apiNetwork: "YELLO" },
-    "11": { price: 400.75, capacity: "100", apiNetwork: "YELLO" }
+    "1": { price: 4.50, capacity: "1", apiNetwork: "TELECEL" },
+    "2": { price: 9.00, capacity: "2", apiNetwork: "TELECEL" },
+    "3": { price: 13.50, capacity: "3", apiNetwork: "TELECEL" },
+    "4": { price: 22.00, capacity: "5", apiNetwork: "TELECEL" },
+    "5": { price: 43.00, capacity: "10", apiNetwork: "TELECEL" }
   }
 };
 
@@ -906,53 +885,121 @@ BUNDLE MENUS
 ========================================================= */
 
 const MENUS = {
-  MTN: `MTN Bundles:
-1 - 1GB ₵4.50
-2 - 2GB ₵9.50
+  MTN: `MTN Bundles (Non-Expiry):
+1 - 1GB ₵4.20
+2 - 2GB ₵8.90
 3 - 3GB ₵13.50
-4 - 4GB ₵18.50
+4 - 4GB ₵18.00
 5 - 5GB ₵23.50
-6 - 6GB ₵27.00
+6 - 6GB ₵26.80
 7 - 8GB ₵35.50
-8 - 10GB ₵44.00
-9 - 15GB ₵63.50
-10 - 20GB ₵83.50
-11 - 25GB ₵103.50
-12 - 40GB ₵160.50
-13 - 50GB ₵206.50
+8 - 10GB ₵44.50
+9 - 15GB ₵67.50
+10 - 20GB ₵85.80
+11 - 25GB ₵102.50
+12 - 30GB ₵122.50
+13 - 40GB ₵165.00
+14 - 50GB ₵212.00
 
 Choose an option to continue`,
 
-  AIRTELTIGO: `AirtelTigo Bundles:
+  AIRTELTIGO: `AirtelTigo / AT Bundles:
 1 - 1GB ₵4.50
-2 - 2GB ₵11.00
-3 - 3GB ₵15.00
-4 - 4GB ₵18.00
-5 - 5GB ₵23.00
-6 - 6GB ₵27.00
-7 - 8GB ₵35.00
-8 - 10GB ₵44.00
-9 - 15GB ₵62.00
-10 - 25GB ₵106.00
-11 - 30GB ₵121.00
+2 - 2GB ₵8.50
+3 - 3GB ₵13.00
+4 - 5GB ₵21.00
+5 - 10GB ₵42.00
 
 Choose an option to continue`,
 
   TELECEL: `Telecel Bundles:
-1 - 10GB ₵38.50
-2 - 12GB ₵45.50
-3 - 15GB ₵56.40
-4 - 20GB ₵27.90
-5 - 25GB ₵100.50
-6 - 30GB ₵110.00
-7 - 35GB ₵133.40
-8 - 40GB ₵145.00
-9 - 45GB ₵160.80
-10 - 50GB ₵180.00
-11 - 100GB ₵400.75
+1 - 1GB ₵4.50
+2 - 2GB ₵9.00
+3 - 3GB ₵13.50
+4 - 5GB ₵22.00
+5 - 10GB ₵43.00
 
 Choose an option to continue`
 };
+
+/* =========================================================
+DYNAMIC PRODUCT & PRICING SYNC FROM DATABASE
+Ensures bot bundle prices are ALWAYS identical to the main site!
+========================================================= */
+
+async function syncPackagesFromDatabase() {
+  try {
+    if (!supabase) return;
+    const { data: prods, error } = await supabase
+      .from("products")
+      .select("id, network, capacity, price, in_stock, sort_order")
+      .eq("in_stock", true)
+      .order("network", { ascending: true })
+      .order("sort_order", { ascending: true });
+
+    if (error || !prods || prods.length === 0) return;
+
+    const newPackages = { MTN: {}, AIRTELTIGO: {}, TELECEL: {} };
+    const menuLines = { MTN: [], AIRTELTIGO: [], TELECEL: [] };
+
+    const mtnProds = prods.filter(p => p.network === "MTN").sort((a,b) => (Number(a.capacity) || 0) - (Number(b.capacity) || 0));
+    const atProds = prods.filter(p => p.network === "AT" || p.network === "AIRTELTIGO").sort((a,b) => (Number(a.capacity) || 0) - (Number(b.capacity) || 0));
+    const telecelProds = prods.filter(p => p.network === "TELECEL").sort((a,b) => (Number(a.capacity) || 0) - (Number(b.capacity) || 0));
+
+    mtnProds.forEach((p, idx) => {
+      const opt = String(idx + 1);
+      newPackages.MTN[opt] = {
+        price: Number(p.price),
+        capacity: String(p.capacity),
+        apiNetwork: "YELLO",
+        productId: p.id
+      };
+      menuLines.MTN.push(`${opt} - ${p.capacity}GB ₵${Number(p.price).toFixed(2)}`);
+    });
+
+    atProds.forEach((p, idx) => {
+      const opt = String(idx + 1);
+      newPackages.AIRTELTIGO[opt] = {
+        price: Number(p.price),
+        capacity: String(p.capacity),
+        apiNetwork: "AT_PREMIUM",
+        productId: p.id
+      };
+      menuLines.AIRTELTIGO.push(`${opt} - ${p.capacity}GB ₵${Number(p.price).toFixed(2)}`);
+    });
+
+    telecelProds.forEach((p, idx) => {
+      const opt = String(idx + 1);
+      newPackages.TELECEL[opt] = {
+        price: Number(p.price),
+        capacity: String(p.capacity),
+        apiNetwork: "TELECEL",
+        productId: p.id
+      };
+      menuLines.TELECEL.push(`${opt} - ${p.capacity}GB ₵${Number(p.price).toFixed(2)}`);
+    });
+
+    if (Object.keys(newPackages.MTN).length > 0) {
+      Object.assign(PACKAGES.MTN, newPackages.MTN);
+      MENUS.MTN = `MTN Bundles (Non-Expiry):\n` + menuLines.MTN.join("\n") + `\n\nChoose an option to continue`;
+    }
+    if (Object.keys(newPackages.AIRTELTIGO).length > 0) {
+      Object.assign(PACKAGES.AIRTELTIGO, newPackages.AIRTELTIGO);
+      MENUS.AIRTELTIGO = `AirtelTigo / AT Bundles:\n` + menuLines.AIRTELTIGO.join("\n") + `\n\nChoose an option to continue`;
+    }
+    if (Object.keys(newPackages.TELECEL).length > 0) {
+      Object.assign(PACKAGES.TELECEL, newPackages.TELECEL);
+      MENUS.TELECEL = `Telecel Bundles:\n` + menuLines.TELECEL.join("\n") + `\n\nChoose an option to continue`;
+    }
+    console.log("✅ Synced bot packages & menus directly from database products!");
+  } catch (err) {
+    console.warn("syncPackagesFromDatabase note:", err.message);
+  }
+}
+
+// Initial sync and recurring sync every 5 minutes
+setTimeout(syncPackagesFromDatabase, 3000);
+setInterval(syncPackagesFromDatabase, 5 * 60 * 1000);
 
 /* =========================================================
 SEND WHATSAPP
@@ -1831,9 +1878,9 @@ function generateCustomerNaturalFallback(lowerText) {
 
   if (/\b(price|cost|how much|rate|charge|packages?|bundle)\b/i.test(lowerText)) {
     return `Our bundles dey very affordable bossu! 💰\n` +
-      `• *MTN (Non-Expiry):* 1GB ₵4.50 | 2GB ₵9.50 | 5GB ₵23.50 | 10GB ₵44.00 | 15GB ₵63.50 | 20GB ₵83.50\n` +
-      `• *Telecel:* 10GB ₵38.50 | 15GB ₵56.40 | 20GB ₵27.90 | 25GB ₵100.50\n` +
-      `• *AirtelTigo:* 1GB ₵4.50 | 2GB ₵11.00 | 5GB ₵23.00 | 10GB ₵44.00\n\n` +
+      `• *MTN (Non-Expiry):* 1GB ₵4.20 | 2GB ₵8.90 | 5GB ₵23.50 | 10GB ₵44.50 | 20GB ₵85.80 | 50GB ₵212.00\n` +
+      `• *Telecel:* 1GB ₵4.50 | 2GB ₵9.00 | 5GB ₵22.00 | 10GB ₵43.00\n` +
+      `• *AirtelTigo:* 1GB ₵4.50 | 2GB ₵8.50 | 5GB ₵21.00 | 10GB ₵42.00\n\n` +
       `🌐 *Order online:* ${STORE_FRONTEND_URL}\n` +
       `Or reply: 1 (MTN), 2 (AT), or 3 (Telecel)!`;
   }
