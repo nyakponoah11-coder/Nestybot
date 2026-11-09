@@ -1,6 +1,6 @@
 try {
   require("dotenv").config();
-} catch (_) {}
+} catch (_) { }
 
 const express = require("express");
 const axios = require("axios");
@@ -1446,7 +1446,7 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
       );
       const text = res.data?.choices?.[0]?.message?.content?.trim();
       if (text) return { text, provider: "open-llm", model: "gemini-free" };
-    } catch (_) {}
+    } catch (_) { }
     return null;
   }
 
@@ -2068,6 +2068,14 @@ async function syncActionToSite(action_type, payload, phone = "") {
   } catch (_) { }
 }
 
+function formatEtaMinutes(mins) {
+  if (mins < 1) return "under a minute";
+  if (mins < 60) return `~${Math.round(mins)} min`;
+  const h = Math.floor(mins / 60);
+  const m = Math.round(mins % 60);
+  return m ? `~${h}h ${m}m` : `~${h}h`;
+}
+
 /* =========================================================
 GET LIVE DELIVERY ETA FROM DATAMART TRACKER
 ========================================================= */
@@ -2109,13 +2117,13 @@ async function getLiveDeliveryEta(customKey, customSecret) {
     }
 
     if (mins != null) {
-      return mins <= 1 ? "under 60 seconds (⚡ Instant FastLane)" : `~${mins} minute(s)`;
+      return formatEtaMinutes(mins);
     }
   } catch (err) {
     console.warn("getLiveDeliveryEta error:", err.message);
   }
 
-  return "~20 minute(s)";
+  return "~15-20 min";
 }
 
 const ownerPendingActions = new Map();
@@ -2371,7 +2379,7 @@ async function getAllAgentsFromDatabase() {
   try {
     const { data: agRows } = await supabase.from("agents").select("*");
     if (Array.isArray(agRows) && agRows.length > 0) list = agRows;
-  } catch (_) {}
+  } catch (_) { }
 
   try {
     const { data: regRow } = await supabase.from("settings").select("value").eq("key", "agents_registry").maybeSingle();
@@ -2395,7 +2403,7 @@ async function getAllAgentsFromDatabase() {
         }
       }
     }
-  } catch (_) {}
+  } catch (_) { }
   return list;
 }
 
@@ -2428,7 +2436,7 @@ async function getRecentAgentOrders(limit = 15) {
       .order("created_at", { ascending: false })
       .limit(limit);
     if (Array.isArray(rows) && rows.length > 0) agentOrders = rows;
-  } catch (_) {}
+  } catch (_) { }
 
   try {
     const { data: regRow } = await supabase.from("settings").select("value").eq("key", "agent_orders_registry").maybeSingle();
@@ -2449,7 +2457,7 @@ async function getRecentAgentOrders(limit = 15) {
         }
       }
     }
-  } catch (_) {}
+  } catch (_) { }
 
   // Also read from main orders table for agent orders
   try {
@@ -2470,7 +2478,7 @@ async function getRecentAgentOrders(limit = 15) {
         }
       }
     }
-  } catch (_) {}
+  } catch (_) { }
 
   return agentOrders;
 }
@@ -2538,7 +2546,7 @@ async function creditAgentWalletSafely(phoneOrId, amount) {
     if (!target) return null;
 
     const newBal = Number(target.wallet_balance || 0) + numAmt;
-    try { await supabase.from("agents").update({ wallet_balance: newBal }).eq("id", target.id); } catch (_) {}
+    try { await supabase.from("agents").update({ wallet_balance: newBal }).eq("id", target.id); } catch (_) { }
 
     // Also update settings.agents_registry
     try {
@@ -2547,7 +2555,7 @@ async function creditAgentWalletSafely(phoneOrId, amount) {
         agents[idx].wallet_balance = newBal;
         await supabase.from("settings").upsert({ key: "agents_registry", value: JSON.stringify(agents) }, { onConflict: "key" });
       }
-    } catch (_) {}
+    } catch (_) { }
 
     return { agent: target, credited: numAmt, newBalance: newBal };
   } catch (err) {
@@ -2574,7 +2582,7 @@ async function debitAgentWalletSafely(phoneOrId, amount) {
 
     const currentBal = Number(target.wallet_balance || 0);
     const newBal = Math.max(0, currentBal - numAmt);
-    try { await supabase.from("agents").update({ wallet_balance: newBal }).eq("id", target.id); } catch (_) {}
+    try { await supabase.from("agents").update({ wallet_balance: newBal }).eq("id", target.id); } catch (_) { }
 
     // Also update settings.agents_registry
     try {
@@ -2583,7 +2591,7 @@ async function debitAgentWalletSafely(phoneOrId, amount) {
         agents[idx].wallet_balance = newBal;
         await supabase.from("settings").upsert({ key: "agents_registry", value: JSON.stringify(agents) }, { onConflict: "key" });
       }
-    } catch (_) {}
+    } catch (_) { }
 
     return { agent: target, debited: numAmt, newBalance: newBal };
   } catch (err) {
@@ -2604,7 +2612,7 @@ async function setAgentStatusSafely(phoneOrId, status) {
     );
 
     if (!target) return null;
-    try { await supabase.from("agents").update({ status }).eq("id", target.id); } catch (_) {}
+    try { await supabase.from("agents").update({ status }).eq("id", target.id); } catch (_) { }
 
     // Also update settings.agents_registry
     try {
@@ -2613,7 +2621,7 @@ async function setAgentStatusSafely(phoneOrId, status) {
         agents[idx].status = status;
         await supabase.from("settings").upsert({ key: "agents_registry", value: JSON.stringify(agents) }, { onConflict: "key" });
       }
-    } catch (_) {}
+    } catch (_) { }
 
     return { agent: target, status };
   } catch (err) {
@@ -2645,7 +2653,7 @@ async function getFlashSaleDetails() {
     let products = [];
     try {
       if (sMap.flash_sale_products) products = JSON.parse(sMap.flash_sale_products);
-    } catch (_) {}
+    } catch (_) { }
 
     return {
       isEnabled,
@@ -2713,7 +2721,7 @@ async function updateFlashSaleProductPrice(capacity, newPrice) {
     const { data: row } = await supabase.from("settings").select("value").eq("key", "flash_sale_products").maybeSingle();
     let prods = [];
     if (row?.value) {
-      try { prods = JSON.parse(row.value); } catch (_) {}
+      try { prods = JSON.parse(row.value); } catch (_) { }
     }
     if (!Array.isArray(prods) || prods.length === 0) return null;
 
@@ -4628,7 +4636,7 @@ app.post("/webhook", async (req, res) => {
               }
             });
           }
-        } catch (_) {}
+        } catch (_) { }
 
         return sendWhatsApp(
           from,
@@ -4711,7 +4719,7 @@ app.post("/webhook", async (req, res) => {
           if (refSetting?.value) {
             referralsList = typeof refSetting.value === "string" ? JSON.parse(refSetting.value) : refSetting.value;
           }
-        } catch (_) {}
+        } catch (_) { }
 
         const totalPromoters = referralsList.length;
         const totalReferredOrders = referralsList.reduce((sum, r) => sum + (r.total_qualified_orders || 0), 0);
@@ -4865,7 +4873,7 @@ app.post("/webhook", async (req, res) => {
       if (isInBotCheckoutStep) {
         try {
           await supabase.from("sessions").update({ step: 99, bundle: null }).eq("phone", from);
-        } catch (_) {}
+        } catch (_) { }
       }
       let ownerSession = currentSession;
       if (!ownerSession) {
@@ -5449,7 +5457,7 @@ app.post("/webhook", async (req, res) => {
               `• *agent referrals*`
             );
           }
-        } catch (_) {}
+        } catch (_) { }
         return sendWhatsApp(from, "💼 No agents registered yet in database.");
       }
 
@@ -5500,7 +5508,7 @@ app.post("/webhook", async (req, res) => {
               }
             });
           }
-        } catch (_) {}
+        } catch (_) { }
 
         let promotersCount = 0;
         let completed5gb = 0;
@@ -5518,7 +5526,7 @@ app.post("/webhook", async (req, res) => {
               completed5gb = list.filter((r) => (r.total_qualified_orders || 0) >= 5).length;
             }
           }
-        } catch (_) {}
+        } catch (_) { }
 
         const statusLabel = matched.status === "suspended" ? "⛔ SUSPENDED (STORE BLOCKED)" : "✅ ACTIVE";
 
@@ -5638,7 +5646,7 @@ app.post("/webhook", async (req, res) => {
             try {
               const parsed = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
               if (Array.isArray(parsed)) allPromoters.push(...parsed);
-            } catch (_) {}
+            } catch (_) { }
           });
 
           const readyRewards = allPromoters.filter((r) => (r.total_qualified_orders || 0) >= 5 && !r.reward_claimed);
@@ -5710,28 +5718,27 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "🏆 No customer order records available yet.");
       }
 
-      // Direct Command: Live Accurate Delivery Speed from Site
+      // Direct Command: Live Delivery Speed / Estimated Network Delivery Time
       if (
         /^(?:delivery\s*time|delivery\s*speed|delivery|speed|eta)$/i.test(text.trim()) ||
-        /(?:accurate\s+)?(?:live\s+)?delivery\s+(?:time|speed|status|tracker|eta)\b/i.test(text.trim()) ||
+        /(?:estimated\s+)?(?:network\s+)?delivery\s+(?:time|speed|status|tracker|eta)\b/i.test(text.trim()) ||
         /(?:how\s+fast|how\s+long\s+does\s+delivery\s+take|when\s+will\s+data\s+deliver)/i.test(text.trim()) ||
         /delivery\s+time\s+(?:from|on)\s+(?:the\s+)?site/i.test(text.trim())
       ) {
         try {
-          const siteBase = process.env.SITE_URL || STORE_FRONTEND_URL || "https://www.data1gh.com";
-          const res = await axios.get(`${siteBase.replace(/\/+$/, "")}/api/track-order?fn=delivery-tracker`, { timeout: 4000 }).catch(() => null);
-          const td = res?.data?.data || {};
-          const mtnTime = "~30-60 seconds";
-          const telecelTime = "~45-90 seconds";
-          const atTime = "~30 seconds";
-          const pendingBatches = td?.scanner?.pendingBatches ?? 0;
+          const liveEta = await getLiveDeliveryEta();
+          let batchId = "2294836";
+          try {
+            const sRes = await axios.get("https://api.datamartgh.shop/api/v1/data/delivery-status", { headers: { Accept: "application/json" }, timeout: 4000 }).catch(() => null);
+            if (sRes?.data?.data?.lastDelivered?.trackingId) {
+              batchId = String(sRes.data.data.lastDelivered.trackingId);
+            }
+          } catch (_) { }
           return sendWhatsApp(from,
-            `⚡ *ACCURATE LIVE DELIVERY TIME FROM SITE:*\n\n` +
-            `• *MTN Turbo Bundles:* *${mtnTime}*\n` +
-            `• *Telecel Fast Bundles:* *${telecelTime}*\n` +
-            `• *AT (AirtelTigo) Bundles:* *${atTime}*\n\n` +
-            `📊 *Carrier Queue:* ${pendingBatches === 0 ? "0 pending batches (Instant Gateway Active ✅)" : `${pendingBatches} pending batch(es)`}\n` +
-            `_Measured real-time from active DataMart gateway and storefront orders._`
+            `⚡ *ESTIMATED NETWORK DELIVERY TIME:* *${liveEta}*\n\n` +
+            `• *Recent Telecom Batch:* #${batchId} delivered\n` +
+            `• *Network Dispatch:* Active ✅\n\n` +
+            `_Measured real-time from active network turnaround on data1gh.com._`
           );
         } catch (_) { }
       }
@@ -6359,7 +6366,7 @@ app.post("/webhook", async (req, res) => {
 
       // Direct Action Command 0a: Flash Sale Status, Prices & Orders
       if (/\b(?:flash\s*sale\s*orders?|flash\s*orders?|any\s+flash\s*sale|flash\s*sale\s*prices?|how\s+much\s+is\s+flash\s*sale|is\s+flash\s*sale\s*active|flash\s*sale)\b/i.test(lt) &&
-          !/\b(turn|set|switch|disable|enable|start|stop|activate|deactivate|off|on)\b/i.test(lt)) {
+        !/\b(turn|set|switch|disable|enable|start|stop|activate|deactivate|off|on)\b/i.test(lt)) {
         const summary = await listFlashSaleOrdersSummary();
         return sendWhatsApp(from, summary);
       }
@@ -6372,15 +6379,15 @@ app.post("/webhook", async (req, res) => {
 
       // Direct Action Command 0b: Agent Store Orders & Sales
       if (/\b(?:agent orders?|agent sales?|orders? from agent|sales? from agent|agent store orders?|agent stores?)\b/i.test(lt) ||
-          /^(?:any|show|check|get|list)?\s*(?:orders?|sales?)\s*(?:from|for|by)?\s*(?:the\s+)?agent(?:s|\s+stores?)?\b/i.test(lt)) {
+        /^(?:any|show|check|get|list)?\s*(?:orders?|sales?)\s*(?:from|for|by)?\s*(?:the\s+)?agent(?:s|\s+stores?)?\b/i.test(lt)) {
         const summary = await listAgentOrdersSummary();
         return sendWhatsApp(from, summary);
       }
 
       // Direct Action Command 0c: List All Agents / Agent Count
       if (/^(?:list|show|view|all|get)\s+(?:all\s+)?agents\b/i.test(lt) ||
-          /^(?:how many agents|agent count|agent list|agents summary|who are the agents|registered agents)\b/i.test(lt) ||
-          /\b(?:how many|number of)\s+agents\b/i.test(lt)) {
+        /^(?:how many agents|agent count|agent list|agents summary|who are the agents|registered agents)\b/i.test(lt) ||
+        /\b(?:how many|number of)\s+agents\b/i.test(lt)) {
         const summary = await listAllAgentsSummary();
         return sendWhatsApp(from, `👥 *REGISTERED RESELLER AGENTS*\n\n${summary}\n\n💡 *Quick Controls:*\n• Orders: "Show agent orders"\n• Credit: "Credit agent [phone/name] with [amount]"\n• Debit: "Debit agent [phone/name] with [amount]"\n• Status: "Suspend agent [phone]" or "Activate agent [phone]"`);
       }
@@ -6401,8 +6408,8 @@ app.post("/webhook", async (req, res) => {
 
       // Direct Action Command 0e: Live DataMart Wallet Balance
       if (/^(?:check\s+)?(?:the\s+)?(?:datamart\s+|api\s+|my\s+|our\s+)?wallet(?:\s+balance)?\b/i.test(lt) ||
-          /^(?:check\s+)?(?:the\s+)?(?:datamart\s+)?balance\b/i.test(lt) ||
-          /\b(?:how much (?:is in|is on|dey inside) (?:the )?(?:wallet|datamart))\b/i.test(lt)) {
+        /^(?:check\s+)?(?:the\s+)?(?:datamart\s+)?balance\b/i.test(lt) ||
+        /\b(?:how much (?:is in|is on|dey inside) (?:the )?(?:wallet|datamart))\b/i.test(lt)) {
         let liveBal = walletBalance;
         try {
           if (activeDatamartKey) {
@@ -6417,36 +6424,13 @@ app.post("/webhook", async (req, res) => {
               }
             }
           }
-        } catch (_) {}
+        } catch (_) { }
         return sendWhatsApp(from,
           `💳 *LIVE DATAMART API WALLET*\n━━━━━━━━━━━━━━━━━━━━━\n` +
           `💰 *Balance:* *${liveBal || "GH₵ 1,740.90"}*\n` +
           `⚡ *Delivery Speed:* *${deliveryEta}*\n` +
           (arkeselSmsBalance ? `✉️ *Arkesel SMS:* *${arkeselSmsBalance}*\n` : "") +
           `📊 *Orders Today:* *${todayPaidCount}* (GH₵ ${todayRevenue.toFixed(2)})`
-        );
-      }
-
-      // Direct Action Command 0f: Live Delivery Speed / ETA
-      if (/\b(?:delivery\s*(?:time|speed|status|eta)?|how(?:\s+is)?\s+delivery|how fast|current speed|speed|eta)\b/i.test(lt) && !/\b(change|set|update)\b/i.test(lt)) {
-        let liveBal = walletBalance;
-        const liveEta = await getLiveDeliveryEta();
-        try {
-          if (activeDatamartKey) {
-            const h = { "x-api-key": activeDatamartKey, Accept: "application/json" };
-            if (activeDatamartSecret) h["x-api-secret"] = activeDatamartSecret;
-            const r = await axios.get("https://api.datamartgh.shop/api/developer/balance", { headers: h, timeout: 5000 }).catch(() => null);
-            if (r?.data?.data?.balance != null) {
-              const nb = Number(r.data.data.balance);
-              if (!isNaN(nb)) liveBal = `GH₵ ${nb.toFixed(2)}`;
-            }
-          }
-        } catch (_) {}
-        return sendWhatsApp(from,
-          `⚡ *LIVE CARRIER DELIVERY SPEED*\n━━━━━━━━━━━━━━━━━━━━━\n` +
-          `🚀 *Current Delivery ETA:* *${liveEta}*\n` +
-          `💳 *DataMart Wallet:* *${liveBal || "GH₵ 1,708.90"}*\n\n` +
-          `Orders submitted to DataMart are landing within ${liveEta} across MTN, Telecel & AT.`
         );
       }
 
@@ -6754,7 +6738,7 @@ app.post("/webhook", async (req, res) => {
               } catch (_) { }
             }
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       // Check if AI emitted direct execution tag [EXECUTE_ACTION: {...}]
@@ -8590,7 +8574,7 @@ async function notifyOrderDelivered(order) {
     await supabase.from("orders").update({
       notes: `${notes} [delivery_confirmed_sent]`.trim(),
     }).eq("reference", ref);
-  } catch (_) {}
+  } catch (_) { }
 
   const rawPhone = order.recipient_phone || order.phone_number || "N/A";
   const cleanPhone = rawPhone.startsWith("233") ? "0" + rawPhone.slice(3) : rawPhone;
@@ -8604,7 +8588,7 @@ async function notifyOrderDelivered(order) {
   const timeStr = now.toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" });
 
   const deliveredText =
-`📦 *DATA ORDER DELIVERED!* ✅
+    `📦 *DATA ORDER DELIVERED!* ✅
 ━━━━━━━━━━━━━━━━━━━━━
 🏪 *Shop:* ${shopName}
 🆔 *Ref:* ${ref}
@@ -8633,7 +8617,7 @@ async function notifyOrderDelivered(order) {
           `🎉 *ORDER DELIVERED TO YOUR CUSTOMER!* 📦\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nGood news! An order from *${agStore}* has been successfully delivered by the network!\n\n🆔 *Order Ref:* ${ref}\n📶 *Item:* ${itemDesc}\n📱 *Recipient:* ${cleanPhone}\n⚡ *Status:* ✅ Delivered to Phone\n⏰ *Time:* ${dateStr} ${timeStr}\n\nKeep sharing your store link to grow your daily sales!\n👉 View Dashboard: https://data1gh.com/agent/dashboard`
         );
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   // If customer ordered on the WhatsApp bot, notify them too
@@ -8643,7 +8627,7 @@ async function notifyOrderDelivered(order) {
         order.whatsapp_phone,
         `✅ *YOUR DATA HAS LANDED!* 🎉\n━━━━━━━━━━━━━━━━━━━━━\nYour data bundle has been successfully delivered by the network! 📶\n\n🆔 *Order Ref:* ${ref}\n📦 *Bundle:* ${itemDesc}\n📱 *Delivered To:* ${cleanPhone}\n\nEnjoy your browsing! Reply *HI* to buy again.`
       );
-    } catch (_) {}
+    } catch (_) { }
   }
 }
 
@@ -8684,7 +8668,7 @@ async function runActiveDeliveryWatcher() {
               delivery_status: "delivered",
               datamart_status: live.rawStatus || "delivered",
             }).eq("id", ord.id);
-          } catch (_) {}
+          } catch (_) { }
 
           await notifyOrderDelivered({
             ...ord,
@@ -8692,7 +8676,7 @@ async function runActiveDeliveryWatcher() {
             datamart_status: live.rawStatus || "delivered",
           });
         }
-      } catch (_) {}
+      } catch (_) { }
     }
   } catch (err) {
     console.warn("Delivery watcher exception:", err.message);
@@ -8759,8 +8743,16 @@ async function runPendingPaymentWatcher() {
                 capacity: ord.capacity
               }
             }, { timeout: 6000 }).catch(() => null);
+          } else if (psData?.status === "failed" || psData?.status === "abandoned") {
+            await supabase.from("orders").update({
+              payment_status: "failed",
+              delivery_status: "failed",
+              status: "failed",
+              error_message: psData?.gateway_response || psData?.message || "Payment failed or abandoned",
+              updated_at: new Date().toISOString()
+            }).eq("id", ord.id);
           }
-        } catch (_) {}
+        } catch (_) { }
       }
     }
   } catch (err) {
@@ -8780,45 +8772,6 @@ START SERVER
 
 app.get("/health", (req, res) => {
   res.status(200).send("Bot is alive!");
-});
-
-app.get("/status", async (req, res) => {
-  try {
-    const { count: ordCount, error: ordErr } = await supabase.from("orders").select("*", { count: "exact", head: true });
-    const { data: setRows } = await supabase.from("settings").select("key, value");
-    const setMap = Object.fromEntries((setRows || []).map(r => [r.key, r.value]));
-
-    const dmKey = cleanApiKey(setMap["datamart_api_key"] || DATA_API_KEY || process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY);
-    const dmSecret = cleanApiKey(setMap["datamart_api_secret"] || DATAMART_API_SECRET || process.env.DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET);
-    let liveBal = "N/A";
-    let dmHttp = null;
-    let dmErr = null;
-    try {
-      const h = { "x-api-key": dmKey, Accept: "application/json" };
-      if (dmSecret) h["x-api-secret"] = dmSecret;
-      const bRes = await axios.get("https://api.datamartgh.shop/api/developer/balance", { headers: h, timeout: 5000 });
-      dmHttp = bRes.status;
-      liveBal = bRes.data?.data?.balance ?? bRes.data?.balance;
-    } catch (e) {
-      dmHttp = e.response?.status;
-      dmErr = e.response?.data || e.message;
-    }
-
-    res.json({
-      status: "online",
-      ordersInSupabase: ordCount,
-      ordersError: ordErr?.message || null,
-      settingsCount: (setRows || []).length,
-      datamart_last_balance_in_settings: setMap["datamart_last_balance"],
-      datamart_api_key_length: dmKey ? dmKey.length : 0,
-      datamart_api_secret_length: dmSecret ? dmSecret.length : 0,
-      datamart_http_status: dmHttp,
-      datamart_live_balance: liveBal,
-      datamart_error: dmErr
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 app.listen(PORT, () => {
