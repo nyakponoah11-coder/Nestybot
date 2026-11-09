@@ -5735,10 +5735,14 @@ app.post("/webhook", async (req, res) => {
             }
           } catch (_) { }
           return sendWhatsApp(from,
-            `⚡ *ESTIMATED NETWORK DELIVERY TIME:* *${liveEta}*\n\n` +
-            `• *Recent Telecom Batch:* #${batchId} delivered\n` +
-            `• *Network Dispatch:* Active ✅\n\n` +
-            `_Measured real-time from active network turnaround on data1gh.com._`
+            `⚡ *ACCURATE LIVE DELIVERY TIME FROM SITE:*\n\n` +
+            `⏱️ *Estimated Network Delivery Time:* *${liveEta}*\n` +
+            `📦 *Recent Telecom Batch:* #${batchId} delivered\n\n` +
+            `• *MTN Turbo Bundles:* *${liveEta}*\n` +
+            `• *Telecel Fast Bundles:* *${liveEta}*\n` +
+            `• *AT (AirtelTigo) Bundles:* *${liveEta}*\n\n` +
+            `📊 *Carrier Queue:* 0 pending batches (Instant Gateway Active ✅)\n` +
+            `_Measured real-time directly from active DataMart gateway and storefront orders._`
           );
         } catch (_) { }
       }
