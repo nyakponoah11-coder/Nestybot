@@ -4229,7 +4229,8 @@ INITIATE DIRECT MOBILE MONEY CHARGE
 async function initiateMomoCharge(from, session, bundle) {
   const sessionPackages = getPackagesForSession(session);
   const effectiveBundle = (sessionPackages[session.network] && sessionPackages[session.network][session.bundle]) || bundle;
-  const ref = "REF-" + Date.now();
+  const randSuffix = Math.random().toString(36).substring(2, 7).toUpperCase();
+  const ref = `WS-${Date.now().toString(36).toUpperCase()}${randSuffix}`;
   const provider = getMomoProvider(session.momo_number, session.network);
 
   console.log("INITIATING MOMO CHARGE:", {
@@ -4242,6 +4243,33 @@ async function initiateMomoCharge(from, session, bundle) {
     store_name: session.agent_name || null,
     ref
   });
+
+  // Pre-insert pending order into Supabase orders table immediately so Admin sees it live
+  if (supabase) {
+    try {
+      await supabase.from("orders").upsert([{
+        reference: ref,
+        ref: ref,
+        phone_number: normalizePhone(session.phone_number || session.phone || from),
+        recipient_phone: normalizePhone(session.phone_number || session.phone || from),
+        whatsapp_phone: normalizePhone(from),
+        network: session.network || "MTN",
+        capacity: String(effectiveBundle?.capacity || session.bundle || "1"),
+        bundle: String(effectiveBundle?.capacity || session.bundle || "1") + (String(effectiveBundle?.capacity || "").includes("GB") || String(effectiveBundle?.capacity || "").includes(" ") ? "" : "GB"),
+        amount: Number(effectiveBundle?.price || 0),
+        payment_status: "pending",
+        delivery_status: "pending",
+        status: "pending",
+        agent_id: session.agent_id || null,
+        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}] [channel:whatsapp_bot]` : "[channel:whatsapp_bot]",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }], { onConflict: "reference" });
+      console.log("📋 Pre-inserted pending order:", ref);
+    } catch (preErr) {
+      console.warn("Pre-insert pending bot order note:", preErr.message);
+    }
+  }
 
   try {
     const charge = await axios.post(
@@ -4330,7 +4358,7 @@ async function initiateMomoCharge(from, session, bundle) {
   }
 
   // Fallback: Generate Paystack Payment Link if direct prompt failed/rejected
-  const fallbackRef = "REF-" + Date.now();
+  const fallbackRef = `WS-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
   const authUrl = await createPaystackCheckoutLink(from, fallbackRef, bundle.price);
 
   if (authUrl) {
@@ -8121,7 +8149,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       if (/^(link|pay|checkout)$/i.test(text) && amount) {
-        const linkRef = "REF-" + Date.now();
+        const linkRef = `WS-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
         const link = await createPaystackCheckoutLink(from, linkRef, amount);
         if (link) {
           await saveCustomerSession(from, { ref: linkRef });
@@ -8370,6 +8398,22 @@ app.post("/paystack-webhook", async (req, res) => {
         }
       }
     }
+    // Also check Supabase settings table for bot_sess_*
+    if (!session && supabase) {
+      try {
+        const { data: sessRow } = await supabase
+          .from("settings")
+          .select("value")
+          .like("key", "bot_sess_%")
+          .ilike("value", `%"ref":"${ref}"%`)
+          .limit(1)
+          .maybeSingle();
+        if (sessRow?.value) {
+          session = typeof sessRow.value === "string" ? JSON.parse(sessRow.value) : sessRow.value;
+          if (session) recordWebhookLog("SESSION_FOUND_VIA_SETTINGS_TABLE", { ref });
+        }
+      } catch (_) {}
+    }
 
     // 2. Check Website Data Orders by exact reference
     if (!session) {
@@ -8563,14 +8607,7 @@ app.post("/paystack-webhook", async (req, res) => {
           const waPhone = emailPhone.startsWith("0") ? "233" + emailPhone.substring(1) : (emailPhone.startsWith("233") ? emailPhone : "233" + emailPhone);
           const localPhone = emailPhone.startsWith("233") ? "0" + emailPhone.substring(3) : (emailPhone.startsWith("0") ? emailPhone : "0" + emailPhone);
 
-          const { data: fallbackSession } = await supabase
-            .from("sessions")
-            .select("*")
-            .or(`phone.eq.${waPhone},phone.eq.${localPhone},momo_number.eq.${localPhone},phone_number.eq.${localPhone}`)
-            .order("id", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-
+          const fallbackSession = (await getCustomerSession(waPhone)) || (await getCustomerSession(localPhone));
           if (fallbackSession) {
             recordWebhookLog("SESSION_FOUND_VIA_FALLBACK", { waPhone, localPhone, sessionPhone: fallbackSession.phone });
             session = fallbackSession;
@@ -8578,6 +8615,47 @@ app.post("/paystack-webhook", async (req, res) => {
             if (!session.momo_number) session.momo_number = localPhone;
           }
         }
+      }
+
+      // 3. Fallback: Check pre-inserted pending order in orders table
+      if (!session && supabase) {
+        try {
+          const { data: pendingOrd } = await supabase
+            .from("orders")
+            .select("*")
+            .or(`reference.eq.${ref},ref.eq.${ref}`)
+            .maybeSingle();
+          if (pendingOrd) {
+            session = {
+              phone: pendingOrd.whatsapp_phone || pendingOrd.recipient_phone || pendingOrd.phone_number,
+              phone_number: pendingOrd.recipient_phone || pendingOrd.phone_number,
+              momo_number: pendingOrd.phone_number || pendingOrd.recipient_phone,
+              network: pendingOrd.network,
+              bundle: pendingOrd.bundle || (pendingOrd.capacity ? `${pendingOrd.capacity}GB` : null),
+              agent_id: pendingOrd.agent_id || null,
+              ref: ref
+            };
+            recordWebhookLog("SESSION_FOUND_VIA_PENDING_ORDER", { ref, session });
+          }
+        } catch (_) {}
+      }
+
+      // 4. Ultimate Fallback: Reconstruct session directly from Paystack event metadata
+      if (!session && event.data?.metadata && (event.data.metadata.recipient_phone || event.data.metadata.capacity || event.data.metadata.network)) {
+        const meta = event.data.metadata;
+        const custPhone = event.data?.customer?.phone || (event.data?.customer?.email || "").split("@")[0] || meta.recipient_phone;
+        session = {
+          phone: custPhone,
+          phone_number: meta.recipient_phone || custPhone,
+          momo_number: meta.momo_number || custPhone,
+          network: meta.network || "MTN",
+          bundle: meta.capacity ? (String(meta.capacity).includes("GB") ? meta.capacity : `${meta.capacity}GB`) : "1GB",
+          agent_id: meta.agent_id || null,
+          agent_name: meta.store_name || null,
+          agent_slug: meta.agent_slug || null,
+          ref: ref
+        };
+        recordWebhookLog("SESSION_RECONSTRUCTED_FROM_PAYSTACK_METADATA", { ref, session });
       }
 
       if (!session) {
@@ -8610,11 +8688,12 @@ app.post("/paystack-webhook", async (req, res) => {
       }
 
       const mashupRef = "MASHUP-" + ref;
-      const { error: orderError } = await supabase.from("orders").insert([{
+      const { error: orderError } = await supabase.from("orders").upsert([{
         whatsapp_phone: session.phone,
         phone_number: normalizePhone(session.phone_number),
         recipient_phone: normalizePhone(session.phone_number),
         reference: mashupRef,
+        ref: mashupRef,
         network: "MASHUP",
         bundle: session.bundle,
         capacity: parsed.combo.label,
@@ -8622,10 +8701,9 @@ app.post("/paystack-webhook", async (req, res) => {
         status: "pending_manual",
         payment_status: "paid",
         delivery_status: "pending_manual",
-        paid_at: new Date().toISOString(),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
-      }]);
+      }], { onConflict: "reference" });
 
       if (orderError) {
         console.error("❌ MASHUP ORDER SAVE ERROR:", orderError);
@@ -8685,11 +8763,12 @@ app.post("/paystack-webhook", async (req, res) => {
         const afaStatus = afaOrder.status || "pending";
         const afaOrderId = afaOrder.id || afaOrder.order_id || null;
 
-        const { error: afaOrderError } = await supabase.from("orders").insert([{
+        const { error: afaOrderError } = await supabase.from("orders").upsert([{
           whatsapp_phone: session.phone,
           phone_number: normalizePhone(afaData.phone_number),
           recipient_phone: normalizePhone(afaData.phone_number),
           reference: afaExternalId,
+          ref: afaExternalId,
           network: "AFA",
           bundle: afaData.full_name,
           capacity: "AFA Registration",
@@ -8697,10 +8776,11 @@ app.post("/paystack-webhook", async (req, res) => {
           status: afaStatus,
           payment_status: "paid",
           delivery_status: afaStatus === "completed" || afaStatus === "approved" ? "delivered" : "processing",
-          paid_at: new Date().toISOString(),
+          agent_id: session.agent_id || null,
+          notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug}]` : null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
-        }]);
+        }], { onConflict: "reference" });
 
         if (afaOrderError) {
           console.error("❌ AFA ORDER SAVE ERROR:", afaOrderError);
@@ -8740,11 +8820,12 @@ app.post("/paystack-webhook", async (req, res) => {
         const isAgentOrder = Boolean(session.agent_id);
         const storeDisplayName = session.agent_name || "Data Store";
 
-        await supabase.from("orders").insert([{
+        await supabase.from("orders").upsert([{
           whatsapp_phone: session.phone,
           phone_number: normalizePhone(afaData.phone_number),
           recipient_phone: normalizePhone(afaData.phone_number),
           reference: afaExternalId,
+          ref: afaExternalId,
           network: "AFA",
           bundle: afaData.full_name,
           capacity: "AFA Registration",
@@ -8752,12 +8833,11 @@ app.post("/paystack-webhook", async (req, res) => {
           status: "pending_manual",
           payment_status: "paid",
           delivery_status: "pending_manual",
-          paid_at: new Date().toISOString(),
           agent_id: session.agent_id || null,
           notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug}]` : null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
-        }]);
+        }], { onConflict: "reference" });
 
         await sendAdminWhatsApp(
           `🔔 AFA REGISTRATION FAILED — MANUAL ACTION NEEDED\n\nThe AFA API call failed after payment was confirmed.\n\n👤 Full Name: ${afaData.full_name}\n📱 Phone: ${afaData.phone_number}\n🪪 Ghana Card: ${afaData.id_number}\n📍 Location: ${afaData.location}\n🎂 DOB: ${afaData.dob}\n💼 Occupation: ${afaData.occupation}\n💵 Confirmed paid: ₵${paidAmount.toFixed(2)}\n\nCheck the afaregistration.com dashboard or submit this manually, then update the order.`
@@ -8811,11 +8891,12 @@ app.post("/paystack-webhook", async (req, res) => {
         }
       }
 
-      const { error: netflixOrderError } = await supabase.from("orders").insert([{
+      const { error: netflixOrderError } = await supabase.from("orders").upsert([{
         whatsapp_phone: session.phone,
         phone_number: normalizePhone(session.phone),
         recipient_phone: normalizePhone(session.phone),
         reference: netflixRef,
+        ref: netflixRef,
         network: "NETFLIX",
         bundle: refCode,
         capacity: "Netflix Subscription",
@@ -8823,12 +8904,11 @@ app.post("/paystack-webhook", async (req, res) => {
         status: "pending_code_request",
         payment_status: "paid",
         delivery_status: "processing",
-        paid_at: paidAt,
         agent_id: session.agent_id || null,
         notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug}]` : null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
-      }]);
+      }], { onConflict: "reference" });
 
       if (netflixOrderError) {
         console.error("❌ NETFLIX ORDER SAVE ERROR:", netflixOrderError);
@@ -8961,11 +9041,12 @@ app.post("/paystack-webhook", async (req, res) => {
     const baseCost = baseBundle ? baseBundle.price : null;
 
     try {
-      const { error: orderError } = await supabase.from("orders").insert([{
+      const { error: orderError } = await supabase.from("orders").upsert([{
         whatsapp_phone: session.phone,
         phone_number: normalizePhone(session.phone_number),
         recipient_phone: normalizePhone(session.phone_number),
         reference: orderReference,
+        ref: orderReference,
         network: session.network,
         bundle: session.bundle,
         capacity: String(bundle.capacity),
@@ -8978,11 +9059,10 @@ app.post("/paystack-webhook", async (req, res) => {
         delivery_status: mappedDeliveryStatus,
         datamart_status: mappedRawStatus,
         datamart_reference: datamartReference || (datamartOrderId ? String(datamartOrderId) : null),
-        paid_at: new Date().toISOString(),
         created_at: datamartData.createdAt || new Date().toISOString(),
         updated_at: datamartData.updatedAt || new Date().toISOString(),
         campaign_code: session.scratch_order_opt_in ? session.scratch_code : null
-      }]);
+      }], { onConflict: "reference" });
 
       // Automatically credit profit to Agent's wallet!
       if (session.agent_id && baseCost) {
