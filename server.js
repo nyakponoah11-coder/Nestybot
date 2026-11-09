@@ -5205,11 +5205,16 @@ app.post("/webhook", async (req, res) => {
     let currentSession = boundSession || (await getCustomerSession(from));
     const hasAgent = Boolean(currentSession?.agent_id);
 
-    // If owner explicitly wants to exit agent store testing mode
-    if (isOwner && /^(exit\s*store|main\s*store|switch\s*to\s*owner|owner\s*mode|leave\s*store)$/i.test(text.trim())) {
+    // If owner explicitly wants to exit agent store testing mode or calls Stony Co-Pilot
+    if (isOwner && /^(admin|owner|exit|reset|copilot|main|exit\s*store|main\s*store|switch\s*to\s*owner|owner\s*mode|leave\s*store)$/i.test(text.trim())) {
       boundSession = await saveCustomerSession(from, { agent_id: null, agent_slug: null, agent_name: null, custom_prices: null, step: 1, bundle: null });
       currentSession = boundSession;
       return sendWhatsApp(from, `👑 Switched back to *DATA 1 GH Owner Mode* bossu! Reply *Hi* or ask me anything.`);
+    }
+
+    if (isOwner && startsWithStony) {
+      boundSession = await saveCustomerSession(from, { agent_id: null, agent_slug: null, agent_name: null, custom_prices: null, step: 99, bundle: null });
+      currentSession = boundSession;
     }
 
     // 1. SWITCH TO BOT MODE (Shows Menu)
