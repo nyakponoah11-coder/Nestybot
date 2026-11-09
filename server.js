@@ -1159,8 +1159,10 @@ function getMenusForSession(session) {
   const pkgs = getPackagesForSession(session);
   const storeName = session.agent_name || "Agent Store";
   const storeUrl = getAgentStoreUrl(session);
+  const netflixCost = resolveServiceCustomPrice("netflix", session.custom_prices, NETFLIX_PRICE);
+  const afaCost = resolveServiceCustomPrice("afa", session.custom_prices, AFA_PRICE);
 
-  const agentMenu = `🏪 Welcome to *${storeName}*! 📶\n🌐 Store Link: ${storeUrl}\n\n1 - MTN Data\n2 - AirtelTigo Data\n3 - Telecel Data\n4 - Track Order\n\nChoose an option to continue`;
+  const agentMenu = `🏪 Welcome to *${storeName}*! 📶\n🌐 Store Link: ${storeUrl}\n\n1 - MTN Data\n2 - AirtelTigo Data\n3 - Telecel Data\n4 - Track Order\n5 - Netflix (₵${netflixCost.toFixed(2)})\n6 - AFA Registration (₵${afaCost.toFixed(2)})\n\nChoose an option to continue`;
 
   const buildSubMenu = (netTitle, netKey) => {
     const netPkgs = pkgs[netKey] || {};
@@ -7440,7 +7442,8 @@ app.post("/webhook", async (req, res) => {
           phone_number: null
         });
 
-        return sendWhatsApp(from, `📺 Netflix Subscription — ₵${netflixCost.toFixed(2)}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
+        const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+        return sendWhatsApp(from, `${storeHeader}📺 Netflix Subscription — ₵${netflixCost.toFixed(2)}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
       } else if (text === "6") {
         const afaCost = resolveServiceCustomPrice("afa", session.custom_prices, AFA_PRICE);
         await saveCustomerSession(from, {
@@ -7450,7 +7453,8 @@ app.post("/webhook", async (req, res) => {
           phone_number: null
         });
 
-        return sendWhatsApp(from, `🪪 AFA Registration — ₵${afaCost.toFixed(2)}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
+        const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+        return sendWhatsApp(from, `${storeHeader}🪪 AFA Registration — ₵${afaCost.toFixed(2)}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
       } else if (text === "7") {
         await saveCustomerSession(from, { step: 10, network: "MASHUP" });
         return sendWhatsApp(from, `📶 MTN MashUp Bundle\n\nEnter the amount you want to pay (₵${MASHUP_MIN_AMOUNT} - ₵${MASHUP_MAX_AMOUNT}):\n\nExample: 5\n\nThe data + minutes mix you get depends on what MTN offers for that amount — this will be applied to your number manually.`);
@@ -7928,9 +7932,11 @@ app.post("/webhook", async (req, res) => {
         step: 38
       });
 
+      const afaCost = resolveServiceCustomPrice("afa", session.custom_prices, AFA_PRICE);
+      const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
       return sendWhatsApp(
         from,
-        `Confirm AFA Registration ✅\n\n👤 Full Name: ${afaData.full_name}\n📱 Phone: ${afaData.phone_number}\n🪪 Ghana Card: ${afaData.id_number}\n📍 Location: ${afaData.location}\n🎂 DOB: ${afaData.dob}\n💼 Occupation: ${afaData.occupation}\n\n💰 Amount: ₵${AFA_PRICE.toFixed(2)}\n💳 Pay from (Momo, ${session.network}): ${momoNumber}\n\nReply YES to pay or NO to cancel`
+        `Confirm AFA Registration ✅\n\n${storeHeader}👤 Full Name: ${afaData.full_name}\n📱 Phone: ${afaData.phone_number}\n🪪 Ghana Card: ${afaData.id_number}\n📍 Location: ${afaData.location}\n🎂 DOB: ${afaData.dob}\n💼 Occupation: ${afaData.occupation}\n\n💰 Amount: ₵${afaCost.toFixed(2)}\n💳 Pay from (Momo, ${session.network}): ${momoNumber}\n\nReply YES to pay or NO to cancel`
       );
     }
 
@@ -7951,7 +7957,8 @@ app.post("/webhook", async (req, res) => {
           session = await saveCustomerSession(from, { step: 1 });
           return sendWhatsApp(from, "❌ Something went wrong with your form. Please reply HI and try again.");
         }
-        const bundle = { price: AFA_PRICE, capacity: "AFA Registration" };
+        const afaCost = resolveServiceCustomPrice("afa", session.custom_prices, AFA_PRICE);
+        const bundle = { price: afaCost, capacity: "AFA Registration" };
         return initiateMomoCharge(from, session, bundle);
       }
 
@@ -7991,9 +7998,11 @@ app.post("/webhook", async (req, res) => {
         step: 52
       });
 
+      const netflixCost = resolveServiceCustomPrice("netflix", session.custom_prices, NETFLIX_PRICE);
+      const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
       return sendWhatsApp(
         from,
-        `Confirm Netflix Subscription ✅\n\n📺 Netflix Subscription\n💰 Amount: ₵${NETFLIX_PRICE.toFixed(2)}\n💳 Pay from (Momo, ${session.network}): ${momoNumber}\n\nReply YES to pay or NO to cancel`
+        `Confirm Netflix Subscription ✅\n\n${storeHeader}📺 Netflix Subscription\n💰 Amount: ₵${netflixCost.toFixed(2)}\n💳 Pay from (Momo, ${session.network}): ${momoNumber}\n\nReply YES to pay or NO to cancel`
       );
     }
 
@@ -8009,7 +8018,8 @@ app.post("/webhook", async (req, res) => {
       }
 
       if (/^yes$/i.test(text)) {
-        const bundle = { price: NETFLIX_PRICE, capacity: "Netflix Subscription" };
+        const netflixCost = resolveServiceCustomPrice("netflix", session.custom_prices, NETFLIX_PRICE);
+        const bundle = { price: netflixCost, capacity: "Netflix Subscription" };
         return initiateMomoCharge(from, session, bundle);
       }
 
@@ -8698,16 +8708,37 @@ app.post("/paystack-webhook", async (req, res) => {
           console.log("✅ AFA ORDER SAVED:", afaExternalId, "| AFA order id:", afaOrderId);
         }
 
-        await sendWhatsApp(
-          session.phone,
-          `✅ PAYMENT RECEIVED! 🎉\n\n🪪 AFA Registration submitted for: ${afaData.full_name}\n📱 Phone: ${afaData.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n📌 Status: ${afaStatus}\n\nYou'll be notified once it's approved.\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To buy again.`
-        );
+        const isAgentOrder = Boolean(session.agent_id);
+        const storeDisplayName = session.agent_name || "Data Store";
+
+        if (isAgentOrder) {
+          const afaProfit = Math.max(0, paidAmount - AFA_PRICE);
+          if (afaProfit > 0) {
+            creditAgentWalletSafely(session.agent_id, afaProfit).then(res => {
+              console.log(`💰 Credited agent ${session.agent_id} with +GH₵ ${afaProfit.toFixed(2)} (AFA profit). New balance: GH₵ ${res.balance}`);
+            }).catch(err => {
+              console.error(`❌ Failed to credit agent ${session.agent_id} for AFA:`, err.message);
+            });
+          }
+          await sendWhatsApp(
+            session.phone,
+            `✅ PAYMENT RECEIVED! 🎉\n\n🏪 Store: *${storeDisplayName}*\n🪪 AFA Registration submitted for: ${afaData.full_name}\n📱 Phone: ${afaData.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n📌 Status: ${afaStatus}\n\nYou'll be notified once it's approved.\n\nSEND: hi / hello / start To return to menu.`
+          );
+        } else {
+          await sendWhatsApp(
+            session.phone,
+            `✅ PAYMENT RECEIVED! 🎉\n\n🪪 AFA Registration submitted for: ${afaData.full_name}\n📱 Phone: ${afaData.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n📌 Status: ${afaStatus}\n\nYou'll be notified once it's approved.\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To buy again.`
+          );
+        }
 
         sendAdminSms(
           `NEW AFA ORDER: ₵${paidAmount.toFixed(2)} paid for ${afaData.full_name} (${afaData.phone_number}). Status: ${afaStatus}. Ref: ${afaExternalId}`
         ).catch(() => { });
       } catch (afaError) {
         console.error("❌ AFA API ERROR:", afaError.response?.data || afaError.message);
+
+        const isAgentOrder = Boolean(session.agent_id);
+        const storeDisplayName = session.agent_name || "Data Store";
 
         await supabase.from("orders").insert([{
           whatsapp_phone: session.phone,
@@ -8722,6 +8753,8 @@ app.post("/paystack-webhook", async (req, res) => {
           payment_status: "paid",
           delivery_status: "pending_manual",
           paid_at: new Date().toISOString(),
+          agent_id: session.agent_id || null,
+          notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug}]` : null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         }]);
@@ -8732,10 +8765,17 @@ app.post("/paystack-webhook", async (req, res) => {
 
         // Automated failed-order SMS disabled.
 
-        await sendWhatsApp(
-          session.phone,
-          `✅ Payment received! Your AFA registration for ${afaData.full_name} is being processed and may take a little longer than usual.\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To buy again.`
-        );
+        if (isAgentOrder) {
+          await sendWhatsApp(
+            session.phone,
+            `✅ Payment received! Your AFA registration for ${afaData.full_name} is being processed and will be delivered shortly.\n\n🏪 Store: *${storeDisplayName}*\n\nSEND: hi / hello / start To return to menu.`
+          );
+        } else {
+          await sendWhatsApp(
+            session.phone,
+            `✅ Payment received! Your AFA registration for ${afaData.full_name} is being processed and may take a little longer than usual.\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To buy again.`
+          );
+        }
       }
 
       return;
@@ -8757,6 +8797,20 @@ app.post("/paystack-webhook", async (req, res) => {
         bundle: JSON.stringify({ type: "netflix", paidAt, refCode, used: false })
       });
 
+      const isAgentOrder = Boolean(session.agent_id);
+      const storeDisplayName = session.agent_name || "Data Store";
+
+      if (isAgentOrder) {
+        const netflixProfit = Math.max(0, paidAmount - NETFLIX_PRICE);
+        if (netflixProfit > 0) {
+          creditAgentWalletSafely(session.agent_id, netflixProfit).then(res => {
+            console.log(`💰 Credited agent ${session.agent_id} with +GH₵ ${netflixProfit.toFixed(2)} (Netflix profit). New balance: GH₵ ${res.balance}`);
+          }).catch(err => {
+            console.error(`❌ Failed to credit agent ${session.agent_id} for Netflix:`, err.message);
+          });
+        }
+      }
+
       const { error: netflixOrderError } = await supabase.from("orders").insert([{
         whatsapp_phone: session.phone,
         phone_number: normalizePhone(session.phone),
@@ -8770,6 +8824,8 @@ app.post("/paystack-webhook", async (req, res) => {
         payment_status: "paid",
         delivery_status: "processing",
         paid_at: paidAt,
+        agent_id: session.agent_id || null,
+        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug}]` : null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }]);
@@ -8780,10 +8836,17 @@ app.post("/paystack-webhook", async (req, res) => {
         console.log("✅ NETFLIX ORDER SAVED:", netflixRef, "| REF CODE:", refCode);
       }
 
-      await sendWhatsApp(
-        session.phone,
-        `✅ PAYMENT RECEIVED! 🎉\n\n📺 Netflix Subscription — ₵${paidAmount.toFixed(2)}\n\nYOUR REFERENCE CODE: *${refCode}*\n⚠️ Save this. It can be used only ONCE to fetch a sign-in code.\n\nSTEP 1\nSign in to Netflix with this email:\n${NETFLIX_EMAIL}\n\n• Open Netflix on your phone, TV, or laptop\n• Choose "Sign in" and enter the email above\n• Netflix will send a sign-in code to that email\n\nSTEP 2\nOnce you've done that, reply here with your reference code above (${refCode}) to get your Netflix sign-in code.\n\nFor assistance: Whatsapp 0547100951 (@stony11)`
-      );
+      if (isAgentOrder) {
+        await sendWhatsApp(
+          session.phone,
+          `✅ PAYMENT RECEIVED! 🎉\n\n🏪 Store: *${storeDisplayName}*\n📺 Netflix Subscription — ₵${paidAmount.toFixed(2)}\n\nYOUR REFERENCE CODE: *${refCode}*\n⚠️ Save this. It can be used only ONCE to fetch a sign-in code.\n\nSTEP 1\nSign in to Netflix with this email:\n${NETFLIX_EMAIL}\n\n• Open Netflix on your phone, TV, or laptop\n• Choose "Sign in" and enter the email above\n• Netflix will send a sign-in code to that email\n\nSTEP 2\nOnce you've done that, reply here with your reference code above (${refCode}) to get your Netflix sign-in code.\n\nSEND: hi / hello / start To return to menu.`
+        );
+      } else {
+        await sendWhatsApp(
+          session.phone,
+          `✅ PAYMENT RECEIVED! 🎉\n\n📺 Netflix Subscription — ₵${paidAmount.toFixed(2)}\n\nYOUR REFERENCE CODE: *${refCode}*\n⚠️ Save this. It can be used only ONCE to fetch a sign-in code.\n\nSTEP 1\nSign in to Netflix with this email:\n${NETFLIX_EMAIL}\n\n• Open Netflix on your phone, TV, or laptop\n• Choose "Sign in" and enter the email above\n• Netflix will send a sign-in code to that email\n\nSTEP 2\nOnce you've done that, reply here with your reference code above (${refCode}) to get your Netflix sign-in code.\n\nFor assistance: Whatsapp 0547100951 (@stony11)`
+        );
+      }
 
       sendAdminSms(
         `NEW NETFLIX ORDER: ₵${paidAmount.toFixed(2)} paid by ${session.phone}. Ref: ${netflixRef}. Code: ${refCode}`
