@@ -4208,6 +4208,8 @@ async function initiateMomoCharge(from, session, bundle) {
         currency: "GHS",
         reference: ref,
         metadata: {
+          channel: "whatsapp_bot",
+          source: "whatsapp_bot",
           agent_id: session.agent_id || null,
           store_name: session.agent_name || null,
           agent_slug: session.agent_slug || null,
@@ -4944,7 +4946,7 @@ app.post("/webhook", async (req, res) => {
         try {
           const { data: ords } = await supabase
             .from("orders")
-            .select("id, reference, network, capacity, amount, base_price, recipient_phone, delivery_status, status, payment_status, created_at")
+            .select("id, reference, network, capacity, amount, base_price, recipient_phone, whatsapp_phone, notes, delivery_status, status, payment_status, created_at")
             .or(`agent_id.eq.${matchedAgent.id},notes.ilike.%[agent:${matchedAgent.id}]%`)
             .order("created_at", { ascending: false })
             .limit(5);
@@ -4963,7 +4965,9 @@ app.post("/webhook", async (req, res) => {
               const profit = o.amount && o.base_price ? Math.max(0, Number(o.amount) - Number(o.base_price)) : 0;
               const deliv = (o.delivery_status || o.status || "pending").toUpperCase();
               const dateStr = o.created_at ? new Date(o.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Africa/Accra" }) : "";
-              return `${idx + 1}️⃣ *${o.network || "DATA"} ${o.capacity || ""}* (${o.recipient_phone || "Customer"})\n   💵 GH₵ ${Number(o.amount || 0).toFixed(2)} | Profit: *+GH₵ ${profit.toFixed(2)}*\n   ⏱️ ${dateStr} | Status: ${deliv === "DELIVERED" ? "✅ DELIVERED" : "⏳ " + deliv}`;
+              const isBot = Boolean(o.whatsapp_phone || (o.notes && o.notes.includes("whatsapp_bot")) || (o.reference && (o.reference.startsWith("WS-") || o.reference.startsWith("REF-"))));
+              const channelTag = isBot ? "📱 *WhatsApp Bot*" : "🌐 *Web Store*";
+              return `${idx + 1}️⃣ *${o.network || "DATA"} ${o.capacity || ""}* (${o.recipient_phone || "Customer"})\n   Channel: ${channelTag}\n   💵 GH₵ ${Number(o.amount || 0).toFixed(2)} | Net Profit: *+GH₵ ${profit.toFixed(2)}*\n   ⏱️ ${dateStr} | Status: ${deliv === "DELIVERED" ? "✅ DELIVERED" : "⏳ " + deliv}`;
             }).join("\n\n");
 
             return sendWhatsApp(
@@ -4980,17 +4984,20 @@ app.post("/webhook", async (req, res) => {
       }
 
       // 5. Store Link
-      if (/\b(link|store|storefront|my link|website|url)\b/i.test(lowerCmd)) {
+      if (/\b(link|store|storefront|my link|website|url|bot link)\b/i.test(lowerCmd)) {
+        const botUrl = `https://wa.me/233200598553?text=${encodeURIComponent(`Hi [store:${matchedAgent.store_slug}]`)}`;
         return sendWhatsApp(
           from,
-          `🔗 *YOUR OFFICIAL STOREFRONT LINK*\n` +
+          `🔗 *YOUR OFFICIAL STOREFRONT & BOT LINKS*\n` +
           `🏪 *${matchedAgent.store_name}*\n\n` +
-          `Share this link directly with your customers:\n` +
+          `🌐 *Web Storefront Link:*\n` +
           `👉 ${storefrontUrl}\n\n` +
-          `✨ *Benefits:*\n` +
-          `• Instant customer self-service with MoMo checkout\n` +
-          `• Automated bundle delivery directly to the buyer's phone\n` +
-          `• Your profit is credited to your wallet in real time!`
+          `🤖 *WhatsApp Bot Store Link:*\n` +
+          `👉 ${botUrl}\n\n` +
+          `✨ *Features:*\n` +
+          `• Zero wholesale cost leakage — customers see ONLY ${matchedAgent.store_name} and your prices\n` +
+          `• Automated MoMo payments & instant delivery\n` +
+          `• Every sale's profit is credited directly to your wallet in real time!`
         );
       }
 
@@ -8802,7 +8809,7 @@ app.post("/paystack-webhook", async (req, res) => {
         amount: paidAmount,
         base_price: baseCost,
         agent_id: session.agent_id || null,
-        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}]` : null,
+        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}] [channel:whatsapp_bot]` : `[channel:whatsapp_bot]`,
         status: mappedDeliveryStatus,
         payment_status: "paid",
         delivery_status: mappedDeliveryStatus,
