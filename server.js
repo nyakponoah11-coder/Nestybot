@@ -1002,6 +1002,152 @@ setTimeout(syncPackagesFromDatabase, 3000);
 setInterval(syncPackagesFromDatabase, 5 * 60 * 1000);
 
 /* =========================================================
+MULTI-TENANT AGENT STORE PRICING & ISOLATION ENGINE
+Allows multiple agents to share this exact WhatsApp bot number
+with 100% strict storefront isolation & zero wholesale leakage.
+========================================================= */
+const botSessions = new Map();
+
+function normalizeBotPhone(p) {
+  return String(p || "").replace(/\D/g, "");
+}
+
+async function getCustomerSession(from) {
+  const norm = normalizeBotPhone(from);
+  let sess = botSessions.get(norm) || botSessions.get(String(from)) || null;
+  if (!sess && supabase) {
+    try {
+      const { data } = await supabase.from("sessions").select("*").eq("phone", from).maybeSingle();
+      if (data) {
+        sess = data;
+        botSessions.set(norm, sess);
+        botSessions.set(String(from), sess);
+      }
+    } catch (_) { }
+  }
+  return sess;
+}
+
+async function saveCustomerSession(from, patch) {
+  const norm = normalizeBotPhone(from);
+  const current = (await getCustomerSession(from)) || { phone: String(from), step: 1 };
+  const updated = { ...current, ...patch, updated_at: new Date().toISOString() };
+  botSessions.set(norm, updated);
+  botSessions.set(String(from), updated);
+  if (supabase) {
+    try {
+      await supabase.from("sessions").upsert(updated, { onConflict: "phone" });
+    } catch (_) { }
+  }
+  return updated;
+}
+
+function resolveProductCustomPrice(p, customPrices, baseCost) {
+  if (!customPrices || typeof customPrices !== "object") {
+    const defaultMarkup = (p.price && p.price >= 20) || baseCost >= 20 ? 3.00 : 1.50;
+    return Number((baseCost + defaultMarkup).toFixed(2));
+  }
+  const net = String(p.network || "").toUpperCase().trim();
+  const cap = String(p.capacity || "").replace(/[^0-9.]/g, "").trim();
+  const netLower = net.toLowerCase();
+  const candidateKeys = [];
+  if (p.id) candidateKeys.push(p.id);
+  candidateKeys.push(`p-${netLower}-${cap}`, `${netLower}-${cap}`, `${netLower}_${cap}`, `${netLower}-${cap}gb`, `${netLower}_${cap}gb`);
+  if (net === "TELECEL" || net.includes("TEL") || net.includes("VODAFONE")) {
+    candidateKeys.push(`p-tel-${cap}`, `p-telecel-${cap}`, `tel-${cap}`, `tel_${cap}`, `telecel-${cap}`, `telecel_${cap}`);
+  } else if (net === "AT" || net.includes("AIRTEL") || net.includes("TIGO")) {
+    candidateKeys.push(`p-at-${cap}`, `p-airteltigo-${cap}`, `at-${cap}`, `at_${cap}`, `airteltigo-${cap}`, `airteltigo_${cap}`);
+  } else if (net === "MTN") {
+    candidateKeys.push(`p-mtn-${cap}`, `mtn-${cap}`, `mtn_${cap}`, `mtn-${cap}gb`, `mtn_${cap}gb`);
+  }
+  for (const k of candidateKeys) {
+    if (k && customPrices[k] !== undefined && customPrices[k] !== null && customPrices[k] !== "") {
+      const val = Number(customPrices[k]);
+      if (!isNaN(val) && val > 0) return Number(val.toFixed(2));
+    }
+  }
+  const defaultMarkup = (p.price && p.price >= 20) || baseCost >= 20 ? 3.00 : 1.50;
+  return Number((baseCost + defaultMarkup).toFixed(2));
+}
+
+function resolveServiceCustomPrice(serviceKey, customPrices, fallbackDefault) {
+  if (!customPrices || typeof customPrices !== "object") return fallbackDefault;
+  const keyMap = {
+    netflix: ["service-netflix", "netflix", "service_netflix", "netflix_1month", "netflix-1month"],
+    afa: ["service-afa", "afa", "service_afa", "afa_registration", "afa-registration"],
+    mashup: ["service-mashup", "mashup", "service_mashup", "mtn_mashup", "mtn-mashup"],
+    waec: ["checker-waec", "waec", "checker_waec", "wassce", "waec_checker", "waec-checker"],
+    bece: ["checker-bece", "bece", "checker_bece", "bece_checker", "bece-checker"],
+  };
+  const cleanKey = serviceKey.toLowerCase().replace(/^(service|checker)[-_]/, "");
+  const aliases = keyMap[cleanKey] || [serviceKey, cleanKey];
+  for (const k of aliases) {
+    if (customPrices[k] !== undefined && customPrices[k] !== null && customPrices[k] !== "") {
+      const val = Number(customPrices[k]);
+      if (!isNaN(val) && val > 0) return Number(val.toFixed(2));
+    }
+  }
+  return fallbackDefault;
+}
+
+function getPackagesForSession(session) {
+  if (!session?.agent_id || !session?.custom_prices) {
+    return PACKAGES;
+  }
+  const customPrices = session.custom_prices;
+  const customPackages = { MTN: {}, AIRTELTIGO: {}, TELECEL: {} };
+  for (const net of ["MTN", "AIRTELTIGO", "TELECEL"]) {
+    const netPkgs = PACKAGES[net] || {};
+    customPackages[net] = {};
+    for (const [opt, pkg] of Object.entries(netPkgs)) {
+      const sellingPrice = resolveProductCustomPrice(
+        { network: net, capacity: pkg.capacity, id: pkg.productId },
+        customPrices,
+        pkg.price
+      );
+      customPackages[net][opt] = {
+        ...pkg,
+        base_price: pkg.price,
+        price: sellingPrice
+      };
+    }
+  }
+  return customPackages;
+}
+
+function getMenusForSession(session) {
+  if (!session?.agent_id) {
+    return {
+      MENU: MENU,
+      MENUS: MENUS
+    };
+  }
+  const pkgs = getPackagesForSession(session);
+  const storeName = session.agent_name || "Agent Store";
+  const storeSlug = session.agent_slug || "";
+  const storeUrl = storeSlug ? `${STORE_FRONTEND_URL}/s/${storeSlug}` : STORE_FRONTEND_URL;
+
+  const agentMenu = `🏪 Welcome to *${storeName}*! 📶\n🌐 Store Link: ${storeUrl}\n\n1 - MTN Data\n2 - AirtelTigo Data\n3 - Telecel Data\n4 - Track Order\n\nChoose an option to continue`;
+
+  const buildSubMenu = (netTitle, netKey) => {
+    const netPkgs = pkgs[netKey] || {};
+    const lines = Object.entries(netPkgs).map(([opt, p]) => `${opt} - ${p.capacity}GB ₵${p.price.toFixed(2)}`);
+    return `${netTitle}:\n` + lines.join("\n") + `\n\nChoose an option to continue`;
+  };
+
+  const agentMenus = {
+    MTN: buildSubMenu(`MTN Bundles (Non-Expiry) — ${storeName}`, "MTN"),
+    AIRTELTIGO: buildSubMenu(`AirtelTigo / AT Bundles — ${storeName}`, "AIRTELTIGO"),
+    TELECEL: buildSubMenu(`Telecel Bundles — ${storeName}`, "TELECEL")
+  };
+
+  return {
+    MENU: agentMenu,
+    MENUS: agentMenus
+  };
+}
+
+/* =========================================================
 SEND WHATSAPP
 ========================================================= */
 
@@ -1562,7 +1708,38 @@ async function fetchLiveDatabaseKnowledge() {
  * Directly answers queries asking to "pull" information from the site and database
  * with clean, structured, non-evasive data.
  */
-async function handleDirectDataPull(rawText, from, isOwner = false) {
+async function handleDirectDataPull(rawText, from, isOwner = false, session = null) {
+  if (!session) {
+    session = await getCustomerSession(from);
+  }
+
+  // If customer belongs to an agent store, present ONLY the agent's store catalog & pricing!
+  if (session?.agent_id && !isOwner) {
+    const pkgs = getPackagesForSession(session);
+    const storeName = session.agent_name || "Agent Store";
+    const storeSlug = session.agent_slug || "";
+    const storeUrl = storeSlug ? `${STORE_FRONTEND_URL}/s/${storeSlug}` : STORE_FRONTEND_URL;
+
+    let reply = `📦 *${storeName.toUpperCase()} — LIVE CATALOG & PRICES*\n\n`;
+
+    const mtnLines = Object.values(pkgs.MTN || {}).map(p => `• ${p.capacity}GB: *GH₵ ${Number(p.price).toFixed(2)}*`);
+    if (mtnLines.length > 0) {
+      reply += `🟡 *MTN NON-EXPIRY BUNDLES:*\n${mtnLines.join("\n")}\n\n`;
+    }
+
+    const telLines = Object.values(pkgs.TELECEL || {}).map(p => `• ${p.capacity}GB: *GH₵ ${Number(p.price).toFixed(2)}*`);
+    if (telLines.length > 0) {
+      reply += `🔴 *TELECEL SPECIAL BUNDLES:*\n${telLines.join("\n")}\n\n`;
+    }
+
+    const atLines = Object.values(pkgs.AIRTELTIGO || {}).map(p => `• ${p.capacity}GB: *GH₵ ${Number(p.price).toFixed(2)}*`);
+    if (atLines.length > 0) {
+      reply += `🔵 *AIRTELTIGO (AT) BIG TIME:*\n${atLines.join("\n")}\n\n`;
+    }
+
+    reply += `🌐 *Shop Online:* ${storeUrl}\n\n💬 _Reply *Hi* anytime to order on WhatsApp!_`;
+    return reply;
+  }
   const text = String(rawText || "").trim();
   const lower = text.toLowerCase();
 
@@ -3988,6 +4165,8 @@ INITIATE DIRECT MOBILE MONEY CHARGE
 ========================================================= */
 
 async function initiateMomoCharge(from, session, bundle) {
+  const sessionPackages = getPackagesForSession(session);
+  const effectiveBundle = (sessionPackages[session.network] && sessionPackages[session.network][session.bundle]) || bundle;
   const ref = "REF-" + Date.now();
   const provider = getMomoProvider(session.momo_number, session.network);
 
@@ -3996,7 +4175,9 @@ async function initiateMomoCharge(from, session, bundle) {
     momo_number: session.momo_number,
     network: session.network,
     detected_provider: provider,
-    price: bundle.price,
+    price: effectiveBundle.price,
+    agent_id: session.agent_id || null,
+    store_name: session.agent_name || null,
     ref
   });
 
@@ -4005,9 +4186,17 @@ async function initiateMomoCharge(from, session, bundle) {
       "https://api.paystack.co/charge",
       {
         email: `${from}@test.com`,
-        amount: Math.round(bundle.price * 100),
+        amount: Math.round(effectiveBundle.price * 100),
         currency: "GHS",
         reference: ref,
+        metadata: {
+          agent_id: session.agent_id || null,
+          store_name: session.agent_name || null,
+          agent_slug: session.agent_slug || null,
+          recipient_phone: session.phone_number,
+          network: session.network,
+          capacity: effectiveBundle.capacity
+        },
         mobile_money: {
           phone: session.momo_number,
           provider
@@ -4445,15 +4634,27 @@ CUSTOMER STONY AI HANDLER (KNOWLEDGE BASE & MULTI-MODEL)
 async function handleCustomerAi(from, rawText) {
   const text = String(rawText || "").trim();
   const lower = text.toLowerCase();
+  const session = await getCustomerSession(from);
 
   // 0. Direct Live Data Pull from Site & Database (Prices, Catalog, Orders, Services)
-  const directPull = await handleDirectDataPull(text, from, false);
+  const directPull = await handleDirectDataPull(text, from, false, session);
   if (directPull) {
     return sendWhatsApp(from, directPull);
   }
 
   // 1. Direct Storefront & App Links Intent
   if (/\b(link|store|website|shop|site|online|web|front\s*end|frontend)\b/i.test(lower)) {
+    if (session?.agent_id) {
+      const storeSlug = session.agent_slug || "";
+      const storeUrl = storeSlug ? `${STORE_FRONTEND_URL}/s/${storeSlug}` : STORE_FRONTEND_URL;
+      return sendWhatsApp(
+        from,
+        `🌐 *${(session.agent_name || "AGENT STORE").toUpperCase()}*\n\n` +
+        `Browse and order data bundles directly from our official store:\n` +
+        `👉 *Store Link:* ${storeUrl}\n\n` +
+        `Or reply *Hi* to view the menu right here on WhatsApp:\n1 - MTN Data\n2 - AirtelTigo Data\n3 - Telecel Data\n4 - Track Order`
+      );
+    }
     return sendWhatsApp(
       from,
       `🌐 *DATA 1 GH STOREFRONT*\n\n` +
@@ -4510,34 +4711,57 @@ async function handleCustomerAi(from, rawText) {
 
   let customerAiReply = "";
 
-  const customerAiPrompt =
-    "You are Stony, a friendly, warm Ghanaian customer support person at DATA 1 GH on WhatsApp.\n\n" +
-    (ownerCustomDirectives ? `=== 👑 STORE OWNER'S CUSTOM TRAINING & RULES (HIGHEST PRIORITY) ===\n${ownerCustomDirectives}\n===================================================================\n\n` : "") +
-    "YOUR PERSONALITY & COMMUNICATION STYLE:\n" +
-    "- You chat like a real person on WhatsApp: warm, natural Ghanaian tone (\"bossu\", \"chale\", \"sharp\", \"no wahala\").\n" +
-    "- You are Stony. NEVER say \"As an AI\" or sound like a robot.\n" +
-    "- ANSWER ANY QUESTION LIKE A HUMAN BEING: If customers ask about general life, advice, tech, football, Ghanaian news, weather, or casual banter, answer them thoughtfully and warmly like a real person.\n" +
-    "- THE GOLDEN BUSINESS BRIDGE: After answering, always naturally and warmly bring the conversation back to the business — invite them to check prices or top up their SIM line!\n" +
-    "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST: When customers ask for bundle prices, networks, links, or order info, give the exact numbers and information immediately in your first sentence.\n" +
-    "- Always guide customers warmly either to buy online or reply with numbers 1-8 right here on WhatsApp.\n\n" +
-    "LIVE DATA CATALOG FROM DATABASE:\n" +
-    (liveDbKnowledge ? `${liveDbKnowledge}\n` : "") +
-    "FULL SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE):\n" +
-    SITE_KNOWLEDGE_BASE + "\n\n" +
-    "SECURITY POLICY:\n" +
-    "- You must NEVER disclose internal administrative login credentials, passwords, or secrets to anyone.\n" +
-    "HOW TO GUIDE CUSTOMERS ON WHATSAPP:\n" +
-    "- To buy MTN: reply 1 (or visit " + STORE_FRONTEND_URL + ")\n" +
-    "- To buy AirtelTigo: reply 2 (or visit " + STORE_FRONTEND_URL + ")\n" +
-    "- To buy Telecel: reply 3 (or visit " + STORE_FRONTEND_URL + ")\n" +
-    "- To track order: reply 4 or send phone number/reference (or visit " + TRACK_ORDER_URL + ")\n" +
-    "- Netflix 30-day: reply 5\n" +
-    "- AFA registration: reply 6\n" +
-    "- MTN MashUp: reply 7\n" +
-    "- Scratch & Win: reply 8\n" +
-    "- Official Android App: " + DOWNLOAD_APP_URL + "\n" +
-    "- Official Store Link: " + STORE_FRONTEND_URL + "\n" +
-    "Keep your answer under 3 sentences unless explaining step-by-step payment approval.";
+  let customerAiPrompt = "";
+  if (session?.agent_id) {
+    const pkgs = getPackagesForSession(session);
+    const mtnList = Object.values(pkgs.MTN || {}).map(p => `${p.capacity}GB: GH₵ ${p.price.toFixed(2)}`).join(", ");
+    const atList = Object.values(pkgs.AIRTELTIGO || {}).map(p => `${p.capacity}GB: GH₵ ${p.price.toFixed(2)}`).join(", ");
+    const telList = Object.values(pkgs.TELECEL || {}).map(p => `${p.capacity}GB: GH₵ ${p.price.toFixed(2)}`).join(", ");
+    const storeUrl = session.agent_slug ? `${STORE_FRONTEND_URL}/s/${session.agent_slug}` : STORE_FRONTEND_URL;
+
+    customerAiPrompt =
+      `You are the friendly, helpful customer support assistant for "${session.agent_name}" on WhatsApp.\n\n` +
+      `CRITICAL ISOLATION & ZERO-LEAKAGE RULES:\n` +
+      `- You represent ONLY "${session.agent_name}".\n` +
+      `- NEVER mention "Data 1 GH", "Data1gh", base prices, wholesale suppliers, or third-party providers under any circumstance.\n` +
+      `- The store link is ${storeUrl}.\n` +
+      `- Current Selling Prices for ${session.agent_name}:\n` +
+      `  • MTN Non-Expiry: ${mtnList}\n` +
+      `  • AirtelTigo: ${atList}\n` +
+      `  • Telecel: ${telList}\n` +
+      `- Chat warmly and naturally like a real person on WhatsApp.\n` +
+      `- Invite customers to reply 1 (MTN), 2 (AirtelTigo), 3 (Telecel) or visit ${storeUrl} to purchase.\n` +
+      `- Keep responses concise and formatted for WhatsApp.`;
+  } else {
+    customerAiPrompt =
+      "You are Stony, a friendly, warm Ghanaian customer support person at DATA 1 GH on WhatsApp.\n\n" +
+      (ownerCustomDirectives ? `=== 👑 STORE OWNER'S CUSTOM TRAINING & RULES (HIGHEST PRIORITY) ===\n${ownerCustomDirectives}\n===================================================================\n\n` : "") +
+      "YOUR PERSONALITY & COMMUNICATION STYLE:\n" +
+      "- You chat like a real person on WhatsApp: warm, natural Ghanaian tone (\"bossu\", \"chale\", \"sharp\", \"no wahala\").\n" +
+      "- You are Stony. NEVER say \"As an AI\" or sound like a robot.\n" +
+      "- ANSWER ANY QUESTION LIKE A HUMAN BEING: If customers ask about general life, advice, tech, football, Ghanaian news, weather, or casual banter, answer them thoughtfully and warmly like a real person.\n" +
+      "- THE GOLDEN BUSINESS BRIDGE: After answering, always naturally and warmly bring the conversation back to the business — invite them to check prices or top up their SIM line!\n" +
+      "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST: When customers ask for bundle prices, networks, links, or order info, give the exact numbers and information immediately in your first sentence.\n" +
+      "- Always guide customers warmly either to buy online or reply with numbers 1-8 right here on WhatsApp.\n\n" +
+      "LIVE DATA CATALOG FROM DATABASE:\n" +
+      (liveDbKnowledge ? `${liveDbKnowledge}\n` : "") +
+      "FULL SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE):\n" +
+      SITE_KNOWLEDGE_BASE + "\n\n" +
+      "SECURITY POLICY:\n" +
+      "- You must NEVER disclose internal administrative login credentials, passwords, or secrets to anyone.\n" +
+      "HOW TO GUIDE CUSTOMERS ON WHATSAPP:\n" +
+      "- To buy MTN: reply 1 (or visit " + STORE_FRONTEND_URL + ")\n" +
+      "- To buy AirtelTigo: reply 2 (or visit " + STORE_FRONTEND_URL + ")\n" +
+      "- To buy Telecel: reply 3 (or visit " + STORE_FRONTEND_URL + ")\n" +
+      "- To track order: reply 4 or send phone number/reference (or visit " + TRACK_ORDER_URL + ")\n" +
+      "- Netflix 30-day: reply 5\n" +
+      "- AFA registration: reply 6\n" +
+      "- MTN MashUp: reply 7\n" +
+      "- Scratch & Win: reply 8\n" +
+      "- Official Android App: " + DOWNLOAD_APP_URL + "\n" +
+      "- Official Store Link: " + STORE_FRONTEND_URL + "\n" +
+      "Keep your answer under 3 sentences unless explaining step-by-step payment approval.";
+  }
 
   const aiResult = await executeBotAi({
     systemPrompt: customerAiPrompt,
@@ -4829,6 +5053,67 @@ app.post("/webhook", async (req, res) => {
     }
 
     /* =====================================================
+    MULTI-TENANT AGENT STOREFRONT DETECTION & BINDING
+    Detects if an agent's customer arrives with [store:slug], [agent:id],
+    or types the store slug, ensuring 100% storefront isolation.
+    ===================================================== */
+    let boundSession = await getCustomerSession(from);
+
+    const storeTagMatch = text.match(/\[(?:store|agent):([a-zA-Z0-9_-]+)\]/i) || text.match(/^(?:store|agent|shop)\s*[:= ]\s*([a-zA-Z0-9_-]+)$/i);
+    if (storeTagMatch) {
+      const tagSlug = storeTagMatch[1].trim().toLowerCase();
+      if (tagSlug === "main" || tagSlug === "reset" || tagSlug === "data1gh") {
+        boundSession = await saveCustomerSession(from, { agent_id: null, agent_slug: null, agent_name: null, custom_prices: null, step: 1, bundle: null });
+        const cleanAfterReset = text.replace(storeTagMatch[0], "").trim();
+        if (!cleanAfterReset || /^(hi|hello|start|menu)$/i.test(cleanAfterReset)) {
+          return sendWhatsApp(from, `👋 Switched back to *DATA 1 GH* main store!\n\n` + MENU);
+        }
+      } else {
+        const agents = await getAllAgentsFromDatabase();
+        const matched = agents.find(a =>
+          (a.store_slug && a.store_slug.toLowerCase() === tagSlug) ||
+          (a.id && a.id.toLowerCase() === tagSlug)
+        );
+        if (matched) {
+          boundSession = await saveCustomerSession(from, {
+            agent_id: matched.id,
+            agent_slug: matched.store_slug,
+            agent_name: matched.store_name,
+            custom_prices: matched.custom_prices || {},
+            step: 1,
+            bundle: null
+          });
+          const cleanAfterTag = text.replace(storeTagMatch[0], "").trim();
+          if (!cleanAfterTag || /^(hi|hello|start|menu|hey)$/i.test(cleanAfterTag)) {
+            const { MENU: agentMenu } = getMenusForSession(boundSession);
+            return sendWhatsApp(from, agentMenu);
+          }
+        }
+      }
+    }
+
+    // Direct store slug message (e.g., customer just sends "mayor-cheap-data")
+    if (!isOwner && !matchedAgent && /^[a-z0-9_-]{3,35}$/i.test(text.trim())) {
+      const possibleSlug = text.trim().toLowerCase();
+      if (!/^(menu|help|hi|hello|start|stony|track|admin|dashboard|orders|balance)$/i.test(possibleSlug)) {
+        const agents = await getAllAgentsFromDatabase();
+        const slugMatched = agents.find(a => a.store_slug && a.store_slug.toLowerCase() === possibleSlug);
+        if (slugMatched) {
+          boundSession = await saveCustomerSession(from, {
+            agent_id: slugMatched.id,
+            agent_slug: slugMatched.store_slug,
+            agent_name: slugMatched.store_name,
+            custom_prices: slugMatched.custom_prices || {},
+            step: 1,
+            bundle: null
+          });
+          const { MENU: agentMenu } = getMenusForSession(boundSession);
+          return sendWhatsApp(from, agentMenu);
+        }
+      }
+    }
+
+    /* =====================================================
     MODE BREAKDOWN (BOT MENU MODE vs STONY AI MODE)
     - "Hi" / "Hello" / "Start" / "Menu" / "Bot" -> Enter BOT MODE (shows MENU)
     - "Stony" / "AI" / "AI Mode" -> Enter STONY AI MODE
@@ -4840,11 +5125,12 @@ app.post("/webhook", async (req, res) => {
     // 1. SWITCH TO BOT MODE (Shows Menu)
     if (isHi) {
       setUserMode(from, "bot");
-      await supabase.from("sessions").upsert({ phone: String(from), step: 1, bundle: null }, { onConflict: "phone" });
+      const savedSess = await saveCustomerSession(from, { step: 1, bundle: null });
       if (isOwner) {
         await clearOwnerPendingAction(from);
       }
-      return sendWhatsApp(from, MENU);
+      const { MENU: activeMenu } = getMenusForSession(savedSess);
+      return sendWhatsApp(from, activeMenu);
     }
 
     // 2. SWITCH TO STONY AI MODE
@@ -6989,27 +7275,23 @@ app.post("/webhook", async (req, res) => {
       return sendWhatsApp(from, aiReply);
     }
 
-    let { data: session } = await supabase
-      .from("sessions")
-      .select("*")
-      .eq("phone", from)
-      .maybeSingle();
+    let session = await getCustomerSession(from);
 
     /* =====================================================
     CREATE SESSION
     ===================================================== */
 
     if (!session) {
-      session = { phone: String(from), step: 1 };
-      await supabase.from("sessions").upsert(session, { onConflict: "phone" });
+      session = await saveCustomerSession(from, { step: 1 });
       if (!/^[1-8]$/.test(text.trim())) {
-        return sendWhatsApp(from, MENU);
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, activeMenu);
       }
     }
 
     if (!session.step) {
       session.step = 1;
-      await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
+      await saveCustomerSession(from, { step: 1 });
     }
 
     // Direct AI mode handling for non-owner customers
@@ -7045,38 +7327,41 @@ app.post("/webhook", async (req, res) => {
       } else if (text === "3") {
         network = "TELECEL";
       } else if (text === "4") {
-        await supabase.from("sessions").update({ step: 6 }).eq("phone", from);
-        return sendWhatsApp(from, `📦 TRACK YOUR ORDER\n\nPlease enter the phone number used when you purchased your data.\n\nExample:\n0241234567`);
+        await saveCustomerSession(from, { step: 6 });
+        return sendWhatsApp(from, `📦 TRACK YOUR ORDER\n\nPlease enter the phone number or order reference used when you purchased your data.\n\nExample:\n0241234567 or WS-123456`);
       } else if (text === "5") {
-        await supabase.from("sessions").update({
+        const netflixCost = resolveServiceCustomPrice("netflix", session.custom_prices, NETFLIX_PRICE);
+        await saveCustomerSession(from, {
           step: 50,
-          bundle: JSON.stringify({ type: "netflix" }),
+          bundle: JSON.stringify({ type: "netflix", price: netflixCost }),
           momo_number: null,
           phone_number: null
-        }).eq("phone", from);
+        });
 
-        return sendWhatsApp(from, `📺 Netflix Subscription — ₵${NETFLIX_PRICE}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
+        return sendWhatsApp(from, `📺 Netflix Subscription — ₵${netflixCost.toFixed(2)}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
       } else if (text === "6") {
-        await supabase.from("sessions").update({
+        const afaCost = resolveServiceCustomPrice("afa", session.custom_prices, AFA_PRICE);
+        await saveCustomerSession(from, {
           step: 30,
           bundle: null,
           momo_number: null,
           phone_number: null
-        }).eq("phone", from);
+        });
 
-        return sendWhatsApp(from, `🪪 AFA Registration — ₵${AFA_PRICE}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
+        return sendWhatsApp(from, `🪪 AFA Registration — ₵${afaCost.toFixed(2)}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
       } else if (text === "7") {
-        await supabase.from("sessions").update({ step: 10, network: "MASHUP" }).eq("phone", from);
+        await saveCustomerSession(from, { step: 10, network: "MASHUP" });
         return sendWhatsApp(from, `📶 MTN MashUp Bundle\n\nEnter the amount you want to pay (₵${MASHUP_MIN_AMOUNT} - ₵${MASHUP_MAX_AMOUNT}):\n\nExample: 5\n\nThe data + minutes mix you get depends on what MTN offers for that amount — this will be applied to your number manually.`);
       } else if (text === "8") {
-        await supabase.from("sessions").update({ step: 70 }).eq("phone", from);
+        await saveCustomerSession(from, { step: 70 });
         return playScratchCard(from);
       } else {
         return handleCustomerAi(from, text);
       }
 
-      await supabase.from("sessions").update({ step: 2, network }).eq("phone", from);
-      return sendWhatsApp(from, MENUS[network]);
+      await saveCustomerSession(from, { step: 2, network });
+      const { MENUS: sessionMenus } = getMenusForSession(session);
+      return sendWhatsApp(from, sessionMenus[network]);
     }
 
     /* =====================================================
@@ -7084,12 +7369,13 @@ app.post("/webhook", async (req, res) => {
     ===================================================== */
 
     if (session.step === 2) {
-      const bundle = PACKAGES[session.network]?.[text];
+      const sessionPackages = getPackagesForSession(session);
+      const bundle = sessionPackages[session.network]?.[text];
       if (!bundle) {
         return sendWhatsApp(from, "Invalid option ❌ Choose an option to continue");
       }
 
-      await supabase.from("sessions").update({ step: 3, bundle: text }).eq("phone", from);
+      await saveCustomerSession(from, { step: 3, bundle: text });
       return sendWhatsApp(from, "Enter phone number to receive the data on:");
     }
 
@@ -7143,11 +7429,13 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 15) {
       const finishConfirm = async () => {
-        const bundle = PACKAGES[session.network]?.[session.bundle];
+        const sessionPackages = getPackagesForSession(session);
+        const bundle = sessionPackages[session.network]?.[session.bundle];
         const tracker = await getDeliveryEstimate();
         const estimateMessage = buildDeliveryEstimateMessage(tracker);
-        await supabase.from("sessions").update({ step: 4 }).eq("phone", from);
-        return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n📶 Network: ${session.network}\n📦 Data: ${bundle.capacity}GB\n💰 Amount: ₵${bundle.price.toFixed(2)}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
+        await saveCustomerSession(from, { step: 4 });
+        const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+        return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n${storeHeader}📶 Network: ${session.network}\n📦 Data: ${bundle.capacity}GB\n💰 Amount: ₵${bundle.price.toFixed(2)}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
       };
 
       if (text === "2" || /^no$/i.test(text) || /^skip$/i.test(text)) {
@@ -7251,12 +7539,14 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 4) {
       if (/^no$/i.test(text)) {
-        await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
-        return sendWhatsApp(from, "❌ Cancelled\n\n" + MENU);
+        await saveCustomerSession(from, { step: 1 });
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
       }
 
       if (/^yes$/i.test(text)) {
-        const bundle = PACKAGES[session.network][session.bundle];
+        const sessionPackages = getPackagesForSession(session);
+        const bundle = sessionPackages[session.network][session.bundle];
         return initiateMomoCharge(from, session, bundle);
       }
 
@@ -8478,6 +8768,9 @@ app.post("/paystack-webhook", async (req, res) => {
     }
     const finalOrderStatus = datamartSuccess ? mappedRawStatus : "pending_manual";
 
+    const baseBundle = PACKAGES[session.network]?.[session.bundle];
+    const baseCost = baseBundle ? baseBundle.price : null;
+
     try {
       const { error: orderError } = await supabase.from("orders").insert([{
         whatsapp_phone: session.phone,
@@ -8488,6 +8781,9 @@ app.post("/paystack-webhook", async (req, res) => {
         bundle: session.bundle,
         capacity: String(bundle.capacity),
         amount: paidAmount,
+        base_price: baseCost,
+        agent_id: session.agent_id || null,
+        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}]` : null,
         status: mappedDeliveryStatus,
         payment_status: "paid",
         delivery_status: mappedDeliveryStatus,
@@ -8498,6 +8794,18 @@ app.post("/paystack-webhook", async (req, res) => {
         updated_at: datamartData.updatedAt || new Date().toISOString(),
         campaign_code: session.scratch_order_opt_in ? session.scratch_code : null
       }]);
+
+      // Automatically credit profit to Agent's wallet!
+      if (session.agent_id && baseCost) {
+        const profit = Math.max(0, Number((paidAmount - baseCost).toFixed(2)));
+        if (profit > 0) {
+          creditAgentWalletSafely(session.agent_id, profit).then(res => {
+            console.log(`💰 Credited agent ${session.agent_id} with +GH₵ ${profit.toFixed(2)} from WhatsApp store sale!`);
+          }).catch(err => {
+            console.warn("Error crediting agent wallet:", err.message);
+          });
+        }
+      }
 
       if (orderError) {
         console.error("❌ ORDER SAVE ERROR:", orderError);
@@ -8526,14 +8834,29 @@ app.post("/paystack-webhook", async (req, res) => {
     const estimateMessage = buildDeliveryEstimateMessage(tracker);
 
     if (datamartSuccess) {
-      if (mappedDeliveryStatus === "delivered") {
-        let successMessage = `✅ ORDER DELIVERED! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Number: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\nYour data has landed! 📶\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To buy again.`;
-        await sendWhatsApp(session.phone, successMessage);
-        recordWebhookLog("CUSTOMER_NOTIFIED_DELIVERED", { phone: session.phone });
+      const isAgentOrder = Boolean(session.agent_id);
+      const storeDisplayName = session.agent_name || "Data Store";
+
+      if (isAgentOrder) {
+        if (mappedDeliveryStatus === "delivered") {
+          let successMessage = `✅ ORDER DELIVERED! 🎉\n\n🏪 Store: *${storeDisplayName}*\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Number: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\nYour data has landed! 📶\n\nSEND: hi / hello / start To buy again.`;
+          await sendWhatsApp(session.phone, successMessage);
+          recordWebhookLog("CUSTOMER_NOTIFIED_DELIVERED", { phone: session.phone });
+        } else {
+          let inProgressMessage = `✅ PAYMENT RECEIVED! 🎉\n\n🏪 Store: *${storeDisplayName}*\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Delivery to: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\n${estimateMessage}\n\nYour order has been dispatched and is currently in progress. It will land shortly!\n\nSEND: hi / hello / start To return to main menu.`;
+          await sendWhatsApp(session.phone, inProgressMessage);
+          recordWebhookLog("CUSTOMER_NOTIFIED_IN_PROGRESS", { phone: session.phone });
+        }
       } else {
-        let inProgressMessage = `✅ PAYMENT RECEIVED! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Delivery to: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\n${estimateMessage}\n\nYour order has been dispatched and is currently in progress. It will land shortly!\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To return to main menu.`;
-        await sendWhatsApp(session.phone, inProgressMessage);
-        recordWebhookLog("CUSTOMER_NOTIFIED_IN_PROGRESS", { phone: session.phone });
+        if (mappedDeliveryStatus === "delivered") {
+          let successMessage = `✅ ORDER DELIVERED! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Number: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\nYour data has landed! 📶\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To buy again.`;
+          await sendWhatsApp(session.phone, successMessage);
+          recordWebhookLog("CUSTOMER_NOTIFIED_DELIVERED", { phone: session.phone });
+        } else {
+          let inProgressMessage = `✅ PAYMENT RECEIVED! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Delivery to: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\n${estimateMessage}\n\nYour order has been dispatched and is currently in progress. It will land shortly!\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To return to main menu.`;
+          await sendWhatsApp(session.phone, inProgressMessage);
+          recordWebhookLog("CUSTOMER_NOTIFIED_IN_PROGRESS", { phone: session.phone });
+        }
       }
 
       sendAdminSms(
