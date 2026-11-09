@@ -5310,20 +5310,29 @@ app.post("/webhook", async (req, res) => {
       currentSession = baseSession;
     }
 
-    const activeMode = getUserMode(from, currentSession);
     const isInBotCheckoutStep = Boolean(currentSession && currentSession.step > 1 && currentSession.step < 99);
+    if (isInBotCheckoutStep) {
+      setUserMode(from, "bot");
+    }
+    const activeMode = isInBotCheckoutStep ? "bot" : getUserMode(from, currentSession);
 
-    // If Owner is messaging, Owner Co-Pilot ALWAYS takes precedence unless the owner specifically entered a digit 1-8 to test customer menus OR is testing an agent store
+    // If Owner is messaging:
+    // When owner is in active checkout (testing buying bundles, entering phone/momo numbers),
+    // let them complete checkout! Only switch to Owner AI if they explicitly message "stony", "admin", "owner", "exit", "cancel", "reset", or prefix with "stony ".
+    const isOwnerExplicitAiCommand = startsWithStony || /^(stony|admin|owner|exit|cancel|reset)$/i.test(text.trim());
     const ownerTestingMenuDigit = isOwner && isMainMenuNumber;
-    const shouldEnterOwnerAi = isOwner && !hasAgent && !ownerTestingMenuDigit && (activeMode === "ai" || startsWithStony || !/^(menu|customer)$/i.test(text.trim()));
+    const shouldEnterOwnerAi = isOwner && !hasAgent && (
+      isOwnerExplicitAiCommand ||
+      (!isInBotCheckoutStep && !ownerTestingMenuDigit && (activeMode === "ai" || !/^(menu|customer)$/i.test(text.trim())))
+    );
 
     /* =====================================================
     STONY OWNER AI — Personal Business Assistant & Co-Pilot
     Active whenever user is Owner (or mode is 'ai' / started with Stony)
     ===================================================== */
     if (shouldEnterOwnerAi) {
-      // Auto-clear any stuck customer checkout step for owner so they are NEVER blocked
-      if (isInBotCheckoutStep) {
+      // Auto-clear any customer checkout step for owner when explicitly switching to AI mode
+      if (isInBotCheckoutStep && isOwnerExplicitAiCommand) {
         try {
           await saveCustomerSession(from, { step: 99, bundle: null });
         } catch (_) { }
@@ -7425,8 +7434,9 @@ app.post("/webhook", async (req, res) => {
       await saveCustomerSession(from, { step: 1 });
     }
 
-    // Direct AI mode handling for non-owner customers
-    if ((activeMode === "ai" || session.step === 99) && !/^[1-8]$/.test(text.trim())) {
+    // Direct AI mode handling for non-owner customers (never interrupt active checkout)
+    const inCheckout = Boolean(session && session.step > 1 && session.step < 99);
+    if (!inCheckout && (activeMode === "ai" || session.step === 99) && !/^[1-8]$/.test(text.trim())) {
       return handleCustomerAi(from, effectiveText || text);
     }
     if (session.step === 99 && /^[1-8]$/.test(text.trim())) {
