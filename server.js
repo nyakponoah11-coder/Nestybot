@@ -6157,19 +6157,20 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // Direct response if owner asks about store links or front end / admin links or data1gh.vercel.app
+      // Direct response if owner asks about store links, front end, admin links, or main site
       if (
-        /(\b(store\s*link|front\s*end|frontend|admin\s*link|site\s*link|website\s*link)\b|data1gh\.vercel\.app)/i.test(text) ||
+        /(\b(store\s*link|front\s*end|frontend|admin\s*link|site\s*link|website\s*link|main\s*store)\b|data1gh\.com|data1gh\.vercel\.app)/i.test(text) ||
         (/\b(link|links)\b/i.test(text) && /\b(store|admin|front|site|shop)\b/i.test(text))
       ) {
         return sendWhatsApp(
           from,
-          `Bossu, here are both links ready for you:\n\n` +
-          `🌐 *Storefront (Customer Shop):* ${STORE_FRONTEND_URL}\n` +
-          `👑 *Admin Portal (Dashboard):* ${ADMIN_DASHBOARD_URL}\n` +
-          `📱 *Android App Download:* ${DOWNLOAD_APP_URL}\n` +
-          `📦 *Live Order Tracking:* ${TRACK_ORDER_URL}\n` +
-          `⚡ *Other Services:* ${SERVICES_URL}\n\n` +
+          `Bossu, here are your official platform links ready:\n\n` +
+          `🌐 *Main Storefront (Customer Shop):* https://www.data1gh.com\n` +
+          `👑 *Admin Portal (Dashboard):* https://www.data1gh.com/admin\n` +
+          `📱 *Android App Download:* https://www.data1gh.com/download-app\n` +
+          `📦 *Live Order Tracking:* https://www.data1gh.com/track\n` +
+          `⚡ *Other Services:* ${SERVICES_URL}\n` +
+          `🤝 *Agent Stores Portal:* https://gooddata1.vercel.app\n\n` +
           `AI Mode on WhatsApp has full knowledge of EVERYTHING FROM THE SITE loaded and active (all data packages, prices, Netflix, AFA, checkers, and apps)!`
         );
       }
