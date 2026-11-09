@@ -1018,12 +1018,20 @@ async function getCustomerSession(from) {
   if (!sess && supabase) {
     try {
       const { data } = await supabase.from("sessions").select("*").eq("phone", from).maybeSingle();
-      if (data) {
-        sess = data;
-        botSessions.set(norm, sess);
-        botSessions.set(String(from), sess);
-      }
+      if (data) sess = data;
     } catch (_) { }
+    if (!sess) {
+      try {
+        const { data: setRow } = await supabase.from("settings").select("value").eq("key", `bot_sess_${norm}`).maybeSingle();
+        if (setRow?.value) {
+          sess = typeof setRow.value === "string" ? JSON.parse(setRow.value) : setRow.value;
+        }
+      } catch (_) { }
+    }
+    if (sess) {
+      botSessions.set(norm, sess);
+      botSessions.set(String(from), sess);
+    }
   }
   if (sess?.agent_id) {
     const cd = String(sess.custom_domain || "").toLowerCase();
@@ -1043,6 +1051,12 @@ async function saveCustomerSession(from, patch) {
   if (supabase) {
     try {
       await supabase.from("sessions").upsert(updated, { onConflict: "phone" });
+    } catch (_) { }
+    try {
+      await supabase.from("settings").upsert({
+        key: `bot_sess_${norm}`,
+        value: JSON.stringify(updated),
+      }, { onConflict: "key" });
     } catch (_) { }
   }
   return updated;
@@ -2011,7 +2025,22 @@ function sanitizeSecretsFromText(rawText) {
     .replace(/nyakponoah11@gmail\.com/gi, "admin@data1gh.com");
 }
 
-function generateCustomerNaturalFallback(lowerText) {
+function generateCustomerNaturalFallback(lowerText, session) {
+  if (session?.agent_id) {
+    const storeName = session.agent_name || "AGENT STORE";
+    const storeUrl = getAgentStoreUrl(session);
+    if (/\b(link|store|website|shop|site|online|web|front\s*end|frontend)\b/i.test(lowerText)) {
+      return `🌐 *${storeName.toUpperCase()}*\n\n` +
+        `Browse and order data bundles directly on our official store:\n` +
+        `👉 *Store Link:* ${storeUrl}\n\n` +
+        `Or reply *Hi* to view the menu right here on WhatsApp:\n1 - MTN Data\n2 - AirtelTigo Data\n3 - Telecel Data\n4 - Track Order`;
+    }
+    if (/\b(track|status|order)\b/i.test(lowerText)) {
+      return `📦 *ORDER TRACKING*\n\nPlease reply with your phone number or Order Reference code to track your bundle status live!`;
+    }
+    return `Hello! Welcome to *${storeName}*.\n\nReply *Hi* to see our data bundle menu, or visit our store at ${storeUrl} to order anytime!`;
+  }
+
   if (/\b(admin\s*pass|admin\s*login|password|credentials?|login\s*details|secret)\b/i.test(lowerText)) {
     return "For security reasons, administrative login credentials and passwords are strictly protected and cannot be disclosed.";
   }
@@ -4794,14 +4823,20 @@ async function handleCustomerAi(from, rawText) {
   }
 
   if (customerAiReply) {
-    customerAiReply = sanitizeSecretsFromText(customerAiReply)
-      .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony from DATA 1 GH")
-      .replace(/\bdatamart\b/gi, "DATA 1 GH");
+    if (session?.agent_id) {
+      customerAiReply = sanitizeSecretsFromText(customerAiReply)
+        .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, `I am your support assistant at ${session.agent_name || "our store"}`)
+        .replace(/\b(DATA 1 GH|Data1gh|data-ease|dataease)\b/gi, session.agent_name || "our store");
+    } else {
+      customerAiReply = sanitizeSecretsFromText(customerAiReply)
+        .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony from DATA 1 GH")
+        .replace(/\bdatamart\b/gi, "DATA 1 GH");
+    }
     return sendWhatsApp(from, customerAiReply);
   }
 
   // 4. Fallback
-  const fallbackReply = generateCustomerNaturalFallback(lower);
+  const fallbackReply = generateCustomerNaturalFallback(lower, session);
   return sendWhatsApp(from, fallbackReply);
 }
 
@@ -5096,43 +5131,49 @@ app.post("/webhook", async (req, res) => {
         const agents = await getAllAgentsFromDatabase();
         const matched = agents.find(a =>
           (a.store_slug && a.store_slug.toLowerCase() === tagSlug) ||
-          (a.id && a.id.toLowerCase() === tagSlug)
+          (a.id && a.id.toLowerCase() === tagSlug) ||
+          (a.name && a.name.toLowerCase() === tagSlug) ||
+          (a.store_name && a.store_name.toLowerCase() === tagSlug)
         );
         if (matched) {
           boundSession = await saveCustomerSession(from, {
             agent_id: matched.id,
-            agent_slug: matched.store_slug,
-            agent_name: matched.store_name,
+            agent_slug: matched.store_slug || tagSlug,
+            agent_name: matched.store_name || matched.name,
             custom_domain: matched.custom_domain || "https://gooddata1.vercel.app",
             custom_prices: matched.custom_prices || {},
             step: 1,
             bundle: null
           });
-          const cleanAfterTag = text.replace(storeTagMatch[0], "").trim();
-          if (!cleanAfterTag || /^(hi|hello|start|menu|hey)$/i.test(cleanAfterTag)) {
-            const { MENU: agentMenu } = getMenusForSession(boundSession);
-            return sendWhatsApp(from, agentMenu);
-          }
+          setUserMode(from, "bot");
+          const { MENU: agentMenu } = getMenusForSession(boundSession);
+          return sendWhatsApp(from, agentMenu);
         }
       }
     }
 
-    // Direct store slug message (e.g., customer just sends "mayor-cheap-data")
-    if (!isOwner && !matchedAgent && /^[a-z0-9_-]{3,35}$/i.test(text.trim())) {
+    // Direct store slug message (e.g., customer just sends "stony" or "mayor-cheap-data")
+    if (!matchedAgent && /^[a-z0-9_-]{2,35}$/i.test(text.trim())) {
       const possibleSlug = text.trim().toLowerCase();
-      if (!/^(menu|help|hi|hello|start|stony|track|admin|dashboard|orders|balance)$/i.test(possibleSlug)) {
+      if (!/^(menu|help|hi|hello|start|track|admin|dashboard|orders|balance|cancel)$/i.test(possibleSlug)) {
         const agents = await getAllAgentsFromDatabase();
-        const slugMatched = agents.find(a => a.store_slug && a.store_slug.toLowerCase() === possibleSlug);
+        const slugMatched = agents.find(a =>
+          (a.store_slug && a.store_slug.toLowerCase() === possibleSlug) ||
+          (a.id && a.id.toLowerCase() === possibleSlug) ||
+          (a.name && a.name.toLowerCase() === possibleSlug) ||
+          (a.store_name && a.store_name.toLowerCase() === possibleSlug)
+        );
         if (slugMatched) {
           boundSession = await saveCustomerSession(from, {
             agent_id: slugMatched.id,
-            agent_slug: slugMatched.store_slug,
-            agent_name: slugMatched.store_name,
+            agent_slug: slugMatched.store_slug || possibleSlug,
+            agent_name: slugMatched.store_name || slugMatched.name,
             custom_domain: slugMatched.custom_domain || "https://gooddata1.vercel.app",
             custom_prices: slugMatched.custom_prices || {},
             step: 1,
             bundle: null
           });
+          setUserMode(from, "bot");
           const { MENU: agentMenu } = getMenusForSession(boundSession);
           return sendWhatsApp(from, agentMenu);
         }
@@ -5148,11 +5189,21 @@ app.post("/webhook", async (req, res) => {
     const isStonySwitch = /^(stony|ai|ai mode|stony ai|switch to ai|ask stony|talk to stony|enter ai mode)$/i.test(text);
     const startsWithStony = /^stony\b/i.test(text);
 
+    let currentSession = boundSession || (await getCustomerSession(from));
+    const hasAgent = Boolean(currentSession?.agent_id);
+
+    // If owner explicitly wants to exit agent store testing mode
+    if (isOwner && /^(exit\s*store|main\s*store|switch\s*to\s*owner|owner\s*mode|leave\s*store)$/i.test(text.trim())) {
+      boundSession = await saveCustomerSession(from, { agent_id: null, agent_slug: null, agent_name: null, custom_prices: null, step: 1, bundle: null });
+      currentSession = boundSession;
+      return sendWhatsApp(from, `👑 Switched back to *DATA 1 GH Owner Mode* bossu! Reply *Hi* or ask me anything.`);
+    }
+
     // 1. SWITCH TO BOT MODE (Shows Menu)
     if (isHi) {
       setUserMode(from, "bot");
       const savedSess = await saveCustomerSession(from, { step: 1, bundle: null });
-      if (isOwner) {
+      if (isOwner && !savedSess?.agent_id) {
         await clearOwnerPendingAction(from);
       }
       const { MENU: activeMenu } = getMenusForSession(savedSess);
@@ -5162,9 +5213,9 @@ app.post("/webhook", async (req, res) => {
     // 2. SWITCH TO STONY AI MODE
     if (isStonySwitch) {
       setUserMode(from, "ai");
-      await supabase.from("sessions").upsert({ phone: String(from), step: 99 }, { onConflict: "phone" });
+      await saveCustomerSession(from, { step: 99 });
 
-      if (isOwner) {
+      if (isOwner && !hasAgent) {
         return sendWhatsApp(from,
           `🤖 *STONY AI MODE ACTIVATED (OWNER)*\n\n` +
           `Hello bossu! I'm Stony, your 24/7 AI co-pilot for DATA 1 GH 🇬🇭.\n\n` +
@@ -5180,13 +5231,14 @@ app.post("/webhook", async (req, res) => {
           `What would you like me to tackle, boss?`
         );
       } else {
+        const storeName = currentSession?.agent_name || "DATA 1 GH 🇬🇭";
+        const storeUrl = currentSession?.agent_id ? getAgentStoreUrl(currentSession) : STORE_FRONTEND_URL;
         return sendWhatsApp(from,
-          `🤖 *STONY AI MODE ACTIVATED*\n\n` +
-          `Hello! I'm Stony, your AI assistant at DATA 1 GH 🇬🇭.\n\n` +
-          `I have full knowledge of our website (${STORE_FRONTEND_URL}) and all our services. You can ask me anything about:\n` +
+          `🤖 *AI ASSISTANT ACTIVATED*\n\n` +
+          `Hello! I'm here to assist you with *${storeName}*.\n\n` +
+          `You can browse our store at ${storeUrl} or ask me anything about:\n` +
           `• Data bundle prices for MTN, AirtelTigo & Telecel\n` +
           `• How to buy online or right here on WhatsApp\n` +
-          `• Netflix subscriptions, AFA registrations & WAEC checkers\n` +
           `• Order status & troubleshooting\n\n` +
           `💡 *Switch back:* Send *Hi* or *Menu* anytime to return to Bot Menu mode.\n\n` +
           `How can I help you today?`
@@ -5198,30 +5250,24 @@ app.post("/webhook", async (req, res) => {
     let effectiveText = text;
     if (startsWithStony) {
       setUserMode(from, "ai");
-      await supabase.from("sessions").upsert({ phone: String(from), step: 99 }, { onConflict: "phone" });
+      await saveCustomerSession(from, { step: 99 });
       effectiveText = text.replace(/^stony\s*[,:]?\s*/i, "").trim() || "hello";
     }
-
-    let { data: currentSession } = await supabase
-      .from("sessions")
-      .select("*")
-      .eq("phone", from)
-      .maybeSingle();
 
     const isMainMenuNumber = /^[1-8]$/.test(text.trim());
     if (isMainMenuNumber && (!currentSession || !currentSession.step || currentSession.step === 1 || currentSession.step === 99)) {
       setUserMode(from, "bot");
       const baseSession = { ...(currentSession || {}), phone: String(from), step: 1 };
-      await supabase.from("sessions").upsert(baseSession, { onConflict: "phone" });
+      await saveCustomerSession(from, { step: 1 });
       currentSession = baseSession;
     }
 
     const activeMode = getUserMode(from, currentSession);
     const isInBotCheckoutStep = Boolean(currentSession && currentSession.step > 1 && currentSession.step < 99);
 
-    // If Owner is messaging, Owner Co-Pilot ALWAYS takes precedence unless the owner specifically entered a digit 1-8 to test customer menus
+    // If Owner is messaging, Owner Co-Pilot ALWAYS takes precedence unless the owner specifically entered a digit 1-8 to test customer menus OR is testing an agent store
     const ownerTestingMenuDigit = isOwner && isMainMenuNumber;
-    const shouldEnterOwnerAi = isOwner && !ownerTestingMenuDigit && (activeMode === "ai" || startsWithStony || !/^(menu|customer)$/i.test(text.trim()));
+    const shouldEnterOwnerAi = isOwner && !hasAgent && !ownerTestingMenuDigit && (activeMode === "ai" || startsWithStony || !/^(menu|customer)$/i.test(text.trim()));
 
     /* =====================================================
     STONY OWNER AI — Personal Business Assistant & Co-Pilot
@@ -6162,6 +6208,16 @@ app.post("/webhook", async (req, res) => {
         /(\b(store\s*link|front\s*end|frontend|admin\s*link|site\s*link|website\s*link|main\s*store)\b|data1gh\.com|data1gh\.vercel\.app)/i.test(text) ||
         (/\b(link|links)\b/i.test(text) && /\b(store|admin|front|site|shop)\b/i.test(text))
       ) {
+        if (hasAgent) {
+          const storeUrl = getAgentStoreUrl(currentSession);
+          return sendWhatsApp(
+            from,
+            `🌐 *${(currentSession?.agent_name || "AGENT STORE").toUpperCase()}*\n\n` +
+            `Browse and order data bundles directly from our official store:\n` +
+            `👉 *Store Link:* ${storeUrl}\n\n` +
+            `Or reply *Hi* to view the menu right here on WhatsApp:\n1 - MTN Data\n2 - AirtelTigo Data\n3 - Telecel Data\n4 - Track Order`
+          );
+        }
         return sendWhatsApp(
           from,
           `Bossu, here are your official platform links ready:\n\n` +
@@ -6169,7 +6225,7 @@ app.post("/webhook", async (req, res) => {
           `👑 *Admin Portal (Dashboard):* https://www.data1gh.com/admin\n` +
           `📱 *Android App Download:* https://www.data1gh.com/download-app\n` +
           `📦 *Live Order Tracking:* https://www.data1gh.com/track\n` +
-          `⚡ *Other Services:* ${SERVICES_URL}\n` +
+          `⚡ *Other Services:* https://www.data1gh.com/services\n` +
           `🤝 *Agent Stores Portal:* https://gooddata1.vercel.app\n\n` +
           `AI Mode on WhatsApp has full knowledge of EVERYTHING FROM THE SITE loaded and active (all data packages, prices, Netflix, AFA, checkers, and apps)!`
         );
@@ -7328,7 +7384,7 @@ app.post("/webhook", async (req, res) => {
     if (session.step === 99 && /^[1-8]$/.test(text.trim())) {
       session.step = 1;
       setUserMode(from, "bot");
-      await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
+      session = await saveCustomerSession(from, { step: 1 });
     }
 
     /* =====================================================
@@ -7336,8 +7392,9 @@ app.post("/webhook", async (req, res) => {
     ===================================================== */
 
     if (/^(hi|hello|start)$/i.test(text)) {
-      await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
-      return sendWhatsApp(from, MENU);
+      session = await saveCustomerSession(from, { step: 1, bundle: null });
+      const { MENU: activeMenu } = getMenusForSession(session);
+      return sendWhatsApp(from, activeMenu);
     }
 
     /* =====================================================
@@ -8890,9 +8947,17 @@ app.post("/paystack-webhook", async (req, res) => {
         `NEW DATA ORDER: ${bundle.capacity}GB ${session.network} to ${session.phone_number}. Paid: ₵${paidAmount.toFixed(2)}. Status: ${mappedDeliveryStatus === "delivered" ? "Delivered" : "In Progress"} (${orderReference})`
       ).catch(() => { });
     } else {
-      let pendingMessage = `✅ PAYMENT RECEIVED! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Data goes to: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\nYour payment has been received and your data order is currently being processed. It will be delivered to your number shortly!\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To return to main menu.`;
-      await sendWhatsApp(session.phone, pendingMessage);
-      recordWebhookLog("CUSTOMER_NOTIFIED_PENDING", { phone: session.phone });
+      const isAgentOrder = Boolean(session.agent_id);
+      const storeDisplayName = session.agent_name || "Data Store";
+      if (isAgentOrder) {
+        let pendingMessage = `✅ PAYMENT RECEIVED! 🎉\n\n🏪 Store: *${storeDisplayName}*\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Delivery to: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\nYour payment has been received and your data order is currently being processed. It will be delivered to your number shortly!\n\nSEND: hi / hello / start To return to main menu.`;
+        await sendWhatsApp(session.phone, pendingMessage);
+        recordWebhookLog("CUSTOMER_NOTIFIED_PENDING", { phone: session.phone });
+      } else {
+        let pendingMessage = `✅ PAYMENT RECEIVED! 🎉\n\n🆔 Order Reference: ${orderReference}\n📦 Data: ${bundle.capacity}GB\n📶 Network: ${session.network}\n📱 Data goes to: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n\nYour payment has been received and your data order is currently being processed. It will be delivered to your number shortly!\n\nFor assistance: Whatsapp 0547100951 (@stony11)\n\nSEND: hi / hello / start To return to main menu.`;
+        await sendWhatsApp(session.phone, pendingMessage);
+        recordWebhookLog("CUSTOMER_NOTIFIED_PENDING", { phone: session.phone });
+      }
 
       const errorString = typeof datamartErrorDetail === "object" ? JSON.stringify(datamartErrorDetail) : String(datamartErrorDetail || "Unknown API error");
       await sendAdminWhatsApp(
