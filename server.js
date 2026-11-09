@@ -8711,7 +8711,7 @@ async function runPendingPaymentWatcher() {
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
     const { data: pendingOrders } = await supabase
       .from("orders")
-      .select("id, reference, recipient_phone, network, capacity, amount, delivery_status, payment_status, datamart_reference, notes, agent_id")
+      .select("id, reference, recipient_phone, network, capacity, amount, delivery_status, payment_status, datamart_reference, supplier_status, notes, agent_id")
       .eq("payment_status", "pending")
       .gte("created_at", twoHoursAgo)
       .order("created_at", { ascending: false })
@@ -8730,23 +8730,23 @@ async function runPendingPaymentWatcher() {
             // 1. Mark paid in orders
             await supabase.from("orders").update({
               payment_status: "paid",
-              delivery_status: "processing",
-              status: "processing",
               updated_at: new Date().toISOString()
             }).eq("id", ord.id);
 
-            // 2. Trigger DataMart dispatch via website API
-            const siteEndpoint = (STORE_FRONTEND_URL || "https://gooddata1.vercel.app").replace(/\/+$/, "") + "/api/admin";
-            axios.post(siteEndpoint, {
-              action: "executeAiAction",
-              action_type: "retry_order",
-              payload: {
-                reference: ord.reference,
-                phone: ord.recipient_phone,
-                network: ord.network,
-                capacity: ord.capacity
-              }
-            }, { timeout: 6000 }).catch(() => null);
+            // 2. Trigger DataMart dispatch via website API ONLY IF not already dispatched or dispatching!
+            if (!ord.datamart_reference && ord.supplier_status !== "dispatching" && ord.delivery_status !== "delivered") {
+              const siteEndpoint = (STORE_FRONTEND_URL || "https://gooddata1.vercel.app").replace(/\/+$/, "") + "/api/admin";
+              axios.post(siteEndpoint, {
+                action: "executeAiAction",
+                action_type: "retry_order",
+                payload: {
+                  reference: ord.reference,
+                  phone: ord.recipient_phone,
+                  network: ord.network,
+                  capacity: ord.capacity
+                }
+              }, { timeout: 6000 }).catch(() => null);
+            }
           } else if (psData?.status === "failed" || psData?.status === "abandoned") {
             await supabase.from("orders").update({
               payment_status: "failed",
