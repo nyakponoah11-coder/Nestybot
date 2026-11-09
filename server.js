@@ -8474,18 +8474,27 @@ app.post("/paystack-webhook", async (req, res) => {
         let dmSuccess = false;
         let dmRef = null;
 
+        const dmHeaders = {
+          "x-api-key": DATA_API_KEY,
+          "X-Idempotency-Key": ref,
+          "Content-Type": "application/json"
+        };
+        if (process.env.DATAMART_API_SECRET || process.env.DM_API_SECRET) {
+          dmHeaders["x-api-secret"] = process.env.DATAMART_API_SECRET || process.env.DM_API_SECRET;
+        }
+
         if (DATA_API_KEY) {
           try {
             const dmRes = await axios.post(
               `${DATAMART_BASE}/purchase`,
-              { phoneNumber: phone, network: dmNetwork, capacity, gateway: "wallet", delivery: "fast" },
-              { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 }
+              { phoneNumber: phone, network: dmNetwork, capacity, gateway: "wallet", ref: ref, delivery: "fast" },
+              { headers: dmHeaders, timeout: 30000 }
             );
             const data = dmRes.data?.data || dmRes.data || {};
             dmRef = data.reference || data.orderReference || data.purchaseId || null;
             dmSuccess = true;
           } catch (dmErr) {
-            console.warn("Direct DataMart purchase error for web order:", dmErr.response?.data || dmErr.message);
+            console.warn("Direct DataMart purchase error for order:", dmErr.response?.data || dmErr.message);
           }
         }
 
@@ -8514,6 +8523,24 @@ app.post("/paystack-webhook", async (req, res) => {
           .from("orders")
           .update(orderUpdatePayload)
           .eq("id", webOrder.id);
+
+        // Credit agent wallet if applicable
+        if (webOrder.agent_id) {
+          const baseBundle = PACKAGES[webOrder.network]?.[`${capacity}GB`] || PACKAGES[webOrder.network]?.[webOrder.bundle];
+          const baseCost = baseBundle ? baseBundle.price : null;
+          if (baseCost && paidAmount > baseCost) {
+            const profit = Math.max(0, Number((paidAmount - baseCost).toFixed(2)));
+            creditAgentWalletSafely(webOrder.agent_id, profit).catch(e => console.warn("Agent credit error:", e.message));
+          }
+        }
+
+        // Notify WhatsApp user if ordered via WhatsApp bot
+        if (webOrder.whatsapp_phone) {
+          sendWhatsApp(
+            webOrder.whatsapp_phone,
+            `✅ PAYMENT RECEIVED! 🎉\n\n📦 Package: ${webOrder.capacity || capacity}GB ${webOrder.network || ""}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n📱 Recipient: ${phone}\n\nYour data has been sent and will land shortly!\n\nSEND: hi / hello / start To buy again.`
+          ).catch(() => {});
+        }
 
         // Website orders are officially alerted by the website backend (sendPaymentReceivedNotification)
         // with the full store name, payment channel, and timestamp. Suppress duplicate alert here.
