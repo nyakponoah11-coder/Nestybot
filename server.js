@@ -857,7 +857,7 @@ async function playScratchCard(from) {
   const { data: updatedScratch, error } = await supabase.from("scratch_codes").update({ scratched: true, status: "processing", prize: prize.capacity, prize_label: prize.prize, scratched_at: new Date().toISOString() }).eq("id", scratch.id).eq("scratched", false).select("*").maybeSingle();
   if (error) return sendWhatsApp(from, "❌ We could not start the scratch game. Please try again.");
   if (updatedScratch) syncScratchToStoreApi({ scratch: updatedScratch });
-  await supabase.from("sessions").update({ step: 80, scratch_prize: prize.capacity }).eq("phone", from);
+  await saveCustomerSession(from, { step: 80, scratch_prize: prize.capacity });
   return sendWhatsApp(from, `🎉 CONGRATULATIONS! 🎉\n\n🎁 YOU WON: *${prize.prize} DATA*\n\n📶 Choose the network for your FREE prize:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
 }
 
@@ -2419,6 +2419,13 @@ async function setOwnerPendingAction(phone, action) {
   } catch (err) {
     console.warn("⚠️ Failed upserting owner pendingAction:", err.message);
   }
+  try {
+    const norm = String(phone || "").replace(/\D/g, "");
+    await supabase.from("settings").upsert({
+      key: `owner_pending_${norm}`,
+      value: action ? JSON.stringify(action) : ""
+    }, { onConflict: "key" });
+  } catch (_) { }
 }
 
 async function clearOwnerPendingAction(phone) {
@@ -2439,6 +2446,12 @@ async function saveOwnerHistory(phone, historyList) {
   } catch (err) {
     console.warn("⚠️ Failed upserting owner history:", err.message);
   }
+  try {
+    await supabase.from("settings").upsert({
+      key: `owner_history_${norm}`,
+      value: JSON.stringify(historyList || [])
+    }, { onConflict: "key" });
+  } catch (_) { }
 }
 
 /* =========================================================
@@ -4267,7 +4280,7 @@ async function initiateMomoCharge(from, session, bundle) {
     console.log("MOMO CHARGE STATUS:", status, "DISPLAY TEXT:", displayText);
 
     if (status === "send_otp") {
-      await supabase.from("sessions").update({ ref, step: 9 }).eq("phone", from);
+      await saveCustomerSession(from, { ref, step: 9 });
 
       if (provider === "vod") {
         return sendWhatsApp(
@@ -4283,7 +4296,7 @@ async function initiateMomoCharge(from, session, bundle) {
     }
 
     if (status === "pay_offline" || status === "pending" || status === "success") {
-      await supabase.from("sessions").update({ ref, step: 5 }).eq("phone", from);
+      await saveCustomerSession(from, { ref, step: 5 });
 
       if (status === "success") {
         return sendWhatsApp(from, `✅ Payment received of ₵${bundle.price.toFixed(2)}! Processing your order now...`);
@@ -4319,14 +4332,14 @@ async function initiateMomoCharge(from, session, bundle) {
   const authUrl = await createPaystackCheckoutLink(from, fallbackRef, bundle.price);
 
   if (authUrl) {
-    await supabase.from("sessions").update({ ref: fallbackRef, step: 5 }).eq("phone", from);
+    await saveCustomerSession(from, { ref: fallbackRef, step: 5 });
     return sendWhatsApp(
       from,
       `💳 COMPLETE YOUR PAYMENT\n\nWe could not trigger an automatic prompt to ${session.momo_number}.\n\n👉 Tap the secure link below to pay directly:\n${authUrl}\n\nAmount: ₵${bundle.price.toFixed(2)}\nYou can pay with MTN MoMo, Telecel, AirtelTigo, or Card.\n\n⏳ Once paid, your order will be processed automatically!`
     );
   }
 
-  await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
+  await saveCustomerSession(from, { step: 1 });
   return sendWhatsApp(from, `❌ We could not start payment right now.\n\nPlease reply HI to try again.`);
 }
 
@@ -4348,7 +4361,7 @@ async function submitMomoOtp(from, session, otp) {
       }
     );
 
-    await supabase.from("sessions").update({ step: 5 }).eq("phone", from);
+    await saveCustomerSession(from, { step: 5 });
     return sendWhatsApp(from, "✅ Code received. Confirming your payment now — you'll get a message here once it's done.");
   } catch (e) {
     console.error("SUBMIT OTP ERROR:", e.response?.data || e.message);
@@ -5277,7 +5290,7 @@ app.post("/webhook", async (req, res) => {
       // Auto-clear any stuck customer checkout step for owner so they are NEVER blocked
       if (isInBotCheckoutStep) {
         try {
-          await supabase.from("sessions").update({ step: 99, bundle: null }).eq("phone", from);
+          await saveCustomerSession(from, { step: 99, bundle: null });
         } catch (_) { }
       }
       let ownerSession = currentSession;
@@ -7473,7 +7486,7 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana phone number to continue");
       }
 
-      await supabase.from("sessions").update({ phone_number: phone, step: 8 }).eq("phone", from);
+      session = await saveCustomerSession(from, { phone_number: phone, step: 8 });
       return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from:\n\n(This can be the same number or a different one)`);
     }
 
@@ -7487,17 +7500,29 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
       }
 
-      const bundle = PACKAGES[session.network][session.bundle];
-      const { error: momoUpdateError } = await supabase.from("sessions").update({
+      const sessionPackages = getPackagesForSession(session);
+      const bundle = sessionPackages[session.network]?.[session.bundle];
+
+      // Agent Store Checkout skips scratch code straight to confirmation
+      if (session.agent_id) {
+        session = await saveCustomerSession(from, {
+          momo_number: momoNumber,
+          step: 4,
+          scratch_order_opt_in: false
+        });
+        const tracker = await getDeliveryEstimate();
+        const estimateMessage = buildDeliveryEstimateMessage(tracker);
+        const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+        const priceStr = bundle ? bundle.price.toFixed(2) : "0.00";
+        const capStr = bundle ? bundle.capacity : "";
+        return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n${storeHeader}📶 Network: ${session.network}\n📦 Data: ${capStr}GB\n💰 Amount: ₵${priceStr}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${momoNumber}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
+      }
+
+      session = await saveCustomerSession(from, {
         momo_number: momoNumber,
         step: 15,
         scratch_order_opt_in: false
-      }).eq("phone", from);
-
-      if (momoUpdateError) {
-        console.error("❌ FAILED TO SAVE MOMO NUMBER / STEP 4:", momoUpdateError);
-        return sendWhatsApp(from, "❌ Something went wrong saving your details. Please reply HI and try again.");
-      }
+      });
 
       const activeScratch = await getActiveScratchCode(from);
       if (activeScratch) {
@@ -7517,23 +7542,25 @@ app.post("/webhook", async (req, res) => {
         const bundle = sessionPackages[session.network]?.[session.bundle];
         const tracker = await getDeliveryEstimate();
         const estimateMessage = buildDeliveryEstimateMessage(tracker);
-        await saveCustomerSession(from, { step: 4 });
+        session = await saveCustomerSession(from, { step: 4 });
         const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
-        return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n${storeHeader}📶 Network: ${session.network}\n📦 Data: ${bundle.capacity}GB\n💰 Amount: ₵${bundle.price.toFixed(2)}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
+        const priceStr = bundle ? bundle.price.toFixed(2) : "0.00";
+        const capStr = bundle ? bundle.capacity : "";
+        return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n${storeHeader}📶 Network: ${session.network}\n📦 Data: ${capStr}GB\n💰 Amount: ₵${priceStr}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
       };
 
       if (text === "2" || /^no$/i.test(text) || /^skip$/i.test(text)) {
-        await supabase.from("sessions").update({ scratch_order_opt_in: false }).eq("phone", from);
+        session = await saveCustomerSession(from, { scratch_order_opt_in: false });
         return finishConfirm();
       }
 
       if (text === "1" || /^yes$/i.test(text)) {
         const activeScratch = await getActiveScratchCode(from);
         if (activeScratch) {
-          await supabase.from("sessions").update({ scratch_code: activeScratch.code, scratch_order_opt_in: true }).eq("phone", from);
+          session = await saveCustomerSession(from, { scratch_code: activeScratch.code, scratch_order_opt_in: true });
           return finishConfirm();
         }
-        await supabase.from("sessions").update({ step: 16, scratch_order_opt_in: false }).eq("phone", from);
+        session = await saveCustomerSession(from, { step: 16, scratch_order_opt_in: false });
         return sendWhatsApp(from, "🎟️ Enter your Data1 Scratch Code:\n\nExample: Data1A7K92P");
       }
       return sendWhatsApp(from, "Reply 1 for YES or 2 for NO / SKIP.");
@@ -7546,11 +7573,15 @@ app.post("/webhook", async (req, res) => {
     if (session.step === 16) {
       const result = await activateScratchCodeForCheckout(from, text);
       if (!result.ok) return sendWhatsApp(from, result.message);
-      await supabase.from("sessions").update({ scratch_code: result.scratch.code, scratch_order_opt_in: true, step: 4 }).eq("phone", from);
-      const bundle = PACKAGES[session.network]?.[session.bundle];
+      session = await saveCustomerSession(from, { scratch_code: result.scratch.code, scratch_order_opt_in: true, step: 4 });
+      const sessionPackages = getPackagesForSession(session);
+      const bundle = sessionPackages[session.network]?.[session.bundle];
       const tracker = await getDeliveryEstimate();
       const estimateMessage = buildDeliveryEstimateMessage(tracker);
-      return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n📶 Network: ${session.network}\n📦 Data: ${bundle.capacity}GB\n💰 Amount: ₵${bundle.price.toFixed(2)}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n🎟️ Scratch Code: ${result.scratch.code}\n🎯 This order will count toward: ${Number(result.scratch.orders_completed || 0) + 1}/${SCRATCH_REQUIRED_ORDERS}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
+      const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+      const priceStr = bundle ? bundle.price.toFixed(2) : "0.00";
+      const capStr = bundle ? bundle.capacity : "";
+      return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n${storeHeader}📶 Network: ${session.network}\n📦 Data: ${capStr}GB\n💰 Amount: ₵${priceStr}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n🎟️ Scratch Code: ${result.scratch.code}\n🎯 This order will count toward: ${Number(result.scratch.orders_completed || 0) + 1}/${SCRATCH_REQUIRED_ORDERS}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
     }
 
     /* =====================================================
@@ -7585,7 +7616,7 @@ app.post("/webhook", async (req, res) => {
       const networks = { "1": "MTN", "2": "AIRTELTIGO", "3": "TELECEL" };
       const network = networks[text];
       if (!network) return sendWhatsApp(from, "Invalid option ❌\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel");
-      await supabase.from("sessions").update({ network, step: 81 }).eq("phone", from);
+      session = await saveCustomerSession(from, { network, step: 81 });
       return sendWhatsApp(from, "📱 Enter the Ghana phone number where you want your FREE prize sent:");
     }
 
@@ -7608,7 +7639,7 @@ app.post("/webhook", async (req, res) => {
         const deliveredAt = new Date().toISOString();
         const { data: updatedScratch } = await supabase.from("scratch_codes").update({ status: "used", prize_network: session.network, prize_phone: prizePhone, datamart_reference: reference, delivered_at: deliveredAt }).eq("id", scratch.id).select("*").maybeSingle();
         syncScratchToStoreApi({ scratch: updatedScratch || { ...scratch, status: "used", prize_network: session.network, prize_phone: prizePhone, datamart_reference: reference, delivered_at: deliveredAt } });
-        await supabase.from("sessions").update({ step: 1, scratch_prize: null }).eq("phone", from);
+        session = await saveCustomerSession(from, { step: 1, scratch_prize: null });
         return sendWhatsApp(from, `🎉 PRIZE SENT SUCCESSFULLY!\n\n🎁 Prize: ${prizeLabel}\n📶 Network: ${session.network}\n📱 Sent to: ${prizePhone}\n${reference ? `🆔 Reference: ${reference}\n` : ""}\nReply HI to continue shopping.`);
       } catch (e) {
         console.error("SCRATCH PRIZE DELIVERY ERROR:", e.response?.data || e.message);
@@ -7655,7 +7686,7 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, `Invalid amount ❌ Enter an amount between ₵${MASHUP_MIN_AMOUNT} and ₵${MASHUP_MAX_AMOUNT} (e.g. 5)`);
       }
 
-      await supabase.from("sessions").update({ bundle: amountText, step: 11 }).eq("phone", from);
+      session = await saveCustomerSession(from, { bundle: amountText, step: 11 });
       const combos = getMashupCombos(amountText);
       let comboMenu = `MashUp ₵${amountText} — choose a package:\n\n`;
       combos.forEach((c, i) => {
@@ -7676,7 +7707,7 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid option ❌ Choose an option to continue");
       }
 
-      await supabase.from("sessions").update({ bundle: `${session.bundle}|${combo.id}`, step: 12 }).eq("phone", from);
+      session = await saveCustomerSession(from, { bundle: `${session.bundle}|${combo.id}`, step: 12 });
       return sendWhatsApp(from, "Enter phone number to receive the MashUp bundle on:");
     }
 
@@ -7690,7 +7721,7 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana phone number to continue");
       }
 
-      await supabase.from("sessions").update({ phone_number: phone, step: 13 }).eq("phone", from);
+      session = await saveCustomerSession(from, { phone_number: phone, step: 13 });
       return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from:\n\n(This can be the same number or a different one)`);
     }
 
@@ -7706,18 +7737,14 @@ app.post("/webhook", async (req, res) => {
 
       const parsed = parseMashupSelection(session.bundle);
       if (!parsed) {
-        await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
+        session = await saveCustomerSession(from, { step: 1 });
         return sendWhatsApp(from, "❌ Something went wrong with your selection. Please reply HI and try again.");
       }
 
-      const { error: momoUpdateError } = await supabase.from("sessions").update({
+      session = await saveCustomerSession(from, {
         momo_number: momoNumber,
         step: 14
-      }).eq("phone", from);
-      if (momoUpdateError) {
-        console.error("❌ FAILED TO SAVE MOMO NUMBER / STEP 14:", momoUpdateError);
-        return sendWhatsApp(from, "❌ Something went wrong saving your details. Please reply HI and try again.");
-      }
+      });
 
       return sendWhatsApp(
         from,
@@ -7731,14 +7758,15 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 14) {
       if (/^no$/i.test(text)) {
-        await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
-        return sendWhatsApp(from, "❌ Cancelled\n\n" + MENU);
+        session = await saveCustomerSession(from, { step: 1 });
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
       }
 
       if (/^yes$/i.test(text)) {
         const parsed = parseMashupSelection(session.bundle);
         if (!parsed) {
-          await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
+          session = await saveCustomerSession(from, { step: 1 });
           return sendWhatsApp(from, "❌ Something went wrong with your selection. Please reply HI and try again.");
         }
         const bundle = { price: parsed.amount, capacity: parsed.combo.label };
@@ -7762,7 +7790,7 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid option ❌ Reply 1 for MTN, 2 for AirtelTigo, or 3 for Telecel");
       }
 
-      await supabase.from("sessions").update({ network, step: 31 }).eq("phone", from);
+      session = await saveCustomerSession(from, { network, step: 31 });
       return sendWhatsApp(from, "Enter the Full Name of the applicant:");
     }
 
@@ -7776,10 +7804,10 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid name ❌ Enter the applicant's full name (e.g. John Doe)");
       }
 
-      await supabase.from("sessions").update({
+      session = await saveCustomerSession(from, {
         bundle: mergeAfaField(session, "full_name", fullName),
         step: 32
-      }).eq("phone", from);
+      });
 
       return sendWhatsApp(from, "Enter the applicant's Phone Number (e.g. 0241234567):");
     }
@@ -7794,10 +7822,10 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana phone number (e.g. 0241234567)");
       }
 
-      await supabase.from("sessions").update({
+      session = await saveCustomerSession(from, {
         bundle: mergeAfaField(session, "phone_number", afaPhone),
         step: 33
-      }).eq("phone", from);
+      });
 
       return sendWhatsApp(from, "Enter the applicant's Ghana Card Number (e.g. GHA-000000000-0):");
     }
@@ -7812,10 +7840,10 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid Ghana Card number ❌ Use the format GHA-000000000-0");
       }
 
-      await supabase.from("sessions").update({
+      session = await saveCustomerSession(from, {
         bundle: mergeAfaField(session, "id_number", idNumber),
         step: 34
-      }).eq("phone", from);
+      });
 
       return sendWhatsApp(from, "Enter the applicant's Location (e.g. Tafo, Kumasi):");
     }
@@ -7830,10 +7858,10 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid location ❌ Enter the applicant's location (e.g. Tafo, Kumasi)");
       }
 
-      await supabase.from("sessions").update({
+      session = await saveCustomerSession(from, {
         bundle: mergeAfaField(session, "location", location),
         step: 35
-      }).eq("phone", from);
+      });
 
       return sendWhatsApp(from, "Enter the applicant's Date of Birth (DD/MM/YYYY, e.g. 15/06/1995):");
     }
@@ -7848,10 +7876,10 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid date ❌ Use the format DD/MM/YYYY (e.g. 15/06/1995)");
       }
 
-      await supabase.from("sessions").update({
+      session = await saveCustomerSession(from, {
         bundle: mergeAfaField(session, "dob", dob),
         step: 36
-      }).eq("phone", from);
+      });
 
       return sendWhatsApp(from, "Enter the applicant's Occupation (e.g. Student, Teacher, Business Owner):");
     }
@@ -7866,10 +7894,10 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid occupation ❌ Enter the applicant's occupation (e.g. Trader)");
       }
 
-      await supabase.from("sessions").update({
+      session = await saveCustomerSession(from, {
         bundle: mergeAfaField(session, "occupation", occupation),
         step: 37
-      }).eq("phone", from);
+      });
 
       return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from (${session.network}):`);
     }
@@ -7886,19 +7914,14 @@ app.post("/webhook", async (req, res) => {
 
       const afaData = getAfaData(session);
       if (!afaData) {
-        await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
+        session = await saveCustomerSession(from, { step: 1 });
         return sendWhatsApp(from, "❌ Something went wrong with your form. Please reply HI and try again.");
       }
 
-      const { error: momoUpdateError } = await supabase.from("sessions").update({
+      session = await saveCustomerSession(from, {
         momo_number: momoNumber,
         step: 38
-      }).eq("phone", from);
-
-      if (momoUpdateError) {
-        console.error("❌ FAILED TO SAVE MOMO NUMBER / STEP 38:", momoUpdateError);
-        return sendWhatsApp(from, "❌ Something went wrong saving your details. Please reply HI and try again.");
-      }
+      });
 
       return sendWhatsApp(
         from,
@@ -7912,14 +7935,15 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 38) {
       if (/^no$/i.test(text)) {
-        await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
-        return sendWhatsApp(from, "❌ Cancelled\n\n" + MENU);
+        session = await saveCustomerSession(from, { step: 1 });
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
       }
 
       if (/^yes$/i.test(text)) {
         const afaData = getAfaData(session);
         if (!afaData) {
-          await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
+          session = await saveCustomerSession(from, { step: 1 });
           return sendWhatsApp(from, "❌ Something went wrong with your form. Please reply HI and try again.");
         }
         const bundle = { price: AFA_PRICE, capacity: "AFA Registration" };
@@ -7943,7 +7967,7 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid option ❌ Reply 1 for MTN, 2 for AirtelTigo, or 3 for Telecel");
       }
 
-      await supabase.from("sessions").update({ network, step: 51 }).eq("phone", from);
+      session = await saveCustomerSession(from, { network, step: 51 });
       return sendWhatsApp(from, "Enter the Mobile Money number to pay from:");
     }
 
@@ -7957,15 +7981,10 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
       }
 
-      const { error: momoUpdateError } = await supabase.from("sessions").update({
+      session = await saveCustomerSession(from, {
         momo_number: momoNumber,
         step: 52
-      }).eq("phone", from);
-
-      if (momoUpdateError) {
-        console.error("❌ FAILED TO SAVE MOMO NUMBER / STEP 52:", momoUpdateError);
-        return sendWhatsApp(from, "❌ Something went wrong saving your details. Please reply HI and try again.");
-      }
+      });
 
       return sendWhatsApp(
         from,
@@ -7979,8 +7998,9 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 52) {
       if (/^no$/i.test(text)) {
-        await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
-        return sendWhatsApp(from, "❌ Cancelled\n\n" + MENU);
+        session = await saveCustomerSession(from, { step: 1 });
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
       }
 
       if (/^yes$/i.test(text)) {
@@ -7998,7 +8018,7 @@ app.post("/webhook", async (req, res) => {
     if (session.step === 53) {
       const netflixData = getNetflixData(session);
       if (!netflixData) {
-        await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
+        session = await saveCustomerSession(from, { step: 1 });
         return sendWhatsApp(from, "❌ Something went wrong with your order. Please reply HI and try again.");
       }
 
@@ -8021,9 +8041,9 @@ app.post("/webhook", async (req, res) => {
       const result = await fetchNetflixSignIn(netflixData.paidAt);
 
       if (result.type === "code" || result.type === "approved" || result.type === "link_flagged") {
-        await supabase.from("sessions").update({
+        session = await saveCustomerSession(from, {
           bundle: JSON.stringify({ ...netflixData, used: true })
-        }).eq("phone", from);
+        });
       }
 
       if (result.type === "code") {
@@ -8066,16 +8086,19 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 5) {
       if (/^(cancel|no|stop)$/i.test(text)) {
-        await supabase.from("sessions").update({ step: 1 }).eq("phone", from);
-        return sendWhatsApp(from, "❌ Order cancelled.\n\n" + MENU);
+        await saveCustomerSession(from, { step: 1 });
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, "❌ Order cancelled.\n\n" + activeMenu);
       }
 
       let amount = null;
       if (session.network === "MASHUP") {
         const parsed = parseMashupSelection(session.bundle);
         amount = parsed?.amount;
-      } else if (session.network && session.bundle && PACKAGES[session.network]?.[session.bundle]) {
-        amount = PACKAGES[session.network][session.bundle].price;
+      } else if (session.network && session.bundle) {
+        const sessionPackages = getPackagesForSession(session);
+        const b = sessionPackages[session.network]?.[session.bundle];
+        amount = b ? b.price : (PACKAGES[session.network]?.[session.bundle]?.price || null);
       } else if (session.network === "AFA" || session.bundle?.includes?.("AFA")) {
         amount = AFA_PRICE;
       } else if (session.bundle?.includes?.("netflix") || session.network === "NETFLIX") {
@@ -8086,7 +8109,7 @@ app.post("/webhook", async (req, res) => {
         const linkRef = "REF-" + Date.now();
         const link = await createPaystackCheckoutLink(from, linkRef, amount);
         if (link) {
-          await supabase.from("sessions").update({ ref: linkRef }).eq("phone", from);
+          await saveCustomerSession(from, { ref: linkRef });
           return sendWhatsApp(
             from,
             `💳 PAYMENT LINK\n\nTap below to pay online:\n${link}\n\nAmount: ₵${Number(amount).toFixed(2)}\nOnce paid, your order will be delivered automatically!`
@@ -8313,11 +8336,25 @@ app.post("/paystack-webhook", async (req, res) => {
     console.log("💰 ACTUAL AMOUNT PAID:", paidAmount);
 
     // 1. Primary: Look up session by exact ref
-    let { data: session } = await supabase
-      .from("sessions")
-      .select("*")
-      .eq("ref", ref)
-      .maybeSingle();
+    let session = null;
+    if (supabase) {
+      try {
+        const { data } = await supabase
+          .from("sessions")
+          .select("*")
+          .eq("ref", ref)
+          .maybeSingle();
+        session = data;
+      } catch (_) {}
+    }
+    if (!session) {
+      for (const s of botSessions.values()) {
+        if (s && s.ref === ref) {
+          session = s;
+          break;
+        }
+      }
+    }
 
     // 2. Check Website Data Orders by exact reference
     if (!session) {
@@ -8710,10 +8747,10 @@ app.post("/paystack-webhook", async (req, res) => {
       const paidAt = new Date().toISOString();
       const refCode = generateNetflixRefCode();
 
-      await supabase.from("sessions").update({
+      await saveCustomerSession(session.phone, {
         step: 53,
         bundle: JSON.stringify({ type: "netflix", paidAt, refCode, used: false })
-      }).eq("phone", session.phone);
+      });
 
       const { error: netflixOrderError } = await supabase.from("orders").insert([{
         whatsapp_phone: session.phone,
