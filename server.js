@@ -1025,6 +1025,12 @@ async function getCustomerSession(from) {
       }
     } catch (_) { }
   }
+  if (sess?.agent_id) {
+    const cd = String(sess.custom_domain || "").toLowerCase();
+    if (!cd || cd.includes("data1gh") || cd.includes("bigjay")) {
+      sess.custom_domain = "https://gooddata1.vercel.app";
+    }
+  }
   return sess;
 }
 
@@ -1115,6 +1121,20 @@ function getPackagesForSession(session) {
   return customPackages;
 }
 
+function getAgentStoreDomain(session) {
+  let domain = (session?.custom_domain || "").trim().replace(/\/+$/, "");
+  if (!domain || domain.toLowerCase().includes("data1gh") || domain.toLowerCase().includes("bigjay")) {
+    domain = "https://gooddata1.vercel.app";
+  }
+  return domain;
+}
+
+function getAgentStoreUrl(session) {
+  const domain = getAgentStoreDomain(session);
+  const slug = session?.agent_slug || session?.store_slug || "";
+  return slug ? `${domain}/s/${slug}` : domain;
+}
+
 function getMenusForSession(session) {
   if (!session?.agent_id) {
     return {
@@ -1124,8 +1144,7 @@ function getMenusForSession(session) {
   }
   const pkgs = getPackagesForSession(session);
   const storeName = session.agent_name || "Agent Store";
-  const storeSlug = session.agent_slug || "";
-  const storeUrl = storeSlug ? `${STORE_FRONTEND_URL}/s/${storeSlug}` : STORE_FRONTEND_URL;
+  const storeUrl = getAgentStoreUrl(session);
 
   const agentMenu = `🏪 Welcome to *${storeName}*! 📶\n🌐 Store Link: ${storeUrl}\n\n1 - MTN Data\n2 - AirtelTigo Data\n3 - Telecel Data\n4 - Track Order\n\nChoose an option to continue`;
 
@@ -1717,8 +1736,7 @@ async function handleDirectDataPull(rawText, from, isOwner = false, session = nu
   if (session?.agent_id && !isOwner) {
     const pkgs = getPackagesForSession(session);
     const storeName = session.agent_name || "Agent Store";
-    const storeSlug = session.agent_slug || "";
-    const storeUrl = storeSlug ? `${STORE_FRONTEND_URL}/s/${storeSlug}` : STORE_FRONTEND_URL;
+    const storeUrl = getAgentStoreUrl(session);
 
     let reply = `📦 *${storeName.toUpperCase()} — LIVE CATALOG & PRICES*\n\n`;
 
@@ -4645,8 +4663,7 @@ async function handleCustomerAi(from, rawText) {
   // 1. Direct Storefront & App Links Intent
   if (/\b(link|store|website|shop|site|online|web|front\s*end|frontend)\b/i.test(lower)) {
     if (session?.agent_id) {
-      const storeSlug = session.agent_slug || "";
-      const storeUrl = storeSlug ? `${STORE_FRONTEND_URL}/s/${storeSlug}` : STORE_FRONTEND_URL;
+      const storeUrl = getAgentStoreUrl(session);
       return sendWhatsApp(
         from,
         `🌐 *${(session.agent_name || "AGENT STORE").toUpperCase()}*\n\n` +
@@ -4717,7 +4734,7 @@ async function handleCustomerAi(from, rawText) {
     const mtnList = Object.values(pkgs.MTN || {}).map(p => `${p.capacity}GB: GH₵ ${p.price.toFixed(2)}`).join(", ");
     const atList = Object.values(pkgs.AIRTELTIGO || {}).map(p => `${p.capacity}GB: GH₵ ${p.price.toFixed(2)}`).join(", ");
     const telList = Object.values(pkgs.TELECEL || {}).map(p => `${p.capacity}GB: GH₵ ${p.price.toFixed(2)}`).join(", ");
-    const storeUrl = session.agent_slug ? `${STORE_FRONTEND_URL}/s/${session.agent_slug}` : STORE_FRONTEND_URL;
+    const storeUrl = getAgentStoreUrl(session);
 
     customerAiPrompt =
       `You are the friendly, helpful customer support assistant for "${session.agent_name}" on WhatsApp.\n\n` +
@@ -5079,6 +5096,7 @@ app.post("/webhook", async (req, res) => {
             agent_id: matched.id,
             agent_slug: matched.store_slug,
             agent_name: matched.store_name,
+            custom_domain: matched.custom_domain || "https://gooddata1.vercel.app",
             custom_prices: matched.custom_prices || {},
             step: 1,
             bundle: null
@@ -5103,6 +5121,7 @@ app.post("/webhook", async (req, res) => {
             agent_id: slugMatched.id,
             agent_slug: slugMatched.store_slug,
             agent_name: slugMatched.store_name,
+            custom_domain: slugMatched.custom_domain || "https://gooddata1.vercel.app",
             custom_prices: slugMatched.custom_prices || {},
             step: 1,
             bundle: null
