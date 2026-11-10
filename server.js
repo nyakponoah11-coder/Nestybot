@@ -5228,7 +5228,7 @@ app.post("/webhook", async (req, res) => {
     - "Hi" / "Hello" / "Start" / "Menu" / "Bot" -> Enter BOT MODE (shows MENU)
     - "Stony" / "AI" / "AI Mode" -> Enter STONY AI MODE
     ===================================================== */
-    const isHi = /^(hi|hello|start|menu|bot|bot mode|menu mode|customer)$/i.test(text);
+    const isHi = /^(hi|hello|start|menu|bot|bot mode|menu mode|customer|reset|restart)$/i.test(text.trim());
     const isStonySwitch = /^(stony|ai|ai mode|stony ai|switch to ai|ask stony|talk to stony|enter ai mode)$/i.test(text);
     const startsWithStony = /^stony\b/i.test(text);
 
@@ -7449,7 +7449,7 @@ app.post("/webhook", async (req, res) => {
     RESET
     ===================================================== */
 
-    if (/^(hi|hello|start)$/i.test(text)) {
+    if (/^(hi|hello|start|reset|restart|menu)$/i.test(text.trim())) {
       session = await saveCustomerSession(from, { step: 1, bundle: null });
       const { MENU: activeMenu } = getMenusForSession(session);
       return sendWhatsApp(from, activeMenu);
