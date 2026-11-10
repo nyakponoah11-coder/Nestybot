@@ -17,11 +17,13 @@ const PORT = process.env.PORT || 3000;
 ENV
 ========================================================= */
 
+const VERIFIED_DATAMART_KEY = "836d191d47c4c1a6ac0fa47eaab4d5da550034056732db23e80f38632a889ee8";
+const VERIFIED_DATAMART_SECRET = "5CNIgdcHstmB2vAvePCTm5RpCg3sodoK";
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_ID = process.env.PHONE_ID;
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET;
-const DATA_API_KEY = process.env.DATA_API_KEY;
-const DATAMART_API_SECRET = process.env.DATAMART_API_SECRET || process.env.DATA_API_SECRET || "";
+const DATA_API_KEY = process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY;
+const DATAMART_API_SECRET = process.env.DATAMART_API_SECRET || process.env.DATA_API_SECRET || process.env.DM_API_SECRET || VERIFIED_DATAMART_SECRET;
 const AFA_API_KEY = process.env.AFA_API_KEY;
 const ARKESEL_API_KEY = process.env.ARKESEL_API_KEY;
 const STORE_FRONTEND_URL = process.env.SITE_URL || "https://www.data1gh.com";
@@ -117,8 +119,6 @@ DATA 1 GH — COMPLETE SITE KNOWLEDGE BASE (FROM HTTPS://WWW.DATA1GH.COM):
 // "UNKNOWN SESSION" in the Paystack webhook.
 const VERIFIED_SUPABASE_URL = "https://gomijazuakrbkkcqusdp.supabase.co";
 const VERIFIED_SERVICE_KEY = Buffer.from("c2Jfc2VjcmV0X1ZubkFOSDRHNkE4U3gxN2lwUTRIU3dfM3JXWUhFcmI=", "base64").toString("utf8");
-const VERIFIED_DATAMART_KEY = "836d191d47c4c1a6ac0fa47eaab4d5da550034056732db23e80f38632a889ee8";
-const VERIFIED_DATAMART_SECRET = "5CNIgdcHstmB2vAvePCTm5RpCg3sodoK";
 
 function sanitizeEnvVal(v) {
   if (!v || typeof v !== "string") return "";
@@ -4252,7 +4252,7 @@ async function initiateMomoCharge(from, session, bundle) {
         ref: ref,
         phone_number: normalizePhone(session.phone_number || session.phone || from),
         recipient_phone: normalizePhone(session.phone_number || session.phone || from),
-        whatsapp_phone: normalizePhone(from),
+        phone: normalizePhone(from),
         network: session.network || "MTN",
         capacity: String(effectiveBundle?.capacity || session.bundle || "1"),
         bundle: String(effectiveBundle?.capacity || session.bundle || "1") + (String(effectiveBundle?.capacity || "").includes("GB") || String(effectiveBundle?.capacity || "").includes(" ") ? "" : "GB"),
@@ -4261,7 +4261,7 @@ async function initiateMomoCharge(from, session, bundle) {
         delivery_status: "pending",
         status: "pending",
         agent_id: session.agent_id || null,
-        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}] [channel:whatsapp_bot]` : "[channel:whatsapp_bot]",
+        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}] [channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(from)}]` : `[channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(from)}]`,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }], { onConflict: "reference" });
@@ -5024,7 +5024,7 @@ app.post("/webhook", async (req, res) => {
         try {
           const { data: ords } = await supabase
             .from("orders")
-            .select("id, reference, network, capacity, amount, base_price, recipient_phone, whatsapp_phone, notes, delivery_status, status, payment_status, created_at")
+            .select("id, reference, network, capacity, amount, base_price, recipient_phone, phone, notes, delivery_status, status, payment_status, created_at")
             .or(`agent_id.eq.${matchedAgent.id},notes.ilike.%[agent:${matchedAgent.id}]%`)
             .order("created_at", { ascending: false })
             .limit(5);
@@ -8726,7 +8726,7 @@ app.post("/paystack-webhook", async (req, res) => {
 
       const mashupRef = "MASHUP-" + ref;
       const { error: orderError } = await supabase.from("orders").upsert([{
-        whatsapp_phone: session.phone,
+        phone: normalizePhone(session.phone),
         phone_number: normalizePhone(session.phone_number),
         recipient_phone: normalizePhone(session.phone_number),
         reference: mashupRef,
@@ -8738,6 +8738,7 @@ app.post("/paystack-webhook", async (req, res) => {
         status: "pending_manual",
         payment_status: "paid",
         delivery_status: "pending_manual",
+        notes: `[channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(session.phone)}]`,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }], { onConflict: "reference" });
@@ -8801,7 +8802,7 @@ app.post("/paystack-webhook", async (req, res) => {
         const afaOrderId = afaOrder.id || afaOrder.order_id || null;
 
         const { error: afaOrderError } = await supabase.from("orders").upsert([{
-          whatsapp_phone: session.phone,
+          phone: normalizePhone(session.phone),
           phone_number: normalizePhone(afaData.phone_number),
           recipient_phone: normalizePhone(afaData.phone_number),
           reference: afaExternalId,
@@ -8814,7 +8815,7 @@ app.post("/paystack-webhook", async (req, res) => {
           payment_status: "paid",
           delivery_status: afaStatus === "completed" || afaStatus === "approved" ? "delivered" : "processing",
           agent_id: session.agent_id || null,
-          notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug}]` : null,
+          notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug}] [whatsapp_phone:${normalizePhone(session.phone)}]` : `[whatsapp_phone:${normalizePhone(session.phone)}]`,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         }], { onConflict: "reference" });
@@ -8858,7 +8859,7 @@ app.post("/paystack-webhook", async (req, res) => {
         const storeDisplayName = session.agent_name || "Data Store";
 
         await supabase.from("orders").upsert([{
-          whatsapp_phone: session.phone,
+          phone: normalizePhone(session.phone),
           phone_number: normalizePhone(afaData.phone_number),
           recipient_phone: normalizePhone(afaData.phone_number),
           reference: afaExternalId,
@@ -8871,7 +8872,7 @@ app.post("/paystack-webhook", async (req, res) => {
           payment_status: "paid",
           delivery_status: "pending_manual",
           agent_id: session.agent_id || null,
-          notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug}]` : null,
+          notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug}] [whatsapp_phone:${normalizePhone(session.phone)}]` : `[whatsapp_phone:${normalizePhone(session.phone)}]`,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         }], { onConflict: "reference" });
@@ -8929,7 +8930,7 @@ app.post("/paystack-webhook", async (req, res) => {
       }
 
       const { error: netflixOrderError } = await supabase.from("orders").upsert([{
-        whatsapp_phone: session.phone,
+        phone: normalizePhone(session.phone),
         phone_number: normalizePhone(session.phone),
         recipient_phone: normalizePhone(session.phone),
         reference: netflixRef,
@@ -8942,7 +8943,7 @@ app.post("/paystack-webhook", async (req, res) => {
         payment_status: "paid",
         delivery_status: "processing",
         agent_id: session.agent_id || null,
-        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug}]` : null,
+        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug}] [whatsapp_phone:${normalizePhone(session.phone)}]` : `[whatsapp_phone:${normalizePhone(session.phone)}]`,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }], { onConflict: "reference" });
@@ -9003,13 +9004,16 @@ app.post("/paystack-webhook", async (req, res) => {
       ref: botRef,
     };
 
+    const activeDmKey = DATA_API_KEY || process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY;
+    const activeDmSecret = process.env.DATAMART_API_SECRET || process.env.DATA_API_SECRET || process.env.DM_API_SECRET || DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET;
+
     const dmHeaders = {
-      "x-api-key": DATA_API_KEY,
+      "x-api-key": activeDmKey,
       "X-Idempotency-Key": botRef,
       "Content-Type": "application/json"
     };
-    if (process.env.DATAMART_API_SECRET || process.env.DM_API_SECRET) {
-      dmHeaders["x-api-secret"] = process.env.DATAMART_API_SECRET || process.env.DM_API_SECRET;
+    if (activeDmSecret) {
+      dmHeaders["x-api-secret"] = activeDmSecret;
     }
 
     // 1. Try Fast Lane delivery
@@ -9079,7 +9083,7 @@ app.post("/paystack-webhook", async (req, res) => {
 
     try {
       const { error: orderError } = await supabase.from("orders").upsert([{
-        whatsapp_phone: session.phone,
+        phone: normalizePhone(session.phone),
         phone_number: normalizePhone(session.phone_number),
         recipient_phone: normalizePhone(session.phone_number),
         reference: orderReference,
@@ -9090,7 +9094,7 @@ app.post("/paystack-webhook", async (req, res) => {
         amount: paidAmount,
         base_price: baseCost,
         agent_id: session.agent_id || null,
-        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}] [channel:whatsapp_bot]` : `[channel:whatsapp_bot]`,
+        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}] [channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(session.phone)}]` : `[channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(session.phone)}]`,
         status: mappedDeliveryStatus,
         payment_status: "paid",
         delivery_status: mappedDeliveryStatus,
@@ -9309,10 +9313,11 @@ async function notifyOrderDelivered(order) {
   }
 
   // If customer ordered on the WhatsApp bot, notify them too
-  if (order.whatsapp_phone) {
+  const customerWaPhone = order.phone || (order.notes && order.notes.match(/\[whatsapp_phone:(\d+)\]/)?.[1]);
+  if (customerWaPhone) {
     try {
       await sendWhatsApp(
-        order.whatsapp_phone,
+        customerWaPhone,
         `✅ *YOUR DATA HAS LANDED!* 🎉\n━━━━━━━━━━━━━━━━━━━━━\nYour data bundle has been successfully delivered by the network! 📶\n\n🆔 *Order Ref:* ${ref}\n📦 *Bundle:* ${itemDesc}\n📱 *Delivered To:* ${cleanPhone}\n\nEnjoy your browsing! Reply *HI* to buy again.`
       );
     } catch (_) { }
@@ -9327,7 +9332,7 @@ async function runActiveDeliveryWatcher() {
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data: pendingOrders, error } = await supabase
       .from("orders")
-      .select("id, reference, datamart_reference, recipient_phone, whatsapp_phone, network, capacity, amount, delivery_status, payment_status")
+      .select("id, reference, datamart_reference, recipient_phone, phone, notes, network, capacity, amount, delivery_status, payment_status")
       .eq("payment_status", "paid")
       .in("delivery_status", ["processing", "pending", "waiting", "in_progress"])
       .gte("created_at", twentyFourHoursAgo)
