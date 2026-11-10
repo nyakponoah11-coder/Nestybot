@@ -8666,7 +8666,7 @@ app.post("/paystack-webhook", async (req, res) => {
 
     // 5. Fallback for WhatsApp chat bot sessions ONLY if not a website order
     if (!session) {
-      const isKnownWebRef = /^(WS|CK|SRV|NFLX|MSH|AFA|D1|ORD|CHK)/i.test(ref);
+      const isKnownWebRef = /^(CK|SRV|NFLX|MSH|AFA|D1|ORD|CHK)/i.test(ref);
 
       // Website order the bot couldn't see in the DB (e.g. RLS / wrong key):
       // hand it to the website's own verify endpoint, which re-checks the
