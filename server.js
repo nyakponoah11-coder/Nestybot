@@ -1007,9 +1007,60 @@ Allows multiple agents to share this exact WhatsApp bot number
 with 100% strict storefront isolation & zero wholesale leakage.
 ========================================================= */
 const botSessions = new Map();
+const agentPricesCache = new Map();
 
 function normalizeBotPhone(p) {
   return String(p || "").replace(/\D/g, "");
+}
+
+async function getFreshAgentPricing(agentId, slug, fallbackPrices = {}) {
+  const cacheKey = String(slug || agentId || "").toLowerCase().trim();
+  if (!cacheKey) return fallbackPrices || {};
+
+  const cached = agentPricesCache.get(cacheKey);
+  const now = Date.now();
+  if (cached && (now - cached.timestamp < 15000)) { // 15s in-memory cache
+    return cached.prices;
+  }
+
+  let resolved = { ...(fallbackPrices || {}) };
+
+  if (supabase) {
+    try {
+      const keys = [
+        slug ? `agent_pricing_${String(slug).toLowerCase().trim()}` : null,
+        agentId ? `agent_pricing_${String(agentId).toLowerCase().trim()}` : null,
+      ].filter(Boolean);
+
+      for (const k of keys) {
+        const { data } = await supabase.from("settings").select("value").eq("key", k).maybeSingle();
+        if (data?.value) {
+          const parsed = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
+          if (parsed && typeof parsed === "object" && Object.keys(parsed).length > 0) {
+            resolved = { ...resolved, ...parsed };
+            break;
+          }
+        }
+      }
+    } catch (_) {}
+
+    // Fallback: check agents table directly
+    if (Object.keys(resolved).length === 0 && (agentId || slug)) {
+      try {
+        const { data: ag } = await supabase
+          .from("agents")
+          .select("custom_prices")
+          .or(`id.eq.${agentId || slug},store_slug.ilike.${slug || agentId}`)
+          .maybeSingle();
+        if (ag?.custom_prices && typeof ag.custom_prices === "object") {
+          resolved = { ...resolved, ...ag.custom_prices };
+        }
+      } catch (_) {}
+    }
+  }
+
+  agentPricesCache.set(cacheKey, { prices: resolved, timestamp: now });
+  return resolved;
 }
 
 async function getCustomerSession(from) {
@@ -1033,11 +1084,17 @@ async function getCustomerSession(from) {
       botSessions.set(String(from), sess);
     }
   }
-  if (sess?.agent_id) {
+  if (sess?.agent_id || sess?.agent_slug) {
     const cd = String(sess.custom_domain || "").toLowerCase();
     if (!cd || cd.includes("data1gh") || cd.includes("bigjay")) {
       sess.custom_domain = "https://gooddata1.vercel.app";
     }
+    try {
+      const livePrices = await getFreshAgentPricing(sess.agent_id, sess.agent_slug, sess.custom_prices);
+      if (livePrices && Object.keys(livePrices).length > 0) {
+        sess.custom_prices = livePrices;
+      }
+    } catch (_) {}
   }
   return sess;
 }
@@ -5179,12 +5236,13 @@ app.post("/webhook", async (req, res) => {
           (a.store_name && a.store_name.toLowerCase() === tagSlug)
         );
         if (matched) {
+          const livePrices = await getFreshAgentPricing(matched.id, matched.store_slug || tagSlug, matched.custom_prices);
           boundSession = await saveCustomerSession(from, {
             agent_id: matched.id,
             agent_slug: matched.store_slug || tagSlug,
             agent_name: matched.store_name || matched.name,
             custom_domain: matched.custom_domain || "https://gooddata1.vercel.app",
-            custom_prices: matched.custom_prices || {},
+            custom_prices: livePrices,
             step: 1,
             bundle: null
           });
@@ -5207,12 +5265,13 @@ app.post("/webhook", async (req, res) => {
           (a.store_name && a.store_name.toLowerCase() === possibleSlug)
         );
         if (slugMatched) {
+          const livePrices = await getFreshAgentPricing(slugMatched.id, slugMatched.store_slug || possibleSlug, slugMatched.custom_prices);
           boundSession = await saveCustomerSession(from, {
             agent_id: slugMatched.id,
             agent_slug: slugMatched.store_slug || possibleSlug,
             agent_name: slugMatched.store_name || slugMatched.name,
             custom_domain: slugMatched.custom_domain || "https://gooddata1.vercel.app",
-            custom_prices: slugMatched.custom_prices || {},
+            custom_prices: livePrices,
             step: 1,
             bundle: null
           });
