@@ -4261,7 +4261,7 @@ async function initiateMomoCharge(from, session, bundle) {
         delivery_status: "pending",
         status: "pending",
         agent_id: session.agent_id || null,
-        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}] [channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(from)}]` : `[channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(from)}]`,
+        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}] [channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(from)}]` : `[channel:whatsapp_bot] [store:Main Store] [whatsapp_phone:${normalizePhone(from)}]`,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }], { onConflict: "reference" });
@@ -8738,7 +8738,7 @@ app.post("/paystack-webhook", async (req, res) => {
         status: "pending_manual",
         payment_status: "paid",
         delivery_status: "pending_manual",
-        notes: `[channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(session.phone)}]`,
+        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}] [channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(session.phone)}]` : `[channel:whatsapp_bot] [store:Main Store] [whatsapp_phone:${normalizePhone(session.phone)}]`,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }], { onConflict: "reference" });
@@ -9094,7 +9094,7 @@ app.post("/paystack-webhook", async (req, res) => {
         amount: paidAmount,
         base_price: baseCost,
         agent_id: session.agent_id || null,
-        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}] [channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(session.phone)}]` : `[channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(session.phone)}]`,
+        notes: session.agent_id ? `[agent:${session.agent_id}] [store:${session.agent_slug || session.agent_name || "store"}] [channel:whatsapp_bot] [whatsapp_phone:${normalizePhone(session.phone)}]` : `[channel:whatsapp_bot] [store:Main Store] [whatsapp_phone:${normalizePhone(session.phone)}]`,
         status: mappedDeliveryStatus,
         payment_status: "paid",
         delivery_status: mappedDeliveryStatus,
@@ -9172,6 +9172,14 @@ app.post("/paystack-webhook", async (req, res) => {
       sendAdminSms(
         `NEW DATA ORDER: ${bundle.capacity}GB ${session.network} to ${session.phone_number}. Paid: ₵${paidAmount.toFixed(2)}. Status: ${mappedDeliveryStatus === "delivered" ? "Delivered" : "In Progress"} (${orderReference})`
       ).catch(() => { });
+
+      try {
+        const storeLabel = session.agent_name || session.agent_slug ? `🏪 Store: *${session.agent_name || session.agent_slug}*` : "🏪 Store: *Main Store (Data1GH)*";
+        const profitText = (session.agent_id && baseCost) ? `\n💼 Agent Profit: +GH₵ ${Math.max(0, paidAmount - baseCost).toFixed(2)}` : "";
+        await sendAdminWhatsApp(
+          `🔔 *NEW PAID BOT ORDER!* 📱\n\n${storeLabel}\n📦 Bundle: ${bundle.capacity}GB ${session.network}\n📱 Recipient: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}${profitText}\n🆔 Ref: ${orderReference}\n⚡ DataMart Status: ${mappedDeliveryStatus === "delivered" ? "Delivered ✅" : "In Progress ⏳"}`
+        );
+      } catch (_) { }
     } else {
       const isAgentOrder = Boolean(session.agent_id);
       const storeDisplayName = session.agent_name || "Data Store";
@@ -9185,9 +9193,10 @@ app.post("/paystack-webhook", async (req, res) => {
         recordWebhookLog("CUSTOMER_NOTIFIED_PENDING", { phone: session.phone });
       }
 
+      const storeLabel = session.agent_name || session.agent_slug ? `🏪 Store: *${session.agent_name || session.agent_slug}*` : "🏪 Store: *Main Store (Data1GH)*";
       const errorString = typeof datamartErrorDetail === "object" ? JSON.stringify(datamartErrorDetail) : String(datamartErrorDetail || "Unknown API error");
       await sendAdminWhatsApp(
-        `🚨 DATAMART FAILED — MANUAL DELIVERY NEEDED!\n\nCustomer paid, but DataMart API purchase failed:\n❌ Error: ${errorString}\n\n📦 Bundle: ${bundle.capacity}GB (${session.network})\n📱 Recipient: ${session.phone_number}\n💳 Paid from MoMo: ${session.momo_number || session.phone_number}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n🆔 Ref: ${orderReference}\n\nPlease deliver this order manually or check your DataMart wallet balance!`
+        `🚨 DATAMART FAILED — MANUAL DELIVERY NEEDED!\n\n${storeLabel}\nCustomer paid, but DataMart API purchase failed:\n❌ Error: ${errorString}\n\n📦 Bundle: ${bundle.capacity}GB (${session.network})\n📱 Recipient: ${session.phone_number}\n💳 Paid from MoMo: ${session.momo_number || session.phone_number}\n💰 Amount: ₵${paidAmount.toFixed(2)}\n🆔 Ref: ${orderReference}\n\nPlease deliver this order manually or check your DataMart wallet balance!`
       );
       recordWebhookLog("ADMIN_ALERTED_DATAMART_FAILURE", { error: errorString });
       // Automated failed-order SMS disabled.
