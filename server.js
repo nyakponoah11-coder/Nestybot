@@ -1694,10 +1694,13 @@ function cleanApiKey(raw) {
 
 let cachedAiConfig = null;
 let lastConfigFetchTime = 0;
+let aiModelRotationIndex = 0;
 
 function normalizeGeminiModel(model) {
   let m = (model || "").trim().replace(/^models\//, "");
-  if (!m || /^gemini-3\./i.test(m)) return "gemini-2.5-flash";
+  if (!m || /^gemini-(1\.|2\.0|2\.5)/i.test(m) || /^gemini-3\.[78]/i.test(m)) {
+    return "gemini-3.5-flash-lite";
+  }
   return m;
 }
 
@@ -1713,7 +1716,7 @@ async function getAiConfig() {
   let openAiKey = cleanApiKey(process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY || "");
 
   let preferredProvider = "groq";
-  let geminiModel = normalizeGeminiModel(process.env.GEMINI_MODEL || "gemini-2.5-flash");
+  let geminiModel = normalizeGeminiModel(process.env.GEMINI_MODEL || "gemini-3.5-flash-lite");
   let grokModel = "grok-2-latest";
   let groqModel = "openai/gpt-oss-120b";
   let openRouterModel = "meta-llama/llama-3.3-70b-instruct";
@@ -1743,8 +1746,8 @@ async function getAiConfig() {
     if (!openRouterKey) openRouterKey = aiMap.openrouter_api_key || aiMap.OPENROUTER_API_KEY || aiMap.openroute_api_key || "";
     if (!openAiKey) openAiKey = aiMap.openai_api_key || aiMap.OPENAI_API_KEY || "";
 
-    // Only accept valid Google AI Studio keys (must start with AIza)
-    if (geminiKey && !geminiKey.startsWith("AIza")) {
+    // Accept both AIza... and AQ.... Google Gemini API keys
+    if (geminiKey && !/^(AIza|AQ\.)/.test(geminiKey)) {
       geminiKey = "";
     }
 
@@ -1768,7 +1771,7 @@ async function getAiConfig() {
     copilotTriggerRules = aiMap.copilot_trigger_rules || "";
     aiSystemInstructions = aiMap.ai_system_instructions || "";
 
-    if (!geminiKey && openAiKey && openAiKey.startsWith("AIzaSy")) {
+    if (!geminiKey && openAiKey && /^(AIza|AQ\.)/.test(openAiKey)) {
       geminiKey = openAiKey;
       openAiKey = "";
     }
@@ -1815,181 +1818,135 @@ async function getAiApiKeys() {
 }
 
 /**
- * Universal multi-provider AI caller for WhatsApp Bot Server.
- * Respects the admin's chosen ai_preferred_provider and chosen model from Supabase,
- * with cascading fallbacks across xAI Grok, Google Gemini 3.8/2.5, Groq, OpenRouter, and OpenAI.
+ * Universal multi-provider & multi-model AI Rotator for WhatsApp Bot Server.
+ * Actively rotates across OpenAI GPT-OSS (120B & 20B), Google Gemini (3.5 Flash Lite, 3.5 Flash, 3.1 Flash Lite, Gemma 4 31B),
+ * Qwen 3.8 27B, xAI Grok, OpenRouter, and OpenAI with automatic instant failover.
  */
-async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens = 350, temperature = 0.7 }) {
+async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens = 1500, temperature = 0.7 }) {
   const config = await getAiConfig();
-  const provider = (config.preferredProvider || "gemini").toLowerCase();
 
-  // Helper for xAI Grok API call
-  async function tryGrok() {
-    const k = config.grokKey || (config.groqKey && config.groqKey.startsWith("xai-") ? config.groqKey : "");
-    if (!k) return null;
-    const models = [
-      config.grokModel || "grok-2-latest",
-      "grok-2-latest",
-      "grok-beta",
-      "grok-2-1212"
-    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
+  const openAiStyleMessages = [
+    { role: "system", content: systemPrompt },
+    ...history.slice(-6).map(h => ({
+      role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
+      content: h.text || h.content || ""
+    })),
+    { role: "user", content: userMessage }
+  ];
 
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...history.slice(-6).map(h => ({
-        role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
-        content: h.text || h.content || ""
-      })),
-      { role: "user", content: userMessage }
-    ];
-
-    for (const model of models) {
-      try {
-        const res = await axios.post(
-          "https://api.x.ai/v1/chat/completions",
-          { model, messages, max_tokens: maxTokens, temperature },
-          { headers: { Authorization: `Bearer ${k}`, "Content-Type": "application/json" }, timeout: 15000 }
-        );
-        const text = res.data?.choices?.[0]?.message?.content?.trim();
-        if (text) return { text, provider: "grok", model };
-      } catch (err) {
-        console.warn(`xAI Grok (${model}) error:`, err.response?.data?.error?.message || err.message);
-      }
-    }
-    return null;
-  }
-
-  // Helper for Groq API call (supports OpenAI GPT-OSS 120B/20B reasoning models and Qwen 3.8)
-  async function tryGroq() {
+  // Call a single Groq model (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`)
+  async function callSingleGroqModel(model) {
     if (!config.groqKey || config.groqKey.startsWith("xai-")) return null;
-    const models = [
-      "openai/gpt-oss-120b",
-      config.groqModel,
-      "openai/gpt-oss-20b",
-      "qwen/qwen3.8-27b",
-      "llama-3.3-70b-versatile"
-    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
+    try {
+      const reqBody = {
+        model,
+        messages: openAiStyleMessages,
+        max_tokens: Math.max(Number(maxTokens || 1500), 2500),
+        temperature
+      };
+      if (model.includes("gpt-oss")) {
+        reqBody.reasoning_effort = "low";
+      }
+      const res = await axios.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        reqBody,
+        { headers: { Authorization: `Bearer ${config.groqKey}`, "Content-Type": "application/json" }, timeout: 12000 }
+      );
+      let text = res.data?.choices?.[0]?.message?.content?.trim() || "";
+      // Strip any <think>...</think> blocks if emitted by Qwen
+      text = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+      if (text) return { text, provider: "groq", model };
+    } catch (err) {
+      console.warn(`Groq (${model}) error:`, err.response?.data?.error?.message || err.message);
+    }
+    return null;
+  }
 
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...history.slice(-6).map(h => ({
-        role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
-        content: h.text || h.content || ""
-      })),
-      { role: "user", content: userMessage }
-    ];
+  // Call a single Google Gemini / Gemma model (`gemini-3.5-flash-lite`, `gemini-3.5-flash`, `gemini-3.1-flash-lite`, `gemma-4-31b-it`)
+  async function callSingleGeminiModel(model) {
+    if (!config.geminiKey) return null;
+    try {
+      const cleanModel = model.replace(/^models\//, "");
+      const isGemma = /^gemma-/i.test(cleanModel);
+      const historyTurns = history.slice(-6).map(h => ({
+        role: h.role === "assistant" || h.role === "model" ? "model" : "user",
+        parts: [{ text: h.text || h.content || "" }]
+      }));
+      while (historyTurns.length > 0 && historyTurns[0].role === "model") historyTurns.shift();
 
+      const turns = [];
+      for (const turn of historyTurns) {
+        if (turns.length > 0 && turns[turns.length - 1].role === turn.role) {
+          turns[turns.length - 1].parts[0].text += `\n${turn.parts[0].text}`;
+        } else {
+          turns.push(turn);
+        }
+      }
+      const finalUserText = isGemma ? `${systemPrompt}\n\nUSER MESSAGE:\n${userMessage}` : userMessage;
+      if (turns.length > 0 && turns[turns.length - 1].role === "user") {
+        turns[turns.length - 1].parts[0].text += `\n${finalUserText}`;
+      } else {
+        turns.push({ role: "user", parts: [{ text: finalUserText }] });
+      }
+
+      const payload = {
+        contents: turns,
+        generationConfig: { maxOutputTokens: Math.max(Number(maxTokens || 1024), 1500), temperature }
+      };
+      if (!isGemma) {
+        payload.systemInstruction = { parts: [{ text: systemPrompt }] };
+      }
+
+      const res = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${encodeURIComponent(config.geminiKey)}`,
+        payload,
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": config.geminiKey
+          },
+          timeout: 9000
+        }
+      );
+      const parts = res.data?.candidates?.[0]?.content?.parts || [];
+      let text = parts.filter(p => typeof p?.text === "string" && !p.thought).map(p => p.text).join("").trim();
+      text = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+      if (text) return { text, provider: "gemini", model: cleanModel };
+    } catch (err) {
+      console.warn(`Gemini (${model}) error:`, err.response?.data?.error?.message || err.message);
+    }
+    return null;
+  }
+
+  // Helper for direct OpenAI API call if OPENAI_API_KEY is configured
+  async function tryOpenAi() {
+    if (!config.openAiKey) return null;
+    const models = [config.openAiModel || "gpt-4o-mini", "gpt-4o"].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
     for (const model of models) {
       try {
-        const reqBody = {
-          model,
-          messages,
-          max_tokens: Math.max(Number(maxTokens || 1024), 2500),
-          temperature
-        };
-        if (model.includes("gpt-oss")) {
-          reqBody.reasoning_effort = "low";
-        }
         const res = await axios.post(
-          "https://api.groq.com/openai/v1/chat/completions",
-          reqBody,
-          { headers: { Authorization: `Bearer ${config.groqKey}`, "Content-Type": "application/json" }, timeout: 15000 }
+          "https://api.openai.com/v1/chat/completions",
+          { model, messages: openAiStyleMessages, max_tokens: maxTokens, temperature },
+          { headers: { Authorization: `Bearer ${config.openAiKey}`, "Content-Type": "application/json" }, timeout: 12000 }
         );
         const text = res.data?.choices?.[0]?.message?.content?.trim();
-        if (text) return { text, provider: "groq", model };
+        if (text) return { text, provider: "openai", model };
       } catch (err) {
-        console.warn(`Groq (${model}) error:`, err.response?.data?.error?.message || err.message);
+        console.warn(`OpenAI (${model}) error:`, err.response?.data?.error?.message || err.message);
       }
     }
     return null;
   }
 
-  // Helper for Google Gemini API call
-  async function tryGemini() {
-    if (!config.geminiKey) {
-      console.warn("⚠️ [tryGemini] config.geminiKey is missing. Set GEMINI_API_KEY in Render or Supabase settings.");
-      return null;
-    }
-    const requestedModel = normalizeGeminiModel(config.geminiModel) || "gemini-2.5-flash";
-    const models = [
-      requestedModel,
-      "gemini-2.5-flash",
-      "gemini-2.0-flash",
-      "gemini-1.5-flash",
-    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
-
-    const historyTurns = history.slice(-6).map(h => ({
-      role: h.role === "assistant" || h.role === "model" ? "model" : "user",
-      parts: [{ text: h.text || h.content || "" }]
-    }));
-    while (historyTurns.length > 0 && historyTurns[0].role === "model") historyTurns.shift();
-
-    const turns = [];
-    for (const turn of historyTurns) {
-      if (turns.length > 0 && turns[turns.length - 1].role === turn.role) {
-        turns[turns.length - 1].parts[0].text += `\n${turn.parts[0].text}`;
-      } else {
-        turns.push(turn);
-      }
-    }
-    turns.push({ role: "user", parts: [{ text: userMessage }] });
-
-    for (const model of models) {
-      try {
-        const cleanModel = model.replace(/^models\//, "");
-        const res = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${encodeURIComponent(config.geminiKey)}`,
-          {
-            contents: turns,
-            systemInstruction: { parts: [{ text: systemPrompt }] },
-            generationConfig: { maxOutputTokens: Math.max(Number(maxTokens || 350), 1024), temperature }
-          },
-          {
-            headers: {
-              "Content-Type": "application/json",
-              "x-goog-api-key": config.geminiKey
-            },
-            timeout: 15000
-          }
-        );
-        const parts = res.data?.candidates?.[0]?.content?.parts || [];
-        const text = parts.filter(p => typeof p?.text === "string" && !p.thought).map(p => p.text).join("").trim();
-        if (text) return { text, provider: "gemini", model: cleanModel };
-      } catch (err) {
-        const errMsg = err.response?.data?.error?.message || err.message || "";
-        console.warn(`Gemini (${model}) error:`, errMsg);
-        if (/API_KEY_INVALID|quota|401|403|429/i.test(errMsg) || err.response?.status === 401 || err.response?.status === 403 || err.response?.status === 429) {
-          break;
-        }
-      }
-    }
-    return null;
-  }
-
-  // Helper for OpenRouter API call
+  // Helper for OpenRouter API call if OPENROUTER_API_KEY is configured
   async function tryOpenRouter() {
     if (!config.openRouterKey) return null;
-    const models = [
-      config.openRouterModel,
-      "meta-llama/llama-3.3-70b-instruct",
-      "meta-llama/llama-3.1-8b-instruct",
-      "google/gemini-flash-1.5-8b"
-    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
-
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...history.slice(-6).map(h => ({
-        role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
-        content: h.text || h.content || ""
-      })),
-      { role: "user", content: userMessage }
-    ];
-
+    const models = [config.openRouterModel, "meta-llama/llama-3.3-70b-instruct"].filter(Boolean);
     for (const model of models) {
       try {
         const res = await axios.post(
           "https://openrouter.ai/api/v1/chat/completions",
-          { model, messages, max_tokens: maxTokens, temperature },
+          { model, messages: openAiStyleMessages, max_tokens: maxTokens, temperature },
           {
             headers: {
               Authorization: `Bearer ${config.openRouterKey}`,
@@ -2009,79 +1966,32 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
     return null;
   }
 
-  // Helper for OpenAI API call
-  async function tryOpenAi() {
-    if (!config.openAiKey) return null;
-    const models = [config.openAiModel || "gpt-4o-mini", "gpt-4o"].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...history.slice(-6).map(h => ({
-        role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
-        content: h.text || h.content || ""
-      })),
-      { role: "user", content: userMessage }
-    ];
+  // Build the active multi-model rotation ring across OpenAI (GPT-OSS 120B & 20B), Google Gemini (3.5 Flash Lite, 3.1 Flash Lite, 3.5 Flash), and Qwen 3.8
+  const rotationRing = [
+    () => callSingleGroqModel("openai/gpt-oss-120b"),
+    () => callSingleGeminiModel("gemini-3.5-flash-lite"),
+    () => callSingleGroqModel("openai/gpt-oss-20b"),
+    () => callSingleGeminiModel("gemini-3.1-flash-lite"),
+    () => callSingleGroqModel("qwen/qwen3.8-27b"),
+    () => callSingleGeminiModel("gemini-3.5-flash"),
+  ];
 
-    for (const model of models) {
-      try {
-        const res = await axios.post(
-          "https://api.openai.com/v1/chat/completions",
-          { model, messages, max_tokens: maxTokens, temperature },
-          { headers: { Authorization: `Bearer ${config.openAiKey}`, "Content-Type": "application/json" }, timeout: 12000 }
-        );
-        const text = res.data?.choices?.[0]?.message?.content?.trim();
-        if (text) return { text, provider: "openai", model };
-      } catch (err) {
-        console.warn(`OpenAI (${model}) error:`, err.response?.data?.error?.message || err.message);
-      }
+  // Rotate starting position on each call so traffic is shared across OpenAI & Gemini models, with instant failover through the rest of the ring!
+  const startIdx = aiModelRotationIndex % rotationRing.length;
+  aiModelRotationIndex = (aiModelRotationIndex + 1) % 100000;
+
+  for (let i = 0; i < rotationRing.length; i++) {
+    const fn = rotationRing[(startIdx + i) % rotationRing.length];
+    const res = await fn();
+    if (res?.text) {
+      console.log(`🤖 [AI Rotator] Responded via ${res.provider}:${res.model}`);
+      return res;
     }
-    return null;
   }
 
-  // Ultimate Free Open LLM fallback so AI never returns null
-  async function tryFreeOpenLLM() {
-    try {
-      const messages = [
-        { role: "system", content: systemPrompt },
-        ...history.slice(-4).map(h => ({
-          role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
-          content: h.text || h.content || ""
-        })),
-        { role: "user", content: userMessage }
-      ];
-      const res = await axios.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        {
-          model: "google/gemini-2.0-flash-exp:free",
-          messages,
-          max_tokens: Math.min(Number(maxTokens || 600), 1024),
-          temperature
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-            "HTTP-Referer": STORE_FRONTEND_URL,
-            "X-Title": "DATA 1 GH",
-          },
-          timeout: 15000,
-        }
-      );
-      const text = res.data?.choices?.[0]?.message?.content?.trim();
-      if (text) return { text, provider: "open-llm", model: "gemini-free" };
-    } catch (_) { }
-    return null;
-  }
-
-  // Build provider execution chain starting with preferred provider
-  const chain = [];
-  if (provider === "groq") chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi, tryFreeOpenLLM);
-  else if (provider === "gemini") chain.push(tryGemini, tryGroq, tryOpenRouter, tryOpenAi, tryFreeOpenLLM);
-  else if (provider === "grok") chain.push(tryGrok, tryGroq, tryGemini, tryOpenRouter, tryOpenAi, tryFreeOpenLLM);
-  else if (provider === "openrouter") chain.push(tryOpenRouter, tryGroq, tryGemini, tryOpenAi, tryFreeOpenLLM);
-  else if (provider === "openai") chain.push(tryOpenAi, tryGroq, tryGemini, tryOpenRouter, tryFreeOpenLLM);
-  else chain.push(tryGroq, tryGemini, tryOpenRouter, tryOpenAi, tryFreeOpenLLM);
-
-  for (const fn of chain) {
+  // Fallback to direct OpenAI / OpenRouter if configured
+  const extraChain = [tryOpenAi, tryOpenRouter];
+  for (const fn of extraChain) {
     const res = await fn();
     if (res?.text) return res;
   }
