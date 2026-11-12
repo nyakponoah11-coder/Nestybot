@@ -1512,6 +1512,7 @@ async function buildChannelPostFromSystem(topicOrMode = "general", customBody = 
       `🎓 *WAEC / BECE Result Checkers:* Instant PIN & Serial\n` +
       `🪪 *MTN AFA Registration:* GH₵ 20.00\n\n` +
       `🛒 *Buy Online 24/7:* ${STORE_FRONTEND_URL}\n` +
+      `📍 *Track Your Order:* ${TRACK_ORDER_URL}\n` +
       `🤖 *24/7 WhatsApp Bot:* https://wa.me/233200598553?text=Hi\n` +
       `📱 *Android App:* ${DOWNLOAD_APP_URL}`;
     return msg;
@@ -1528,6 +1529,7 @@ async function buildChannelPostFromSystem(topicOrMode = "general", customBody = 
       msg += items.slice(0, 10).map(p => `🔥 *${p.capacity}GB* — *GH₵ ${Number(p.price).toFixed(2)}*`).join("\n") + `\n\n`;
     }
     msg += `👉 *Rush to the Store Now:* ${STORE_FRONTEND_URL}\n` +
+      `📍 *Track Orders:* ${TRACK_ORDER_URL}\n` +
       `🤖 *Or Order on WhatsApp Bot:* https://wa.me/233200598553?text=Hi`;
     return msg;
   }
@@ -1548,7 +1550,8 @@ async function buildChannelPostFromSystem(topicOrMode = "general", customBody = 
       msg += list.map((c, i) => `${i + 1}. 🎟️ *${c.code}* (${c.capacity}GB ${c.network})`).join("\n") + `\n\n`;
     }
     msg += `👉 *Claim Here Now:* ${STORE_FRONTEND_URL}/free-data\n` +
-      `🌐 *Main Shop:* ${STORE_FRONTEND_URL}`;
+      `🌐 *Main Shop:* ${STORE_FRONTEND_URL}\n` +
+      `📍 *Track Orders:* ${TRACK_ORDER_URL}`;
     return msg;
   }
 
@@ -1559,6 +1562,7 @@ async function buildChannelPostFromSystem(topicOrMode = "general", customBody = 
     `💛 *MTN 1GB:* ₵4.20 | *2GB:* ₵8.90 | *5GB:* ₵23.50 | *10GB:* ₵44.50\n` +
     `🎬 *Netflix, WAEC Checkers & AFA Registration* also live 24/7.\n\n` +
     `🛒 *Shop Online:* ${STORE_FRONTEND_URL}\n` +
+    `📍 *Track Orders:* ${TRACK_ORDER_URL}\n` +
     `🤖 *WhatsApp Bot:* https://wa.me/233200598553?text=Hi`
   );
 }
@@ -9203,7 +9207,7 @@ app.post("/paystack-webhook", async (req, res) => {
                 }
                 trackUrl = slug
                   ? `https://gooddata1.vercel.app/s/${slug}?ref=${encodeURIComponent(ref)}`
-                  : `https://gooddata1.vercel.app/track?ref=${encodeURIComponent(ref)}`;
+                  : `https://www.data1gh.com/track?ref=${encodeURIComponent(ref)}`;
               } else {
                 trackUrl = `https://www.data1gh.com/track?ref=${encodeURIComponent(ref)}`;
                 brand = "Data1GH";
