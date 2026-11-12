@@ -9864,6 +9864,19 @@ app.post("/paystack-webhook", async (req, res) => {
         await sendAdminWhatsApp(
           `🔔 *NEW PAID BOT ORDER!* 📱\n\n${storeLabel}\n📦 Bundle: ${bundle.capacity}GB ${session.network}\n📱 Recipient: ${session.phone_number}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}${profitText}\n🆔 Ref: ${orderReference}\n⚡ DataMart Status: ${mappedDeliveryStatus === "delivered" ? "Delivered ✅" : "In Progress ⏳"}`
         );
+        if (mappedDeliveryStatus === "delivered") {
+          await notifyOrderDelivered({
+            reference: orderReference,
+            recipient_phone: session.phone_number,
+            phone: session.phone,
+            network: session.network,
+            capacity: bundle.capacity,
+            amount: paidAmount,
+            base_price: baseCost,
+            agent_id: session.agent_id || null,
+            store_name: session.agent_name || session.agent_slug || null,
+          }).catch(() => {});
+        }
       } catch (_) { }
     } else {
       const isAgentOrder = Boolean(session.agent_id);
@@ -9907,9 +9920,13 @@ app.get("/admin", (req, res) => {
 
 app.post("/api/send-admin-alert", async (req, res) => {
   try {
-    const { text } = req.body || {};
+    const { text, to } = req.body || {};
     if (!text) return res.status(400).json({ error: "Missing alert text" });
-    await sendAdminWhatsApp(text);
+    if (to) {
+      await sendWhatsApp(to, text);
+    } else {
+      await sendAdminWhatsApp(text);
+    }
     return res.json({ ok: true });
   } catch (err) {
     return res.status(500).json({ error: err?.message });
@@ -9979,14 +9996,19 @@ async function notifyOrderDelivered(order) {
   }
 
   // 2. Atomic PostgreSQL Compare-And-Swap lock on orders.notes so Vercel + Render can NEVER double-send
+  let resolvedAgentId = order.agent_id ? String(order.agent_id).trim() : "";
+  let resolvedStoreName = order.store_name ? String(order.store_name).trim() : "";
+  let resolvedBasePrice = Number(order.base_price || 0);
   try {
     const { data: freshOrd } = await supabase
       .from("orders")
-      .select("id, notes")
+      .select("id, notes, agent_id, base_price")
       .eq("reference", ref)
       .maybeSingle();
 
     if (freshOrd) {
+      if (!resolvedAgentId && freshOrd.agent_id) resolvedAgentId = String(freshOrd.agent_id).trim();
+      if (!resolvedBasePrice && freshOrd.base_price) resolvedBasePrice = Number(freshOrd.base_price);
       const currentNotes = freshOrd.notes;
       if (String(currentNotes || "").includes("[delivery_confirmed_sent]")) {
         return;
@@ -10005,6 +10027,15 @@ async function notifyOrderDelivered(order) {
       if (claimErr || !claimedRows || claimedRows.length === 0) {
         return;
       }
+      const notesStr = String(currentNotes || order.notes || "");
+      if (!resolvedAgentId) {
+        const agMatch = notesStr.match(/\[agent:([^\]]+)\]/i);
+        if (agMatch) resolvedAgentId = agMatch[1].trim();
+      }
+      if (!resolvedStoreName) {
+        const stMatch = notesStr.match(/\[store:([^\]]+)\]/i);
+        if (stMatch) resolvedStoreName = stMatch[1].trim();
+      }
     }
   } catch (_) {
     return;
@@ -10013,13 +10044,107 @@ async function notifyOrderDelivered(order) {
   const rawPhone = order.recipient_phone || order.phone_number || "N/A";
   const cleanPhone = rawPhone.startsWith("233") ? "0" + rawPhone.slice(3) : rawPhone;
   const itemDesc = `${order.capacity || ""}GB ${order.network || ""} Data`.trim() || "Data Bundle";
-  const shopName = order.store_name
-    ? (/agent/i.test(order.store_name) ? order.store_name : `${order.store_name} (Agent Store)`)
-    : "DataOne GH";
   const amount = Number(order.amount || 0).toFixed(2);
   const now = new Date();
   const dateStr = now.toLocaleDateString("en-GB", { timeZone: "Africa/Accra" });
   const timeStr = now.toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" });
+
+  // Resolve Agent details + update Agent Order status if order belongs to an Agent Store
+  let agPhone = "";
+  let agStore = resolvedStoreName;
+  let agentProfit = resolvedBasePrice > 0 ? Math.max(0, Number(order.amount || 0) - resolvedBasePrice) : 0;
+
+  if (resolvedAgentId) {
+    try {
+      const { data: ag } = await supabase
+        .from("agents")
+        .select("id, name, phone, whatsapp_number, momo_number, store_name, store_slug")
+        .eq("id", resolvedAgentId)
+        .maybeSingle();
+
+      if (ag) {
+        agPhone = ag.whatsapp_number || ag.phone || ag.momo_number || "";
+        if (!agStore && ag.store_name) agStore = ag.store_name;
+      }
+
+      // Check settings.agents_registry fallback if agent lives in registry
+      if (!agPhone || !agStore) {
+        const { data: regRow } = await supabase
+          .from("settings")
+          .select("value")
+          .eq("key", "agents_registry")
+          .maybeSingle();
+        if (regRow?.value) {
+          const parsed = typeof regRow.value === "string" ? JSON.parse(regRow.value) : regRow.value;
+          const regAg = Array.isArray(parsed)
+            ? parsed.find(a => String(a.id) === resolvedAgentId || String(a.store_slug) === resolvedAgentId)
+            : parsed?.[resolvedAgentId];
+          if (regAg) {
+            if (!agPhone) agPhone = regAg.whatsapp_number || regAg.whatsapp_phone || regAg.phone || regAg.momo_number || "";
+            if (!agStore && regAg.store_name) agStore = regAg.store_name;
+          }
+        }
+      }
+
+      // Check agent custom notification override in settings.agent_notifications_${resolvedAgentId}
+      const { data: notifPref } = await supabase
+        .from("settings")
+        .select("value")
+        .eq("key", `agent_notifications_${resolvedAgentId}`)
+        .maybeSingle();
+      if (notifPref?.value) {
+        const pref = typeof notifPref.value === "string" ? JSON.parse(notifPref.value) : notifPref.value;
+        if (pref?.whatsapp_phone || pref?.whatsapp_number || pref?.phone) {
+          agPhone = pref.whatsapp_phone || pref.whatsapp_number || pref.phone;
+        }
+      }
+
+      // Update agent_orders & settings.agent_orders_registry to delivered and get profit
+      const { data: aoRow } = await supabase
+        .from("agent_orders")
+        .update({ delivery_status: "delivered" })
+        .eq("reference", ref)
+        .select("profit")
+        .maybeSingle();
+      if (aoRow?.profit !== undefined && Number(aoRow.profit) > 0) {
+        agentProfit = Number(aoRow.profit);
+      }
+
+      const { data: aoReg } = await supabase
+        .from("settings")
+        .select("value")
+        .eq("key", "agent_orders_registry")
+        .maybeSingle();
+      if (aoReg?.value) {
+        const list = typeof aoReg.value === "string" ? JSON.parse(aoReg.value) : aoReg.value;
+        if (Array.isArray(list)) {
+          let changed = false;
+          for (const item of list) {
+            if (item && String(item.reference) === ref) {
+              if (item.delivery_status !== "delivered" || item.status !== "delivered") {
+                item.delivery_status = "delivered";
+                item.status = "delivered";
+                changed = true;
+              }
+              if (!agentProfit && Number(item.profit) > 0) {
+                agentProfit = Number(item.profit);
+              }
+            }
+          }
+          if (changed) {
+            await supabase
+              .from("settings")
+              .update({ value: list, updated_at: new Date().toISOString() })
+              .eq("key", "agent_orders_registry");
+          }
+        }
+      }
+    } catch (_) { }
+  }
+
+  const shopName = agStore
+    ? (/agent/i.test(agStore) ? agStore : `${agStore} (Agent Store)`)
+    : "DataOne GH";
 
   const deliveredText =
     `📦 *DATA ORDER DELIVERED!* ✅
@@ -10034,23 +10159,56 @@ async function notifyOrderDelivered(order) {
 
   await sendAdminWhatsApp(deliveredText);
 
-  // If order belongs to an Agent Store, also notify the Agent
-  if (order.agent_id) {
+  // Also send the DATA ORDER DELIVERED! ✅ alert directly to the respective Agent & log to their account
+  if (resolvedAgentId) {
     try {
-      const { data: ag } = await supabase
-        .from("agents")
-        .select("whatsapp_phone, phone, store_name, business_name")
-        .eq("id", order.agent_id)
-        .maybeSingle();
+      const agentStoreTitle = agStore || "Your Agent Store";
+      const profitLine = agentProfit > 0 ? `\n💵 *Your Profit:* +GHS ${agentProfit.toFixed(2)}` : "";
+      const agentDeliveredText =
+        `📦 *DATA ORDER DELIVERED!* ✅
+━━━━━━━━━━━━━━━━━━━━━
+🏪 *Shop:* ${agentStoreTitle}
+🆔 *Ref:* ${ref}
+📶 *Item:* ${itemDesc}
+📱 *Recipient:* ${cleanPhone}
+💰 *Amount:* GHS ${amount}${profitLine}
+⚡ *Status:* ✅ Delivered to Phone
+⏰ *Delivered At:* ${dateStr} ${timeStr}`;
 
-      const agPhone = ag?.whatsapp_phone || ag?.phone;
       if (agPhone) {
-        const agStore = ag?.store_name || ag?.business_name || order.store_name || "Your Store";
-        await sendWhatsApp(
-          agPhone,
-          `🎉 *ORDER DELIVERED TO YOUR CUSTOMER!* 📦\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nGood news! An order from *${agStore}* has been successfully delivered by the network!\n\n🆔 *Order Ref:* ${ref}\n📶 *Item:* ${itemDesc}\n📱 *Recipient:* ${cleanPhone}\n⚡ *Status:* ✅ Delivered to Phone\n⏰ *Time:* ${dateStr} ${timeStr}\n\nKeep sharing your store link to grow your daily sales!\n👉 View Dashboard: https://data1gh.com/agent/dashboard`
-        );
+        await sendWhatsApp(agPhone, agentDeliveredText);
       }
+
+      // Record in agent's dashboard notification log (settings.agent_notif_log_${resolvedAgentId})
+      const logKey = `agent_notif_log_${resolvedAgentId}`;
+      const { data: logRow } = await supabase
+        .from("settings")
+        .select("value")
+        .eq("key", logKey)
+        .maybeSingle();
+      const existingLogs = Array.isArray(logRow?.value)
+        ? logRow.value
+        : typeof logRow?.value === "string"
+        ? JSON.parse(logRow.value || "[]")
+        : [];
+      const newLogEntry = {
+        id: `deliv_${ref}_${Date.now()}`,
+        type: "order_delivered",
+        title: "📦 DATA ORDER DELIVERED! ✅",
+        reference: ref,
+        recipient_phone: cleanPhone,
+        item: itemDesc,
+        amount: Number(amount),
+        profit: Number(agentProfit || 0),
+        status: "delivered",
+        whatsapp_to: agPhone || null,
+        message: agentDeliveredText,
+        created_at: now.toISOString(),
+      };
+      const updatedLogs = [newLogEntry, ...existingLogs.filter(x => x?.reference !== ref || x?.type !== "order_delivered")].slice(0, 50);
+      await supabase
+        .from("settings")
+        .upsert({ key: logKey, value: updatedLogs, updated_at: now.toISOString() }, { onConflict: "key" });
     } catch (_) { }
   }
 
@@ -10080,7 +10238,7 @@ async function runActiveDeliveryWatcher() {
     const cutoffIso = new Date(Date.now() - lookbackMs).toISOString();
     const { data: pendingOrders, error } = await supabase
       .from("orders")
-      .select("id, reference, datamart_reference, datamart_status, recipient_phone, notes, network, capacity, amount, delivery_status, payment_status, supplier_status, created_at")
+      .select("id, reference, datamart_reference, datamart_status, recipient_phone, phone_number, notes, network, capacity, amount, base_price, agent_id, delivery_status, payment_status, supplier_status, created_at")
       .eq("payment_status", "paid")
       .in("delivery_status", ["processing", "pending", "waiting", "in_progress"])
       .gte("created_at", cutoffIso)
