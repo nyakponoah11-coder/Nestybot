@@ -3652,19 +3652,27 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
   if (!referenceOrOrderId) return { deliveryStatus: "processing", rawStatus: "processing" };
   const cleanId = String(referenceOrOrderId).trim();
 
-  // Resolve API key candidates
+  // Resolve API key & secret candidates
   const keyCandidates = [];
-  const envKey = cleanApiKey(DATA_API_KEY || process.env.DATA_API_KEY || process.env.DATAMART_API_KEY || process.env.VITE_DATA_API_KEY);
+  const envKey = cleanApiKey(DATA_API_KEY || process.env.DATA_API_KEY || process.env.DATAMART_API_KEY || process.env.VITE_DATA_API_KEY || VERIFIED_DATAMART_KEY);
   if (envKey) keyCandidates.push(envKey);
 
+  let activeSecret = cleanApiKey(process.env.DATAMART_API_SECRET || process.env.DM_API_SECRET || DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET);
+
   try {
-    const { data: dmRow } = await supabase
+    const { data: dmRows } = await supabase
       .from("settings")
-      .select("value")
-      .in("key", ["datamart_api_key", "DATA_API_KEY", "dm_api_key"])
-      .maybeSingle();
-    const dbKey = cleanApiKey(dmRow?.value);
-    if (dbKey && !keyCandidates.includes(dbKey)) keyCandidates.push(dbKey);
+      .select("key, value")
+      .in("key", ["datamart_api_key", "DATA_API_KEY", "dm_api_key", "datamart_api_secret", "DATAMART_API_SECRET"]);
+    for (const row of dmRows || []) {
+      if (row.key.toLowerCase().includes("secret")) {
+        const secVal = cleanApiKey(row.value);
+        if (secVal) activeSecret = secVal;
+      } else {
+        const dbKey = cleanApiKey(row.value);
+        if (dbKey && !keyCandidates.includes(dbKey)) keyCandidates.push(dbKey);
+      }
+    }
   } catch (_) { }
 
   if (keyCandidates.length === 0) return { deliveryStatus: "processing", rawStatus: "processing" };
@@ -3672,39 +3680,39 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
   const urls = [
     `${DATAMART_BASE}/order-status/${encodeURIComponent(cleanId)}`,
     `https://api.datamartgh.shop/api/order-status/${encodeURIComponent(cleanId)}`,
-    `${DATAMART_BASE}/orders/${encodeURIComponent(cleanId)}`
   ];
 
   for (const apiKey of keyCandidates) {
     for (const url of urls) {
       try {
+        const headers = { "x-api-key": apiKey, Accept: "application/json" };
+        if (activeSecret) headers["x-api-secret"] = activeSecret;
         const res = await axios.get(url, {
-          headers: { "x-api-key": apiKey, Accept: "application/json" },
+          headers,
           timeout: 6000
         });
         const data = res.data?.data || res.data || {};
         const related = data.relatedPurchase || {};
+        // Strictly inspect authoritative telecom delivery status fields (never wrapper status:"success")
         const statusField = (
           related.orderStatus ||
           related.order_status ||
           related.deliveryStatus ||
           related.delivery_status ||
-          related.status ||
           data.orderStatus ||
           data.order_status ||
           data.deliveryStatus ||
           data.delivery_status ||
-          data.status ||
           ""
         ).toLowerCase().trim();
 
-        if (!statusField) continue;
+        if (!statusField || statusField === "success" || statusField === "ok") continue;
 
         if (statusField === "failed" || statusField === "cancelled" || statusField === "rejected" || statusField === "declined") {
           return { deliveryStatus: "failed", rawStatus: statusField, failureReason: data.failureReason || data.message || null };
         }
-        // DataMart returns "completed" or "delivered" when order is delivered successfully
-        if (statusField === "delivered" || statusField === "completed" || statusField === "successful" || statusField === "fulfilled" || statusField === "done") {
+        // DataMart returns "completed" or "delivered" when bundle is delivered to phone
+        if (statusField === "delivered" || statusField === "completed" || statusField === "fulfilled" || statusField === "done") {
           return { deliveryStatus: "delivered", rawStatus: statusField };
         }
         if (statusField === "refunded") {
@@ -3714,7 +3722,7 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
           return { deliveryStatus: "waiting", rawStatus: statusField };
         }
         // "processing", "received", "pending" mean PROCESSING
-        return { deliveryStatus: "processing", rawStatus: statusField };
+        return { deliveryStatus: "processing", rawStatus: statusField === "pending" ? "processing" : statusField };
       } catch (e) {
         // Continue to next candidate URL
       }
@@ -4284,6 +4292,18 @@ INITIATE DIRECT MOBILE MONEY CHARGE
 ========================================================= */
 
 async function initiateMomoCharge(from, session, bundle) {
+  // Check if store orders are paused
+  if (supabase) {
+    try {
+      const { data: pauseRow } = await supabase.from("settings").select("value").eq("key", "orders_paused").maybeSingle();
+      if (pauseRow?.value === "true") {
+        const { data: msgRow } = await supabase.from("settings").select("value").eq("key", "orders_pause_message").maybeSingle();
+        const msg = msgRow?.value || "Store orders are temporarily paused for brief maintenance. Please check back shortly!";
+        return sendWhatsApp(from, `⏸️ *ORDERS TEMPORARILY PAUSED*\n\n${msg}\n\nPlease check back in a short while!`);
+      }
+    } catch (_) {}
+  }
+
   const sessionPackages = getPackagesForSession(session);
   const effectiveBundle = (sessionPackages[session.network] && sessionPackages[session.network][session.bundle]) || bundle;
   const randSuffix = Math.random().toString(36).substring(2, 7).toUpperCase();
@@ -6787,6 +6807,176 @@ app.post("/webhook", async (req, res) => {
       const lt = cmdText.toLowerCase();
       const orderRefsInText = extractOrderReferences(cmdText);
 
+      // Direct Action Command 0a_dm: Credit DataMart Wallet via MoMo prompt
+      const creditDatamartMatch = cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:to\s+)?(?:datamart|data\s*mart|telecom\s*wallet|dm\s*wallet|my\s+wallet)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i) ||
+        cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)\s+(?:to\s+)?(?:datamart|data\s*mart|telecom\s*wallet|dm\s*wallet|my\s+wallet)/i);
+      if (creditDatamartMatch) {
+        const amt = parseFloat(creditDatamartMatch[1]);
+        if (!isNaN(amt) && amt > 0) {
+          const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
+            "datamart_auth_token", "datamart_login_email", "datamart_login_password", "admin_topup_phone", "admin_alert_phone", "admin_whatsapp_number"
+          ]);
+          const sMap = {};
+          (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+          
+          let token = sMap["datamart_auth_token"] || process.env.DATAMART_AUTH_TOKEN;
+          if (!token && sMap["datamart_login_email"] && sMap["datamart_login_password"]) {
+            try {
+              const lRes = await axios.post("https://api.datamartgh.shop/api/v1/login", {
+                email: sMap["datamart_login_email"],
+                password: sMap["datamart_login_password"]
+              }, { timeout: 10000 });
+              if (lRes.data?.token) {
+                token = lRes.data.token;
+                await supabase.from("settings").upsert({ key: "datamart_auth_token", value: token }, { onConflict: "key" });
+              }
+            } catch (_) {}
+          }
+
+          // Check if an explicit phone was provided in the command (e.g. "top up datamart 50 on 0551234567")
+          const explicitPhoneMatch = cmdText.match(/(?:on|with|to|for|momo|number|num|phone)\s*(?:0|\+?233)?([2357][0-9]{8})\b/i) ||
+            cmdText.match(/\b(0[2357][0-9]{8})\b/i) ||
+            cmdText.match(/\b(233[2357][0-9]{8})\b/i);
+
+          let chosenPhone = "";
+          if (explicitPhoneMatch) {
+            const rawP = (explicitPhoneMatch[1] || explicitPhoneMatch[0]).replace(/\D/g, "");
+            chosenPhone = rawP.startsWith("233") ? "0" + rawP.slice(3) : (rawP.startsWith("0") ? rawP : "0" + rawP);
+          } else if (sMap["admin_topup_phone"]) {
+            chosenPhone = sMap["admin_topup_phone"];
+          } else if (sMap["admin_alert_phone"]) {
+            chosenPhone = sMap["admin_alert_phone"];
+          } else {
+            chosenPhone = normalizeGhanaPhone(from) || "0547228161";
+          }
+          const formattedPhone = chosenPhone.length === 12 && chosenPhone.startsWith("233") ? "0" + chosenPhone.slice(3) : chosenPhone;
+
+          if (token) {
+            try {
+              const bRes = await axios.post("https://api.datamartgh.shop/api/bridge/collect", {
+                phoneNumber: formattedPhone,
+                amount: amt,
+                network: "MTN"
+              }, {
+                headers: { "Content-Type": "application/json", "x-auth-token": token },
+                timeout: 15000
+              });
+
+              if (bRes.data?.status === "success" || bRes.data?.success) {
+                const trxId = bRes.data.data?.transactionId || bRes.data.transactionId;
+                if (trxId) {
+                  let attempts = 0;
+                  const pollInterval = setInterval(async () => {
+                    attempts++;
+                    try {
+                      const stRes = await axios.get(`https://api.datamartgh.shop/api/bridge/status/${trxId}`, {
+                        headers: { "x-auth-token": token },
+                        timeout: 5000
+                      });
+                      if (stRes.data?.data?.status === "completed") {
+                        clearInterval(pollInterval);
+                        const balRes = await axios.get("https://api.datamartgh.shop/api/developer/balance", {
+                          headers: { "x-api-key": activeDatamartKey, ...(activeDatamartSecret ? { "x-api-secret": activeDatamartSecret } : {}) },
+                          timeout: 5000
+                        }).catch(() => ({}));
+                        const newBal = balRes.data?.data?.balance;
+                        sendWhatsApp(from,
+                          `🎉 *DATAMART WALLET CREDITED SUCCESSFULLY BOSS!*\n\n` +
+                          `• *Amount Added:* GH₵ ${amt.toFixed(2)}\n` +
+                          `• *New DataMart Balance:* *GH₵ ${newBal != null ? Number(newBal).toFixed(2) : "Updated"}* 🚀\n\n` +
+                          `Your developer wallet has been credited and is active for customer orders!`
+                        ).catch(() => {});
+                      } else if (attempts >= 20 || stRes.data?.data?.status === "failed") {
+                        clearInterval(pollInterval);
+                      }
+                    } catch (_) {}
+                  }, 3000);
+                }
+
+                return sendWhatsApp(from,
+                  `📲 *MOMO TOP-UP PROMPT DISPATCHED BOSS!*\n\n` +
+                  `I have sent a Mobile Money payment prompt of *GH₵ ${amt.toFixed(2)}* to *${formattedPhone}*.\n\n` +
+                  `🔑 *Next Step:* Enter your MoMo PIN on *${formattedPhone}* to approve the deposit.\n\n` +
+                  `💡 *Tip:* To send to a different MoMo number next time, you can write:\n` +
+                  `• *top up datamart ${amt} on [phone]*\n` +
+                  `• Or set default: *set momo [phone]*`
+                );
+              }
+            } catch (err) {
+              console.error("Bridge deposit error:", err?.response?.data || err?.message);
+            }
+          }
+
+          // Fallback if token not configured: display merchant deposit details + instructions
+          return sendWhatsApp(from,
+            `💳 *TOP UP DATAMART WALLET*\n\n` +
+            `To top up *GH₵ ${amt.toFixed(2)}* to your DataMart developer wallet:\n\n` +
+            `📱 *Transfer MoMo to DataMart Merchant:*\n` +
+            `• *MoMo Number:* *0257476174*\n` +
+            `• *Account Name:* *DANAA SAMUEL FRIMPONG / Dajo Unimarket*\n` +
+            `• *Network:* MTN\n\n` +
+            `After sending, reply here with:\n` +
+            `*claim datamart [Transaction_ID]*\n\n` +
+            `💡 Or log into your DataMart dashboard settings to enable automatic 1-click MoMo prompts!`
+          );
+        }
+      }
+
+      // Direct Action Command 0a_set_momo: Set default top-up MoMo number
+      const setTopupPhoneMatch = cmdText.match(/(?:set|update|change)\s+(?:default\s+)?(?:top\s*up|datamart|telecom|momo)\s*(?:phone|number)?\s*(?:to|=)?\s*(0[2357]\d{8}|233[2357]\d{8})/i) ||
+        cmdText.match(/(?:set|update|change)\s+momo\s+(?:number\s+)?(?:to|=)?\s*(0[2357]\d{8}|233[2357]\d{8})/i);
+      if (setTopupPhoneMatch) {
+        let cleanP = setTopupPhoneMatch[1].trim();
+        if (cleanP.startsWith("233")) cleanP = "0" + cleanP.slice(3);
+        await supabase.from("settings").upsert({ key: "admin_topup_phone", value: cleanP }, { onConflict: "key" });
+        return sendWhatsApp(from,
+          `✅ *DEFAULT TOP-UP MOMO NUMBER SAVED BOSS!*\n\n` +
+          `• *Saved Number:* *${cleanP}*\n\n` +
+          `Whenever you send *top up datamart [amount]*, the payment prompt will automatically be sent to *${cleanP}*!\n\n` +
+          `💡 *Tip:* You can also top up any other number anytime by adding it to your message:\n` +
+          `• *top up datamart 50 on 054XXXXXXX*`
+        );
+      }
+
+      // Direct Action Command 0a_claim: Claim DataMart MoMo Deposit
+      const claimDatamartMatch = cmdText.match(/(?:claim\s+datamart|claim\s+deposit|claim\s+momo)\s+([A-Za-z0-9_-]+)/i);
+      if (claimDatamartMatch) {
+        const trxId = claimDatamartMatch[1].trim();
+        const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
+          "datamart_auth_token", "admin_topup_phone", "admin_alert_phone", "admin_whatsapp_number"
+        ]);
+        const sMap = {};
+        (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+        const token = sMap["datamart_auth_token"] || process.env.DATAMART_AUTH_TOKEN;
+        const momoPhone = sMap["admin_topup_phone"] || sMap["admin_alert_phone"] || normalizeGhanaPhone(from) || "0547228161";
+        
+        if (token) {
+          try {
+            const clRes = await axios.post("https://api.datamartgh.shop/api/user/claim-deposit", {
+              trxId,
+              momoNumber: momoPhone,
+              network: "mtn"
+            }, {
+              headers: { "Content-Type": "application/json", "x-auth-token": token },
+              timeout: 15000
+            });
+            if (clRes.data?.status === "success" || clRes.data?.success) {
+              const newBal = clRes.data?.data?.newBalance ?? clRes.data?.newBalance;
+              return sendWhatsApp(from,
+                `✅ *DATAMART DEPOSIT CLAIMED BOSS!*\n\n` +
+                `• *Transaction ID:* ${trxId}\n` +
+                `• *New DataMart Balance:* *GH₵ ${newBal != null ? Number(newBal).toFixed(2) : "Credited"}* 🎉\n\n` +
+                `Your developer wallet is updated!`
+              );
+            } else {
+              return sendWhatsApp(from, `⚠️ DataMart response: ${clRes.data?.message || "Could not verify transaction ID. Please check the ID and retry."}`);
+            }
+          } catch (err) {
+            return sendWhatsApp(from, `⚠️ Could not claim deposit: ${err?.response?.data?.message || err?.message}`);
+          }
+        }
+      }
+
       // Direct Action Command 0a: Credit Agent Wallet
       const creditAgentMatch = cmdText.match(/(?:credit|fund|top\s*up)\s+(?:agent\s+)?([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i);
       if (creditAgentMatch) {
@@ -6878,25 +7068,31 @@ app.post("/webhook", async (req, res) => {
       }
 
       // Direct Action Command 0a_pause_orders: Pause Store Orders
-      if (/\b(?:pause\s*orders?|stop\s*orders?|disable\s*orders?|close\s*shop|turn\s*off\s*orders?|stop\s*taking\s*orders?|hold\s*orders?|freeze\s*orders?)\b/i.test(lt)) {
+      if (/\b(?:pause\s*orders?|pause\s*packages?|stop\s*orders?|disable\s*orders?|close\s*shop|turn\s*off\s*orders?|stop\s*taking\s*orders?|hold\s*orders?|freeze\s*orders?)\b/i.test(lt)) {
         await supabase.from("settings").upsert({ key: "orders_paused", value: "true" }, { onConflict: "key" });
         await syncActionToSite("update_setting", { key: "orders_paused", value: "true" }).catch(() => null);
         return sendWhatsApp(from,
-          `⏸️ *STORE ORDERS PAUSED BOSS!*\n\n` +
-          `The store checkout & order buttons are now *PAUSED* on the website.\n\n` +
-          `📢 Customers will see an alert notifying them that ordering is temporarily on hold.\n\n` +
-          `💡 When ready, simply say *"Resume orders"* or *"Turn on orders"* to open the store again!`
+          `⏸️ *ALL STORE ORDERS & PACKAGES PAUSED BOSS!*\n\n` +
+          `All packages have now been *PAUSED* across:\n` +
+          `• ✅ Main Storefront (data1gh.com)\n` +
+          `• ✅ All Agent Reseller Storefronts\n` +
+          `• ✅ WhatsApp Bot Ordering\n\n` +
+          `📢 All "Buy Now" buttons now display *"Orders Paused"* and checkout is locked.\n\n` +
+          `💡 When ready, simply say *"Resume orders"* or *"Turn on orders"* to open everything back up!`
         );
       }
 
       // Direct Action Command 0a_resume_orders: Resume Store Orders
-      if (/\b(?:resume\s*orders?|open\s*shop|enable\s*orders?|turn\s*on\s*orders?|start\s*taking\s*orders?|unpause\s*orders?|unfreeze\s*orders?)\b/i.test(lt)) {
+      if (/\b(?:resume\s*orders?|resume\s*packages?|open\s*shop|enable\s*orders?|turn\s*on\s*orders?|start\s*taking\s*orders?|unpause\s*orders?|unfreeze\s*orders?)\b/i.test(lt)) {
         await supabase.from("settings").upsert({ key: "orders_paused", value: "false" }, { onConflict: "key" });
         await syncActionToSite("update_setting", { key: "orders_paused", value: "false" }).catch(() => null);
         return sendWhatsApp(from,
-          `▶️ *STORE ORDERS RESUMED BOSS!*\n\n` +
-          `🔥 Checkout and order buttons are now *ACTIVE & OPEN* on the storefront!\n\n` +
-          `Customers can now purchase data packages normally.`
+          `▶️ *ALL STORE ORDERS RESUMED BOSS!*\n\n` +
+          `🔥 All packages are now *ACTIVE & OPEN* across:\n` +
+          `• ✅ Main Storefront (data1gh.com)\n` +
+          `• ✅ All Agent Reseller Storefronts\n` +
+          `• ✅ WhatsApp Bot Ordering\n\n` +
+          `Customers can now purchase data packages normally! 🚀`
         );
       }
 
@@ -8510,11 +8706,13 @@ app.post("/paystack-webhook", async (req, res) => {
         recordWebhookLog("ORDERS_LOOKUP_ERROR", { ref, error: webOrderErr.message });
       }
 
-      // Avoid double delivery: the website verify flow may have already dispatched this order.
+      // Avoid double delivery: the website verify flow may have already dispatched or locked this order.
       if (
         webOrder &&
-        webOrder.payment_status === "paid" &&
-        (webOrder.datamart_reference || ["processing", "delivered", "completed", "waiting"].includes(String(webOrder.delivery_status || "").toLowerCase()))
+        (webOrder.datamart_reference ||
+          webOrder.supplier_status === "dispatching" ||
+          (webOrder.payment_status === "paid" &&
+            ["processing", "delivered", "completed", "waiting"].includes(String(webOrder.delivery_status || "").toLowerCase())))
       ) {
         recordWebhookLog("WEBSITE_DATA_ORDER_ALREADY_DISPATCHED", { ref, delivery_status: webOrder.delivery_status });
         return;
@@ -8523,6 +8721,36 @@ app.post("/paystack-webhook", async (req, res) => {
       if (webOrder) {
         recordWebhookLog("WEBSITE_DATA_ORDER_FOUND", { ref, id: webOrder.id, network: webOrder.network, capacity: webOrder.capacity });
         console.log("🌐 RECOGNIZED WEBSITE DATA ORDER:", ref);
+
+        // Route website & agent orders through the primary /api/paystack endpoint first so atomic DB locking
+        // (claimOrderDispatchLock) and canonical WS- reference formatting prevent any duplicate DataMart order.
+        const verifyEndpoint = (STORE_FRONTEND_URL || "https://www.data1gh.com").replace(/\/+$/, "") + "/api/paystack";
+        try {
+          const vRes = await axios.post(verifyEndpoint, { reference: ref }, { timeout: 25000 });
+          if (vRes.status >= 200 && vRes.status < 300) {
+            recordWebhookLog("WEBSITE_DATA_ORDER_VERIFIED_VIA_API", { ref, status: vRes.data?.status });
+            return;
+          }
+        } catch (vErr) {
+          console.warn("Primary /api/paystack call from webhook failed, checking fallback lock:", vErr.message);
+        }
+
+        // Re-check DB and atomically claim dispatch lock before fallback purchase
+        const { data: lockedRows, error: lockErr } = await supabase
+          .from("orders")
+          .update({ supplier_status: "dispatching", updated_at: new Date().toISOString() })
+          .eq("id", webOrder.id)
+          .is("datamart_reference", null)
+          .or("supplier_status.is.null,supplier_status.neq.dispatching")
+          .select("id, notes");
+
+        if (lockErr || !lockedRows || lockedRows.length === 0) {
+          recordWebhookLog("WEBSITE_DATA_ORDER_LOCK_SKIPPED", { ref });
+          return;
+        }
+
+        const cleanRef = String(ref || "").trim().replace(/^WS[-_]?/i, "");
+        const dmCanonicalRef = `WS-${cleanRef}`;
 
         const networkMap = {
           MTN: "YELLO",
@@ -8543,27 +8771,40 @@ app.post("/paystack-webhook", async (req, res) => {
         let dmSuccess = false;
         let dmRef = null;
 
+        const activeDmKey = DATA_API_KEY || process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY;
+        const activeDmSecret = process.env.DATAMART_API_SECRET || process.env.DM_API_SECRET || DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET;
+
         const dmHeaders = {
-          "x-api-key": DATA_API_KEY,
-          "X-Idempotency-Key": ref,
+          "x-api-key": activeDmKey,
+          "X-Idempotency-Key": dmCanonicalRef,
           "Content-Type": "application/json"
         };
-        if (process.env.DATAMART_API_SECRET || process.env.DM_API_SECRET) {
-          dmHeaders["x-api-secret"] = process.env.DATAMART_API_SECRET || process.env.DM_API_SECRET;
+        if (activeDmSecret) {
+          dmHeaders["x-api-secret"] = activeDmSecret;
         }
 
-        if (DATA_API_KEY) {
+        const isFlash = Boolean(webOrder.is_flash_sale || String(webOrder.notes || "").includes("FLASH_SALE"));
+
+        if (activeDmKey && !isFlash) {
           try {
             const dmRes = await axios.post(
               `${DATAMART_BASE}/purchase`,
-              { phoneNumber: phone, network: dmNetwork, capacity, gateway: "wallet", ref: ref, delivery: "fast" },
+              { phoneNumber: phone, network: dmNetwork, capacity, gateway: "wallet", ref: dmCanonicalRef, delivery: "fast" },
               { headers: dmHeaders, timeout: 30000 }
             );
             const data = dmRes.data?.data || dmRes.data || {};
-            dmRef = data.reference || data.orderReference || data.purchaseId || null;
+            dmRef = data.reference || data.orderReference || data.purchaseId || dmCanonicalRef;
             dmSuccess = true;
           } catch (dmErr) {
-            console.warn("Direct DataMart purchase error for order:", dmErr.response?.data || dmErr.message);
+            const errMsg = String(dmErr.response?.data?.message || dmErr.response?.data?.error || dmErr.message || "").toLowerCase();
+            if (errMsg.includes("already exist") || errMsg.includes("duplicate")) {
+              dmRef = dmCanonicalRef;
+              dmSuccess = true;
+            } else {
+              console.warn("Direct DataMart purchase error for order:", dmErr.response?.data || dmErr.message);
+              await supabase.from("orders").update({ supplier_status: "failed" }).eq("id", webOrder.id);
+              return;
+            }
           }
         }
 
@@ -8573,7 +8814,7 @@ app.post("/paystack-webhook", async (req, res) => {
         let verifiedDelivery = "processing";
         let verifiedRaw = "processing";
         if (dmSuccess) {
-          const direct = await getRealDatamartDeliveryStatus(dmRef || ref);
+          const direct = await getRealDatamartDeliveryStatus(dmRef || dmCanonicalRef);
           verifiedDelivery = direct.deliveryStatus;
           verifiedRaw = direct.rawStatus;
         }
@@ -8583,6 +8824,7 @@ app.post("/paystack-webhook", async (req, res) => {
           payment_status: "paid",
           delivery_status: verifiedDelivery,
           datamart_status: verifiedRaw,
+          supplier_status: "datamart",
           updated_at: new Date().toISOString()
         };
         if (dmRef) {
@@ -8611,8 +8853,23 @@ app.post("/paystack-webhook", async (req, res) => {
           ).catch(() => {});
         }
 
-        // Website orders are officially alerted by the website backend (sendPaymentReceivedNotification)
-        // with the full store name, payment channel, and timestamp. Suppress duplicate alert here.
+        // Send instant WhatsApp order alert to admin directly from live bot!
+        try {
+          const storeLabel = webOrder.store_name ? `🏪 Store: *${webOrder.store_name}*` : (webOrder.agent_id ? `🏪 Store: *Agent Store*` : "🏪 Store: *DataOne GH*");
+          await sendAdminWhatsApp(
+            `🛍️ *NEW ORDER PAYMENT RECEIVED!* 🎉\n` +
+            `━━━━━━━━━━━━━━━━━━━━━\n` +
+            `${storeLabel}\n` +
+            `🆔 *Ref:* ${webOrder.reference || ref}\n` +
+            `📶 *Item:* ${webOrder.capacity || capacity}GB ${webOrder.network || ""}\n` +
+            `📱 *Customer Phone:* ${phone}\n` +
+            `💰 *Amount:* GHS ${paidAmount.toFixed(2)}\n` +
+            `⚡ *DataMart Delivery:* ${verifiedDelivery === "delivered" ? "Delivered ✅" : "In Progress ⏳"}\n` +
+            `⏰ *Time:* ${new Date().toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" })}`
+          );
+          // Tag as alerted
+          await supabase.from("orders").update({ notes: `${webOrder.notes || ""} [wa_alert_sent]`.trim() }).eq("id", webOrder.id);
+        } catch (_) {}
         return;
       }
     }
@@ -8636,7 +8893,19 @@ app.post("/paystack-webhook", async (req, res) => {
           })
           .eq("reference", ref);
 
-        // Website service orders are alerted by the website backend with store & customer details
+        // Send instant WhatsApp order alert to admin
+        try {
+          await sendAdminWhatsApp(
+            `🛍️ *NEW SERVICE ORDER PAID!* 🎉\n` +
+            `━━━━━━━━━━━━━━━━━━━━━\n` +
+            `🏪 *Store:* DataOne GH\n` +
+            `🆔 *Ref:* ${ref}\n` +
+            `📶 *Service:* ${webService.service?.toUpperCase()}\n` +
+            `📱 *Customer Phone:* ${webService.customer_phone || "N/A"}\n` +
+            `💰 *Amount:* GHS ${paidAmount.toFixed(2)}\n` +
+            `⏰ *Time:* ${new Date().toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" })}`
+          );
+        } catch (_) {}
         return;
       }
     }
@@ -8659,7 +8928,19 @@ app.post("/paystack-webhook", async (req, res) => {
           })
           .eq("reference", ref);
 
-        // Website checker orders are alerted by the website backend with store & customer details
+        // Send instant WhatsApp order alert to admin
+        try {
+          await sendAdminWhatsApp(
+            `🛍️ *NEW RESULT CHECKER ORDER PAID!* 🎉\n` +
+            `━━━━━━━━━━━━━━━━━━━━━\n` +
+            `🏪 *Store:* DataOne GH\n` +
+            `🆔 *Ref:* ${ref}\n` +
+            `📶 *Item:* ${webChecker.checker_type?.toUpperCase()} Result Checker\n` +
+            `📱 *Customer Phone:* ${webChecker.phone || webChecker.recipient_phone || "N/A"}\n` +
+            `💰 *Amount:* GHS ${paidAmount.toFixed(2)}\n` +
+            `⏰ *Time:* ${new Date().toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" })}`
+          );
+        } catch (_) {}
         return;
       }
     }
@@ -9279,6 +9560,17 @@ app.get("/admin", (req, res) => {
   res.sendFile(__dirname + "/admin.html");
 });
 
+app.post("/api/send-admin-alert", async (req, res) => {
+  try {
+    const { text } = req.body || {};
+    if (!text) return res.status(400).json({ error: "Missing alert text" });
+    await sendAdminWhatsApp(text);
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message });
+  }
+});
+
 /* =========================================================
 ADMIN DATA
 ========================================================= */
@@ -9393,18 +9685,23 @@ async function notifyOrderDelivered(order) {
 }
 
 let isDeliveryWatcherRunning = false;
+let deliveryWatcherTick = 0;
 async function runActiveDeliveryWatcher() {
   if (isDeliveryWatcherRunning) return;
   isDeliveryWatcherRunning = true;
+  deliveryWatcherTick++;
   try {
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    // Zero-egress optimization: normally query only the last 4 hours (limit 10); once every 10 ticks (~15 mins) check 24 hours
+    const lookbackMs = deliveryWatcherTick % 10 === 0 ? 24 * 60 * 60 * 1000 : 4 * 60 * 60 * 1000;
+    const cutoffIso = new Date(Date.now() - lookbackMs).toISOString();
     const { data: pendingOrders, error } = await supabase
       .from("orders")
-      .select("id, reference, datamart_reference, recipient_phone, phone, notes, network, capacity, amount, delivery_status, payment_status")
+      .select("id, reference, datamart_reference, datamart_status, recipient_phone, notes, network, capacity, amount, delivery_status, payment_status, supplier_status, created_at")
       .eq("payment_status", "paid")
       .in("delivery_status", ["processing", "pending", "waiting", "in_progress"])
-      .gte("created_at", twentyFourHoursAgo)
-      .limit(20);
+      .gte("created_at", cutoffIso)
+      .order("created_at", { ascending: false })
+      .limit(10);
 
     if (error || !Array.isArray(pendingOrders) || pendingOrders.length === 0) {
       isDeliveryWatcherRunning = false;
@@ -9413,6 +9710,18 @@ async function runActiveDeliveryWatcher() {
 
     for (const ord of pendingOrders) {
       try {
+        const isFlash = Boolean(String(ord.notes || "").includes("FLASH_SALE"));
+        if (isFlash) continue;
+
+        // If paid order was never dispatched to DataMart (and is at least 30s old so we never race an active checkout),
+        // trigger /api/paystack to fulfill & alert idempotently.
+        const orderAgeMs = ord.created_at ? Date.now() - new Date(ord.created_at).getTime() : 60000;
+        if (!ord.datamart_reference && ord.supplier_status !== "dispatching" && ord.reference && orderAgeMs > 30000) {
+          const verifyEndpoint = (STORE_FRONTEND_URL || "https://www.data1gh.com").replace(/\/+$/, "") + "/api/paystack";
+          await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 }).catch(() => null);
+          continue;
+        }
+
         const queryTarget = ord.datamart_reference || ord.reference;
         if (!queryTarget) continue;
 
@@ -9420,22 +9729,29 @@ async function runActiveDeliveryWatcher() {
         if (live && (live.deliveryStatus === "delivered" || live.rawStatus === "delivered" || live.rawStatus === "completed")) {
           await supabase.from("orders").update({
             delivery_status: "delivered",
-            datamart_status: live.rawStatus || "delivered",
+            datamart_status: "completed",
+            status: "delivered",
             updated_at: new Date().toISOString(),
           }).eq("id", ord.id);
 
           try {
             data1db.getClient().from("orders").update({
               delivery_status: "delivered",
-              datamart_status: live.rawStatus || "delivered",
+              datamart_status: "completed",
             }).eq("id", ord.id);
           } catch (_) { }
 
           await notifyOrderDelivered({
             ...ord,
             delivery_status: "delivered",
-            datamart_status: live.rawStatus || "delivered",
+            datamart_status: "completed",
           });
+        } else if (live && live.deliveryStatus && (ord.delivery_status !== live.deliveryStatus || ord.datamart_status !== live.rawStatus)) {
+          await supabase.from("orders").update({
+            delivery_status: live.deliveryStatus,
+            datamart_status: live.rawStatus || live.deliveryStatus,
+            updated_at: new Date().toISOString(),
+          }).eq("id", ord.id);
         }
       } catch (_) { }
     }
@@ -9446,64 +9762,56 @@ async function runActiveDeliveryWatcher() {
   }
 }
 
-// Check every 60 seconds for orders that just completed delivery on DataMart
-setInterval(runActiveDeliveryWatcher, 60000);
-setTimeout(runActiveDeliveryWatcher, 10000);
+// Check every 90 seconds (ultra-low Supabase egress) for orders that updated or completed delivery on DataMart
+setInterval(runActiveDeliveryWatcher, 90000);
+setTimeout(runActiveDeliveryWatcher, 15000);
 
 let isPaymentWatcherRunning = false;
+let cachedWatcherPaystackKey = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET || "";
 async function runPendingPaymentWatcher() {
   if (isPaymentWatcherRunning) return;
   isPaymentWatcherRunning = true;
   try {
-    let paystackKey = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET;
-    if (!paystackKey) {
+    if (!cachedWatcherPaystackKey) {
       const { data: sRow } = await supabase.from("settings").select("value").in("key", ["paystack_secret_key", "PAYSTACK_SECRET_KEY"]).maybeSingle();
-      if (sRow?.value) paystackKey = sRow.value;
+      if (sRow?.value) cachedWatcherPaystackKey = sRow.value;
     }
-    if (!paystackKey) {
+    if (!cachedWatcherPaystackKey) {
       isPaymentWatcherRunning = false;
       return;
     }
 
-    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const fortyFiveMinutesAgo = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+    const thirtySecondsAgo = new Date(Date.now() - 30 * 1000).toISOString();
     const { data: pendingOrders } = await supabase
       .from("orders")
-      .select("id, reference, recipient_phone, network, capacity, amount, delivery_status, payment_status, datamart_reference, supplier_status, notes, agent_id")
-      .eq("payment_status", "pending")
-      .gte("created_at", twoHoursAgo)
+      .select("id, reference, payment_status, datamart_reference, supplier_status, notes, created_at")
+      .or("payment_status.eq.pending,and(payment_status.eq.paid,datamart_reference.is.null)")
+      .gte("created_at", fortyFiveMinutesAgo)
+      .lte("created_at", thirtySecondsAgo)
       .order("created_at", { ascending: false })
-      .limit(6);
+      .limit(5);
 
     if (Array.isArray(pendingOrders) && pendingOrders.length > 0) {
+      const verifyEndpoint = (STORE_FRONTEND_URL || "https://www.data1gh.com").replace(/\/+$/, "") + "/api/paystack";
       for (const ord of pendingOrders) {
-        if (!ord.reference) continue;
+        if (!ord.reference || ord.datamart_reference || ord.supplier_status === "dispatching") continue;
+        const isFlash = Boolean(String(ord.notes || "").includes("FLASH_SALE"));
+        if (ord.payment_status === "paid" && isFlash) continue;
+
         try {
+          if (ord.payment_status === "paid") {
+            await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 }).catch(() => null);
+            continue;
+          }
           const psRes = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(ord.reference)}`, {
-            headers: { Authorization: `Bearer ${paystackKey}` },
+            headers: { Authorization: `Bearer ${cachedWatcherPaystackKey}` },
             timeout: 5000
           });
           const psData = psRes.data?.data;
           if (psData?.status === "success") {
-            // 1. Mark paid in orders
-            await supabase.from("orders").update({
-              payment_status: "paid",
-              updated_at: new Date().toISOString()
-            }).eq("id", ord.id);
-
-            // 2. Trigger DataMart dispatch via website API ONLY IF not already dispatched or dispatching!
-            if (!ord.datamart_reference && ord.supplier_status !== "dispatching" && ord.delivery_status !== "delivered") {
-              const siteEndpoint = (STORE_FRONTEND_URL || "https://gooddata1.vercel.app").replace(/\/+$/, "") + "/api/admin";
-              axios.post(siteEndpoint, {
-                action: "executeAiAction",
-                action_type: "retry_order",
-                payload: {
-                  reference: ord.reference,
-                  phone: ord.recipient_phone,
-                  network: ord.network,
-                  capacity: ord.capacity
-                }
-              }, { timeout: 6000 }).catch(() => null);
-            }
+            // Trigger full Paystack verification + DataMart auto-dispatch + WhatsApp alert via primary /api/paystack endpoint!
+            await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 }).catch(() => null);
           } else if (psData?.status === "failed" || psData?.status === "abandoned") {
             await supabase.from("orders").update({
               payment_status: "failed",
@@ -9523,8 +9831,8 @@ async function runPendingPaymentWatcher() {
   }
 }
 
-// Check every 45 seconds for orders that were paid on Paystack but pending sync
-setInterval(runPendingPaymentWatcher, 45000);
+// Check every 60 seconds (minimal egress) for orders that were paid on Paystack so they dispatch & alert automatically
+setInterval(runPendingPaymentWatcher, 60000);
 setTimeout(runPendingPaymentWatcher, 12000);
 
 /* =========================================================
