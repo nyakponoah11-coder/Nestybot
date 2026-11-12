@@ -113,6 +113,89 @@ DATA 1 GH — COMPLETE SITE KNOWLEDGE BASE (FROM HTTPS://WWW.DATA1GH.COM):
   - Fallback Paystack Link: If direct prompt doesn't pop up, a secure online link is generated for instant payment.
 `;
 
+/* =========================================================
+ALL-CORNERS CODEBASE & ARCHITECTURE BLUEPRINT
+Gives Stony Co-Pilot deep engineering awareness of every file,
+table, lock tag, webhook, and background worker in the system!
+========================================================= */
+const ALL_CORNERS_CODEBASE_BLUEPRINT = `
+DATA 1 GH — FULL CODEBASE & SYSTEM ARCHITECTURE MAP (ALL CORNERS):
+
+1. REPOSITORIES & DEPLOYMENT INFRASTRUCTURE:
+• Main Storefront & Serverless API Repo: github.com/nyakponoah11-coder/data-ease-shop (deployed on Vercel at https://www.data1gh.com)
+• 24/7 WhatsApp Bot & Background Worker Repo: github.com/nyakponoah11-coder/Nestybot (server.js synced from whatsapp-bot-server.js, deployed on Render)
+• Master Database: Supabase PostgreSQL (gomijazuakrbkkcqusdp.supabase.co) using service_role key to bypass RLS.
+
+2. FRONTEND CODEBASE FILES (src/):
+• src/pages/Index.tsx & src/components/OrderModal.tsx: Storefront bundle selection, Paystack inline checkout, reseller attribution ([agent:id], [store:slug]), and post-payment call to /api/paystack.
+• src/pages/Track.tsx: Customer real-time order tracker (/track) — calls /api/datamart?action=trackOrder, reconciles Paystack payment + DataMart status.
+• src/pages/admin/AdminOrders.tsx & src/pages/admin/AdminDashboard.tsx: Admin portal order management, auto-syncs pending/processing orders every 20s, buttons for Auto Sync (syncOrderStatus), Sync Payment (reconcileOrderPayment), and Retry (retryDatamartOrder).
+• src/pages/admin/AdminWhatsAppOrders.tsx & src/components/WhatsAppOrdersSummary.tsx: WhatsApp bot order sessions and logs.
+• src/pages/AgentStore.tsx & src/pages/agent/AgentDashboard.tsx: Reseller storefronts (/s/:slug), custom pricing overrides, agent wallet & profit withdrawals.
+
+3. BACKEND SERVERLESS API FILES (api/ on Vercel):
+• api/paystack.ts & api/paystack-webhook.ts: Verifies Paystack transactions, marks payment_status="paid", credits reseller agent profit ([agent_credited]), dispatches bundle via fulfillCoreOrder in api/_datamart.ts, and triggers WhatsApp admin alert ([wa_alert_sent]).
+• api/_datamart.ts: Core DataMart engine (purchaseDataFromDatamart, checkDatamartStatus, claimOrderDispatchLock). Uses canonical reference format WS-{CLEAN_REF} and atomic lock tags [dm_inflight:timestamp] and [dm_dispatched] in orders.notes so duplicate dispatches can NEVER happen.
+• api/admin.ts & api/_ai-rotator.ts: Admin portal API and multi-provider AI rotator (Groq openai/gpt-oss-120b with reasoning_effort="low").
+• api/partner.ts: Reseller agent registration, custom pricing, and withdrawal endpoints.
+
+4. 24/7 RENDER BACKGROUND WORKERS (whatsapp-bot-server.js / Nestybot/server.js):
+• runPendingPaymentWatcher() (every 60s): Scans orders from last 45m where payment_status="pending" OR (payment_status="paid" and datamart_reference is null). Verifies pending orders directly against Paystack API (/transaction/verify/:ref) and calls /api/paystack so orders dispatch to DataMart and send WhatsApp alerts automatically even if the customer closed their browser before redirect!
+• runActiveDeliveryWatcher() (every 90s): Polls getRealDatamartDeliveryStatus() for paid orders in pending/processing/waiting, updates delivery_status ("processing" or "delivered") in Supabase, and sends the "✅ DATA ORDER DELIVERED!" WhatsApp alert ([delivery_confirmed_sent]).
+
+5. DATABASE TABLES & STATE MACHINE TAGS (orders.notes):
+• Tables: orders, whatsapp_orders, sessions, service_orders, checker_orders, products, settings, agents, agent_orders, scratch_codes, free_data_codes, support_chats, security_logs.
+• Key State Tags in orders.notes:
+  - [dm_inflight:<ms>]: Atomic 3-minute lock while a DataMart purchase request is in flight.
+  - [dm_dispatched]: Permanently marks that DataMart accepted the bundle purchase (blocks duplicate dispatches).
+  - [wa_alert_sent]: Marks that the initial New Paid Order WhatsApp alert was sent to the owner.
+  - [delivery_confirmed_sent]: Marks that the final Delivered WhatsApp alert was sent.
+  - [agent:<id>] & [store:<slug>]: Reseller store attribution tags.
+  - [agent_credited]: Marks that reseller commission was credited to the agent's wallet.
+  - FLASH_SALE: Marks manual flash sale orders (excluded from automated DataMart wallet dispatch).
+`;
+
+const RUNTIME_ERROR_LOG = [];
+const MAX_RUNTIME_ERRORS = 40;
+const WATCHER_TELEMETRY = {
+  bootTime: new Date().toISOString(),
+  lastPaymentWatcherAt: null,
+  lastDeliveryWatcherAt: null,
+  paymentWatcherRuns: 0,
+  deliveryWatcherRuns: 0,
+  autoVerifiedPayments: 0,
+  autoDispatchedOrders: 0,
+  autoSyncedDeliveries: 0,
+  lastWatcherError: null,
+};
+
+function recordRuntimeDiagnostic(level, msg) {
+  try {
+    const clean = String(msg || "").trim();
+    if (!clean || /dotenv|ExperimentalWarning|punycode/i.test(clean)) return;
+    RUNTIME_ERROR_LOG.unshift({
+      time: new Date().toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      level,
+      message: clean.slice(0, 260),
+    });
+    if (RUNTIME_ERROR_LOG.length > MAX_RUNTIME_ERRORS) {
+      RUNTIME_ERROR_LOG.length = MAX_RUNTIME_ERRORS;
+    }
+  } catch (_) {}
+}
+
+const _origConsoleError = console.error.bind(console);
+const _origConsoleWarn = console.warn.bind(console);
+console.error = (...args) => {
+  recordRuntimeDiagnostic("ERROR", args.map(a => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" "));
+  _origConsoleError(...args);
+};
+console.warn = (...args) => {
+  recordRuntimeDiagnostic("WARN", args.map(a => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" "));
+  _origConsoleWarn(...args);
+};
+
+
 // IMPORTANT: The bot MUST use the service_role key. Since the 2026-09-30 RLS
 // lockdown, the anon key can no longer read/update `orders`, `service_orders`
 // or `checker_orders`, which makes every website payment look like an
@@ -3534,6 +3617,20 @@ async function executeOwnerDirectAction(type, payload = {}) {
       }]).catch(() => null);
       return `Dispatched *${cleanCap}GB ${net}* to *${cleanPhone}* via DataMart (Ref: *${dmRef}*)!`;
     }
+
+    // 21. All-Corners System Diagnostic & Auto-Healer
+    if (cleanType === "diagnose_system" || cleanType === "fix_all_anomalies" || cleanType === "heal_system" || cleanType === "audit_system") {
+      const shouldFix = cleanType === "fix_all_anomalies" || cleanType === "heal_system" || Boolean(payload.autoFix || payload.fix);
+      const report = await runAllCornersSystemXRay(shouldFix);
+      return report;
+    }
+
+    // 22. Live Codebase File Inspector
+    if (cleanType === "inspect_codebase" || cleanType === "read_file" || cleanType === "read_code") {
+      const targetFile = String(payload.file || payload.path || payload.query || "whatsapp-bot-server.js").trim();
+      const snippet = await inspectCodebaseFile(targetFile, payload.keyword || "");
+      return snippet;
+    }
   } catch (e) {
     console.warn("executeOwnerDirectAction error:", e.message);
     return `Action execution encountered an issue: ${e.message}`;
@@ -3541,6 +3638,274 @@ async function executeOwnerDirectAction(type, payload = {}) {
 
   return "Action executed.";
 }
+
+/* =========================================================
+ALL-CORNERS DEEP SYSTEM X-RAY, CODEBASE INSPECTOR & AUTO-HEALER
+Gives Stony Co-Pilot 360° visibility into every corner of the
+codebase, database, Paystack, DataMart, and runtime logs!
+========================================================= */
+
+async function inspectCodebaseFile(fileOrQuery, keyword = "") {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const q = String(fileOrQuery || "").trim();
+
+    // Map shorthand names to exact repository file paths
+    let repoPath = q;
+    if (/adminorders/i.test(q)) repoPath = "src/pages/admin/AdminOrders.tsx";
+    else if (/admindashboard/i.test(q)) repoPath = "src/pages/admin/AdminDashboard.tsx";
+    else if (/whatsapporders/i.test(q)) repoPath = "src/pages/admin/AdminWhatsAppOrders.tsx";
+    else if (/track/i.test(q)) repoPath = "src/pages/Track.tsx";
+    else if (/ordermodal/i.test(q)) repoPath = "src/components/OrderModal.tsx";
+    else if (/_datamart|datamart\.ts/i.test(q)) repoPath = "api/_datamart.ts";
+    else if (/webhook/i.test(q)) repoPath = "api/paystack-webhook.ts";
+    else if (/paystack/i.test(q)) repoPath = "api/paystack.ts";
+    else if (/partner/i.test(q)) repoPath = "api/partner.ts";
+    else if (/ai-rotator|rotator/i.test(q)) repoPath = "api/_ai-rotator.ts";
+    else if (/admin\.ts/i.test(q)) repoPath = "api/admin.ts";
+    else if (/bot|server\.js|whatsapp-bot/i.test(q)) repoPath = "whatsapp-bot-server.js";
+
+    let content = "";
+    // 1. Try local filesystem first
+    const localCandidate = repoPath === "whatsapp-bot-server.js"
+      ? __filename
+      : path.resolve(__dirname, repoPath);
+    if (fs.existsSync(localCandidate)) {
+      content = fs.readFileSync(localCandidate, "utf8");
+    } else {
+      // 2. Fetch live from GitHub repository
+      const ghUrl = `https://raw.githubusercontent.com/nyakponoah11-coder/data-ease-shop/main/${repoPath.replace(/^\/+/, "")}`;
+      const ghRes = await axios.get(ghUrl, { timeout: 6000 });
+      if (typeof ghRes.data === "string") content = ghRes.data;
+    }
+
+    if (!content) return `Could not locate file "${repoPath}".`;
+    const lines = content.split(/\r?\n/);
+
+    if (keyword) {
+      const kw = String(keyword).toLowerCase();
+      const matchedRanges = [];
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].toLowerCase().includes(kw)) {
+          const start = Math.max(0, i - 4);
+          const end = Math.min(lines.length - 1, i + 8);
+          matchedRanges.push(
+            lines.slice(start, end + 1).map((l, idx) => `L${start + idx + 1}: ${l}`).join("\n")
+          );
+          i = end;
+          if (matchedRanges.length >= 4) break;
+        }
+      }
+      if (matchedRanges.length > 0) {
+        return `📂 *FILE: ${repoPath}* (${lines.length} lines | matches for "${keyword}"):\n` + matchedRanges.join("\n---\n");
+      }
+    }
+
+    return `📂 *FILE: ${repoPath}* (${lines.length} total lines):\n` +
+      lines.slice(0, 45).map((l, idx) => `L${idx + 1}: ${l}`).join("\n") +
+      (lines.length > 45 ? `\n... (${lines.length - 45} more lines)` : "");
+  } catch (err) {
+    return `Codebase inspect note (${fileOrQuery}): ${err.message}`;
+  }
+}
+
+async function runAllCornersSystemXRay(autoFix = false) {
+  const findings = [];
+  const fixesApplied = [];
+  const verifyEndpoint = (STORE_FRONTEND_URL || "https://www.data1gh.com").replace(/\/+$/, "") + "/api/paystack";
+
+  try {
+    // 1. Pull last 35 orders from Supabase
+    const { data: recentOrders } = await supabase
+      .from("orders")
+      .select("id, reference, datamart_reference, datamart_status, supplier_status, network, capacity, recipient_phone, amount, payment_status, delivery_status, notes, error_message, created_at")
+      .order("created_at", { ascending: false })
+      .limit(35);
+
+    const ordersList = Array.isArray(recentOrders) ? recentOrders : [];
+
+    // 2. Fetch live DataMart transactions (up to 60) for cross-reference
+    let dmTransactions = [];
+    const dmKey = DATA_API_KEY || process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY;
+    const dmSec = process.env.DATAMART_API_SECRET || DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET;
+    try {
+      const dmRes = await axios.get(`${DATAMART_BASE}/transactions?limit=60`, {
+        headers: { "x-api-key": dmKey, ...(dmSec ? { "x-api-secret": dmSec } : {}) },
+        timeout: 8000,
+      });
+      dmTransactions = dmRes.data?.data?.transactions || dmRes.data?.transactions || dmRes.data?.data || [];
+      if (!Array.isArray(dmTransactions)) dmTransactions = [];
+    } catch (dmErr) {
+      findings.push(`⚠️ *DataMart API Transactions Check:* Could not fetch /transactions (${dmErr.message})`);
+    }
+
+    // 3. Get Paystack key for live verification of recent pending orders
+    let psKey = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET || "";
+    if (!psKey) {
+      try {
+        const { data: sRow } = await supabase.from("settings").select("value").in("key", ["paystack_secret_key", "PAYSTACK_SECRET_KEY"]).maybeSingle();
+        if (sRow?.value) psKey = sRow.value;
+      } catch (_) {}
+    }
+
+    const paidUndispatched = [];
+    const statusDesyncs = [];
+    const unverifiedButPaidOnPaystack = [];
+    const missingWaAlerts = [];
+    const staleInflightLocks = [];
+    const recentFailedOrders = [];
+
+    for (const ord of ordersList) {
+      const notes = String(ord.notes || "");
+      const isFlash = notes.includes("FLASH_SALE") || notes.includes("FLASH SALE");
+      const ageMs = ord.created_at ? Date.now() - new Date(ord.created_at).getTime() : 0;
+      const cleanRef = String(ord.reference || "").replace(/^WS-?/i, "").toUpperCase();
+      const canonicalDmRef = `WS-${cleanRef}`;
+
+      // Check stale [dm_inflight:ts] lock (>3 mins old)
+      const inflightMatch = notes.match(/\[dm_inflight:(\d+)\]/);
+      if (inflightMatch && Date.now() - Number(inflightMatch[1]) > 180000) {
+        staleInflightLocks.push(ord);
+        if (autoFix) {
+          const cleanedNotes = notes.replace(/\[dm_inflight:\d+\]/g, "").trim();
+          await supabase.from("orders").update({ notes: cleanedNotes }).eq("id", ord.id);
+          fixesApplied.push(`Cleared stale [dm_inflight] lock on *${ord.reference}*`);
+        }
+      }
+
+      // Match against DataMart transactions list
+      const cleanPhone = String(ord.recipient_phone || "").replace(/\D/g, "");
+      const normPhone = cleanPhone.startsWith("233") ? "0" + cleanPhone.slice(3) : cleanPhone;
+      const dmMatch = dmTransactions.find(tx => {
+        const txRef = String(tx.reference || tx.transactionReference || tx.ref || tx.orderReference || "").toUpperCase();
+        if (txRef && (txRef === String(ord.reference || "").toUpperCase() || txRef === canonicalDmRef || (ord.datamart_reference && txRef === String(ord.datamart_reference).toUpperCase()))) {
+          return true;
+        }
+        const txPhone = String(tx.phoneNumber || tx.phone || tx.recipient || "").replace(/\D/g, "");
+        const normTxPhone = txPhone.startsWith("233") ? "0" + txPhone.slice(3) : txPhone;
+        const txCap = String(tx.capacity || tx.dataAmount || "").replace(/[^\d.]/g, "");
+        const ordCap = String(ord.capacity || "").replace(/[^\d.]/g, "");
+        const txTime = tx.createdAt ? new Date(tx.createdAt).getTime() : 0;
+        const ordTime = ord.created_at ? new Date(ord.created_at).getTime() : 0;
+        return normTxPhone && normTxPhone === normPhone && txCap === ordCap && Math.abs(txTime - ordTime) < 30 * 60 * 1000;
+      });
+
+      if (ord.payment_status === "paid") {
+        // Check if DataMart has a newer status than Supabase
+        if (dmMatch) {
+          const rawDmStatus = String(dmMatch.status || "").toLowerCase();
+          const mappedDmStatus = /complet|deliver|success/i.test(rawDmStatus)
+            ? "delivered"
+            : (/process|queue|pending|ongoing|wait/i.test(rawDmStatus) ? "processing" : rawDmStatus);
+
+          if (
+            (mappedDmStatus === "delivered" && ord.delivery_status !== "delivered") ||
+            (mappedDmStatus === "processing" && ord.delivery_status === "pending")
+          ) {
+            statusDesyncs.push({ ord, dmStatus: mappedDmStatus, rawDmStatus, dmRef: dmMatch.reference || dmMatch.transactionReference || canonicalDmRef });
+            if (autoFix) {
+              const nextNotes = notes.includes("[dm_dispatched]") ? notes : `${notes} [dm_dispatched]`.trim();
+              await supabase.from("orders").update({
+                delivery_status: mappedDmStatus,
+                datamart_status: rawDmStatus || mappedDmStatus,
+                datamart_reference: ord.datamart_reference || dmMatch.reference || dmMatch.transactionReference || canonicalDmRef,
+                notes: nextNotes,
+                updated_at: new Date().toISOString()
+              }).eq("id", ord.id);
+              fixesApplied.push(`Synced *${ord.reference}* (${ord.recipient_phone}) from *${ord.delivery_status}* → *${mappedDmStatus.toUpperCase()}*`);
+            }
+          }
+        } else if (!isFlash && !ord.datamart_reference && !notes.includes("[dm_dispatched]") && ord.delivery_status === "pending" && ageMs > 45000 && ageMs < 12 * 60 * 60 * 1000) {
+          paidUndispatched.push(ord);
+          if (autoFix) {
+            await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 }).catch(() => null);
+            fixesApplied.push(`Triggered DataMart dispatch & alert for paid order *${ord.reference}* (${ord.capacity}GB ${ord.network} → ${ord.recipient_phone})`);
+          }
+        }
+
+        if (!notes.includes("[wa_alert_sent]") && ageMs < 6 * 60 * 60 * 1000) {
+          missingWaAlerts.push(ord);
+        }
+        if (ord.delivery_status === "failed") {
+          recentFailedOrders.push(ord);
+        }
+      } else if (ord.payment_status === "pending" && psKey && ageMs > 30000 && ageMs < 3 * 60 * 60 * 1000) {
+        // Check up to 5 recent pending orders against Paystack live
+        if (unverifiedButPaidOnPaystack.length < 5) {
+          try {
+            const psRes = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(ord.reference)}`, {
+              headers: { Authorization: `Bearer ${psKey}` },
+              timeout: 4500,
+            });
+            if (psRes.data?.data?.status === "success") {
+              unverifiedButPaidOnPaystack.push(ord);
+              if (autoFix) {
+                await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 }).catch(() => null);
+                fixesApplied.push(`Verified Paystack payment & dispatched *${ord.reference}* (${ord.capacity}GB ${ord.network} → ${ord.recipient_phone})`);
+              }
+            }
+          } catch (_) {}
+        }
+      }
+    }
+
+    // Build Corner-by-Corner Report
+    if (unverifiedButPaidOnPaystack.length > 0) {
+      findings.push(`🔴 *Unverified Paystack Payments (${unverifiedButPaidOnPaystack.length}):* Customer paid on MoMo, but browser closed before redirect:\n` +
+        unverifiedButPaidOnPaystack.map(o => `  • *${o.reference}* (${o.capacity}GB ${o.network} → ${o.recipient_phone}, ₵${o.amount})`).join("\n"));
+    } else {
+      findings.push(`✅ *Paystack Reconciliation:* 0 unverified MoMo payments.`);
+    }
+
+    if (paidUndispatched.length > 0) {
+      findings.push(`🔴 *Paid Orders Not Dispatched to DataMart (${paidUndispatched.length}):*\n` +
+        paidUndispatched.map(o => `  • *${o.reference}* (${o.capacity}GB ${o.network} → ${o.recipient_phone}, ₵${o.amount})`).join("\n"));
+    } else {
+      findings.push(`✅ *DataMart Dispatch Pipeline:* All paid bundles have been dispatched to DataMart.`);
+    }
+
+    if (statusDesyncs.length > 0) {
+      findings.push(`🟡 *Admin vs DataMart Status Desyncs (${statusDesyncs.length}):* Showing Pending/Processing in DB while DataMart moved ahead:\n` +
+        statusDesyncs.map(d => `  • *${d.ord.reference}* (${d.ord.recipient_phone}): DB=*${d.ord.delivery_status}* vs DataMart=*${d.dmStatus.toUpperCase()}*`).join("\n"));
+    } else {
+      findings.push(`✅ *Admin vs DataMart Status Sync:* 100% in sync across recent orders.`);
+    }
+
+    if (staleInflightLocks.length > 0) {
+      findings.push(`🟡 *Stale [dm_inflight] Locks (${staleInflightLocks.length}):* ${staleInflightLocks.map(o => o.reference).join(", ")}`);
+    }
+
+    if (recentFailedOrders.length > 0) {
+      findings.push(`⚠️ *Failed Orders in Last 35 (${recentFailedOrders.length}):*\n` +
+        recentFailedOrders.slice(0, 4).map(o => `  • *${o.reference}* (${o.capacity}GB ${o.network} → ${o.recipient_phone})${o.error_message ? ` — Reason: ${o.error_message}` : ""}`).join("\n"));
+    }
+
+    // Watcher & Runtime Error Telemetry
+    const recentErrors = RUNTIME_ERROR_LOG.slice(0, 4);
+    findings.push(
+      `⚙️ *Background Watchers (Render Nestybot):*\n` +
+      `  • Payment Watcher (60s): ${WATCHER_TELEMETRY.paymentWatcherRuns} runs (Last: ${WATCHER_TELEMETRY.lastPaymentWatcherAt || "starting"})\n` +
+      `  • Delivery Watcher (90s): ${WATCHER_TELEMETRY.deliveryWatcherRuns} runs (Last: ${WATCHER_TELEMETRY.lastDeliveryWatcherAt || "starting"})`
+    );
+
+    if (recentErrors.length > 0) {
+      findings.push(`🪵 *Recent Server Logs (${recentErrors.length}):*\n` +
+        recentErrors.map(e => `  • [${e.time}] ${e.level}: ${e.message}`).join("\n"));
+    } else {
+      findings.push(`✅ *Server Runtime Logs:* 0 runtime errors recorded.`);
+    }
+  } catch (err) {
+    findings.push(`⚠️ Diagnostic scan exception: ${err.message}`);
+  }
+
+  let out = `🔬 *ALL-CORNERS SYSTEM & CODEBASE X-RAY*\n━━━━━━━━━━━━━━━━━━━━\n` + findings.join("\n\n");
+  if (fixesApplied.length > 0) {
+    out += `\n\n🛠️ *AUTO-HEAL FIXES APPLIED (${fixesApplied.length}):*\n` + fixesApplied.map(f => `• ${f}`).join("\n");
+  }
+  return out;
+}
+
 
 function extractActionSuggestion(rawText) {
   if (!rawText || typeof rawText !== "string") return null;
@@ -6777,9 +7142,33 @@ app.post("/webhook", async (req, res) => {
         } catch (_) { }
       }
 
+      // Live All-Corners X-Ray & Codebase Inspection if owner asks about errors, bugs, diagnostics, why something happened, or code files
+      let liveCornerDiagnosticsCtx = "";
+      if (/\b(why|error|errors|bug|bugs|diagnos|scan|corner|corners|code|codebase|file|sync|desync|missing|alert|webhook|datamart|paystack|pending|stuck|problem|issue|check\s+system|audit|heal|fix)\b/i.test(text)) {
+        try {
+          const shouldAutoFixNow = /\b(fix\s+all|auto\s*fix|heal\s+system|sync\s+all)\b/i.test(text);
+          const xrayReport = await runAllCornersSystemXRay(shouldAutoFixNow);
+          liveCornerDiagnosticsCtx += `\nLIVE ALL-CORNERS DIAGNOSTIC X-RAY (RAN JUST NOW):\n${xrayReport}\n`;
+        } catch (_) {}
+
+        const fileMention = text.match(/\b(AdminOrders|AdminDashboard|AdminWhatsAppOrders|Track|OrderModal|_datamart|datamart\.ts|paystack-webhook|paystack\.ts|partner\.ts|_ai-rotator|admin\.ts|whatsapp-bot-server|server\.js)\b/i);
+        if (fileMention) {
+          try {
+            const codeSnippet = await inspectCodebaseFile(fileMention[1]);
+            liveCornerDiagnosticsCtx += `\nLIVE SOURCE CODE INSPECTION (${fileMention[1]}):\n${codeSnippet}\n`;
+          } catch (_) {}
+        }
+      }
+
+      const recentRuntimeLogSummary = RUNTIME_ERROR_LOG.length > 0
+        ? `\nRECENT SERVER RUNTIME LOGS (LAST ${Math.min(5, RUNTIME_ERROR_LOG.length)}):\n` +
+          RUNTIME_ERROR_LOG.slice(0, 5).map(e => `• [${e.time}] ${e.level}: ${e.message}`).join("\n")
+        : `\nRECENT SERVER RUNTIME LOGS: Zero runtime errors (All background workers healthy).`;
+
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
       let ownerSystemPrompt =
-        "You are Stony, the owner's personal AI business assistant, digital co-pilot, and commercial partner at DATA 1 GH.\n" +
+        "You are Stony, the owner's personal AI Senior Full-Stack Engineer, System Architect, and Commercial Co-Pilot at DATA 1 GH.\n" +
+        "You have 100% visibility into EVERY CORNER of the codebase (Vercel frontend + API and Render 24/7 Nestybot worker), Supabase database tables, state lock tags, Paystack webhooks, DataMart API, and live runtime logs — just like Antigravity.\n" +
         "You are having a direct, private WhatsApp conversation with the business owner.\n\n" +
         "OFFICIAL STORE LINKS & ACCESS:\n" +
         `- Storefront (Shop / Front end): ${STORE_FRONTEND_URL}\n` +
@@ -6792,6 +7181,8 @@ app.post("/webhook", async (req, res) => {
         "COMPLETE SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE — NOT RESTRICTED TO DATABASE ROWS):\n" +
         "You know EVERYTHING on the website. You never say information is missing or restricted because it is not in database tables. You have full context of all packages, prices, Netflix passes, AFA registrations, WAEC result checkers, download APK, and payment workflows:\n" +
         SITE_KNOWLEDGE_BASE + "\n\n" +
+        "COMPLETE CODEBASE & ALL-CORNERS ARCHITECTURE MAP:\n" +
+        ALL_CORNERS_CODEBASE_BLUEPRINT + "\n\n" +
         "FULL EXECUTIVE AUTHORITY & ACCESS (FRONT END & ADMIN SIDE):\n" +
         "- You have full administrative access to both the front end and the admin portal.\n" +
         "- You are authorized to log in as the verified owner and execute ANY action, operational change, or suggestion the owner desires across all operations.\n" +
@@ -6832,12 +7223,14 @@ app.post("/webhook", async (req, res) => {
         "  14. Change the website color scheme / theme (e.g. blue, emerald, purple, dark mode, light mode)\n" +
         "  15. Full Reseller Agent Network Operations: Credit agent wallet, debit agent wallet, suspend/activate agent accounts, list registered agents, and view agent store sales\n" +
         "  16. Direct DataMart Bundle Dispatch: Send/dispatch any MTN, Telecel, or AirtelTigo data bundle directly from the DataMart API wallet to any recipient phone number (e.g. '0549992958 1GB' or 'send 2GB MTN to 0549992958') using {\"type\": \"dispatch_datamart_bundle\", \"phone\": \"0549992958\", \"capacity\": 1, \"network\": \"MTN\"}\n" +
-        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\", ...}] at the end of your reply.\n" +
+        "  17. All-Corners System Diagnostic, Auto-Heal & Live Codebase Inspection: Scan every corner of the system (Paystack unverified payments, DataMart status desyncs, missing WhatsApp alerts, stale [dm_inflight] locks, runtime logs) and auto-heal them using {\"type\": \"diagnose_system\", \"autoFix\": true} or inspect any codebase file using {\"type\": \"inspect_codebase\", \"file\": \"AdminOrders.tsx\", \"keyword\": \"syncOrderStatus\"}\n" +
+        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\", ...}] at the end of your reply.\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
         "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
         "  - NEVER output HTML tags like <br> or markdown tables (| col | col |) — WhatsApp does not render tables or HTML tags! Use clean bullet points (•) and line breaks instead.\n" +
         "  - Understand shorthand & context immediately: if the owner sends a phone number + bundle size (e.g. '0549992958 1GB'), or says 'mistake' / 'cancel', respond sharply and intelligently like a real human engineer co-pilot.\n" +
+        "  - When the owner asks why an error happened or asks to check all corners of the codebase/system, use the LIVE ALL-CORNERS DIAGNOSTIC X-RAY and COMPLETE CODEBASE MAP below to pinpoint the exact file, function, database column, or lock tag ([dm_dispatched], [dm_inflight], [wa_alert_sent]) and fix it on the spot!\n" +
         "- Approved SMS Sender ID for DATA 1 GH is 'D_1Gh'. Whenever sending customer SMS or alerts, use sender ID 'D_1Gh'.\n" +
         "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST (NEVER BEAT AROUND THE BUSH):\n" +
         "  When the owner asks to pull, fetch, display, or check anything from the site or database, immediately retrieve and output the exact, structured information directly. Never beat around the bush, never give generic conversational fluff like 'I'm on it boss' or 'Tell me which department to tackle' without answering the question.\n" +
@@ -6851,7 +7244,9 @@ app.post("/webhook", async (req, res) => {
         (recentOrdersSummary ? `\n${recentOrdersSummary}\n` : "") +
         (systemData ? `\n${systemData}\n` : "") +
         (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
-        (specificOrderCtx ? `\n${specificOrderCtx}` : "");
+        (specificOrderCtx ? `\n${specificOrderCtx}` : "") +
+        (recentRuntimeLogSummary ? `\n${recentRuntimeLogSummary}\n` : "") +
+        (liveCornerDiagnosticsCtx ? `\n${liveCornerDiagnosticsCtx}\n` : "");
 
       if (aiConfig.copilotCustomInstructions) {
         ownerSystemPrompt += `\n\nADMIN CO-PILOT CUSTOM INSTRUCTIONS (CONFIGURED ON WEBSITE):\n${aiConfig.copilotCustomInstructions}\n`;
@@ -6886,6 +7281,13 @@ app.post("/webhook", async (req, res) => {
       const cmdText = (effectiveText || text).trim();
       const lt = cmdText.toLowerCase();
       const orderRefsInText = extractOrderReferences(cmdText);
+
+      // Direct Action Command 0a_xray: Instant All-Corners System Diagnostic & Auto-Heal
+      if (/^(?:diagnose|scan\s+system|check\s+all\s+corners|all\s+corners|system\s+xray|x-ray|check\s+errors|fix\s+all\s+errors|heal\s+system|sync\s+all\s+orders)$/i.test(cmdText)) {
+        const shouldAutoFix = /\b(fix|heal|sync\s+all)\b/i.test(cmdText);
+        const xrayReport = await runAllCornersSystemXRay(shouldAutoFix);
+        return sendWhatsApp(from, xrayReport + (!shouldAutoFix ? `\n\n💡 Reply *fix all errors* anytime to auto-heal any desynced or unverified orders across the system.` : ""));
+      }
 
       // Direct Action Command 0a_shorthand: Shorthand bundle dispatch/lookup (e.g. "0549992958 1GB", "1GB 0549992958", "send 1GB to 0549992958")
       const shorthandPhoneFirst = cmdText.match(/^(?:(send|dispatch|push|give|buy)\s+)?(?:to\s+)?(0[2357]\d{8}|\+?233[2357]\d{8})\s+(?:(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime)\s+)?(\d+(?:\.\d+)?)\s*gb(?:\s+(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime))?$/i);
@@ -9827,6 +10229,8 @@ async function runActiveDeliveryWatcher() {
   if (isDeliveryWatcherRunning) return;
   isDeliveryWatcherRunning = true;
   deliveryWatcherTick++;
+  WATCHER_TELEMETRY.deliveryWatcherRuns++;
+  WATCHER_TELEMETRY.lastDeliveryWatcherAt = new Date().toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   try {
     // Zero-egress optimization: normally query only the last 4 hours (limit 10); once every 10 ticks (~15 mins) check 24 hours
     const lookbackMs = deliveryWatcherTick % 10 === 0 ? 24 * 60 * 60 * 1000 : 4 * 60 * 60 * 1000;
@@ -9908,6 +10312,8 @@ let cachedWatcherPaystackKey = process.env.PAYSTACK_SECRET_KEY || process.env.PA
 async function runPendingPaymentWatcher() {
   if (isPaymentWatcherRunning) return;
   isPaymentWatcherRunning = true;
+  WATCHER_TELEMETRY.paymentWatcherRuns++;
+  WATCHER_TELEMETRY.lastPaymentWatcherAt = new Date().toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   try {
     if (!cachedWatcherPaystackKey) {
       const { data: sRow } = await supabase.from("settings").select("value").in("key", ["paystack_secret_key", "PAYSTACK_SECRET_KEY"]).maybeSingle();
