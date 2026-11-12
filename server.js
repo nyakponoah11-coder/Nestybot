@@ -1386,8 +1386,35 @@ async function sendWhatsApp(to, text) {
   }
 }
 
+const recentAdminAlertSignatures = new Map();
+
 async function sendAdminWhatsApp(text) {
   try {
+    const rawText = String(text || "");
+    // Deduplicate order-level admin alerts (e.g. DATA ORDER DELIVERED / NEW ORDER PAYMENT RECEIVED) by Reference
+    const refMatch = rawText.match(/Ref:\*?\s*\*?([A-Za-z0-9_-]+)/i);
+    if (refMatch) {
+      const refCode = refMatch[1].trim().toUpperCase();
+      const alertKind = /DATA ORDER DELIVERED/i.test(rawText)
+        ? "DELIVERED"
+        : /PAYMENT RECEIVED|NEW PAID BOT ORDER/i.test(rawText)
+        ? "PAID"
+        : "";
+      if (alertKind) {
+        const sig = `${alertKind}:${refCode}`;
+        const prevAt = recentAdminAlertSignatures.get(sig);
+        if (prevAt && Date.now() - prevAt < 30 * 60 * 1000) {
+          console.log(`🛡️ [DEDUP] Blocked duplicate admin WhatsApp alert (${sig})`);
+          return;
+        }
+        recentAdminAlertSignatures.set(sig, Date.now());
+        if (recentAdminAlertSignatures.size > 1000) {
+          const oldestKey = recentAdminAlertSignatures.keys().next().value;
+          if (oldestKey) recentAdminAlertSignatures.delete(oldestKey);
+        }
+      }
+    }
+
     function normalizeWhatsAppTarget(raw) {
       const clean = String(raw || "").replace(/\D/g, "");
       if (clean.startsWith("0") && clean.length === 10) return "233" + clean.slice(1);
@@ -9932,19 +9959,56 @@ app.get("/admin-data", async (req, res) => {
 AUTOMATED DATAMART DELIVERY MONITOR & CONFIRMATION ALERTS
 ========================================================= */
 
+const deliveredAlertSentRefs = new Set();
+
 async function notifyOrderDelivered(order) {
   if (!order || !order.reference) return;
-  const ref = order.reference;
+  const ref = String(order.reference).trim();
+  const refKey = ref.toUpperCase();
 
-  // Deduplication: prevent sending delivery alert multiple times
-  const notes = String(order.notes || "");
-  if (notes.includes("[delivery_confirmed_sent]")) return;
+  // 1. Immediate synchronous in-memory lock
+  if (deliveredAlertSentRefs.has(refKey)) return;
+  if (String(order.notes || "").includes("[delivery_confirmed_sent]")) {
+    deliveredAlertSentRefs.add(refKey);
+    return;
+  }
+  deliveredAlertSentRefs.add(refKey);
+  if (deliveredAlertSentRefs.size > 1000) {
+    const first = deliveredAlertSentRefs.values().next().value;
+    if (first) deliveredAlertSentRefs.delete(first);
+  }
 
+  // 2. Atomic PostgreSQL Compare-And-Swap lock on orders.notes so Vercel + Render can NEVER double-send
   try {
-    await supabase.from("orders").update({
-      notes: `${notes} [delivery_confirmed_sent]`.trim(),
-    }).eq("reference", ref);
-  } catch (_) { }
+    const { data: freshOrd } = await supabase
+      .from("orders")
+      .select("id, notes")
+      .eq("reference", ref)
+      .maybeSingle();
+
+    if (freshOrd) {
+      const currentNotes = freshOrd.notes;
+      if (String(currentNotes || "").includes("[delivery_confirmed_sent]")) {
+        return;
+      }
+      const nextNotes = `${currentNotes || ""} [delivery_confirmed_sent]`.trim();
+      let claimQuery = supabase
+        .from("orders")
+        .update({ notes: nextNotes })
+        .eq("id", freshOrd.id);
+      if (currentNotes === null || currentNotes === undefined) {
+        claimQuery = claimQuery.is("notes", null);
+      } else {
+        claimQuery = claimQuery.eq("notes", currentNotes);
+      }
+      const { data: claimedRows, error: claimErr } = await claimQuery.select("id");
+      if (claimErr || !claimedRows || claimedRows.length === 0) {
+        return;
+      }
+    }
+  } catch (_) {
+    return;
+  }
 
   const rawPhone = order.recipient_phone || order.phone_number || "N/A";
   const cleanPhone = rawPhone.startsWith("233") ? "0" + rawPhone.slice(3) : rawPhone;
