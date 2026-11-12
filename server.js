@@ -5487,71 +5487,29 @@ async function handleCustomerAi(from, rawText) {
   const lower = text.toLowerCase();
   const session = await getCustomerSession(from);
 
-  // 0. Direct Live Data Pull from Site & Database (Prices, Catalog, Orders, Services)
-  const directPull = await handleDirectDataPull(text, from, false, session);
-  if (directPull) {
-    return sendWhatsApp(from, directPull);
-  }
-
-  // 1. Direct Storefront & App Links Intent
-  if (/\b(link|store|website|shop|site|online|web|front\s*end|frontend)\b/i.test(lower)) {
-    if (session?.agent_id) {
-      const storeUrl = getAgentStoreUrl(session);
-      return sendWhatsApp(
-        from,
-        `🌐 *${(session.agent_name || "AGENT STORE").toUpperCase()}*\n\n` +
-        `Browse and order data bundles directly from our official store:\n` +
-        `👉 *Store Link:* ${storeUrl}\n\n` +
-        `Or reply *Hi* to view the menu right here on WhatsApp:\n1 - MTN Data\n2 - AirtelTigo Data\n3 - Telecel Data\n4 - Track Order`
-      );
-    }
-    return sendWhatsApp(
-      from,
-      `🌐 *DATA 1 GH STOREFRONT*\n\n` +
-      `Browse and order all data bundles, Netflix, AFA & WAEC checkers directly on our official store:\n` +
-      `👉 *Store Link:* ${STORE_FRONTEND_URL}\n` +
-      `📱 *Download Android App:* ${DOWNLOAD_APP_URL}\n` +
-      `📦 *Track Orders:* ${TRACK_ORDER_URL}\n\n` +
-      `Or reply *Hi* to view the menu:\n1 - MTN\n2 - AirtelTigo\n3 - Telecel\n4 - Track Order\n5 - Netflix\n6 - AFA\n7 - MashUp\n8 - Scratch & Win`
-    );
-  }
-
-  if (/\b(app|apk|download|mobile\s*app|android|install)\b/i.test(lower)) {
-    return sendWhatsApp(
-      from,
-      `📱 *DOWNLOAD OUR OFFICIAL ANDROID APP*\n\n` +
-      `Get our lightweight mobile app with 1-click ordering, saved recipients, and instant push updates:\n` +
-      `👉 *Install APK:* ${DOWNLOAD_APP_URL}\n\n` +
-      `Prefer WhatsApp? Reply *Hi* to view the menu!`
-    );
-  }
-
-  // 2. Direct Order Tracking Intent
+  // Gather any live order lookup context to feed into the AI so it answers naturally without rigid templates
+  let customerOrderLookupCtx = "";
   const phoneMatch = lower.match(/\b(0[2357]\d{8}|233\d{9})\b/);
-  const refMatch = text.match(/\b(REF-\d+|[A-Z0-9]{8,})\b/i);
-  if (refMatch || (phoneMatch && !/\b(price|cost|bundle|buy|order|how|hello|hi|good)\b/i.test(lower))) {
+  const refMatch = text.match(/\b(REF-\d+|WS-?[A-Z0-9]{6,14}|[A-Z0-9]{8,})\b/i);
+  if (refMatch || phoneMatch) {
     const lookup = refMatch ? refMatch[1] : phoneMatch[0];
     try {
-      const { data: ord } = await supabase
+      const { data: ords } = await supabase
         .from("orders")
-        .select("reference, network, capacity, amount, delivery_status, recipient_phone, payment_status")
+        .select("reference, network, capacity, amount, delivery_status, recipient_phone, payment_status, created_at")
         .or(`reference.ilike.%${lookup}%,recipient_phone.ilike.%${lookup}%`)
         .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .limit(3);
 
-      if (ord) {
-        const liveStatus = await getRealDatamartDeliveryStatus(ord.reference);
-        const ds = liveStatus.deliveryStatus === "delivered" ? "Delivered ✅" : (liveStatus.deliveryStatus === "processing" ? "Processing ⏳" : `${liveStatus.deliveryStatus || "In Progress"} ⏳`);
-        return sendWhatsApp(
-          from,
-          `🔍 *Order Status (${ord.reference})*\n• Bundle: ${ord.capacity}GB ${ord.network}\n• Recipient: ${ord.recipient_phone}\n• Payment: ${ord.payment_status}\n• Delivery: ${ds}\n\nTrack live at: ${TRACK_ORDER_URL}\nNeed to buy more data? Reply *Hi* for main menu.`
-        );
+      if (ords && ords.length > 0) {
+        const liveStatus = await getRealDatamartDeliveryStatus(ords[0].reference).catch(() => ({ deliveryStatus: ords[0].delivery_status }));
+        customerOrderLookupCtx = `\nLIVE ORDER LOOKUP FOR "${lookup}":\n` +
+          ords.map((o, idx) => `${idx + 1}. Ref: ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | Amount: GH₵ ${o.amount} | Payment: ${o.payment_status} | Live Delivery Status: ${idx === 0 ? (liveStatus?.deliveryStatus || o.delivery_status) : o.delivery_status}`).join("\n") + "\n";
       }
     } catch (_) { }
   }
 
-  // 3. AI Mode Response (Multi-model: Groq / Gemini 3.8/2.5 / OpenRouter / OpenAI)
+  // AI Mode Response (Multi-model: Groq openai/gpt-oss-120b / Gemini / OpenRouter / OpenAI)
   const liveDbKnowledge = await fetchLiveDatabaseKnowledge();
   let ownerCustomDirectives = "";
   try {
@@ -5581,7 +5539,8 @@ async function handleCustomerAi(from, rawText) {
       `  • Telecel: ${telList}\n` +
       `- Chat warmly and naturally like a real person on WhatsApp.\n` +
       `- Invite customers to reply 1 (MTN), 2 (AirtelTigo), 3 (Telecel) or visit ${storeUrl} to purchase.\n` +
-      `- Keep responses concise and formatted for WhatsApp.`;
+      `- Keep responses concise and formatted for WhatsApp.` +
+      (customerOrderLookupCtx ? `\n${customerOrderLookupCtx}` : "");
   } else {
     customerAiPrompt =
       "You are Stony, a friendly, warm Ghanaian customer support person at DATA 1 GH on WhatsApp.\n\n" +
@@ -5595,6 +5554,7 @@ async function handleCustomerAi(from, rawText) {
       "- Always guide customers warmly either to buy online or reply with numbers 1-8 right here on WhatsApp.\n\n" +
       "LIVE DATA CATALOG FROM DATABASE:\n" +
       (liveDbKnowledge ? `${liveDbKnowledge}\n` : "") +
+      (customerOrderLookupCtx ? `\n${customerOrderLookupCtx}\n` : "") +
       "FULL SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE):\n" +
       SITE_KNOWLEDGE_BASE + "\n\n" +
       "SECURITY POLICY:\n" +
@@ -5610,13 +5570,13 @@ async function handleCustomerAi(from, rawText) {
       "- Scratch & Win: reply 8\n" +
       "- Official Android App: " + DOWNLOAD_APP_URL + "\n" +
       "- Official Store Link: " + STORE_FRONTEND_URL + "\n" +
-      "Keep your answer under 3 sentences unless explaining step-by-step payment approval.";
+      "Keep your answer natural, conversational, and helpful.";
   }
 
   const aiResult = await executeBotAi({
     systemPrompt: customerAiPrompt,
     userMessage: text,
-    maxTokens: 250,
+    maxTokens: 1500,
     temperature: 0.7
   });
 
@@ -5904,16 +5864,6 @@ app.post("/webhook", async (req, res) => {
     }
 
     /* =====================================================
-    ADMIN COMMAND: EXECUTIVE BOT DASHBOARD
-    Triggers when you text "Admin", "ADMIN", "Dashboard", or "Report"
-    ===================================================== */
-    if (/^(admin|dashboard|report)$/i.test(text) && isOwner) {
-      console.log("📊 GENERATING EXECUTIVE BOT DASHBOARD FOR ADMIN:", from);
-      const adminReport = await generateFullAdminReport();
-      return await sendWhatsApp(from, adminReport);
-    }
-
-    /* =====================================================
     MULTI-TENANT AGENT STOREFRONT DETECTION & BINDING
     Detects if an agent's customer arrives with [store:slug], [agent:id],
     or types the store slug, ensuring 100% storefront isolation.
@@ -5994,18 +5944,23 @@ app.post("/webhook", async (req, res) => {
     const startsWithStony = /^stony\b/i.test(text);
 
     let currentSession = boundSession || (await getCustomerSession(from));
-    const hasAgent = Boolean(currentSession?.agent_id);
+    let hasAgent = Boolean(currentSession?.agent_id);
 
     // If owner explicitly wants to exit agent store testing mode or calls Stony Co-Pilot
     if (isOwner && /^(admin|owner|exit|reset|copilot|main|exit\s*store|main\s*store|switch\s*to\s*owner|owner\s*mode|leave\s*store)$/i.test(text.trim())) {
-      boundSession = await saveCustomerSession(from, { agent_id: null, agent_slug: null, agent_name: null, custom_prices: null, step: 1, bundle: null });
+      boundSession = await saveCustomerSession(from, { agent_id: null, agent_slug: null, agent_name: null, custom_prices: null, step: 99, bundle: null });
       currentSession = boundSession;
-      return sendWhatsApp(from, `👑 Switched back to *DATA 1 GH Owner Mode* bossu! Reply *Hi* or ask me anything.`);
+      hasAgent = false;
+      setUserMode(from, "ai");
+      if (/^(exit|reset|main|exit\s*store|main\s*store|switch\s*to\s*owner|owner\s*mode|leave\s*store)$/i.test(text.trim())) {
+        return sendWhatsApp(from, `👑 Switched back to *DATA 1 GH Owner Mode* bossu! Reply *Hi* for the menu or ask me anything.`);
+      }
     }
 
     if (isOwner && startsWithStony) {
       boundSession = await saveCustomerSession(from, { agent_id: null, agent_slug: null, agent_name: null, custom_prices: null, step: 99, bundle: null });
       currentSession = boundSession;
+      hasAgent = false;
     }
 
     // 1. SWITCH TO BOT MODE (Shows Menu)
@@ -6023,35 +5978,9 @@ app.post("/webhook", async (req, res) => {
     if (isStonySwitch) {
       setUserMode(from, "ai");
       await saveCustomerSession(from, { step: 99 });
-
-      if (isOwner && !hasAgent) {
-        return sendWhatsApp(from,
-          `🤖 *STONY AI MODE ACTIVATED (OWNER)*\n\n` +
-          `Hello bossu! I'm Stony, your 24/7 AI co-pilot for DATA 1 GH 🇬🇭.\n\n` +
-          `I have full live access to our website (${STORE_FRONTEND_URL}) and the admin portal. You can command me to:\n` +
-          `• Update delivery status to ANY state: *delivered*, *processing*, *pending*, *waiting*, *failed*, *cancelled*, *refunded*, etc.\n` +
-          `• Update payment status to ANY state: *paid*, *pending*, *failed*, *refunded*, *cancelled*\n` +
-          `• Update store settings & announcements (e.g. "update announcement to 20% bonus data today", "turn off announcement", "change support phone to 0541234567")\n` +
-          `• Update product prices and toggle stock (e.g. "change 5GB MTN price to 25")\n` +
-          `• Check live sales, stuck orders, DataMart wallet, and issue radar\n` +
-          `• Brainstorm business suggestions & promos\n\n` +
-          `📱 *SMS Policy:* Customer SMS is automated for Result Checkers (PIN/Serial) and Netflix (sign-in codes). Data delivery SMS is disabled, and failed orders always alert you via SMS.\n\n` +
-          `💡 *Switch back:* Send *Hi* or *Menu* anytime to return to Bot Menu mode.\n\n` +
-          `What would you like me to tackle, boss?`
-        );
-      } else {
-        const storeName = currentSession?.agent_name || "DATA 1 GH 🇬🇭";
-        const storeUrl = currentSession?.agent_id ? getAgentStoreUrl(currentSession) : STORE_FRONTEND_URL;
-        return sendWhatsApp(from,
-          `🤖 *AI ASSISTANT ACTIVATED*\n\n` +
-          `Hello! I'm here to assist you with *${storeName}*.\n\n` +
-          `You can browse our store at ${storeUrl} or ask me anything about:\n` +
-          `• Data bundle prices for MTN, AirtelTigo & Telecel\n` +
-          `• How to buy online or right here on WhatsApp\n` +
-          `• Order status & troubleshooting\n\n` +
-          `💡 *Switch back:* Send *Hi* or *Menu* anytime to return to Bot Menu mode.\n\n` +
-          `How can I help you today?`
-        );
+      // For customers (or owner testing an agent storefront), greet via customer AI; for owner, flow directly into Owner Co-Pilot AI!
+      if (!isOwner || hasAgent) {
+        return handleCustomerAi(from, text);
       }
     }
 
@@ -6588,39 +6517,6 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // Direct Command: Full Order Details Lookup
-      const orderDetailsMatch =
-        text.match(/^(?:check\s+order|order\s+details|details\s+(?:for|of)?|lookup\s+order|inspect\s+order)\s*([A-Za-z0-9_-]{5,35})/i) ||
-        text.match(/^(?:details|inspect)\s+([A-Za-z0-9_-]{6,35})$/i);
-
-      if (orderDetailsMatch) {
-        const queryRef = orderDetailsMatch[1].trim();
-        const detailsList = await getOrderFullDetails(queryRef);
-        if (detailsList && detailsList.length > 0) {
-          const formatted = detailsList.map((d, idx) =>
-            `📦 *ORDER DETAILS (#${idx + 1}):*\n` +
-            `• *Reference:* ${d.reference}\n` +
-            `• *Supplier Ref:* ${d.supplierRef}\n` +
-            `• *Package:* ${d.capacity} (${d.network})\n` +
-            `• *Recipient:* *${d.recipient}*\n` +
-            `• *Amount:* ${d.amount}\n` +
-            `• *Payment Status:* ${d.paymentStatus.toUpperCase()}\n` +
-            `• *Delivery Status:* *${d.deliveryStatus.toUpperCase()}*\n` +
-            `• *Live DataMart Status:* ${d.liveDatamartStatus}\n` +
-            `• *Date Placed:* ${d.created}\n` +
-            (d.notes ? `• *Notes:* ${d.notes}\n` : "")
-          ).join("\n━━━━━━━━━━━━━━━━━━━━━\n");
-
-          return sendWhatsApp(from,
-            `🔍 *ORDER INSPECTION RESULT*\n\n` +
-            formatted +
-            `\n\n💡 _Tip: You can say "mark ${detailsList[0].reference} as delivered" or "retry ${detailsList[0].reference}" anytime!_`
-          );
-        } else {
-          return sendWhatsApp(from, `🔍 Could not find any order matching *${queryRef}*. Please verify the reference or customer phone number.`);
-        }
-      }
-
       // Direct Command: Generate Free Data Codes
       const genVoucherMatch = text.match(/(?:generate|create|make)\s+(\d+)?\s*(?:free\s+data\s+)?(?:codes?|vouchers?)(?:\s+(?:for|on)\s+([a-zA-Z]+))?(?:\s+(\d+)GB)?/i);
       if (genVoucherMatch) {
@@ -6663,131 +6559,6 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // Direct Command: List Agents
-      if (/^(?:list|check|show|view)\s+agents?\b/i.test(text.trim()) || text.trim().toLowerCase() === "agents" || text.trim().toLowerCase() === "all agents") {
-        try {
-          const { data: agents } = await supabase
-            .from("agents")
-            .select("id, name, phone, store_name, store_slug, wallet_balance, total_earnings, status")
-            .order("created_at", { ascending: false })
-            .limit(25);
-
-          if (agents && agents.length > 0) {
-            const listText = agents.map((a, i) => {
-              const statusBadge = a.status === "suspended" ? "⛔ SUSPENDED" : "✅ Active";
-              return `${i + 1}. *${a.store_name || a.name || "Store"}* (${a.phone || "No phone"})\n   • Owner: ${a.name || "Partner"} | ${statusBadge}\n   • Balance: *GH₵ ${Number(a.wallet_balance || 0).toFixed(2)}* | Earned: *GH₵ ${Number(a.total_earnings || 0).toFixed(2)}*`;
-            }).join("\n\n");
-
-            return sendWhatsApp(
-              from,
-              `💼 *REGISTERED AGENTS DIRECTORY (${agents.length})*\n\n` +
-              listText +
-              `\n\n💡 *Admin Commands:*\n` +
-              `• *check agent [name/phone]*\n` +
-              `• *credit agent [name/phone] with [amount]*\n` +
-              `• *debit agent [name/phone] with [amount]*\n` +
-              `• *suspend agent [name/phone]*\n` +
-              `• *activate agent [name/phone]*\n` +
-              `• *agent referrals*`
-            );
-          }
-        } catch (_) { }
-        return sendWhatsApp(from, "💼 No agents registered yet in database.");
-      }
-
-      // Direct Command: Inspect / Check Specific Agent
-      const inspectAgentMatch = text.match(/(?:check|inspect|view|info|details\s+on)\s+agent\s+(.+)/i);
-      if (inspectAgentMatch) {
-        const targetQuery = inspectAgentMatch[1].trim();
-        const { data: agents } = await supabase.from("agents").select("*");
-        const cleanT = targetQuery.replace(/\D/g, "");
-
-        const matched = (agents || []).find((a) => {
-          if (a.id && a.id.toLowerCase() === targetQuery.toLowerCase()) return true;
-          if (a.store_slug && a.store_slug.toLowerCase() === targetQuery.toLowerCase()) return true;
-          if (a.store_name && a.store_name.toLowerCase().includes(targetQuery.toLowerCase())) return true;
-          if (a.name && a.name.toLowerCase().includes(targetQuery.toLowerCase())) return true;
-          const p1 = (a.phone || "").replace(/\D/g, "");
-          const p2 = (a.whatsapp_number || "").replace(/\D/g, "");
-          if (cleanT && cleanT.length >= 7) {
-            if (p1 && (p1 === cleanT || p1.endsWith(cleanT.slice(-9)) || cleanT.endsWith(p1.slice(-9)))) return true;
-            if (p2 && (p2 === cleanT || p2.endsWith(cleanT.slice(-9)) || cleanT.endsWith(p2.slice(-9)))) return true;
-          }
-          return false;
-        });
-
-        if (!matched) {
-          return sendWhatsApp(from, `❌ Agent "${targetQuery}" not found. Type *list agents* to view all registered agents.`);
-        }
-
-        const todayDate = new Date().toISOString().split("T")[0];
-        let todaySales = 0;
-        let todayProfit = 0;
-        let totalOrders = 0;
-
-        try {
-          const { data: ords } = await supabase
-            .from("orders")
-            .select("id, amount, base_price, created_at")
-            .or(`agent_id.eq.${matched.id},notes.ilike.%[agent:${matched.id}]%`);
-
-          if (ords) {
-            totalOrders = ords.length;
-            ords.forEach((o) => {
-              const isToday = (o.created_at || "").startsWith(todayDate);
-              const p = o.amount && o.base_price ? Math.max(0, Number(o.amount) - Number(o.base_price)) : 0;
-              if (isToday) {
-                todaySales++;
-                todayProfit += p;
-              }
-            });
-          }
-        } catch (_) { }
-
-        let promotersCount = 0;
-        let completed5gb = 0;
-        try {
-          const { data: refRow } = await supabase
-            .from("settings")
-            .select("value")
-            .eq("key", `agent_referrals_${matched.id}`)
-            .maybeSingle();
-
-          if (refRow?.value) {
-            const list = typeof refRow.value === "string" ? JSON.parse(refRow.value) : refRow.value;
-            if (Array.isArray(list)) {
-              promotersCount = list.length;
-              completed5gb = list.filter((r) => (r.total_qualified_orders || 0) >= 5).length;
-            }
-          }
-        } catch (_) { }
-
-        const statusLabel = matched.status === "suspended" ? "⛔ SUSPENDED (STORE BLOCKED)" : "✅ ACTIVE";
-
-        return sendWhatsApp(
-          from,
-          `🔍 *AGENT PROFILE & STORE INTEL*\n` +
-          `🏪 *${matched.store_name || "Store"}*\n\n` +
-          `• *Owner Name:* ${matched.name || "N/A"}\n` +
-          `• *Email:* ${matched.email || "No email"}\n` +
-          `• *Phone Number:* ${matched.phone || "N/A"}\n` +
-          `• *WhatsApp:* ${matched.whatsapp_number || matched.phone || "N/A"}\n` +
-          `• *Account Status:* *${statusLabel}*\n` +
-          `• *Store URL:* https://gooddata1.vercel.app/s/${matched.store_slug}\n\n` +
-          `💰 *Wallet Balance:* *GH₵ ${Number(matched.wallet_balance || 0).toFixed(2)}*\n` +
-          `📈 *All-Time Profit:* *GH₵ ${Number(matched.total_earnings || 0).toFixed(2)}*\n` +
-          `📅 *Today's Sales:* ${todaySales} orders (+GH₵ ${todayProfit.toFixed(2)} profit)\n` +
-          `🛍️ *Lifetime Sales:* ${totalOrders} orders placed\n` +
-          `🎁 *5GB Promoters:* ${promotersCount} registered (${completed5gb} completed 5 friends)\n\n` +
-          `💡 *Quick Actions:*\n` +
-          `• *credit agent ${matched.phone} with 20*\n` +
-          `• *debit agent ${matched.phone} with 10*\n` +
-          (matched.status === "suspended"
-            ? `• *activate agent ${matched.phone}*`
-            : `• *suspend agent ${matched.phone}*`)
-        );
-      }
-
       // Direct Command: Suspend Agent
       const suspendMatch = text.match(/(?:suspend|block|freeze)\s+agent\s+(.+)/i);
       if (suspendMatch) {
@@ -6804,7 +6575,7 @@ app.post("/webhook", async (req, res) => {
             `*activate agent ${res.agent.phone}*`
           );
         } else {
-          return sendWhatsApp(from, `❌ Could not find an agent matching "${target}". Use *list agents* to see all agents.`);
+          return sendWhatsApp(from, `❌ Could not find an agent matching "${target}".`);
         }
       }
 
@@ -6823,7 +6594,7 @@ app.post("/webhook", async (req, res) => {
             `Storefront is live and processing orders!`
           );
         } else {
-          return sendWhatsApp(from, `❌ Could not find an agent matching "${target}". Use *list agents* to see all agents.`);
+          return sendWhatsApp(from, `❌ Could not find an agent matching "${target}".`);
         }
       }
 
@@ -6843,7 +6614,7 @@ app.post("/webhook", async (req, res) => {
             `Agent can now dispatch orders using their wallet!`
           );
         } else {
-          return sendWhatsApp(from, `❌ Could not find an agent matching *${target}*. Use "list agents" to see all registered agents.`);
+          return sendWhatsApp(from, `❌ Could not find an agent matching *${target}*.`);
         }
       }
 
@@ -6862,123 +6633,8 @@ app.post("/webhook", async (req, res) => {
             `• *New Balance:* *GH₵ ${debRes.newBalance.toFixed(2)}*`
           );
         } else {
-          return sendWhatsApp(from, `❌ Could not find an agent matching *${target}*. Use "list agents" to see all registered agents.`);
+          return sendWhatsApp(from, `❌ Could not find an agent matching *${target}*.`);
         }
-      }
-
-      // Direct Command: Agent Referrals & 5GB Free Data Rewards
-      if (/(?:agent\s+referrals?|admin\s+referrals?|5gb\s+winners?|referral\s+winners?)/i.test(text.trim())) {
-        try {
-          const { data: rows } = await supabase
-            .from("settings")
-            .select("key, value")
-            .like("key", "agent_referrals_%");
-
-          let allPromoters = [];
-          (rows || []).forEach((row) => {
-            if (!row.value) return;
-            try {
-              const parsed = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
-              if (Array.isArray(parsed)) allPromoters.push(...parsed);
-            } catch (_) { }
-          });
-
-          const readyRewards = allPromoters.filter((r) => (r.total_qualified_orders || 0) >= 5 && !r.reward_claimed);
-          const totalReferredOrders = allPromoters.reduce((sum, r) => sum + (r.total_qualified_orders || 0), 0);
-
-          let winnersList = "";
-          if (readyRewards.length > 0) {
-            winnersList =
-              `\n🏆 *PROMOTERS WAITING FOR 5GB REWARD (${readyRewards.length}):*\n` +
-              readyRewards
-                .map(
-                  (w, idx) =>
-                    `${idx + 1}️⃣ *${w.customer_phone}* (${w.agent_name || "Store"})\n   • Code: *${w.referral_code}* | Orders: *${w.total_qualified_orders}/5*\n   • Reward: 5GB Free Data (Manual send)`
-                )
-                .join("\n\n");
-          } else {
-            winnersList = `\n_No promoters currently waiting for 5GB rewards._`;
-          }
-
-          return sendWhatsApp(
-            from,
-            `🎁 *AGENT CUSTOMER REFERRALS & 5GB REWARDS*\n\n` +
-            `• *Total Registered Promoters:* *${allPromoters.length}*\n` +
-            `• *Total Referred Customer Sales:* *${totalReferredOrders} orders*\n` +
-            `• *Pending 5GB Rewards to Fulfill:* *${readyRewards.length} winners*\n` +
-            winnersList +
-            `\n\n💡 Manage and mark rewards fulfilled anytime at:\n👉 https://data1gh.com/admin/referrals`
-          );
-        } catch (_) {
-          return sendWhatsApp(from, `⚠️ Could not load customer referrals list.`);
-        }
-      }
-
-      // Direct Command: Check Live Balances
-      if (/^(?:check\s+)?(?:balance|balances|wallet|datamart|arkesel)\b/i.test(text.trim())) {
-        const rep = await generateFullAdminReport();
-        return sendWhatsApp(from, rep);
-      }
-
-      // Direct Command: Top Customer Numbers with Most Orders
-      if (
-        /(?:who|which\s+(?:number|phone|customer)|list\s+(?:the\s+)?numbers?)\s+(?:has|have|with)\s+(?:the\s+)?(?:most|highest|top|max)\s+orders?/i.test(text.trim()) ||
-        /(?:number|customer)\s+(?:that\s+)?(?:have|has)\s+(?:a\s+)?(?:list\s+order\s+)?(?:most|top|highest)\s+orders?/i.test(text.trim()) ||
-        /(?:top|highest)\s+(?:order(?:ing)?|customers?|buyers?|numbers?)/i.test(text.trim()) ||
-        /(?:most\s+orders|who\s+ordered\s+most|who\s+bought\s+most)/i.test(text.trim())
-      ) {
-        try {
-          const { data: allOrders } = await supabase
-            .from("orders")
-            .select("recipient_phone, amount, payment_status, delivery_status, created_at")
-            .order("created_at", { ascending: false })
-            .limit(500);
-
-          if (allOrders && allOrders.length > 0) {
-            const map = {};
-            allOrders.forEach(o => {
-              const ph = String(o.recipient_phone || "").trim();
-              if (!ph) return;
-              if (!map[ph]) map[ph] = { phone: ph, count: 0, delivered: 0, total: 0 };
-              map[ph].count += 1;
-              if (/paid/i.test(o.payment_status || "")) map[ph].total += Number(o.amount || 0);
-              if (/delivered/i.test(o.delivery_status || "")) map[ph].delivered += 1;
-            });
-            const top = Object.values(map).sort((a, b) => b.count - a.count).slice(0, 6);
-            const lines = top.map((c, i) => `${i + 1}. *${c.phone}* — *${c.count} orders* (${c.delivered} delivered) • Spent: *GH₵ ${c.total.toFixed(2)}*`);
-            return sendWhatsApp(from, `🏆 *CUSTOMER NUMBERS WITH MOST ORDERS:*\n\n${lines.join("\n")}\n\n📊 Total Customer Numbers Analyzed: *${Object.keys(map).length}*`);
-          }
-        } catch (_) { }
-        return sendWhatsApp(from, "🏆 No customer order records available yet.");
-      }
-
-      // Direct Command: Live Delivery Speed / Estimated Network Delivery Time
-      if (
-        /^(?:delivery\s*time|delivery\s*speed|delivery|speed|eta)$/i.test(text.trim()) ||
-        /(?:estimated\s+)?(?:network\s+)?delivery\s+(?:time|speed|status|tracker|eta)\b/i.test(text.trim()) ||
-        /(?:how\s+fast|how\s+long\s+does\s+delivery\s+take|when\s+will\s+data\s+deliver)/i.test(text.trim()) ||
-        /delivery\s+time\s+(?:from|on)\s+(?:the\s+)?site/i.test(text.trim())
-      ) {
-        try {
-          const liveEta = await getLiveDeliveryEta();
-          let batchId = "2294836";
-          try {
-            const sRes = await axios.get("https://api.datamartgh.shop/api/v1/data/delivery-status", { headers: { Accept: "application/json" }, timeout: 4000 }).catch(() => null);
-            if (sRes?.data?.data?.lastDelivered?.trackingId) {
-              batchId = String(sRes.data.data.lastDelivered.trackingId);
-            }
-          } catch (_) { }
-          return sendWhatsApp(from,
-            `⚡ *ACCURATE LIVE DELIVERY TIME FROM SITE:*\n\n` +
-            `⏱️ *Estimated Network Delivery Time:* *${liveEta}*\n` +
-            `📦 *Recent Telecom Batch:* #${batchId} delivered\n\n` +
-            `• *MTN Turbo Bundles:* *${liveEta}*\n` +
-            `• *Telecel Fast Bundles:* *${liveEta}*\n` +
-            `• *AT (AirtelTigo) Bundles:* *${liveEta}*\n\n` +
-            `📊 *Carrier Queue:* 0 pending batches (Instant Gateway Active ✅)\n` +
-            `_Measured real-time directly from active DataMart gateway and storefront orders._`
-          );
-        } catch (_) { }
       }
 
       // Direct Command: Broadcast Bulk SMS
@@ -7030,48 +6686,6 @@ app.post("/webhook", async (req, res) => {
           `• *Message:* "${msgBody}"\n\n` +
           `Dispatched live via Arkesel gateway!`
         );
-      }
-
-      // Direct response if owner asks about store links, front end, admin links, or main site
-      if (
-        /(\b(store\s*link|front\s*end|frontend|admin\s*link|site\s*link|website\s*link|main\s*store)\b|data1gh\.com|data1gh\.vercel\.app)/i.test(text) ||
-        (/\b(link|links)\b/i.test(text) && /\b(store|admin|front|site|shop)\b/i.test(text))
-      ) {
-        if (hasAgent) {
-          const storeUrl = getAgentStoreUrl(currentSession);
-          return sendWhatsApp(
-            from,
-            `🌐 *${(currentSession?.agent_name || "AGENT STORE").toUpperCase()}*\n\n` +
-            `Browse and order data bundles directly from our official store:\n` +
-            `👉 *Store Link:* ${storeUrl}\n\n` +
-            `Or reply *Hi* to view the menu right here on WhatsApp:\n1 - MTN Data\n2 - AirtelTigo Data\n3 - Telecel Data\n4 - Track Order`
-          );
-        }
-        return sendWhatsApp(
-          from,
-          `Bossu, here are your official platform links ready:\n\n` +
-          `🌐 *Main Storefront (Customer Shop):* https://www.data1gh.com\n` +
-          `👑 *Admin Portal (Dashboard):* https://www.data1gh.com/admin\n` +
-          `📱 *Android App Download:* https://www.data1gh.com/download-app\n` +
-          `📦 *Live Order Tracking:* https://www.data1gh.com/track\n` +
-          `⚡ *Other Services:* https://www.data1gh.com/services\n` +
-          `🤝 *Agent Stores Portal:* https://gooddata1.vercel.app\n\n` +
-          `AI Mode on WhatsApp has full knowledge of EVERYTHING FROM THE SITE loaded and active (all data packages, prices, Netflix, AFA, checkers, and apps)!`
-        );
-      }
-
-      // ── DIRECT LIVE DATA PULL (SITE & DATABASE) ──
-      const directPull = await handleDirectDataPull(text, from, true);
-      if (directPull) {
-        try {
-          const updatedHistory = [
-            ...history.slice(-6),
-            { role: "user", text },
-            { role: "assistant", text: directPull }
-          ];
-          await saveOwnerHistory(from, updatedHistory);
-        } catch (_) { }
-        return sendWhatsApp(from, directPull);
       }
 
       // ── FETCH AI KEYS & ACTIVE CONFIG ──
@@ -7197,11 +6811,11 @@ app.post("/webhook", async (req, res) => {
           flashInfo,
           totalOrdersCountRes
         ] = await Promise.all([
-          supabase.from("orders").select("id, amount, payment_status, delivery_status, created_at, agent_id, notes").limit(500),
+          supabase.from("orders").select("id, reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes, datamart_reference").order("created_at", { ascending: false }).limit(300),
           supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes").gte("created_at", startOfDay.toISOString()).order("created_at", { ascending: false }),
-          supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes").order("created_at", { ascending: false }).limit(6),
-          supabase.from("service_orders").select("id, reference, service, amount, delivery_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
-          supabase.from("checker_orders").select("id, reference, checker_type, amount, delivery_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
+          supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes").order("created_at", { ascending: false }).limit(15),
+          supabase.from("service_orders").select("id, reference, service, amount, delivery_status, payment_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
+          supabase.from("checker_orders").select("id, reference, checker_type, amount, delivery_status, payment_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
           supabase.from("chat_conversations").select("id, unread_for_support").eq("status", "open"),
           supabase.from("products").select("id, name, network, capacity, price, in_stock"),
           supabase.from("scratch_codes").select("id, code, orders_completed, status").limit(20),
@@ -7223,28 +6837,80 @@ app.post("/webhook", async (req, res) => {
         // Stuck orders: paid MoMo, not delivered, not failed, created > 15 mins ago
         stuckOrders = allOrders.filter(o =>
           /paid/i.test(o.payment_status || "") &&
-          !/fail|cancel|delivered/i.test(o.delivery_status || "") &&
+          !/fail|cancel|delivered|completed|success/i.test(o.delivery_status || "") &&
           o.created_at < fifteenMinsAgo
+        );
+
+        // Distinguish REAL PAID FAILED ORDERS vs UNPAID/ABANDONED CHECKOUTS across recent orders
+        const paidFailedOrders = allOrders.filter(o =>
+          /paid|success|complet/i.test(o.payment_status || "") &&
+          /fail|cancel|error/i.test(o.delivery_status || "")
+        );
+        const unpaidAbandonedOrders = allOrders.filter(o =>
+          /fail|cancel|abandon/i.test(o.payment_status || "")
+        );
+        const paidInProgressOrders = allOrders.filter(o =>
+          /paid|success|complet/i.test(o.payment_status || "") &&
+          !/deliver|complet|success|fail|cancel/i.test(o.delivery_status || "")
         );
 
         const todayOrders = todayOrdersRes?.data || [];
         const paid = todayOrders.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
-        const failed = todayOrders.filter(o => /fail|cancel/i.test(o.delivery_status || ""));
-        const pending = todayOrders.filter(o => !/fail|cancel|delivered/i.test(o.delivery_status || "") && /paid/i.test(o.payment_status || ""));
+        const failed = paidFailedOrders;
+        const pending = paidInProgressOrders;
         todayPaidCount = paid.length;
         todayRevenue = paid.reduce((s, o) => s + Number(o.amount || 0), 0);
-        pendingOrdersList = pending.slice(0, 5);
-        failedOrdersList = failed.slice(0, 5);
+        pendingOrdersList = paidInProgressOrders.slice(0, 8);
+        failedOrdersList = paidFailedOrders.slice(0, 8);
 
-        // Recent orders
+        // Top Customers calculation from recent 300 orders
+        const custMap = {};
+        allOrders.forEach(o => {
+          const ph = String(o.recipient_phone || "").trim();
+          if (!ph) return;
+          if (!custMap[ph]) custMap[ph] = { phone: ph, count: 0, delivered: 0, total: 0 };
+          custMap[ph].count += 1;
+          if (/paid/i.test(o.payment_status || "")) custMap[ph].total += Number(o.amount || 0);
+          if (/deliver|complet|success/i.test(o.delivery_status || "")) custMap[ph].delivered += 1;
+        });
+        const topCustomersList = Object.values(custMap).sort((a, b) => b.count - a.count).slice(0, 6);
+        const topCustomersSummary = topCustomersList.length > 0
+          ? `TOP CUSTOMERS BY ORDER COUNT (RECENT 300 ORDERS):\n` +
+            topCustomersList.map((c, i) => `  ${i + 1}. ${c.phone} — ${c.count} orders (${c.delivered} delivered) | Total Paid: GH₵ ${c.total.toFixed(2)}`).join("\n") + "\n"
+          : "";
+
+        // Recent orders ( clearly showing Payment vs Delivery status )
         const recentOrders = recentOrdersRes?.data || [];
         if (recentOrders.length > 0) {
-          recentOrdersSummary = `MOST RECENT STORE ORDERS IN DATABASE:\n` +
+          recentOrdersSummary = `MOST RECENT STORE ORDERS IN DATABASE (LATEST 15):\n` +
             recentOrders.map((o, idx) => {
               const dt = formatGhanaTime(o.created_at);
-              return `  ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Paid: ${o.payment_status} | Delivery: ${o.delivery_status} | Time: ${dt}`;
+              const isPaidFailed = /paid/i.test(o.payment_status || "") && /fail/i.test(o.delivery_status || "");
+              const isUnpaidCheckout = /fail/i.test(o.payment_status || "");
+              const tag = isPaidFailed
+                ? "⚠️ [PAID ORDER — DELIVERY FAILED, NEEDS RETRY/ATTENTION]"
+                : isUnpaidCheckout
+                  ? "[UNPAID / ABANDONED MOMO CHECKOUT — CUSTOMER NEVER PAID]"
+                  : "";
+              return `  ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status} | Time: ${dt} ${tag}`;
             }).join("\n") + "\n";
         }
+
+        // Explicit Failed & Pending Breakdown for AI Clarity
+        const failedBreakdownText =
+          `ORDER FAILURE & QUEUE BREAKDOWN (CRITICAL DISTINCTION):\n` +
+          `• REAL PAID ORDERS WITH FAILED DELIVERY (payment_status = 'paid' & delivery_status = 'failed'): ${paidFailedOrders.length} order(s)\n` +
+          (paidFailedOrders.length > 0
+            ? paidFailedOrders.slice(0, 8).map((o, idx) => `    ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Placed: ${formatGhanaTime(o.created_at)} | Payment: PAID 💰 | Delivery: FAILED ❌`).join("\n") + "\n"
+            : `    (Zero paid orders with failed delivery right now)\n`) +
+          `• UNPAID / ABANDONED CHECKOUTS (payment_status = 'failed' — customer did not complete Paystack/MoMo payment, NO money taken): ${unpaidAbandonedOrders.length} recent checkout(s)\n` +
+          (unpaidAbandonedOrders.length > 0
+            ? unpaidAbandonedOrders.slice(0, 6).map((o, idx) => `    ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Placed: ${formatGhanaTime(o.created_at)} | Payment: UNPAID/FAILED (No payment received)`).join("\n") + "\n"
+            : "") +
+          `• PAID ORDERS CURRENTLY PROCESSING / IN-PROGRESS: ${paidInProgressOrders.length} order(s)\n` +
+          (paidInProgressOrders.length > 0
+            ? paidInProgressOrders.slice(0, 6).map((o, idx) => `    ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Placed: ${formatGhanaTime(o.created_at)} | Delivery: ${o.delivery_status}`).join("\n") + "\n"
+            : "");
 
         // Digital Services
         const paidServices = (servicesRes?.data || []).filter(s => s.payment_status === "paid" || /complet|success/i.test(s.delivery_status || ""));
@@ -7298,8 +6964,8 @@ app.post("/webhook", async (req, res) => {
         if (stuckOrders.length > 0) {
           anomalies.push(`${stuckOrders.length} order(s) stuck in processing > 15 mins (e.g. ${stuckOrders.slice(0, 2).map(o => o.reference || o.id).join(", ")})`);
         }
-        if (failed.length > 0) {
-          anomalies.push(`${failed.length} failed data order(s) needing attention`);
+        if (paidFailedOrders.length > 0) {
+          anomalies.push(`${paidFailedOrders.length} paid order(s) with failed delivery needing retry/attention (${paidFailedOrders.slice(0, 3).map(o => `${o.reference}: ${o.capacity}GB ${o.network} → ${o.recipient_phone}`).join(", ")})`);
         }
         if (unreadSupportCount > 0) {
           anomalies.push(`${unreadSupportCount} unread customer live chat message(s) waiting for attention`);
@@ -7319,21 +6985,29 @@ app.post("/webhook", async (req, res) => {
         const flashPaidToday = flashOrdersToday.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
         const flashRevToday = flashPaidToday.reduce((s, o) => s + Number(o.amount || 0), 0);
 
+        const agentsDetailText = allAgents.length > 0
+          ? `REGISTERED RESELLER AGENTS DIRECTORY (${allAgents.length}):\n` +
+            allAgents.map((a, idx) => `  ${idx + 1}. ${a.store_name || a.name || "Store"} | Owner: ${a.name || "Partner"} | Phone: ${a.phone || "N/A"} | Slug: /s/${a.store_slug || ""} | Wallet: GH₵ ${Number(a.wallet_balance || 0).toFixed(2)} | Earned: GH₵ ${Number(a.total_earnings || 0).toFixed(2)} | Status: ${a.status || "active"}`).join("\n") + "\n"
+          : "";
+
         systemData = `LIVE STORE OPERATIONS SUMMARY:\n` +
-          `• Total All-Time Orders in Database: ${totalOrdersDatabaseCount} orders (Recorded revenue: ~GH₵ ${allGross.toFixed(2)})\n` +
+          `• Total All-Time Orders in Database: ${totalOrdersDatabaseCount} orders (Recent 300 gross: ~GH₵ ${allGross.toFixed(2)})\n` +
           `• Today's Orders: ${paid.length} paid | Sales: GH₵ ${todayRevenue.toFixed(2)}\n` +
           `• Flash Sale Status: ${flashInfo?.isActive ? "ACTIVE & LIVE ON STOREFRONT" : (flashInfo?.isEnabled ? "ACTIVE (Countdown ended)" : "DISABLED")} | Title: "${flashInfo?.title || "MTN Flash Sale"}" | Today's Flash Orders: ${flashOrdersToday.length} (${flashPaidToday.length} paid, GH₵ ${flashRevToday.toFixed(2)})\n` +
           (flashInfo?.products && flashInfo.products.length > 0 ? `  - Flash Sale Live Prices: ${flashInfo.products.slice(0, 8).map(p => `${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}`).join(", ")}\n` : "") +
           `• Reseller Agents: ${allAgents.length} registered (${activeAgents.length} active) | Total Agent Wallets: GH₵ ${totalAgentWallets.toFixed(2)} | Agent Orders Today: ${todayAgentOrders.length} (${paidAgentOrders.length} paid, GH₵ ${todayAgentRevenue.toFixed(2)})\n` +
-          (allAgents.length > 0 ? `  - Active Agent Stores: ${allAgents.slice(0, 8).map(a => `${a.store_name || a.name || "Agent"} (/s/${a.store_slug || "store"})`).join(", ")}\n` : "") +
           `• DataMart API Wallet: ${walletBalance || "Live connection active"} | Speed: ${deliveryEta}\n` +
           `• Arkesel Bulk SMS: ${arkeselSmsBalance || "Operational"}\n` +
-          `• In-Progress Deliveries: ${pending.length} order(s)\n` +
+          `• Paid In-Progress Deliveries: ${paidInProgressOrders.length} order(s)\n` +
           `• Stuck Deliveries (>15 mins): ${stuckOrders.length}\n` +
-          `• Failed Orders: ${failed.length}\n` +
+          `• Paid Orders with Failed Delivery: ${paidFailedOrders.length}\n` +
+          `• Unpaid/Abandoned Checkouts: ${unpaidAbandonedOrders.length}\n` +
           `• Open Visitor Chats: ${openSupportCount} (${unreadSupportCount} unread)\n` +
           `• Digital Services: ${netflixCount} Netflix passes, ${pendingMashupCount} MashUp awaiting dialing, ${afaCount} AFA, ${checkerCount} WAEC/BECE checkers\n` +
-          `• Catalog Stock: ${outOfStockCount > 0 ? `${outOfStockCount} packages OUT OF STOCK` : "All packages in stock ✅"}`;
+          `• Catalog Stock: ${outOfStockCount > 0 ? `${outOfStockCount} packages OUT OF STOCK` : "All packages in stock ✅"}\n\n` +
+          failedBreakdownText +
+          (agentsDetailText ? `\n${agentsDetailText}` : "") +
+          (topCustomersSummary ? `\n${topCustomersSummary}` : "");
 
         if (anomalies.length > 0) {
           systemData += `\n🚨 ACTIVE SYSTEM WARNINGS:\n` + anomalies.map(a => `• ${a}`).join("\n");
@@ -7344,13 +7018,13 @@ app.post("/webhook", async (req, res) => {
 
       // Order lookup if message mentions reference or phone number
       let specificOrderCtx = "";
-      const refMatch = text.match(/\b(REF-\d+|[A-Z0-9]{8,})\b/i);
+      const refMatch = text.match(/\b(REF-\d+|WS-?[A-Z0-9]{5,14}|[A-Z0-9]{8,})\b/i);
       const phoneMatch = text.match(/\b(0[2357]\d{8}|233\d{9})\b/);
       if (refMatch) {
         try {
           const lookupRef = refMatch[1].trim();
           let { data: ord } = await supabase.from("orders")
-            .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, datamart_reference")
+            .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, datamart_reference, notes")
             .or(`reference.ilike.%${lookupRef}%,datamart_reference.ilike.%${lookupRef}%`).limit(1).maybeSingle();
 
           // If order was pending payment, do a live Paystack verify right now!
@@ -7377,19 +7051,19 @@ app.post("/webhook", async (req, res) => {
 
           if (ord) {
             const liveStatus = await getRealDatamartDeliveryStatus(ord.datamart_reference || ord.reference);
-            specificOrderCtx = `ORDER LOOKUP (${lookupRef}):\nRef: ${ord.reference} | ${ord.capacity}GB ${ord.network} → ${ord.recipient_phone} | ₵${ord.amount} | Payment: ${ord.payment_status} | Delivery Status: ${liveStatus.deliveryStatus} (Raw: ${liveStatus.rawStatus}) | Date: ${ord.created_at?.slice(0, 16)}\n`;
+            specificOrderCtx = `ORDER LOOKUP (${lookupRef}):\nRef: ${ord.reference} | Supplier Ref: ${ord.datamart_reference || "None"} | ${ord.capacity}GB ${ord.network} → ${ord.recipient_phone} | ₵${ord.amount} | Payment: ${ord.payment_status} | Delivery Status: ${liveStatus.deliveryStatus} (Raw: ${liveStatus.rawStatus}) | Date: ${formatGhanaTime(ord.created_at)} | Notes: ${ord.notes || "None"}\n`;
           }
         } catch (_) { }
       } else if (phoneMatch) {
         try {
           const lookupPhone = normalizePhone(phoneMatch[0]);
           const { data: ords } = await supabase.from("orders")
-            .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at")
+            .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, datamart_reference")
             .eq("recipient_phone", lookupPhone)
-            .order("created_at", { ascending: false }).limit(3);
+            .order("created_at", { ascending: false }).limit(5);
           if (ords && ords.length > 0) {
             specificOrderCtx = `ORDERS FOR ${lookupPhone}:\n` + ords.map((o, i) =>
-              `${i + 1}. ${o.reference} | ${o.capacity}GB ${o.network} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status} | ₵${o.amount}`
+              `${i + 1}. ${o.reference} | ${o.capacity}GB ${o.network} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status} | ₵${o.amount} | Date: ${formatGhanaTime(o.created_at)}`
             ).join("\n") + "\n";
           }
         } catch (_) { }
@@ -7489,6 +7163,11 @@ app.post("/webhook", async (req, res) => {
         "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST (NEVER BEAT AROUND THE BUSH):\n" +
         "  When the owner asks to pull, fetch, display, or check anything from the site or database, immediately retrieve and output the exact, structured information directly. Never beat around the bush, never give generic conversational fluff like 'I'm on it boss' or 'Tell me which department to tackle' without answering the question.\n" +
         "  Always answer directly in your very first sentence with exact figures, dates, references, prices, or statuses.\n" +
+        "- CRITICAL DISTINCTION FOR FAILED ORDERS:\n" +
+        "  When the owner asks 'Any failed order?' or asks about failed/problem orders, NEVER dump a rigid list of 15 orders mixing unpaid checkouts with paid orders!\n" +
+        "  Always distinguish clearly and conversationally between:\n" +
+        "  1. REAL PAID ORDERS WITH FAILED DELIVERY (payment_status = 'paid' & delivery_status = 'failed'): The customer paid MoMo, so this order genuinely needs attention or a DataMart retry (give the exact Reference, package, recipient phone, amount, and time, and offer to retry or mark it delivered).\n" +
+        "  2. UNPAID / ABANDONED CHECKOUTS (payment_status = 'failed'): The customer abandoned Paystack/MoMo checkout without paying, so no money was collected and no action is needed.\n" +
         "- NEVER give canned, robotic dismissals like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
         "- NEVER say \"As an AI\". You are Stony.\n\n" +
         "CURRENT LIVE BUSINESS REALITY:\n" +
@@ -7531,17 +7210,10 @@ app.post("/webhook", async (req, res) => {
         } catch (_) { }
       };
 
-      // ── STEP 0: EXECUTE EXPLICIT DIRECT OWNER COMMANDS IMMEDIATELY ──
+      // ── STEP 0: EXECUTE EXPLICIT DIRECT OWNER WRITE/ACTION COMMANDS IMMEDIATELY ──
       const cmdText = (effectiveText || text).trim();
       const lt = cmdText.toLowerCase();
       const orderRefsInText = extractOrderReferences(cmdText);
-
-      // Direct Action Command 0a_xray: Instant All-Corners System Diagnostic & Auto-Heal
-      if (/^(?:diagnose|scan\s+system|check\s+all\s+corners|all\s+corners|system\s+xray|x-ray|check\s+errors|fix\s+all\s+errors|heal\s+system|sync\s+all\s+orders)$/i.test(cmdText)) {
-        const shouldAutoFix = /\b(fix|heal|sync\s+all)\b/i.test(cmdText);
-        const xrayReport = await runAllCornersSystemXRay(shouldAutoFix);
-        return sendWhatsApp(from, xrayReport + (!shouldAutoFix ? `\n\n💡 Reply *fix all errors* anytime to auto-heal any desynced or unverified orders across the system.` : ""));
-      }
 
       // Direct Action Command 0a_channel_config: Configure Whapi Token or Channel JID for direct @newsletter posting
       const setWhapiMatch = cmdText.match(/^set\s+(?:whapi|channel)\s+token\s+([^\s]+)$/i);
@@ -7931,34 +7603,6 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // Direct Action Command 0a: Flash Sale Status, Prices & Orders
-      if (/\b(?:flash\s*sale\s*orders?|flash\s*orders?|any\s+flash\s*sale|flash\s*sale\s*prices?|how\s+much\s+is\s+flash\s*sale|is\s+flash\s*sale\s*active|flash\s*sale)\b/i.test(lt) &&
-        !/\b(turn|set|switch|disable|enable|start|stop|activate|deactivate|off|on)\b/i.test(lt)) {
-        const summary = await listFlashSaleOrdersSummary();
-        return sendWhatsApp(from, summary);
-      }
-
-      // Direct Action Command 0a2: Full History / All-Time Orders
-      if (/\b(?:full\s*history|all\s*time\s*orders?|order\s*history|total\s*orders?|how\s+many\s+orders\s+in\s+total)\b/i.test(lt)) {
-        const summary = await getAllTimeOrderStatsSummary();
-        return sendWhatsApp(from, summary);
-      }
-
-      // Direct Action Command 0b: Agent Store Orders & Sales
-      if (/\b(?:agent orders?|agent sales?|orders? from agent|sales? from agent|agent store orders?|agent stores?)\b/i.test(lt) ||
-        /^(?:any|show|check|get|list)?\s*(?:orders?|sales?)\s*(?:from|for|by)?\s*(?:the\s+)?agent(?:s|\s+stores?)?\b/i.test(lt)) {
-        const summary = await listAgentOrdersSummary();
-        return sendWhatsApp(from, summary);
-      }
-
-      // Direct Action Command 0c: List All Agents / Agent Count
-      if (/^(?:list|show|view|all|get)\s+(?:all\s+)?agents\b/i.test(lt) ||
-        /^(?:how many agents|agent count|agent list|agents summary|who are the agents|registered agents)\b/i.test(lt) ||
-        /\b(?:how many|number of)\s+agents\b/i.test(lt)) {
-        const summary = await listAllAgentsSummary();
-        return sendWhatsApp(from, `👥 *REGISTERED RESELLER AGENTS*\n\n${summary}\n\n💡 *Quick Controls:*\n• Orders: "Show agent orders"\n• Credit: "Credit agent [phone/name] with [amount]"\n• Debit: "Debit agent [phone/name] with [amount]"\n• Status: "Suspend agent [phone]" or "Activate agent [phone]"`);
-      }
-
       // Direct Action Command 0d: Suspend / Activate Agent
       const statusAgentMatch = cmdText.match(/(suspend|block|deactivate|activate|unblock|enable)\s+agent\s+([A-Za-z0-9_.-]+)/i);
       if (statusAgentMatch) {
@@ -7971,34 +7615,6 @@ app.post("/webhook", async (req, res) => {
         } else {
           return sendWhatsApp(from, `⚠️ Could not find agent "${target}".`);
         }
-      }
-
-      // Direct Action Command 0e: Live DataMart Wallet Balance
-      if (/^(?:check\s+)?(?:the\s+)?(?:datamart\s+|api\s+|my\s+|our\s+)?wallet(?:\s+balance)?\b/i.test(lt) ||
-        /^(?:check\s+)?(?:the\s+)?(?:datamart\s+)?balance\b/i.test(lt) ||
-        /\b(?:how much (?:is in|is on|dey inside) (?:the )?(?:wallet|datamart))\b/i.test(lt)) {
-        let liveBal = walletBalance;
-        try {
-          if (activeDatamartKey) {
-            const h = { "x-api-key": activeDatamartKey, Accept: "application/json" };
-            if (activeDatamartSecret) h["x-api-secret"] = activeDatamartSecret;
-            const r = await axios.get("https://api.datamartgh.shop/api/developer/balance", { headers: h, timeout: 5000 }).catch(() => null);
-            if (r?.data?.data?.balance != null) {
-              const nb = Number(r.data.data.balance);
-              if (!isNaN(nb)) {
-                liveBal = `GH₵ ${nb.toFixed(2)}`;
-                supabase.from("settings").upsert({ key: "datamart_last_balance", value: String(nb) }, { onConflict: "key" }).catch(() => null);
-              }
-            }
-          }
-        } catch (_) { }
-        return sendWhatsApp(from,
-          `💳 *LIVE DATAMART API WALLET*\n━━━━━━━━━━━━━━━━━━━━━\n` +
-          `💰 *Balance:* *${liveBal || "GH₵ 1,740.90"}*\n` +
-          `⚡ *Delivery Speed:* *${deliveryEta}*\n` +
-          (arkeselSmsBalance ? `✉️ *Arkesel SMS:* *${arkeselSmsBalance}*\n` : "") +
-          `📊 *Orders Today:* *${todayPaidCount}* (GH₵ ${todayRevenue.toFixed(2)})`
-        );
       }
 
       // Direct Action Command 1a: Payment Status Update
@@ -8203,52 +7819,6 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, `✅ *SUPPORT CHAT RESOLVED BOSS!*\n\n💬 Marked open customer support conversation${target ? ` for *${target}*` : ""} as resolved!`);
       }
 
-      // Direct Action Command 8: Interactive Operations & Issue Radar
-      if (/^(issues|check issues|scan issues|scan system|system issues|what issues|any problem|pending tasks|what to do|action list|problems)\b/i.test(lt)) {
-        let report = `🚨 *STONY OPERATIONS & ISSUE RADAR*\n\n`;
-        let issueCount = 0;
-        let firstAction = null;
-
-        if (stuckOrders.length > 0) {
-          report += `⏳ *Stuck Deliveries (>15 mins):*\n` + stuckOrders.slice(0, 3).map(o => `• *${o.reference}*: ${o.capacity}GB ${o.network} → ${o.recipient_phone}`).join("\n") + "\n\n";
-          issueCount += stuckOrders.length;
-          firstAction = { type: "update_order_status", orders: stuckOrders.map(o => o.reference), status: "delivered", send_sms: false };
-        }
-        if (failedOrdersList.length > 0) {
-          report += `❌ *Failed Orders Needing Attention:*\n` + failedOrdersList.slice(0, 3).map(o => `• *${o.reference}*: ${o.capacity}GB ${o.network} → ${o.recipient_phone}`).join("\n") + "\n\n";
-          issueCount += failedOrdersList.length;
-        }
-        if (pendingMashupCount > 0) {
-          report += `📱 *Pending MashUp Queue:* ${pendingMashupCount} order(s) awaiting manual dial (*567*2#).\n\n`;
-          issueCount += pendingMashupCount;
-        }
-        if (unreadSupportCount > 0) {
-          report += `💬 *Customer Support:* ${unreadSupportCount} unread message(s) waiting on website!\n\n`;
-          issueCount += unreadSupportCount;
-        }
-        if (outOfStockCount > 0) {
-          report += `⚠️ *Out of Stock:* ${outOfStockCount} package(s) marked out of stock on website.\n\n`;
-          issueCount += outOfStockCount;
-        }
-        if (walletBalance && /₵\s*([0-4]?\d(?:\.\d+)?)/.test(walletBalance)) {
-          report += `💳 *Low DataMart Wallet:* ${walletBalance} (top up needed to prevent paused dispatches).\n\n`;
-          issueCount += 1;
-        }
-
-        if (issueCount === 0) {
-          return sendWhatsApp(from, `✅ *ALL CLEAR BOSSU!*\n\nI just scanned the whole system across all 13 departments: No stuck orders, no failed deliveries, customer chats are attended, and packages are in stock!\n\nDelivery Speed: *${deliveryEta}*\nDataMart Wallet: *${walletBalance || "Active"}*\nBulk SMS: *${arkeselSmsBalance || "Active"}* (Sender: *D_1Gh*)\n\nWhat would you like me to tackle?`);
-        }
-
-        if (firstAction && stuckOrders.length > 0) {
-          await setOwnerPendingAction(from, firstAction);
-          report += `💡 *Recommended Action:*\nShall I mark the ${stuckOrders.length} stuck order(s) as *DELIVERED* in the database? (Customer SMS is turned off). Reply *YES* to execute or tell me what to do!`;
-        } else {
-          report += `💡 *How can I help you boss?*\nJust text me what to do:\n• "Update [order] to delivered"\n• "Retry order [order]"\n• "Send SMS to [phone] saying ..."\n• "Mark [package] in stock / out of stock"\n• "Change price of [package] to [amount]"`;
-        }
-
-        return sendWhatsApp(from, report);
-      }
-
       // ── STEP 1: FAST DIRECT IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──
       let aiReply = "";
       try {
@@ -8256,7 +7826,7 @@ app.post("/webhook", async (req, res) => {
           systemPrompt: ownerSystemPrompt,
           userMessage: text,
           history,
-          maxTokens: 800,
+          maxTokens: 2500,
           temperature: 0.7
         });
         aiReply = aiResult?.text || "";
@@ -8285,7 +7855,7 @@ app.post("/webhook", async (req, res) => {
                 "x-admin-bot": "true",
                 "x-admin-key": process.env.ADMIN_API_KEY || "data1gh-secure-admin",
               },
-              timeout: 6000,
+              timeout: 15000,
             }
           );
 
