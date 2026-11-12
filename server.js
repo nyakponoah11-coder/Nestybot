@@ -1435,6 +1435,245 @@ async function sendAdminWhatsApp(text) {
 }
 
 /* =========================================================
+WHATSAPP CHANNEL PUBLISHER ENGINE
+Posts updates, bundle prices, flash sales, free data vouchers,
+and AI promos directly to the official WhatsApp Channel:
+https://whatsapp.com/channel/0029Vb7vwLN5kg70GeNMsB2w
+========================================================= */
+const DEFAULT_WHATSAPP_CHANNEL_URL = "https://whatsapp.com/channel/0029Vb7vwLN5kg70GeNMsB2w";
+
+async function buildChannelPostFromSystem(topicOrMode = "general", customBody = "") {
+  const mode = String(topicOrMode || "general").toLowerCase().trim();
+  let channelUrl = DEFAULT_WHATSAPP_CHANNEL_URL;
+  try {
+    const { data: cRow } = await supabase.from("settings").select("value").eq("key", "whatsapp_channel_url").maybeSingle();
+    if (cRow?.value) channelUrl = cRow.value;
+  } catch (_) {}
+
+  if (customBody && customBody.trim().length > 10 && mode === "custom") {
+    let text = customBody.trim();
+    if (!text.includes("data1gh.com")) {
+      text += `\n\n🌐 *Order Instantly:* ${STORE_FRONTEND_URL}\n🤖 *WhatsApp Bot:* https://wa.me/233200598553`;
+    }
+    return text;
+  }
+
+  // 1. Live Prices / Catalog Channel Broadcast
+  if (/price|catalog|bundle|rate|menu/i.test(mode)) {
+    const { data: prods } = await supabase
+      .from("products")
+      .select("network, capacity, price, in_stock")
+      .eq("in_stock", true)
+      .order("price", { ascending: true });
+    const all = Array.isArray(prods) ? prods : [];
+    const mtn = all.filter(p => /mtn|yello/i.test(p.network)).sort((a, b) => Number(a.capacity) - Number(b.capacity));
+    const tel = all.filter(p => /telecel|vodafone/i.test(p.network)).sort((a, b) => Number(a.capacity) - Number(b.capacity));
+    const at = all.filter(p => /airtel|tigo|at/i.test(p.network)).sort((a, b) => Number(a.capacity) - Number(b.capacity));
+
+    let msg = `🔥 *DATA 1 GH — TODAY'S NON-EXPIRY DATA RATES* 🇬🇭📶\n` +
+      `⚡ *Fast Automated Delivery (5–20 Mins)*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+    if (mtn.length > 0) {
+      msg += `💛 *MTN NON-EXPIRY DATA:*\n` + mtn.map(p => `• *${p.capacity}GB* — GH₵ ${Number(p.price).toFixed(2)}`).join("\n") + `\n\n`;
+    }
+    if (tel.length > 0) {
+      msg += `❤️ *TELECEL DATA:*\n` + tel.map(p => `• *${p.capacity}GB* — GH₵ ${Number(p.price).toFixed(2)}`).join("\n") + `\n\n`;
+    }
+    if (at.length > 0) {
+      msg += `💙 *AIRTELTIGO (AT) BIG TIME:*\n` + at.map(p => `• *${p.capacity}GB* — GH₵ ${Number(p.price).toFixed(2)}`).join("\n") + `\n\n`;
+    }
+    msg += `🎬 *Netflix 30-Day Pass:* GH₵ 30.00\n` +
+      `🎓 *WAEC / BECE Result Checkers:* Instant PIN & Serial\n` +
+      `🪪 *MTN AFA Registration:* GH₵ 20.00\n\n` +
+      `🛒 *Buy Online 24/7:* ${STORE_FRONTEND_URL}\n` +
+      `🤖 *24/7 WhatsApp Bot:* https://wa.me/233200598553?text=Hi\n` +
+      `📱 *Android App:* ${DOWNLOAD_APP_URL}`;
+    return msg;
+  }
+
+  // 2. Flash Sale Channel Broadcast
+  if (/flash/i.test(mode)) {
+    const flashInfo = await getFlashSaleLiveInfo().catch(() => null);
+    const items = flashInfo?.products || [];
+    let msg = `⚡🔥 *FLASH SALE IS LIVE ON DATA 1 GH!* 🔥⚡\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `Grab discounted *${flashInfo?.title || "MTN Non-Expiry Data Bundles"}* right now before the timer runs out!\n\n`;
+    if (items.length > 0) {
+      msg += items.slice(0, 10).map(p => `🔥 *${p.capacity}GB* — *GH₵ ${Number(p.price).toFixed(2)}*`).join("\n") + `\n\n`;
+    }
+    msg += `👉 *Rush to the Store Now:* ${STORE_FRONTEND_URL}\n` +
+      `🤖 *Or Order on WhatsApp Bot:* https://wa.me/233200598553?text=Hi`;
+    return msg;
+  }
+
+  // 3. Free Data Vouchers Channel Broadcast
+  if (/voucher|free\s*data|giveaway/i.test(mode)) {
+    const { data: codes } = await supabase
+      .from("free_data_codes")
+      .select("code, network, capacity")
+      .eq("claimed", false)
+      .order("created_at", { ascending: false })
+      .limit(10);
+    const list = Array.isArray(codes) ? codes : [];
+    let msg = `🎁 *FREE DATA GIVEAWAY DROP — DATA 1 GH!* 🎉📶\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `Fastest fingers first! Claim your FREE data voucher right now on our website:\n\n`;
+    if (list.length > 0) {
+      msg += list.map((c, i) => `${i + 1}. 🎟️ *${c.code}* (${c.capacity}GB ${c.network})`).join("\n") + `\n\n`;
+    }
+    msg += `👉 *Claim Here Now:* ${STORE_FRONTEND_URL}/free-data\n` +
+      `🌐 *Main Shop:* ${STORE_FRONTEND_URL}`;
+    return msg;
+  }
+
+  return customBody || (
+    `🚀 *DATA 1 GH — NETWORK STATUS: FAST & ACTIVE!* 🇬🇭📶\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `All MTN, Telecel & AirtelTigo data bundles are dropping smoothly right now (5–20 mins)!\n\n` +
+    `💛 *MTN 1GB:* ₵4.20 | *2GB:* ₵8.90 | *5GB:* ₵23.50 | *10GB:* ₵44.50\n` +
+    `🎬 *Netflix, WAEC Checkers & AFA Registration* also live 24/7.\n\n` +
+    `🛒 *Shop Online:* ${STORE_FRONTEND_URL}\n` +
+    `🤖 *WhatsApp Bot:* https://wa.me/233200598553?text=Hi`
+  );
+}
+
+async function postToWhatsAppChannel(messageText, options = {}) {
+  const cleanPost = String(messageText || "").trim();
+  if (!cleanPost) return { ok: false, error: "Empty channel post text" };
+
+  let channelUrl = DEFAULT_WHATSAPP_CHANNEL_URL;
+  let whapiToken = process.env.WHAPI_API_TOKEN || process.env.WHAPI_TOKEN || process.env.WHATSAPP_CHANNEL_API_TOKEN || "";
+  let channelJid = process.env.WHATSAPP_CHANNEL_JID || "";
+  let channelWebhookUrl = process.env.WHATSAPP_CHANNEL_WEBHOOK_URL || "";
+
+  try {
+    const { data: sRows } = await supabase
+      .from("settings")
+      .select("key, value")
+      .in("key", [
+        "whatsapp_channel_url",
+        "whapi_api_token",
+        "whatsapp_channel_api_token",
+        "whatsapp_channel_jid",
+        "whatsapp_channel_webhook_url",
+      ]);
+    const sMap = Object.fromEntries((sRows || []).map(r => [r.key, r.value]));
+    if (sMap.whatsapp_channel_url) channelUrl = sMap.whatsapp_channel_url.trim();
+    if (sMap.whapi_api_token || sMap.whatsapp_channel_api_token) {
+      whapiToken = (sMap.whapi_api_token || sMap.whatsapp_channel_api_token).trim();
+    }
+    if (sMap.whatsapp_channel_jid) channelJid = sMap.whatsapp_channel_jid.trim();
+    if (sMap.whatsapp_channel_webhook_url) channelWebhookUrl = sMap.whatsapp_channel_webhook_url.trim();
+  } catch (_) {}
+
+  // Save latest channel post in settings history
+  try {
+    await supabase.from("settings").upsert([
+      {
+        key: "last_whatsapp_channel_post",
+        value: JSON.stringify({
+          text: cleanPost,
+          channel_url: channelUrl,
+          posted_at: new Date().toISOString(),
+        }),
+      },
+    ], { onConflict: "key" });
+  } catch (_) {}
+
+  let directPosted = false;
+  let directProvider = "";
+  let apiErrorNote = "";
+
+  // 1. Direct Whapi.Cloud Newsletter / Channel API
+  if (whapiToken) {
+    try {
+      // Auto-resolve @newsletter JID from invite code (e.g. 0029Vb7vwLN5kg70GeNMsB2w) if not cached
+      if (!channelJid) {
+        const inviteMatch = channelUrl.match(/channel\/([A-Za-z0-9_-]+)/i);
+        const inviteCode = inviteMatch ? inviteMatch[1] : "";
+        try {
+          const listRes = await axios.get("https://gate.whapi.cloud/newsletters?count=50", {
+            headers: { Authorization: `Bearer ${whapiToken}`, Accept: "application/json" },
+            timeout: 8000,
+          });
+          const newsletters = listRes.data?.newsletters || listRes.data?.data || [];
+          if (Array.isArray(newsletters) && newsletters.length > 0) {
+            const matched = newsletters.find(n =>
+              (inviteCode && String(n.invite_code || n.invite || n.link || "").includes(inviteCode)) ||
+              /data\s*1|data\s*one/i.test(n.name || n.subject || "")
+            ) || newsletters[0];
+            if (matched?.id) {
+              channelJid = matched.id.includes("@") ? matched.id : `${matched.id}@newsletter`;
+              await supabase.from("settings").upsert([{ key: "whatsapp_channel_jid", value: channelJid }], { onConflict: "key" });
+            }
+          }
+        } catch (_) {}
+      }
+
+      if (channelJid) {
+        const sendRes = await axios.post(
+          "https://gate.whapi.cloud/messages/text",
+          { to: channelJid, body: cleanPost },
+          {
+            headers: {
+              Authorization: `Bearer ${whapiToken}`,
+              "Content-Type": "application/json",
+            },
+            timeout: 12000,
+          }
+        );
+        if (sendRes.status >= 200 && sendRes.status < 300) {
+          directPosted = true;
+          directProvider = `Whapi Channel API (${channelJid})`;
+        }
+      } else {
+        apiErrorNote = "Whapi token is set, but could not auto-detect the @newsletter JID yet (make sure the number linked to Whapi is an Admin of your WhatsApp Channel, or set whatsapp_channel_jid).";
+      }
+    } catch (wErr) {
+      apiErrorNote = wErr.response?.data?.error?.message || wErr.message;
+    }
+  }
+
+  // 2. Custom Channel Webhook (Waha / Evolution API / Make / n8n)
+  if (!directPosted && channelWebhookUrl) {
+    try {
+      const whRes = await axios.post(
+        channelWebhookUrl,
+        {
+          text: cleanPost,
+          body: cleanPost,
+          channel_url: channelUrl,
+          channel_jid: channelJid || undefined,
+          source: "data1gh_stony_copilot",
+        },
+        { timeout: 10000 }
+      );
+      if (whRes.status >= 200 && whRes.status < 300) {
+        directPosted = true;
+        directProvider = "Channel Webhook Bridge";
+      }
+    } catch (whErr) {
+      apiErrorNote = whErr.message;
+    }
+  }
+
+  // 3. If requested by background trigger or if direct API is not linked yet, deliver ready-to-forward post to Owner WhatsApp
+  if (!directPosted && options.deliverReadyCopyToPhone) {
+    await sendWhatsApp(options.deliverReadyCopyToPhone, cleanPost);
+  }
+
+  return {
+    ok: true,
+    directPosted,
+    directProvider,
+    channelUrl,
+    channelJid,
+    apiErrorNote,
+    postText: cleanPost,
+  };
+}
+
+
+/* =========================================================
 API KEY CLEANER & ENHANCED MULTI-PROVIDER AI SYSTEM
 (Groq, Google Gemini 3.8/2.5, OpenRouter, OpenAI)
 Takes effect directly from Admin Settings saved on Supabase!
@@ -3630,6 +3869,20 @@ async function executeOwnerDirectAction(type, payload = {}) {
       const targetFile = String(payload.file || payload.path || payload.query || "whatsapp-bot-server.js").trim();
       const snippet = await inspectCodebaseFile(targetFile, payload.keyword || "");
       return snippet;
+    }
+
+    // 23. Post / Broadcast to Official WhatsApp Channel
+    if (cleanType === "post_to_channel" || cleanType === "broadcast_channel" || cleanType === "channel_post") {
+      const topic = String(payload.topic || payload.mode || (payload.message ? "custom" : "general")).trim();
+      const rawMsg = String(payload.message || payload.text || payload.body || "").trim();
+      const postBody = await buildChannelPostFromSystem(topic, rawMsg);
+      const res = await postToWhatsAppChannel(postBody);
+      if (res.directPosted) {
+        return `📢 *Posted Live to WhatsApp Channel!* (${res.directProvider})\n🔗 ${res.channelUrl}\n\n${res.postText}`;
+      }
+      return `📢 *WhatsApp Channel Broadcast Ready!*\n🔗 Channel: ${res.channelUrl}\n` +
+        (res.apiErrorNote ? `⚠️ Note: ${res.apiErrorNote}\n` : `💡 *(Tip: Forward the message below to your Channel in 1 tap, or link a Whapi token via "set whapi token YOUR_TOKEN" for 100% hands-free direct Channel posting)*`) +
+        `\n━━━━━━━━━━━━━━━━━━━━\n${res.postText}`;
     }
   } catch (e) {
     console.warn("executeOwnerDirectAction error:", e.message);
@@ -7224,7 +7477,8 @@ app.post("/webhook", async (req, res) => {
         "  15. Full Reseller Agent Network Operations: Credit agent wallet, debit agent wallet, suspend/activate agent accounts, list registered agents, and view agent store sales\n" +
         "  16. Direct DataMart Bundle Dispatch: Send/dispatch any MTN, Telecel, or AirtelTigo data bundle directly from the DataMart API wallet to any recipient phone number (e.g. '0549992958 1GB' or 'send 2GB MTN to 0549992958') using {\"type\": \"dispatch_datamart_bundle\", \"phone\": \"0549992958\", \"capacity\": 1, \"network\": \"MTN\"}\n" +
         "  17. All-Corners System Diagnostic, Auto-Heal & Live Codebase Inspection: Scan every corner of the system (Paystack unverified payments, DataMart status desyncs, missing WhatsApp alerts, stale [dm_inflight] locks, runtime logs) and auto-heal them using {\"type\": \"diagnose_system\", \"autoFix\": true} or inspect any codebase file using {\"type\": \"inspect_codebase\", \"file\": \"AdminOrders.tsx\", \"keyword\": \"syncOrderStatus\"}\n" +
-        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\", ...}] at the end of your reply.\n" +
+        "  18. Official WhatsApp Channel Broadcasting (https://whatsapp.com/channel/0029Vb7vwLN5kg70GeNMsB2w): Post live bundle prices, flash sales, free data voucher drops, or custom marketing promos to the DATA 1 GH WhatsApp Channel using {\"type\": \"post_to_channel\", \"topic\": \"prices\"|\"flash\"|\"vouchers\"|\"custom\", \"message\": \"your formatted channel post\"}\n" +
+        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\", ...}] at the end of your reply.\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
         "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
@@ -7287,6 +7541,51 @@ app.post("/webhook", async (req, res) => {
         const shouldAutoFix = /\b(fix|heal|sync\s+all)\b/i.test(cmdText);
         const xrayReport = await runAllCornersSystemXRay(shouldAutoFix);
         return sendWhatsApp(from, xrayReport + (!shouldAutoFix ? `\n\n💡 Reply *fix all errors* anytime to auto-heal any desynced or unverified orders across the system.` : ""));
+      }
+
+      // Direct Action Command 0a_channel_config: Configure Whapi Token or Channel JID for direct @newsletter posting
+      const setWhapiMatch = cmdText.match(/^set\s+(?:whapi|channel)\s+token\s+([^\s]+)$/i);
+      if (setWhapiMatch) {
+        const tok = setWhapiMatch[1].trim();
+        await updateStoreSetting("whapi_api_token", tok);
+        return sendWhatsApp(from, `✅ *Whapi Channel API Token Saved!*\nStony will now auto-resolve your WhatsApp Channel JID and post directly into ${DEFAULT_WHATSAPP_CHANNEL_URL} whenever you command a channel post.`);
+      }
+      const setChannelJidMatch = cmdText.match(/^set\s+channel\s+jid\s+([^\s]+)$/i);
+      if (setChannelJidMatch) {
+        const rawJid = setChannelJidMatch[1].trim();
+        const jid = rawJid.includes("@") ? rawJid : `${rawJid}@newsletter`;
+        await updateStoreSetting("whatsapp_channel_jid", jid);
+        return sendWhatsApp(from, `✅ *WhatsApp Channel JID Saved:* *${jid}*`);
+      }
+
+      // Direct Action Command 0a_channel_post: Post Prices, Flash Sale, Free Data Vouchers, or Custom Post to WhatsApp Channel
+      const channelExplicitMatch = cmdText.match(/^(?:post|broadcast|share|send|publish)\s+(?:(prices?|catalog|rates?|bundles?|flash\s*sale|free\s*data|vouchers?)\s+)?(?:to|on|in)\s+(?:our\s+|my\s+|the\s+)?(?:whatsapp\s+)?channel(?:\s*[:\-]\s*([\s\S]+))?$/i) ||
+        cmdText.match(/^channel\s+post(?:\s*[:\-]\s*([\s\S]+))?$/i);
+      if (channelExplicitMatch) {
+        const subTopic = (channelExplicitMatch[1] || "").trim().toLowerCase();
+        const customBody = (channelExplicitMatch[2] || "").trim();
+        let topicMode = "general";
+        if (customBody) topicMode = "custom";
+        else if (/price|catalog|rate|bundle/.test(subTopic)) topicMode = "prices";
+        else if (/flash/.test(subTopic)) topicMode = "flash";
+        else if (/free|voucher/.test(subTopic)) topicMode = "vouchers";
+
+        const postBody = await buildChannelPostFromSystem(topicMode, customBody);
+        const res = await postToWhatsAppChannel(postBody);
+        if (res.directPosted) {
+          return sendWhatsApp(from, `📢 *Posted Live to Your WhatsApp Channel!* ✅\n🔗 ${res.channelUrl}\n\n${res.postText}`);
+        } else {
+          // Send the clean ready-to-forward message first so the owner can 1-tap forward it to the Channel without editing!
+          await sendWhatsApp(from, res.postText);
+          return sendWhatsApp(
+            from,
+            `📢 *Channel Post Ready Above!* ☝️\n` +
+            `Long-press the message above → tap *Forward* → select your *DATA 1 GH Channel* (${res.channelUrl}).\n\n` +
+            (res.apiErrorNote
+              ? `⚠️ *Direct Channel API Note:* ${res.apiErrorNote}`
+              : `💡 *Want 100% hands-free auto-posting into the Channel?* Link your Whapi.Cloud token in Admin Settings (or text *set whapi token YOUR_TOKEN*) and Stony will post directly into the Channel without needing a forward!`)
+          );
+        }
       }
 
       // Direct Action Command 0a_shorthand: Shorthand bundle dispatch/lookup (e.g. "0549992958 1GB", "1GB 0549992958", "send 1GB to 0549992958")
