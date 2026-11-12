@@ -26,12 +26,12 @@ const DATA_API_KEY = process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY;
 const DATAMART_API_SECRET = process.env.DATAMART_API_SECRET || process.env.DATA_API_SECRET || process.env.DM_API_SECRET || VERIFIED_DATAMART_SECRET;
 const AFA_API_KEY = process.env.AFA_API_KEY;
 const ARKESEL_API_KEY = process.env.ARKESEL_API_KEY;
-const STORE_FRONTEND_URL = process.env.SITE_URL || "https://www.data1gh.com";
+const STORE_FRONTEND_URL = "https://www.data1gh.com";
 const ADMIN_DASHBOARD_URL = `${STORE_FRONTEND_URL}/admin`;
 const DOWNLOAD_APP_URL = `${STORE_FRONTEND_URL}/download-app`;
 const TRACK_ORDER_URL = `${STORE_FRONTEND_URL}/track`;
 const SERVICES_URL = `${STORE_FRONTEND_URL}/services`;
-const STORE_API_URL = process.env.STORE_API_URL || `${STORE_FRONTEND_URL}/api/whatsapp-bot`;
+const STORE_API_URL = `${STORE_FRONTEND_URL}/api/whatsapp-bot`;
 const SCRATCH_REQUIRED_ORDERS = 5;
 const SCRATCH_ONE_GB_PROBABILITY = 0.90;
 
@@ -1477,8 +1477,8 @@ async function buildChannelPostFromSystem(topicOrMode = "general", customBody = 
     if (cRow?.value) channelUrl = cRow.value;
   } catch (_) {}
 
-  if (customBody && customBody.trim().length > 10 && mode === "custom") {
-    let text = customBody.trim();
+  if (customBody && customBody.trim().length > 0 && mode === "custom") {
+    let text = customBody.trim().replace(/https?:\/\/data1gh\.vercel\.app/gi, "https://www.data1gh.com");
     if (!text.includes("data1gh.com")) {
       text += `\n\n🌐 *Order Instantly:* ${STORE_FRONTEND_URL}\n🤖 *WhatsApp Bot:* https://wa.me/233200598553`;
     }
@@ -1776,7 +1776,7 @@ setTimeout(() => {
 }, 5000);
 
 async function postToWhatsAppChannel(messageText, options = {}) {
-  const cleanPost = String(messageText || "").trim();
+  const cleanPost = String(messageText || "").replace(/https?:\/\/data1gh\.vercel\.app/gi, "https://www.data1gh.com").trim();
   if (!cleanPost) return { ok: false, error: "Empty channel post text" };
 
   let channelUrl = DEFAULT_WHATSAPP_CHANNEL_URL;
@@ -2901,7 +2901,7 @@ SYNC ACTION TO SITE BACKEND
 ========================================================= */
 async function syncActionToSite(action_type, payload, phone = "") {
   try {
-    const siteBase = process.env.SITE_URL || STORE_FRONTEND_URL || "https://www.data1gh.com";
+    const siteBase = STORE_FRONTEND_URL;
     const siteAiEndpoint = `${siteBase.replace(/\/+$/, "")}/api/admin?fn=admin-ai`;
     await axios.post(
       siteAiEndpoint,
@@ -7293,7 +7293,7 @@ app.post("/webhook", async (req, res) => {
         `- Storefront (Shop / Front end): ${STORE_FRONTEND_URL}\n` +
         `- Admin Dashboard / Portal: ${ADMIN_DASHBOARD_URL}\n` +
         `- Reseller Agent Portal / Dashboard: ${STORE_FRONTEND_URL}/agent/dashboard\n` +
-        `- Reseller Agent Storefronts: ${STORE_FRONTEND_URL}/s/[slug]\n` +
+        `- Reseller Agent Storefronts: https://gooddata1.vercel.app/s/[slug]\n` +
         `- Android Mobile App (APK): ${DOWNLOAD_APP_URL}\n` +
         `- Real-time Order Tracking: ${TRACK_ORDER_URL}\n` +
         `- Digital Services Portal: ${SERVICES_URL}\n\n` +
@@ -7383,7 +7383,7 @@ app.post("/webhook", async (req, res) => {
         ownerSystemPrompt += `\n\nGLOBAL STORE AI INSTRUCTIONS:\n${aiConfig.aiSystemInstructions}\n`;
       }
 
-      const siteBase = process.env.SITE_URL || STORE_FRONTEND_URL || "https://www.data1gh.com";
+      const siteBase = STORE_FRONTEND_URL;
       const siteAiEndpoint = `${siteBase.replace(/\/+$/, "")}/api/admin?fn=admin-ai`;
       const syncActionToSite = async (action_type, payload) => {
         try {
@@ -10454,7 +10454,7 @@ async function notifyAgentNewOrder(order) {
       `⚡ *Status:* ${statusText}\n` +
       `⏰ *Time:* ${dateStr} ${timeStr}\n\n` +
       `Keep sharing your store link to grow your daily sales!\n` +
-      `👉 View Dashboard: https://data1gh.com/agent/dashboard`;
+      `👉 View Dashboard: https://www.data1gh.com/agent/dashboard`;
 
     if (agPhone) {
       await sendWhatsApp(agPhone, newOrderAlertText);
