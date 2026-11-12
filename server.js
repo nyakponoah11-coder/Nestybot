@@ -1390,10 +1390,10 @@ async function getAiConfig() {
   let openRouterKey = cleanApiKey(process.env.OPENROUTER_API_KEY || process.env.VITE_OPENROUTER_API_KEY || process.env.OPENROUTE_API_KEY || "");
   let openAiKey = cleanApiKey(process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY || "");
 
-  let preferredProvider = groqKey ? "groq" : "gemini";
+  let preferredProvider = "groq";
   let geminiModel = normalizeGeminiModel(process.env.GEMINI_MODEL || "gemini-2.5-flash");
   let grokModel = "grok-2-latest";
-  let groqModel = "llama-3.3-70b-versatile";
+  let groqModel = "openai/gpt-oss-120b";
   let openRouterModel = "meta-llama/llama-3.3-70b-instruct";
   let openAiModel = "gpt-4o-mini";
   let copilotCustomInstructions = "";
@@ -1421,9 +1421,15 @@ async function getAiConfig() {
     if (!openRouterKey) openRouterKey = aiMap.openrouter_api_key || aiMap.OPENROUTER_API_KEY || aiMap.openroute_api_key || "";
     if (!openAiKey) openAiKey = aiMap.openai_api_key || aiMap.OPENAI_API_KEY || "";
 
+    // Only accept valid Google AI Studio keys (must start with AIza)
+    if (geminiKey && !geminiKey.startsWith("AIza")) {
+      geminiKey = "";
+    }
+
     if (groqKey && groqKey.startsWith("xai-") && !grokKey) grokKey = groqKey;
 
-    if (aiMap.primary_ai_provider) preferredProvider = aiMap.primary_ai_provider.toLowerCase();
+    if (groqKey && !geminiKey) preferredProvider = "groq";
+    else if (aiMap.primary_ai_provider) preferredProvider = aiMap.primary_ai_provider.toLowerCase();
     else if (aiMap.active_ai_provider) preferredProvider = aiMap.active_ai_provider.toLowerCase();
     else if (aiMap.ai_preferred_provider) preferredProvider = aiMap.ai_preferred_provider.toLowerCase();
     else if (aiMap.ai_provider) preferredProvider = aiMap.ai_provider.toLowerCase();
@@ -1531,15 +1537,15 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
     return null;
   }
 
-  // Helper for Groq API call
+  // Helper for Groq API call (supports OpenAI GPT-OSS 120B/20B reasoning models and Qwen 3.8)
   async function tryGroq() {
     if (!config.groqKey || config.groqKey.startsWith("xai-")) return null;
     const models = [
+      "openai/gpt-oss-120b",
       config.groqModel,
-      "llama-3.3-70b-versatile",
-      "llama-3.1-8b-instant",
-      "qwen-2.5-32b",
-      "mixtral-8x7b-32768"
+      "openai/gpt-oss-20b",
+      "qwen/qwen3.8-27b",
+      "llama-3.3-70b-versatile"
     ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
     const messages = [
@@ -1553,10 +1559,19 @@ async function executeBotAi({ systemPrompt, userMessage, history = [], maxTokens
 
     for (const model of models) {
       try {
+        const reqBody = {
+          model,
+          messages,
+          max_tokens: Math.max(Number(maxTokens || 1024), 2500),
+          temperature
+        };
+        if (model.includes("gpt-oss")) {
+          reqBody.reasoning_effort = "low";
+        }
         const res = await axios.post(
           "https://api.groq.com/openai/v1/chat/completions",
-          { model, messages, max_tokens: maxTokens, temperature },
-          { headers: { Authorization: `Bearer ${config.groqKey}`, "Content-Type": "application/json" }, timeout: 12000 }
+          reqBody,
+          { headers: { Authorization: `Bearer ${config.groqKey}`, "Content-Type": "application/json" }, timeout: 15000 }
         );
         const text = res.data?.choices?.[0]?.message?.content?.trim();
         if (text) return { text, provider: "groq", model };
@@ -3469,6 +3484,55 @@ async function executeOwnerDirectAction(type, payload = {}) {
       if (!ords || ords.length === 0) return `No orders found for phone 0${last9}.`;
       const lines = ords.map((o, i) => `${i + 1}. *${o.reference}* — ${o.capacity}GB ${o.network} (GH₵ ${Number(o.amount || 0).toFixed(2)}) | Delivery: *${(o.delivery_status || "pending").toUpperCase()}* | Paid: *${o.payment_status}*`);
       return `Orders for 0${last9}:\n${lines.join("\n")}`;
+    }
+
+    // 20. Dispatch Data Bundle Directly via DataMart Wallet
+    if (cleanType === "dispatch_datamart_bundle" || cleanType === "send_data" || cleanType === "dispatch_data") {
+      const rawPhone = String(payload.phone || payload.recipient || payload.recipient_phone || "").replace(/\D/g, "");
+      const cleanPhone = rawPhone.startsWith("233") ? "0" + rawPhone.slice(3) : (rawPhone.startsWith("0") ? rawPhone : "0" + rawPhone);
+      const cleanCap = String(payload.capacity || payload.gb || payload.package_size || "1").replace(/[^\d.]/g, "");
+      let net = String(payload.network || "").toUpperCase();
+      if (!net) {
+        const pfx = cleanPhone.slice(0, 3);
+        if (["020", "050"].includes(pfx)) net = "TELECEL";
+        else if (["026", "056", "027", "057"].includes(pfx)) net = "AIRTELTIGO";
+        else net = "MTN";
+      }
+      const dmNet = net === "MTN" || net === "YELLO" ? "YELLO" : (net === "TELECEL" ? "TELECEL" : "AT_PREMIUM");
+      const ref = `WS-ADM${Date.now().toString(36).toUpperCase()}`;
+      const dmKey = DATA_API_KEY || process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY;
+      const dmSec = process.env.DATAMART_API_SECRET || DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET;
+
+      const dmRes = await axios.post(
+        `${DATAMART_BASE}/purchase`,
+        { phoneNumber: cleanPhone, network: dmNet, capacity: cleanCap, gateway: "wallet", ref, delivery: "fast" },
+        {
+          headers: {
+            "x-api-key": dmKey,
+            ...(dmSec ? { "x-api-secret": dmSec } : {}),
+            "X-Idempotency-Key": ref,
+            "Content-Type": "application/json"
+          },
+          timeout: 25000
+        }
+      );
+      const dmData = dmRes.data?.data || dmRes.data || {};
+      const dmRef = dmData.reference || dmData.orderReference || dmData.purchaseId || ref;
+      await supabase.from("orders").insert([{
+        reference: ref,
+        datamart_reference: dmRef,
+        network: net === "YELLO" ? "MTN" : net,
+        capacity: cleanCap,
+        recipient_phone: cleanPhone,
+        amount: Number(dmData.price || 0),
+        payment_status: "paid",
+        delivery_status: "processing",
+        datamart_status: "processing",
+        supplier_status: "datamart",
+        notes: "[admin_whatsapp_dispatch] [wa_alert_sent]",
+        created_at: new Date().toISOString()
+      }]).catch(() => null);
+      return `Dispatched *${cleanCap}GB ${net}* to *${cleanPhone}* via DataMart (Ref: *${dmRef}*)!`;
     }
   } catch (e) {
     console.warn("executeOwnerDirectAction error:", e.message);
@@ -5528,7 +5592,8 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      const isCancel = /^(no|nope|cancel|nah|stop|abort|leave it|ignore)$/i.test(cleanInput.trim());
+      const isMistakeOrIgnore = /^(mistake|wrong|wrong number|ignore|ignore it|ignore that|nevermind|never mind|forget it|my bad|by mistake)$/i.test(cleanInput.trim());
+      const isCancel = isMistakeOrIgnore || /^(no|nope|cancel|nah|stop|abort|leave it)$/i.test(cleanInput.trim());
 
       // Recognize confirmation strictly when confirming a pending staged action
       const isConfirm = !isCancel && (
@@ -5547,10 +5612,10 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // If pendingAction exists and owner cancels
-      if (pendingAction && isCancel) {
+      // If owner says "mistake", "ignore", "nevermind", or cancels (with or without a pending action)
+      if (isMistakeOrIgnore || (pendingAction && isCancel)) {
         await clearOwnerPendingAction(from);
-        return sendWhatsApp(from, "Sharp, cancelled that action bossu! No changes were made to the database. What else is on your mind?");
+        return sendWhatsApp(from, "No problem at all boss — ignored and cancelled! Let me know whenever you need anything else.");
       }
 
       // If owner is confirming AND has pendingAction
@@ -5829,6 +5894,16 @@ app.post("/webhook", async (req, res) => {
             );
           } else {
             return sendWhatsApp(from, `❌ Could not find agent "${target}" to credit.`);
+          }
+        }
+
+        // 16. DISPATCH DATA BUNDLE DIRECTLY VIA DATAMART WALLET
+        if (type === "dispatch_datamart_bundle" || type === "send_data" || type === "dispatch_data") {
+          try {
+            const msg = await executeOwnerDirectAction("dispatch_datamart_bundle", pendingAction);
+            return sendWhatsApp(from, `✅ *DATA BUNDLE DISPATCHED BOSS!*\n\n${msg}`);
+          } catch (err) {
+            return sendWhatsApp(from, `❌ Could not dispatch bundle: ${err.response?.data?.message || err.message}`);
           }
         }
 
@@ -6756,8 +6831,13 @@ app.post("/webhook", async (req, res) => {
         "  13. Toggle the Free Data Giveaway Campaign active or off on the storefront\n" +
         "  14. Change the website color scheme / theme (e.g. blue, emerald, purple, dark mode, light mode)\n" +
         "  15. Full Reseller Agent Network Operations: Credit agent wallet, debit agent wallet, suspend/activate agent accounts, list registered agents, and view agent store sales\n" +
-        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\", ...}] at the end of your reply.\n" +
+        "  16. Direct DataMart Bundle Dispatch: Send/dispatch any MTN, Telecel, or AirtelTigo data bundle directly from the DataMart API wallet to any recipient phone number (e.g. '0549992958 1GB' or 'send 2GB MTN to 0549992958') using {\"type\": \"dispatch_datamart_bundle\", \"phone\": \"0549992958\", \"capacity\": 1, \"network\": \"MTN\"}\n" +
+        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\", ...}] at the end of your reply.\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
+        "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
+        "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
+        "  - NEVER output HTML tags like <br> or markdown tables (| col | col |) — WhatsApp does not render tables or HTML tags! Use clean bullet points (•) and line breaks instead.\n" +
+        "  - Understand shorthand & context immediately: if the owner sends a phone number + bundle size (e.g. '0549992958 1GB'), or says 'mistake' / 'cancel', respond sharply and intelligently like a real human engineer co-pilot.\n" +
         "- Approved SMS Sender ID for DATA 1 GH is 'D_1Gh'. Whenever sending customer SMS or alerts, use sender ID 'D_1Gh'.\n" +
         "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST (NEVER BEAT AROUND THE BUSH):\n" +
         "  When the owner asks to pull, fetch, display, or check anything from the site or database, immediately retrieve and output the exact, structured information directly. Never beat around the bush, never give generic conversational fluff like 'I'm on it boss' or 'Tell me which department to tackle' without answering the question.\n" +
@@ -6806,6 +6886,60 @@ app.post("/webhook", async (req, res) => {
       const cmdText = (effectiveText || text).trim();
       const lt = cmdText.toLowerCase();
       const orderRefsInText = extractOrderReferences(cmdText);
+
+      // Direct Action Command 0a_shorthand: Shorthand bundle dispatch/lookup (e.g. "0549992958 1GB", "1GB 0549992958", "send 1GB to 0549992958")
+      const shorthandPhoneFirst = cmdText.match(/^(?:(send|dispatch|push|give|buy)\s+)?(?:to\s+)?(0[2357]\d{8}|\+?233[2357]\d{8})\s+(?:(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime)\s+)?(\d+(?:\.\d+)?)\s*gb(?:\s+(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime))?$/i);
+      const shorthandCapFirst = !shorthandPhoneFirst && cmdText.match(/^(?:(send|dispatch|push|give|buy)\s+)?(\d+(?:\.\d+)?)\s*gb\s+(?:(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime)\s+)?(?:to\s+|for\s+|on\s+)?(0[2357]\d{8}|\+?233[2357]\d{8})(?:\s+(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime))?$/i);
+      if (shorthandPhoneFirst || shorthandCapFirst) {
+        const hasExplicitVerb = Boolean((shorthandPhoneFirst && shorthandPhoneFirst[1]) || (shorthandCapFirst && shorthandCapFirst[1]));
+        const rawTargetPhone = shorthandPhoneFirst ? shorthandPhoneFirst[2] : shorthandCapFirst[4];
+        const rawCap = shorthandPhoneFirst ? shorthandPhoneFirst[4] : shorthandCapFirst[2];
+        const rawNet = (shorthandPhoneFirst ? (shorthandPhoneFirst[3] || shorthandPhoneFirst[5]) : (shorthandCapFirst[3] || shorthandCapFirst[5])) || "";
+        const cleanPhone = normalizePhone(rawTargetPhone);
+        const capNum = parseFloat(rawCap);
+        const pfx = cleanPhone.slice(0, 3);
+        const detectedNet = rawNet
+          ? (/telecel|vodafone/i.test(rawNet) ? "Telecel" : /airteltigo|^at$|ishare|bigtime/i.test(rawNet) ? "AirtelTigo" : "MTN")
+          : (["020", "050"].includes(pfx) ? "Telecel" : ["027", "057", "026", "056"].includes(pfx) ? "AirtelTigo" : "MTN");
+
+        if (hasExplicitVerb) {
+          const execMsg = await executeOwnerDirectAction("dispatch_datamart_bundle", {
+            phone: cleanPhone,
+            capacity: capNum,
+            network: detectedNet,
+          });
+          return sendWhatsApp(from, execMsg);
+        } else {
+          // Check if there are any recent orders for this phone number
+          let recentOrderLine = "";
+          try {
+            const { data: recentOrds } = await supabase
+              .from("orders")
+              .select("reference, network, capacity, amount, payment_status, delivery_status, created_at")
+              .eq("recipient_phone", cleanPhone)
+              .order("created_at", { ascending: false })
+              .limit(2);
+            if (recentOrds && recentOrds.length > 0) {
+              recentOrderLine = `\n\n📋 *Recent Order(s) for ${cleanPhone}:*\n` +
+                recentOrds.map((o, idx) => `• *${o.reference}* — ${o.capacity}GB ${o.network} (₵${o.amount}) | Pay: *${o.payment_status}* | Delivery: *${o.delivery_status}*`).join("\n");
+            }
+          } catch (_) {}
+
+          setOwnerPendingAction(from, {
+            type: "dispatch_datamart_bundle",
+            phone: cleanPhone,
+            capacity: capNum,
+            network: detectedNet,
+          });
+
+          const confirmReply =
+            `⚡ *Ready to Dispatch ${capNum}GB ${detectedNet} → ${cleanPhone}*\n` +
+            `• *Source:* DataMart Wallet (${walletBalance || "Live"})\n` +
+            recentOrderLine +
+            `\n\nReply *YES* to send *${capNum}GB ${detectedNet}* to *${cleanPhone}* right now, or reply *mistake* / *NO* to cancel.`;
+          return sendWhatsApp(from, confirmReply);
+        }
+      }
 
       // Direct Action Command 0a_dm: Credit DataMart Wallet via MoMo prompt
       const creditDatamartMatch = cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:to\s+)?(?:datamart|data\s*mart|telecom\s*wallet|dm\s*wallet|my\s+wallet)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i) ||
@@ -7654,6 +7788,9 @@ app.post("/webhook", async (req, res) => {
       }
 
       aiReply = sanitizeSecretsFromText(aiReply)
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/\*\*([^*\n]+)\*\*/g, "*$1*")
+        .replace(/^#{1,4}\s+(.+)$/gm, "*$1*")
         .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony")
         .replace(/\bdatamart\b/gi, "DataMart");
 
