@@ -1563,6 +1563,218 @@ async function buildChannelPostFromSystem(topicOrMode = "general", customBody = 
   );
 }
 
+const fsChannel = require("fs");
+const pathChannel = require("path");
+const osChannel = require("os");
+
+const BAILEYS_AUTH_DIR = pathChannel.join(osChannel.tmpdir(), "data1gh_channel_auth_v1");
+let baileysChannelSock = null;
+let baileysChannelReady = false;
+let baileysChannelConnecting = false;
+let pendingChannelPostQueue = null;
+let lastPairingOwnerPhone = "233547100951";
+
+async function restoreBaileysAuthFromSupabase() {
+  try {
+    if (!fsChannel.existsSync(BAILEYS_AUTH_DIR)) {
+      fsChannel.mkdirSync(BAILEYS_AUTH_DIR, { recursive: true });
+    }
+    const { data: row } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", "baileys_channel_auth_bundle")
+      .maybeSingle();
+    if (!row?.value) return false;
+    const bundle = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+    if (!bundle || typeof bundle !== "object") return false;
+    let restoredCreds = false;
+    for (const [fname, content] of Object.entries(bundle)) {
+      if (typeof content === "string" && fname.endsWith(".json")) {
+        fsChannel.writeFileSync(pathChannel.join(BAILEYS_AUTH_DIR, fname), content, "utf8");
+        if (fname === "creds.json") restoredCreds = true;
+      }
+    }
+    return restoredCreds;
+  } catch (err) {
+    console.warn("restoreBaileysAuthFromSupabase note:", err.message);
+    return false;
+  }
+}
+
+let backupAuthTimer = null;
+function scheduleBackupBaileysAuthToSupabase() {
+  if (backupAuthTimer) clearTimeout(backupAuthTimer);
+  backupAuthTimer = setTimeout(async () => {
+    try {
+      if (!fsChannel.existsSync(BAILEYS_AUTH_DIR)) return;
+      const files = fsChannel.readdirSync(BAILEYS_AUTH_DIR).filter(f => f.endsWith(".json"));
+      const bundle = {};
+      for (const f of files) {
+        bundle[f] = fsChannel.readFileSync(pathChannel.join(BAILEYS_AUTH_DIR, f), "utf8");
+      }
+      if (Object.keys(bundle).length > 0) {
+        await supabase.from("settings").upsert(
+          [{ key: "baileys_channel_auth_bundle", value: JSON.stringify(bundle), updated_at: new Date().toISOString() }],
+          { onConflict: "key" }
+        );
+      }
+    } catch (err) {
+      console.warn("scheduleBackupBaileysAuthToSupabase note:", err.message);
+    }
+  }, 1500);
+}
+
+async function resolveNewsletterJidViaBaileys(sock, channelUrl = DEFAULT_WHATSAPP_CHANNEL_URL) {
+  if (!sock || typeof sock.newsletterMetadata !== "function") return "";
+  const inviteMatch = String(channelUrl || DEFAULT_WHATSAPP_CHANNEL_URL).match(/channel\/([A-Za-z0-9_-]+)/i);
+  const inviteCode = inviteMatch ? inviteMatch[1] : "0029Vb7vwLN5kg70GeNMsB2w";
+  try {
+    const meta = await sock.newsletterMetadata("invite", inviteCode);
+    if (meta?.id) {
+      const jid = meta.id.includes("@") ? meta.id : `${meta.id}@newsletter`;
+      await supabase.from("settings").upsert([{ key: "whatsapp_channel_jid", value: jid }], { onConflict: "key" });
+      return jid;
+    }
+  } catch (err) {
+    console.warn("resolveNewsletterJidViaBaileys note:", err.message);
+  }
+  return "";
+}
+
+async function initBaileysChannelClient(options = {}) {
+  const { forceReset = false, requestPairForPhone = "" } = options;
+  if (baileysChannelReady && baileysChannelSock && !forceReset && !requestPairForPhone) {
+    return { ok: true, ready: true, sock: baileysChannelSock };
+  }
+  if (baileysChannelConnecting && !forceReset && !requestPairForPhone) {
+    return { ok: true, connecting: true };
+  }
+
+  try {
+    baileysChannelConnecting = true;
+    if (forceReset) {
+      try {
+        if (baileysChannelSock?.ws) baileysChannelSock.ws.close();
+      } catch (_) {}
+      baileysChannelSock = null;
+      baileysChannelReady = false;
+      if (fsChannel.existsSync(BAILEYS_AUTH_DIR)) {
+        fsChannel.rmSync(BAILEYS_AUTH_DIR, { recursive: true, force: true });
+      }
+      await supabase.from("settings").delete().eq("key", "baileys_channel_auth_bundle");
+    } else {
+      await restoreBaileysAuthFromSupabase();
+    }
+
+    if (!fsChannel.existsSync(BAILEYS_AUTH_DIR)) {
+      fsChannel.mkdirSync(BAILEYS_AUTH_DIR, { recursive: true });
+    }
+
+    const baileys = await import("@whiskeysockets/baileys");
+    const pinoMod = await import("pino");
+    const pino = pinoMod.default || pinoMod;
+    const makeWASocket = baileys.makeWASocket || baileys.default?.makeWASocket || baileys.default;
+    const { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = baileys;
+
+    const { state, saveCreds } = await useMultiFileAuthState(BAILEYS_AUTH_DIR);
+
+    // If not registered and no pairing phone was requested on boot, don't open an idle unauthenticated socket
+    if (!state.creds?.registered && !requestPairForPhone) {
+      baileysChannelConnecting = false;
+      return { ok: false, ready: false, needsPairing: true };
+    }
+
+    let version = [2, 3000, 1015901307];
+    try {
+      const latest = await fetchLatestBaileysVersion();
+      if (latest?.version) version = latest.version;
+    } catch (_) {}
+
+    const sock = makeWASocket({
+      version,
+      auth: state,
+      printQRInTerminal: false,
+      logger: pino({ level: "silent" }),
+      browser: Browsers ? Browsers.ubuntu("Chrome") : ["Ubuntu", "Chrome", "20.0.04"],
+      syncFullHistory: false,
+      markOnlineOnConnect: false,
+    });
+
+    baileysChannelSock = sock;
+
+    sock.ev.on("creds.update", async () => {
+      await saveCreds();
+      scheduleBackupBaileysAuthToSupabase();
+    });
+
+    sock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect } = update;
+      if (connection === "open") {
+        baileysChannelReady = true;
+        baileysChannelConnecting = false;
+        scheduleBackupBaileysAuthToSupabase();
+        const jid = await resolveNewsletterJidViaBaileys(sock, DEFAULT_WHATSAPP_CHANNEL_URL);
+        console.log("✅ Native Baileys WhatsApp Channel Publisher Connected! JID:", jid || "pending");
+
+        if (pendingChannelPostQueue) {
+          const queuedText = pendingChannelPostQueue;
+          pendingChannelPostQueue = null;
+          try {
+            const targetJid = jid || (await resolveNewsletterJidViaBaileys(sock, DEFAULT_WHATSAPP_CHANNEL_URL));
+            if (targetJid) {
+              await sock.sendMessage(targetJid, { text: queuedText });
+              await sendWhatsApp(
+                lastPairingOwnerPhone,
+                `🎉 *WHATSAPP CHANNEL CONNECTED & POST PUBLISHED LIVE!* ✅\n━━━━━━━━━━━━━━━━━━━━\n🔗 *Channel:* ${DEFAULT_WHATSAPP_CHANNEL_URL}\n🆔 *Channel JID:* ${targetJid}\n\nYour queued post is now LIVE inside your WhatsApp Channel! From now on, anytime you tell me to post in the channel, I will publish it directly with zero extra steps.`
+              );
+            }
+          } catch (qErr) {
+            console.warn("Queued channel post error:", qErr.message);
+          }
+        }
+      } else if (connection === "close") {
+        baileysChannelReady = false;
+        baileysChannelConnecting = false;
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const loggedOut = statusCode === DisconnectReason?.loggedOut || statusCode === 401;
+        if (loggedOut) {
+          if (fsChannel.existsSync(BAILEYS_AUTH_DIR)) {
+            fsChannel.rmSync(BAILEYS_AUTH_DIR, { recursive: true, force: true });
+          }
+          await supabase.from("settings").delete().eq("key", "baileys_channel_auth_bundle");
+        } else if (state.creds?.registered) {
+          setTimeout(() => {
+            initBaileysChannelClient().catch(() => {});
+          }, 8000);
+        }
+      }
+    });
+
+    if (requestPairForPhone && !state.creds?.registered) {
+      let cleanNum = String(requestPairForPhone).replace(/\D/g, "");
+      if (cleanNum.startsWith("0") && cleanNum.length === 10) cleanNum = "233" + cleanNum.slice(1);
+      else if (cleanNum.length === 9) cleanNum = "233" + cleanNum;
+      lastPairingOwnerPhone = cleanNum;
+
+      await new Promise(r => setTimeout(r, 2500));
+      const rawCode = await sock.requestPairingCode(cleanNum);
+      const formattedCode = rawCode?.match(/.{1,4}/g)?.join("-") || rawCode;
+      return { ok: true, pairingCode: formattedCode, phone: cleanNum };
+    }
+
+    return { ok: true, ready: baileysChannelReady, sock };
+  } catch (err) {
+    baileysChannelConnecting = false;
+    console.warn("initBaileysChannelClient error:", err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+// Auto-restore WhatsApp Channel session on server boot if already linked
+setTimeout(() => {
+  initBaileysChannelClient().catch(() => {});
+}, 5000);
+
 async function postToWhatsAppChannel(messageText, options = {}) {
   const cleanPost = String(messageText || "").trim();
   if (!cleanPost) return { ok: false, error: "Empty channel post text" };
@@ -1609,9 +1821,31 @@ async function postToWhatsAppChannel(messageText, options = {}) {
   let directPosted = false;
   let directProvider = "";
   let apiErrorNote = "";
+  let pairingCode = "";
+
+  // 0. Native Built-In Baileys WhatsApp Channel Publisher (Zero 3rd-party cost!)
+  try {
+    if (!baileysChannelReady) {
+      await initBaileysChannelClient();
+    }
+    if (baileysChannelReady && baileysChannelSock) {
+      if (!channelJid || !channelJid.endsWith("@newsletter")) {
+        channelJid = await resolveNewsletterJidViaBaileys(baileysChannelSock, channelUrl);
+      }
+      if (channelJid) {
+        await baileysChannelSock.sendMessage(channelJid, { text: cleanPost });
+        directPosted = true;
+        directProvider = `Native WhatsApp Channel Engine (${channelJid})`;
+      } else {
+        apiErrorNote = "Connected to WhatsApp, but could not resolve @newsletter JID for " + channelUrl;
+      }
+    }
+  } catch (bErr) {
+    apiErrorNote = bErr.message;
+  }
 
   // 1. Direct Whapi.Cloud Newsletter / Channel API
-  if (whapiToken) {
+  if (!directPosted && whapiToken) {
     try {
       // Auto-resolve @newsletter JID from invite code (e.g. 0029Vb7vwLN5kg70GeNMsB2w) if not cached
       if (!channelJid) {
@@ -1653,7 +1887,7 @@ async function postToWhatsAppChannel(messageText, options = {}) {
           directProvider = `Whapi Channel API (${channelJid})`;
         }
       } else {
-        apiErrorNote = "Whapi token is set, but could not auto-detect the @newsletter JID yet (make sure the number linked to Whapi is an Admin of your WhatsApp Channel, or set whatsapp_channel_jid).";
+        apiErrorNote = "Whapi token is set, but could not auto-detect the @newsletter JID yet.";
       }
     } catch (wErr) {
       apiErrorNote = wErr.response?.data?.error?.message || wErr.message;
@@ -1683,7 +1917,18 @@ async function postToWhatsAppChannel(messageText, options = {}) {
     }
   }
 
-  // 3. If requested by background trigger or if direct API is not linked yet, deliver ready-to-forward post to Owner WhatsApp
+  // 3. If not linked yet, queue the post AND automatically generate a 1-time 8-digit WhatsApp Pairing Code for the owner!
+  if (!directPosted) {
+    pendingChannelPostQueue = cleanPost;
+    const ownerTarget = options.ownerPhone || "233547100951";
+    try {
+      const pairRes = await initBaileysChannelClient({ forceReset: true, requestPairForPhone: ownerTarget });
+      if (pairRes?.pairingCode) {
+        pairingCode = pairRes.pairingCode;
+      }
+    } catch (_) {}
+  }
+
   if (!directPosted && options.deliverReadyCopyToPhone) {
     await sendWhatsApp(options.deliverReadyCopyToPhone, cleanPost);
   }
@@ -1694,6 +1939,7 @@ async function postToWhatsAppChannel(messageText, options = {}) {
     directProvider,
     channelUrl,
     channelJid,
+    pairingCode,
     apiErrorNote,
     postText: cleanPost,
   };
@@ -3813,12 +4059,21 @@ async function executeOwnerDirectAction(type, payload = {}) {
       const topic = String(payload.topic || payload.mode || (payload.message ? "custom" : "general")).trim();
       const rawMsg = String(payload.message || payload.text || payload.body || "").trim();
       const postBody = await buildChannelPostFromSystem(topic, rawMsg);
-      const res = await postToWhatsAppChannel(postBody);
+      const res = await postToWhatsAppChannel(postBody, { ownerPhone: payload.phone || "233547100951" });
       if (res.directPosted) {
         return `📢 *Posted Live to WhatsApp Channel!* (${res.directProvider})\n🔗 ${res.channelUrl}\n\n${res.postText}`;
       }
+      if (res.pairingCode) {
+        return `🔐 *1-Time WhatsApp Channel Link Required!*\n` +
+          `Your post is queued and ready to go live in ${res.channelUrl}!\n\n` +
+          `🔑 *Your 8-Digit Pairing Code:* *${res.pairingCode}*\n\n` +
+          `📲 *How to complete (takes 10 seconds):*\n` +
+          `1. On your WhatsApp phone (the Admin of the Channel), tap the *"Enter code to link new device"* notification (or go to *Settings → Linked Devices → Link a Device → Link with phone number instead*).\n` +
+          `2. Enter *${res.pairingCode}*.\n` +
+          `3. As soon as it links, I will automatically publish this post and all future posts straight into your Channel!`;
+      }
       return `📢 *WhatsApp Channel Broadcast Ready!*\n🔗 Channel: ${res.channelUrl}\n` +
-        (res.apiErrorNote ? `⚠️ Note: ${res.apiErrorNote}\n` : `💡 *(Tip: Forward the message below to your Channel in 1 tap, or link a Whapi token via "set whapi token YOUR_TOKEN" for 100% hands-free direct Channel posting)*`) +
+        (res.apiErrorNote ? `⚠️ Note: ${res.apiErrorNote}\n` : `💡 *(Reply "pair channel" to get an 8-digit code to link your WhatsApp Channel for 100% automatic direct posting)*`) +
         `\n━━━━━━━━━━━━━━━━━━━━\n${res.postText}`;
     }
   } catch (e) {
@@ -7152,7 +7407,7 @@ app.post("/webhook", async (req, res) => {
       const lt = cmdText.toLowerCase();
       const orderRefsInText = extractOrderReferences(cmdText);
 
-      // Direct Action Command 0a_channel_config: Configure Whapi Token or Channel JID for direct @newsletter posting
+      // Direct Action Command 0a_channel_config: Configure Whapi Token, Channel JID, or Native 8-Digit Channel Pairing
       const setWhapiMatch = cmdText.match(/^set\s+(?:whapi|channel)\s+token\s+([^\s]+)$/i);
       if (setWhapiMatch) {
         const tok = setWhapiMatch[1].trim();
@@ -7167,32 +7422,71 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, `✅ *WhatsApp Channel JID Saved:* *${jid}*`);
       }
 
-      // Direct Action Command 0a_channel_post: Post Prices, Flash Sale, Free Data Vouchers, or Custom Post to WhatsApp Channel
-      const channelExplicitMatch = cmdText.match(/^(?:post|broadcast|share|send|publish)\s+(?:(prices?|catalog|rates?|bundles?|flash\s*sale|free\s*data|vouchers?)\s+)?(?:to|on|in)\s+(?:our\s+|my\s+|the\s+)?(?:whatsapp\s+)?channel(?:\s*[:\-]\s*([\s\S]+))?$/i) ||
-        cmdText.match(/^channel\s+post(?:\s*[:\-]\s*([\s\S]+))?$/i);
-      if (channelExplicitMatch) {
-        const subTopic = (channelExplicitMatch[1] || "").trim().toLowerCase();
-        const customBody = (channelExplicitMatch[2] || "").trim();
-        let topicMode = "general";
-        if (customBody) topicMode = "custom";
-        else if (/price|catalog|rate|bundle/.test(subTopic)) topicMode = "prices";
-        else if (/flash/.test(subTopic)) topicMode = "flash";
-        else if (/free|voucher/.test(subTopic)) topicMode = "vouchers";
+      const pairChannelMatch = cmdText.match(/^(?:pair|link|connect)\s+(?:our\s+|my\s+|the\s+)?(?:whatsapp\s+)?channel(?:\s+(\+?233\d{9}|0\d{9}))?$/i);
+      if (pairChannelMatch) {
+        const pairPhone = pairChannelMatch[1] || from || "233547100951";
+        await sendWhatsApp(from, `⏳ *Generating your 8-Digit WhatsApp Channel Pairing Code...*`);
+        const pairRes = await initBaileysChannelClient({ forceReset: true, requestPairForPhone: pairPhone });
+        if (pairRes?.pairingCode) {
+          return sendWhatsApp(
+            from,
+            `🔐 *YOUR WHATSAPP CHANNEL PAIRING CODE:* *${pairRes.pairingCode}*\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `📲 *Complete in 10 seconds on your phone:*\n` +
+            `1. Tap the *"Enter code to link new device"* notification on WhatsApp (or open *WhatsApp → Linked Devices → Link a Device → Link with phone number instead*).\n` +
+            `2. Enter: *${pairRes.pairingCode}*\n\n` +
+            `✅ Once linked, I will post directly into ${DEFAULT_WHATSAPP_CHANNEL_URL} automatically forever!`
+          );
+        }
+        return sendWhatsApp(from, `⚠️ Could not generate pairing code right now (${pairRes?.error || "try again in 10 seconds"}).`);
+      }
 
-        const postBody = await buildChannelPostFromSystem(topicMode, customBody);
-        const res = await postToWhatsAppChannel(postBody);
+      // Direct Action Command 0a_channel_post: Post Prices, Flash Sale, Free Data Vouchers, or Custom Post to WhatsApp Channel
+      const isDirectChannelUrlOnly = /^https?:\/\/(?:www\.)?whatsapp\.com\/channel\/[A-Za-z0-9_-]+\/?$/i.test(cmdText);
+      const channelExplicitMatch =
+        cmdText.match(/(?:post|broadcast|share|send|publish|write|put|drop)\s+(?:(prices?|catalog|rates?|bundles?|flash\s*sale|free\s*data|vouchers?|something|update|promo)\s+)?(?:to|on|in|into)\s+(?:our\s+|my\s+|the\s+)?(?:whatsapp\s+)?channel(?:\s*[:\-]?\s*([\s\S]+))?$/i) ||
+        cmdText.match(/^(?:channel\s+post|post\s+channel)(?:\s*[:\-]?\s*([\s\S]+))?$/i);
+
+      if (isDirectChannelUrlOnly || channelExplicitMatch) {
+        if (isDirectChannelUrlOnly) {
+          await updateStoreSetting("whatsapp_channel_url", cmdText.trim());
+        }
+        const subTopic = (!isDirectChannelUrlOnly && channelExplicitMatch?.[1] ? channelExplicitMatch[1] : "").trim().toLowerCase();
+        const customBody = (!isDirectChannelUrlOnly && channelExplicitMatch ? (channelExplicitMatch[2] || channelExplicitMatch[1] || "") : "").trim();
+        let topicMode = "prices";
+        if (customBody && !/^(prices?|catalog|rates?|bundles?|flash\s*sale|free\s*data|vouchers?|something|update|promo)$/i.test(customBody)) {
+          topicMode = "custom";
+        } else if (/flash/.test(subTopic)) {
+          topicMode = "flash";
+        } else if (/free|voucher/.test(subTopic)) {
+          topicMode = "vouchers";
+        } else if (/something|update|promo/.test(subTopic)) {
+          topicMode = "general";
+        }
+
+        const postBody = await buildChannelPostFromSystem(topicMode, topicMode === "custom" ? customBody : "");
+        const res = await postToWhatsAppChannel(postBody, { ownerPhone: from });
         if (res.directPosted) {
           return sendWhatsApp(from, `📢 *Posted Live to Your WhatsApp Channel!* ✅\n🔗 ${res.channelUrl}\n\n${res.postText}`);
+        } else if (res.pairingCode) {
+          return sendWhatsApp(
+            from,
+            `🔐 *1-Time WhatsApp Channel Link Needed to Publish Live!*\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `Your post for ${res.channelUrl} is queued and ready! Because Meta restricts Channel posting to your Channel Admin device, enter this 1-time code on your phone:\n\n` +
+            `🔑 *Pairing Code:* *${res.pairingCode}*\n\n` +
+            `📲 *How to enter (10 seconds):*\n` +
+            `1. Tap the *"Enter code to link new device"* notification on your WhatsApp (or go to *WhatsApp → Linked Devices → Link a Device → Link with phone number instead*).\n` +
+            `2. Type *${res.pairingCode}*.\n\n` +
+            `🚀 The moment it links, I will automatically publish your queued post below straight into the Channel and stay connected 24/7!\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${res.postText}`
+          );
         } else {
-          // Send the clean ready-to-forward message first so the owner can 1-tap forward it to the Channel without editing!
           await sendWhatsApp(from, res.postText);
           return sendWhatsApp(
             from,
             `📢 *Channel Post Ready Above!* ☝️\n` +
-            `Long-press the message above → tap *Forward* → select your *DATA 1 GH Channel* (${res.channelUrl}).\n\n` +
-            (res.apiErrorNote
-              ? `⚠️ *Direct Channel API Note:* ${res.apiErrorNote}`
-              : `💡 *Want 100% hands-free auto-posting into the Channel?* Link your Whapi.Cloud token in Admin Settings (or text *set whapi token YOUR_TOKEN*) and Stony will post directly into the Channel without needing a forward!`)
+            `Reply *pair channel* to get an 8-digit code so I can post directly into ${res.channelUrl} hands-free!`
           );
         }
       }
@@ -9964,6 +10258,27 @@ app.post("/api/send-admin-alert", async (req, res) => {
     return res.json({ ok: true });
   } catch (err) {
     return res.status(500).json({ error: err?.message });
+  }
+});
+
+app.post("/api/channel-post", async (req, res) => {
+  try {
+    const { topic = "prices", text = "", ownerPhone = "233547100951" } = req.body || {};
+    const postBody = text ? await buildChannelPostFromSystem("custom", text) : await buildChannelPostFromSystem(topic, "");
+    const out = await postToWhatsAppChannel(postBody, { ownerPhone });
+    return res.json(out);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err?.message });
+  }
+});
+
+app.post("/api/channel-pair", async (req, res) => {
+  try {
+    const { phone = "233547100951" } = req.body || {};
+    const out = await initBaileysChannelClient({ forceReset: true, requestPairForPhone: phone });
+    return res.json(out);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err?.message });
   }
 });
 
