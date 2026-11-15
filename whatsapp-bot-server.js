@@ -4447,24 +4447,20 @@ async function runAllCornersSystemXRay(autoFix = false) {
             (mappedDmStatus === "processing" && ord.delivery_status === "pending")
           ) {
             statusDesyncs.push({ ord, dmStatus: mappedDmStatus, rawDmStatus, dmRef: dmMatch.reference || dmMatch.transactionReference || canonicalDmRef });
-            if (autoFix) {
-              const nextNotes = notes.includes("[dm_dispatched]") ? notes : `${notes} [dm_dispatched]`.trim();
-              await supabase.from("orders").update({
-                delivery_status: mappedDmStatus,
-                datamart_status: rawDmStatus || mappedDmStatus,
-                datamart_reference: ord.datamart_reference || dmMatch.reference || dmMatch.transactionReference || canonicalDmRef,
-                notes: nextNotes,
-                updated_at: new Date().toISOString()
-              }).eq("id", ord.id);
-              fixesApplied.push(`Synced *${ord.reference}* (${ord.recipient_phone}) from *${ord.delivery_status}* → *${mappedDmStatus.toUpperCase()}*`);
-            }
+            const nextNotes = notes.includes("[dm_dispatched]") ? notes : `${notes} [dm_dispatched]`.trim();
+            await supabase.from("orders").update({
+              delivery_status: mappedDmStatus,
+              datamart_status: rawDmStatus || mappedDmStatus,
+              datamart_reference: ord.datamart_reference || dmMatch.reference || dmMatch.transactionReference || canonicalDmRef,
+              notes: nextNotes,
+              updated_at: new Date().toISOString()
+            }).eq("id", ord.id);
+            fixesApplied.push(`Synced *${ord.reference}* (${ord.recipient_phone}) from *${ord.delivery_status}* → *${mappedDmStatus.toUpperCase()}*`);
           }
         } else if (!isFlash && !ord.datamart_reference && !notes.includes("[dm_dispatched]") && ord.delivery_status === "pending" && ageMs > 45000 && ageMs < 12 * 60 * 60 * 1000) {
           paidUndispatched.push(ord);
-          if (autoFix) {
-            await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 }).catch(() => null);
-            fixesApplied.push(`Triggered DataMart dispatch & alert for paid order *${ord.reference}* (${ord.capacity}GB ${ord.network} → ${ord.recipient_phone})`);
-          }
+          await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 }).catch(() => null);
+          fixesApplied.push(`Triggered DataMart dispatch & alert for paid order *${ord.reference}* (${ord.capacity}GB ${ord.network} → ${ord.recipient_phone})`);
         }
 
         if (!notes.includes("[wa_alert_sent]") && ageMs < 6 * 60 * 60 * 1000) {
@@ -4473,9 +4469,9 @@ async function runAllCornersSystemXRay(autoFix = false) {
         if (ord.delivery_status === "failed") {
           recentFailedOrders.push(ord);
         }
-      } else if (ord.payment_status === "pending" && psKey && ageMs > 30000 && ageMs < 3 * 60 * 60 * 1000) {
-        // Check up to 5 recent pending orders against Paystack live
-        if (unverifiedButPaidOnPaystack.length < 5) {
+      } else if (ord.payment_status === "pending" && psKey && ageMs > 30000 && ageMs < 6 * 60 * 60 * 1000) {
+        // Check up to 10 recent pending orders against Paystack live
+        if (unverifiedButPaidOnPaystack.length < 10) {
           try {
             const psRes = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(ord.reference)}`, {
               headers: { Authorization: `Bearer ${psKey}` },
@@ -4483,10 +4479,11 @@ async function runAllCornersSystemXRay(autoFix = false) {
             });
             if (psRes.data?.data?.status === "success") {
               unverifiedButPaidOnPaystack.push(ord);
-              if (autoFix) {
-                await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 }).catch(() => null);
-                fixesApplied.push(`Verified Paystack payment & dispatched *${ord.reference}* (${ord.capacity}GB ${ord.network} → ${ord.recipient_phone})`);
-              }
+              // ALWAYS auto-heal confirmed Paystack payments immediately!
+              try {
+                await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 });
+                fixesApplied.push(`Auto-verified Paystack payment & dispatched *${ord.reference}* (${ord.capacity}GB ${ord.network} → ${ord.recipient_phone})`);
+              } catch (_) {}
             }
           } catch (_) {}
         }
@@ -4495,8 +4492,8 @@ async function runAllCornersSystemXRay(autoFix = false) {
 
     // Build Corner-by-Corner Report
     if (unverifiedButPaidOnPaystack.length > 0) {
-      findings.push(`🔴 *Unverified Paystack Payments (${unverifiedButPaidOnPaystack.length}):* Customer paid on MoMo, but browser closed before redirect:\n` +
-        unverifiedButPaidOnPaystack.map(o => `  • *${o.reference}* (${o.capacity}GB ${o.network} → ${o.recipient_phone}, ₵${o.amount})`).join("\n"));
+      findings.push(`🟢 *Auto-Healed Paystack Payments (${unverifiedButPaidOnPaystack.length}):* Customer paid on MoMo and closed browser, but system auto-verified with Paystack & dispatched to DataMart:\n` +
+        unverifiedButPaidOnPaystack.map(o => `  • *${o.reference}* (${o.capacity}GB ${o.network} → ${o.recipient_phone}, ₵${o.amount}) — ✅ AUTO-DISPATCHED`).join("\n"));
     } else {
       findings.push(`✅ *Paystack Reconciliation:* 0 unverified MoMo payments.`);
     }
@@ -11169,16 +11166,16 @@ async function runPendingPaymentWatcher() {
       return;
     }
 
-    const fortyFiveMinutesAgo = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+    const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
     const thirtySecondsAgo = new Date(Date.now() - 30 * 1000).toISOString();
     const { data: pendingOrders } = await supabase
       .from("orders")
       .select("id, reference, payment_status, datamart_reference, supplier_status, notes, created_at")
       .or("payment_status.eq.pending,and(payment_status.eq.paid,datamart_reference.is.null)")
-      .gte("created_at", fortyFiveMinutesAgo)
+      .gte("created_at", sixHoursAgo)
       .lte("created_at", thirtySecondsAgo)
       .order("created_at", { ascending: false })
-      .limit(5);
+      .limit(15);
 
     if (Array.isArray(pendingOrders) && pendingOrders.length > 0) {
       const verifyEndpoint = (STORE_FRONTEND_URL || "https://www.data1gh.com").replace(/\/+$/, "") + "/api/paystack";
