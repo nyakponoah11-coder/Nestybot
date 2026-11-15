@@ -635,7 +635,7 @@ const PaymentCallback = () => {
                   )}
                   {order.boost_order_id && (
                     <div className="flex justify-between items-center">
-                      <span className="text-muted-foreground">Provider Order ID</span>
+                      <span className="text-muted-foreground">Order Batch #</span>
                       <span className="font-mono font-bold text-emerald-400">#{order.boost_order_id}</span>
                     </div>
                   )}
@@ -646,7 +646,7 @@ const PaymentCallback = () => {
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">Delivery Status</span>
                     <span className="font-bold text-emerald-400 capitalize">
-                      {order.delivery_status === "in_progress" ? "In Progress (Processing on BoostUpGH)" : order.delivery_status}
+                      {order.delivery_status === "in_progress" ? "In Progress (Processing Delivery)" : order.delivery_status}
                     </span>
                   </div>
                 </div>

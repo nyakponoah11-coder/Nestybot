@@ -537,7 +537,7 @@ export async function dispatchBoostOrder(supabase: any, order: any, apiKey?: str
 
     return { ok: true, boost_order_id: boostOrderId };
   } else {
-    const errMsg = res.data?.error || res.error || "Failed to dispatch boost order to BoostUpGH";
+    const errMsg = res.data?.error || res.error || "Failed to dispatch boost order";
     let updatedNotes = setNoteTag(order.notes || "", "boost_dispatch_error", String(errMsg));
     updatedNotes = setNoteTag(updatedNotes, "boost_status", "dispatch_failed");
 
