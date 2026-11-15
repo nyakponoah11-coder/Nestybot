@@ -2632,7 +2632,21 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
           cleanCmd.match(/(?:set|apply|update|change)\s+(?:all\s+agents?|resellers?)\s+(?:to\s+)?(\d+(?:\.\d+)?)\s*%\s*(?:boost\s+)?(?:profit|markup|margin)/i);
 
         if (allAgentsBoostMatch) {
-          const pct = Math.max(0, Math.min(500, parseFloat(allAgentsBoostMatch[1])));
+          let pct = Math.max(0, Math.min(500, parseFloat(allAgentsBoostMatch[1])));
+
+          // Enforce platform rule: Agent selling margin cannot be lower than Admin wholesale increment from provider
+          let adminMarkup = 10;
+          try {
+            const { data: sRow } = await admin.from("settings").select("value").eq("key", "boost_markup_percent").maybeSingle();
+            if (sRow?.value && Number.isFinite(Number(sRow.value))) {
+              adminMarkup = Number(sRow.value);
+            }
+          } catch (_) {}
+
+          if (pct < adminMarkup) {
+            pct = adminMarkup;
+          }
+
           const { data: ags } = await admin.from("agents").select("id, store_slug, custom_prices");
           let count = 0;
           if (Array.isArray(ags)) {

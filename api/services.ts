@@ -1738,6 +1738,12 @@ export default async function handler(req: any, res: any) {
             }
           } catch (_) {}
 
+          // Enforce platform rule: Agent selling margin cannot be lower than Admin's wholesale increment
+          const minAllowedMarkup = Number(result?.markup_percent) || 10;
+          if (agentMarkup < minAllowedMarkup) {
+            agentMarkup = minAllowedMarkup;
+          }
+
           const multiplier = 1 + (agentMarkup / 100);
           const agentServices = (result.services || []).map((s: any) => {
             const adminBaseRate = s.rate;

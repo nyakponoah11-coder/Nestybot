@@ -2743,6 +2743,19 @@ Glad to have you!`;
       const waecPrice = resolveServiceCustomPrice("waec", agentCustomPrices, 20.00);
       const becePrice = resolveServiceCustomPrice("bece", agentCustomPrices, 18.00);
 
+      // Load Admin's wholesale increment from provider (settings.boost_markup_percent)
+      let adminBoostMarkup = 10;
+      try {
+        const { data: sRow } = await supabase
+          .from("settings")
+          .select("value")
+          .eq("key", "boost_markup_percent")
+          .maybeSingle();
+        if (sRow?.value && Number.isFinite(Number(sRow.value))) {
+          adminBoostMarkup = Math.max(0, Number(sRow.value));
+        }
+      } catch (_) {}
+
       const otherServices = [
         {
           id: "service-netflix",
@@ -2807,6 +2820,8 @@ Glad to have you!`;
         services: otherServices,
         base_prices: basePrices,
         custom_prices: agentCustomPrices,
+        admin_boost_markup_percent: adminBoostMarkup,
+        min_boost_markup_percent: adminBoostMarkup,
       });
     }
 
@@ -2840,6 +2855,25 @@ Glad to have you!`;
         const numVal = Number(rawVal);
         if (rawKey === "boost_markup_percent") {
           if (!isNaN(numVal) && numVal >= 0) {
+            // Load admin minimum markup from provider (settings.boost_markup_percent)
+            let adminMin = 10;
+            try {
+              const { data: sRow } = await supabase
+                .from("settings")
+                .select("value")
+                .eq("key", "boost_markup_percent")
+                .maybeSingle();
+              if (sRow?.value && Number.isFinite(Number(sRow.value))) {
+                adminMin = Math.max(0, Number(sRow.value));
+              }
+            } catch (_) {}
+
+            if (numVal < adminMin) {
+              return res.status(400).json({
+                ok: false,
+                error: `Your Social Boost selling profit margin (+${numVal}%) cannot be lower than the platform base increment rate of +${adminMin}%.`,
+              });
+            }
             expandedPrices["boost_markup_percent"] = Math.round(numVal * 10) / 10;
           }
           continue;
@@ -2947,8 +2981,30 @@ Glad to have you!`;
       }
       const pct = Math.round(rawPct * 10) / 10;
 
-      // 1. Settings batch rows
+      // 1. Resolve Admin wholesale increment from provider (settings.boost_markup_percent)
+      let adminMarkup = 10;
+      if (body?.admin_boost_markup_percent !== undefined && !isNaN(Number(body.admin_boost_markup_percent))) {
+        adminMarkup = Math.max(0, Math.min(500, Math.round(Number(body.admin_boost_markup_percent) * 10) / 10));
+      } else {
+        try {
+          const { data: sRow } = await supabase.from("settings").select("value").eq("key", "boost_markup_percent").maybeSingle();
+          if (sRow?.value && Number.isFinite(Number(sRow.value))) {
+            adminMarkup = Math.max(0, Number(sRow.value));
+          }
+        } catch (_) {}
+      }
+
+      // Rule: Agent selling margin cannot be less than Admin wholesale increment from provider
+      if (pct < adminMarkup) {
+        return res.status(400).json({
+          ok: false,
+          error: `Agent selling margin (+${pct}%) cannot be less than your increment from provider (+${adminMarkup}%).`,
+        });
+      }
+
+      // 2. Settings batch rows
       const settingsBatch: Array<{ key: string; value: string }> = [
+        { key: "boost_markup_percent", value: String(adminMarkup) },
         { key: "default_agent_boost_markup_percent", value: String(pct) },
         { key: "agent_boost_default_markup_percent", value: String(pct) },
       ];
@@ -3031,7 +3087,8 @@ Glad to have you!`;
 
       return res.status(200).json({
         ok: true,
-        message: `Successfully updated Social Boost profit margin to +${pct}% across all ${updatedCount} agents!`,
+        message: `Successfully updated Social Boost margins! Admin Wholesale Increment: +${adminMarkup}%, Agent Selling Margin: +${pct}% across all ${updatedCount} agents!`,
+        admin_boost_markup_percent: adminMarkup,
         boost_markup_percent: pct,
         updated_count: updatedCount,
       });
