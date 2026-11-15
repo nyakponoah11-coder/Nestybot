@@ -4168,19 +4168,40 @@ async function executeOwnerDirectAction(type, payload = {}) {
       const dmKey = DATA_API_KEY || process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY;
       const dmSec = process.env.DATAMART_API_SECRET || DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET;
 
-      const dmRes = await axios.post(
-        `${DATAMART_BASE}/purchase`,
-        { phoneNumber: cleanPhone, network: dmNet, capacity: cleanCap, gateway: "wallet", ref, delivery: "fast" },
-        {
-          headers: {
-            "x-api-key": dmKey,
-            ...(dmSec ? { "x-api-secret": dmSec } : {}),
-            "X-Idempotency-Key": ref,
-            "Content-Type": "application/json"
-          },
-          timeout: 25000
+      let dmRes = null;
+      try {
+        dmRes = await axios.post(
+          `${DATAMART_BASE}/purchase`,
+          { phoneNumber: cleanPhone, network: dmNet, capacity: cleanCap, gateway: "wallet", ref, delivery: "fast" },
+          {
+            headers: {
+              "x-api-key": dmKey,
+              ...(dmSec ? { "x-api-secret": dmSec } : {}),
+              "X-Idempotency-Key": ref,
+              "Content-Type": "application/json"
+            },
+            timeout: 25000
+          }
+        );
+      } catch (firstErr) {
+        if (firstErr.response && (firstErr.response.status === 401 || firstErr.response.status === 403)) {
+          dmRes = await axios.post(
+            `${DATAMART_BASE}/purchase`,
+            { phoneNumber: cleanPhone, network: dmNet, capacity: cleanCap, gateway: "wallet", ref, delivery: "fast" },
+            {
+              headers: {
+                "x-api-key": VERIFIED_DATAMART_KEY,
+                "x-api-secret": VERIFIED_DATAMART_SECRET,
+                "X-Idempotency-Key": ref,
+                "Content-Type": "application/json"
+              },
+              timeout: 25000
+            }
+          );
+        } else {
+          throw firstErr;
         }
-      );
+      }
       const dmData = dmRes.data?.data || dmRes.data || {};
       const dmRef = dmData.reference || dmData.orderReference || dmData.purchaseId || ref;
       await supabase.from("orders").insert([{
