@@ -584,10 +584,13 @@ export async function getBoostBalance(supabase: any, apiKey?: string) {
   if (res.data?.error) {
     return { ok: false, error: res.data.error };
   }
-  const bal = res.data?.balance !== undefined ? String(res.data.balance) : undefined;
+  const rawBal = res.data?.balance;
+  if (rawBal === undefined || rawBal === null || String(rawBal).trim() === "" || String(rawBal) === "undefined") {
+    return { ok: false, error: "Could not parse balance from BoostUpGH response" };
+  }
   return {
     ok: true,
-    balance: bal,
+    balance: String(rawBal).trim(),
     currency: res.data?.currency || "GHS",
   };
 }

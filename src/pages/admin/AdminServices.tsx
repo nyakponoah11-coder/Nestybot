@@ -465,8 +465,9 @@ const AdminServices = () => {
       } else {
         const balValue = data?.balance !== undefined ? data.balance : data?.data?.balance;
         const curValue = data?.currency || data?.data?.currency || "GHS";
-        if (balValue !== undefined && balValue !== null) {
-          const displayBal = `${balValue} ${curValue}`;
+        const cleanBalStr = balValue !== undefined && balValue !== null ? String(balValue).trim() : "";
+        if (cleanBalStr !== "" && cleanBalStr !== "undefined" && cleanBalStr !== "null") {
+          const displayBal = `${cleanBalStr} ${curValue}`;
           setBoostUpBalance(displayBal);
           toast.success(`BoostUpGH Balance: ${displayBal}`);
         } else {

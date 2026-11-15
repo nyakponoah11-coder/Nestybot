@@ -61,17 +61,7 @@ const NetflixCode = () => {
     setFetchError(null);
     try {
       const { data, error } = await invokeApiFunction("netflix-fetch-code", { body: { reference, force } });
-      let payload: any = data;
-      if (error) {
-        const ctx = (error as any)?.context;
-        if (ctx?.text) {
-          try {
-            payload = JSON.parse(await ctx.text());
-          } catch {
-            /* ignore */
-          }
-        }
-      }
+      const payload: any = data;
 
       if (payload?.netflix_email) {
         setNetflixEmail(payload.netflix_email);
@@ -86,16 +76,19 @@ const NetflixCode = () => {
         return;
       }
 
-      if (payload?.error) {
-        setFetchError(payload.error);
+      const explicitError =
+        payload?.error ||
+        error?.message ||
+        (payload?.message && payload.message !== "Sign-in code retrieved successfully." ? payload.message : null);
+
+      if (explicitError) {
+        setFetchError(explicitError);
         return;
       }
 
-      if (error) {
-        throw error;
-      }
-
-      throw new Error("Could not retrieve sign-in code. Please try again.");
+      setFetchError(
+        `No Netflix code detected in inbox yet. Please open Netflix, tap "Send sign-in code" using ${netflixEmail || "the account email"}, wait 20 seconds, and tap Check Again.`
+      );
     } catch (e: any) {
       setFetchError(e.message || "Could not fetch code");
       toast.error(e.message || "Could not fetch code");

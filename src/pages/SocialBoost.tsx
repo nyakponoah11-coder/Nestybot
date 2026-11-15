@@ -29,43 +29,17 @@ import {
 import { invokeApiFunction } from "@/integrations/supabase/client";
 import { getSavedPhone, saveOrderToHistory } from "@/lib/orderHistory";
 import { SocialPlatformIcon } from "@/components/SocialPlatformIcon";
+import {
+  type BoostServiceItem,
+  type ActionCategory,
+  type DropQualityInfo,
+  isFixedPackage,
+  detectActionCategory,
+  detectDropQuality,
+} from "@/lib/boostServices";
 
-export interface BoostServiceItem {
-  service: number | string;
-  name: string;
-  category: string;
-  platform: string;
-  rate: number; // in GHS per 1,000 OR flat package price if is_package
-  wholesale_rate?: number;
-  min: number;
-  max: number;
-  type?: string;
-  is_package?: boolean;
-  refill?: boolean;
-  cancel?: boolean;
-  description?: string;
-}
-
-export function isFixedPackage(service?: BoostServiceItem | null): boolean {
-  if (!service) return false;
-  return Boolean(
-    service.is_package ||
-    service.type?.toLowerCase() === "package" ||
-    (service.min === service.max && service.min > 0)
-  );
-}
-
-export type ActionCategory = "followers" | "likes" | "views" | "comments" | "shares" | "other";
-
-export function detectActionCategory(name: string, category: string): ActionCategory {
-  const s = `${category || ""} ${name || ""}`.toLowerCase();
-  if (s.includes("follower") || s.includes("subscriber") || s.includes("member")) return "followers";
-  if (s.includes("like") || s.includes("reaction") || s.includes("heart") || s.includes("upvote")) return "likes";
-  if (s.includes("view") || s.includes("play") || s.includes("impression") || s.includes("watch time")) return "views";
-  if (s.includes("comment")) return "comments";
-  if (s.includes("share") || s.includes("retweet") || s.includes("save") || s.includes("repost")) return "shares";
-  return "other";
-}
+export type { BoostServiceItem, ActionCategory, DropQualityInfo };
+export { isFixedPackage, detectActionCategory, detectDropQuality };
 
 const PLATFORMS = [
   {
@@ -232,15 +206,44 @@ export const SocialBoost = () => {
     }
   }, [selectedPlatform, availableActionCategories]);
 
-  // Services matching current platform + category
-  const filteredServices = useMemo(() => {
+  // Quality filter tab: "all" | "non_drop" | "standard"
+  const [qualityFilter, setQualityFilter] = useState<"all" | "non_drop" | "standard">("all");
+
+  // All services in currently selected platform + category
+  const categoryServices = useMemo(() => {
     return platformServices.filter(
       (s) => detectActionCategory(s.name, s.category) === selectedActionCategory
     );
   }, [platformServices, selectedActionCategory]);
 
+  // Counts of Non-Drop vs Standard
+  const nonDropCount = useMemo(() => {
+    return categoryServices.filter((s) => detectDropQuality(s.name, s.category, s).isNonDrop).length;
+  }, [categoryServices]);
+
+  const standardCount = useMemo(() => {
+    return categoryServices.filter((s) => !detectDropQuality(s.name, s.category, s).isNonDrop).length;
+  }, [categoryServices]);
+
+  // Filtered services applied with quality tab
+  const filteredServices = useMemo(() => {
+    return categoryServices.filter((s) => {
+      if (qualityFilter === "all") return true;
+      const q = detectDropQuality(s.name, s.category, s);
+      if (qualityFilter === "non_drop") return q.isNonDrop;
+      if (qualityFilter === "standard") return !q.isNonDrop;
+      return true;
+    });
+  }, [categoryServices, qualityFilter]);
+
   // Whether currently selected service is a fixed package
   const isSelectedPackage = useMemo(() => isFixedPackage(selectedService), [selectedService]);
+
+  // Selected service drop quality info
+  const selectedQualityInfo = useMemo(() => {
+    if (!selectedService) return null;
+    return detectDropQuality(selectedService.name, selectedService.category, selectedService);
+  }, [selectedService]);
 
   // Live Price calculation
   const totalPrice = useMemo(() => {
@@ -623,7 +626,10 @@ export const SocialBoost = () => {
                 return (
                   <button
                     key={cat.id}
-                    onClick={() => setSelectedActionCategory(cat.id)}
+                    onClick={() => {
+                      setSelectedActionCategory(cat.id);
+                      setQualityFilter("all");
+                    }}
                     className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs md:text-sm font-bold transition-all shadow-sm ${
                       active
                         ? "bg-gradient-to-r from-violet-600 via-fuchsia-600 to-pink-600 text-white shadow-violet-600/30 scale-105"
@@ -637,6 +643,44 @@ export const SocialBoost = () => {
               })}
             </div>
 
+            {/* Quality Filter Tabs (Non-Drop Permanent vs Standard Range) */}
+            <div className="flex items-center justify-center gap-2 flex-wrap pt-2">
+              <span className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider mr-1">Quality:</span>
+              <button
+                type="button"
+                onClick={() => setQualityFilter("all")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  qualityFilter === "all"
+                    ? "bg-white text-zinc-950 shadow-md"
+                    : "bg-zinc-900/90 border border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700"
+                }`}
+              >
+                All Packages ({categoryServices.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setQualityFilter("non_drop")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                  qualityFilter === "non_drop"
+                    ? "bg-emerald-500 text-white shadow-emerald-500/30 shadow-md"
+                    : "bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/40 hover:border-emerald-400"
+                }`}
+              >
+                <ShieldCheck className="size-3.5" /> 🛡️ Non-Drop Only ({nonDropCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => setQualityFilter("standard")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                  qualityFilter === "standard"
+                    ? "bg-amber-500 text-zinc-950 shadow-amber-500/30 shadow-md font-extrabold"
+                    : "bg-amber-950/40 border border-amber-500/40 text-amber-300 hover:bg-amber-900/40 hover:border-amber-400"
+                }`}
+              >
+                <Zap className="size-3.5" /> ⚡ Standard Range ({standardCount})
+              </button>
+            </div>
+
             {/* Packages List */}
             {loadingServices ? (
               <div className="p-12 text-center text-zinc-400 space-y-3">
@@ -646,56 +690,55 @@ export const SocialBoost = () => {
             ) : filteredServices.length === 0 ? (
               <Card className="p-8 text-center text-zinc-400 bg-zinc-900/50 border-zinc-800 space-y-3">
                 <HelpCircle className="size-8 mx-auto text-zinc-500" />
-                <p className="text-sm">No packages found for this specific category.</p>
+                <p className="text-sm">No packages match the selected quality filter.</p>
                 <Button
                   size="sm"
                   variant="secondary"
-                  onClick={() => setSelectedActionCategory("followers")}
+                  onClick={() => setQualityFilter("all")}
                 >
-                  View All Services
+                  Show All Packages ({categoryServices.length})
                 </Button>
               </Card>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {filteredServices.map((service) => {
                   const isPkg = isFixedPackage(service);
+                  const quality = detectDropQuality(service.name, service.category, service);
                   return (
                     <Card
                       key={service.service}
                       onClick={() => handleSelectService(service)}
-                      className="cursor-pointer p-5 rounded-2xl bg-zinc-900/90 border border-zinc-800 hover:border-fuchsia-500/50 hover:bg-zinc-800/80 transition-all duration-200 group relative flex flex-col justify-between shadow-lg"
+                      className={`cursor-pointer p-5 rounded-2xl bg-zinc-900/90 border transition-all duration-200 group relative flex flex-col justify-between shadow-lg ${
+                        quality.isNonDrop
+                          ? "border-emerald-500/40 hover:border-emerald-400 hover:shadow-[0_0_25px_rgba(16,185,129,0.25)] bg-gradient-to-br from-zinc-900 via-zinc-900 to-emerald-950/20"
+                          : "border-zinc-800 hover:border-amber-500/50 hover:shadow-[0_0_25px_rgba(245,158,11,0.2)] hover:bg-zinc-800/80"
+                      }`}
                     >
                       <div>
                         <div className="flex items-start justify-between gap-2 flex-wrap">
                           <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
                             {service.category}
                           </span>
-                          {isPkg ? (
-                            <Badge className="bg-emerald-500/20 text-emerald-300 border-emerald-500/30 text-[10px] font-bold">
-                              Fixed {service.min.toLocaleString()} Pack
-                            </Badge>
-                          ) : service.refill ? (
-                            <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-[10px]">
-                              30-Day Refill Guarantee
-                            </Badge>
-                          ) : null}
+                          <Badge className={`${quality.badgeColor} text-[10px] font-bold`}>
+                            {quality.badgeLabel}
+                          </Badge>
                         </div>
 
                         <h4 className="text-base font-bold text-white mt-3 group-hover:text-fuchsia-300 transition-colors leading-snug">
                           {service.name}
                         </h4>
 
-                        <div className="mt-3 flex items-center gap-3 text-xs text-zinc-400">
-                          {isPkg ? (
-                            <span className="text-emerald-400 font-semibold">
-                              Fixed Quantity: <b>{service.min.toLocaleString()}</b> units
-                            </span>
+                        <div className="mt-3">
+                          {quality.isNonDrop ? (
+                            <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-semibold bg-emerald-500/10 px-2.5 py-1.5 rounded-lg border border-emerald-500/20">
+                              <ShieldCheck className="size-3.5 shrink-0 text-emerald-400" />
+                              <span>Provider Fixed Package: <b>{service.min.toLocaleString()}</b> units (0% Drop Guaranteed)</span>
+                            </div>
                           ) : (
-                            <>
-                              <span>Min: <b>{service.min.toLocaleString()}</b></span>
-                              <span>•</span>
-                              <span>Max: <b>{service.max.toLocaleString()}</b></span>
-                            </>
+                            <div className="flex items-center gap-1.5 text-xs text-amber-300 font-medium bg-amber-500/10 px-2.5 py-1.5 rounded-lg border border-amber-500/20">
+                              <Zap className="size-3.5 shrink-0 text-amber-400" />
+                              <span>Standard Range: Min <b>{service.min.toLocaleString()}</b> — Max <b>{service.max.toLocaleString()}</b> units</span>
+                            </div>
                           )}
                         </div>
                       </div>
@@ -712,7 +755,11 @@ export const SocialBoost = () => {
 
                         <Button
                           size="sm"
-                          className="bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white font-bold text-xs shadow"
+                          className={`font-bold text-xs shadow ${
+                            quality.isNonDrop
+                              ? "bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white"
+                              : "bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white"
+                          }`}
                         >
                           Select Package <ChevronRight className="size-3.5 ml-1" />
                         </Button>
@@ -779,6 +826,40 @@ export const SocialBoost = () => {
                 </div>
               </div>
             </Card>
+
+            {/* Drop Quality Assurance Notice */}
+            {selectedQualityInfo && (
+              <div
+                className={`p-4 rounded-2xl border flex items-start gap-3 shadow-md ${
+                  selectedQualityInfo.isNonDrop
+                    ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-200"
+                    : "bg-amber-950/30 border-amber-500/40 text-amber-200"
+                }`}
+              >
+                {selectedQualityInfo.isNonDrop ? (
+                  <ShieldCheck className="size-5 text-emerald-400 shrink-0 mt-0.5" />
+                ) : (
+                  <Zap className="size-5 text-amber-400 shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-black text-sm text-white">
+                      {selectedQualityInfo.isNonDrop
+                        ? "100% Non-Drop Permanent Package Guaranteed"
+                        : "Standard Range Engagement Service"}
+                    </span>
+                    <Badge className={`${selectedQualityInfo.badgeColor} text-[10px] font-bold`}>
+                      {selectedQualityInfo.badgeLabel}
+                    </Badge>
+                  </div>
+                  <p className="text-xs opacity-90 leading-relaxed">
+                    {selectedQualityInfo.isNonDrop
+                      ? `Provider fixed package with 0% drop guarantee and permanent retention. Delivered in a single complete batch of ${selectedService.min.toLocaleString()} units.`
+                      : `Variable quantity range (Min ${selectedService.min.toLocaleString()} - Max ${selectedService.max.toLocaleString()} units). Standard delivery speed; engagement may naturally fluctuate or drop over time.`}
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Order Form */}
             <Card className="p-5 md:p-6 rounded-2xl bg-zinc-900/90 border border-zinc-800 space-y-6 shadow-xl">

@@ -34,43 +34,17 @@ import {
 import { invokeApiFunction } from "@/integrations/supabase/client";
 import { getSavedPhone, saveOrderToHistory } from "@/lib/orderHistory";
 import { SocialPlatformIcon } from "@/components/SocialPlatformIcon";
+import {
+  type BoostServiceItem,
+  type ActionCategory,
+  type DropQualityInfo,
+  isFixedPackage,
+  detectActionCategory,
+  detectDropQuality,
+} from "@/lib/boostServices";
 
-export interface BoostServiceItem {
-  service: number | string;
-  name: string;
-  category: string;
-  platform: string;
-  rate: number; // in GHS per 1,000 OR flat package price if is_package
-  wholesale_rate?: number;
-  min: number;
-  max: number;
-  type?: string;
-  is_package?: boolean;
-  refill?: boolean;
-  cancel?: boolean;
-  description?: string;
-}
-
-export function isFixedPackage(service?: BoostServiceItem | null): boolean {
-  if (!service) return false;
-  return Boolean(
-    service.is_package ||
-    service.type?.toLowerCase() === "package" ||
-    (service.min === service.max && service.min > 0)
-  );
-}
-
-export type ActionCategory = "followers" | "likes" | "views" | "comments" | "shares" | "other";
-
-export function detectActionCategory(name: string, category: string): ActionCategory {
-  const s = `${category || ""} ${name || ""}`.toLowerCase();
-  if (s.includes("follower") || s.includes("subscriber") || s.includes("member")) return "followers";
-  if (s.includes("like") || s.includes("reaction") || s.includes("heart") || s.includes("upvote")) return "likes";
-  if (s.includes("view") || s.includes("play") || s.includes("impression") || s.includes("watch time")) return "views";
-  if (s.includes("comment")) return "comments";
-  if (s.includes("share") || s.includes("retweet") || s.includes("save") || s.includes("repost")) return "shares";
-  return "other";
-}
+export type { BoostServiceItem, ActionCategory, DropQualityInfo };
+export { isFixedPackage, detectActionCategory, detectDropQuality };
 
 const PLATFORMS = [
   {
@@ -231,15 +205,44 @@ export const SocialBoostDialog = ({
     }
   }, [selectedPlatform, availableActionCategories]);
 
-  // Services matching current platform + category
-  const filteredServices = useMemo(() => {
+  // Quality filter tab: "all" | "non_drop" | "standard"
+  const [qualityFilter, setQualityFilter] = useState<"all" | "non_drop" | "standard">("all");
+
+  // All services in currently selected platform + category
+  const categoryServices = useMemo(() => {
     return platformServices.filter(
       (s) => detectActionCategory(s.name, s.category) === selectedActionCategory
     );
   }, [platformServices, selectedActionCategory]);
 
+  // Counts of Non-Drop vs Standard
+  const nonDropCount = useMemo(() => {
+    return categoryServices.filter((s) => detectDropQuality(s.name, s.category, s).isNonDrop).length;
+  }, [categoryServices]);
+
+  const standardCount = useMemo(() => {
+    return categoryServices.filter((s) => !detectDropQuality(s.name, s.category, s).isNonDrop).length;
+  }, [categoryServices]);
+
+  // Filtered services applied with quality tab
+  const filteredServices = useMemo(() => {
+    return categoryServices.filter((s) => {
+      if (qualityFilter === "all") return true;
+      const q = detectDropQuality(s.name, s.category, s);
+      if (qualityFilter === "non_drop") return q.isNonDrop;
+      if (qualityFilter === "standard") return !q.isNonDrop;
+      return true;
+    });
+  }, [categoryServices, qualityFilter]);
+
   // Whether currently selected service is a fixed package
   const isSelectedPackage = useMemo(() => isFixedPackage(selectedService), [selectedService]);
+
+  // Selected service drop quality info
+  const selectedQualityInfo = useMemo(() => {
+    if (!selectedService) return null;
+    return detectDropQuality(selectedService.name, selectedService.category, selectedService);
+  }, [selectedService]);
 
   // Live Price calculation
   const totalPrice = useMemo(() => {
@@ -545,7 +548,10 @@ export const SocialBoostDialog = ({
                   return (
                     <button
                       key={cat.id}
-                      onClick={() => setSelectedActionCategory(cat.id)}
+                      onClick={() => {
+                        setSelectedActionCategory(cat.id);
+                        setQualityFilter("all");
+                      }}
                       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition ${
                         active
                           ? "bg-fuchsia-600 text-white shadow"
@@ -559,6 +565,43 @@ export const SocialBoostDialog = ({
                 })}
               </div>
 
+              {/* Quality Filter Tabs */}
+              <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                <button
+                  type="button"
+                  onClick={() => setQualityFilter("all")}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition ${
+                    qualityFilter === "all"
+                      ? "bg-white text-zinc-950 shadow"
+                      : "bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white"
+                  }`}
+                >
+                  All ({categoryServices.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setQualityFilter("non_drop")}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition flex items-center gap-1 ${
+                    qualityFilter === "non_drop"
+                      ? "bg-emerald-500 text-white shadow"
+                      : "bg-emerald-950/30 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-900/40"
+                  }`}
+                >
+                  <ShieldCheck className="size-3" /> 🛡️ Non-Drop ({nonDropCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setQualityFilter("standard")}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition flex items-center gap-1 ${
+                    qualityFilter === "standard"
+                      ? "bg-amber-500 text-zinc-950 shadow font-extrabold"
+                      : "bg-amber-950/30 border border-amber-500/30 text-amber-300 hover:bg-amber-900/40"
+                  }`}
+                >
+                  <Zap className="size-3" /> ⚡ Standard ({standardCount})
+                </button>
+              </div>
+
               {/* Service packages list */}
               {loadingServices ? (
                 <div className="py-8 text-center text-zinc-400 space-y-2">
@@ -566,40 +609,46 @@ export const SocialBoostDialog = ({
                   <p className="text-xs">Loading packages…</p>
                 </div>
               ) : filteredServices.length === 0 ? (
-                <div className="p-6 text-center text-zinc-400 bg-zinc-900/50 rounded-xl">
+                <div className="p-6 text-center text-zinc-400 bg-zinc-900/50 rounded-xl space-y-2">
                   <HelpCircle className="size-6 mx-auto text-zinc-500 mb-1" />
-                  <p className="text-xs">No packages found for this category.</p>
+                  <p className="text-xs">No packages match the selected filter.</p>
+                  <Button size="sm" variant="secondary" onClick={() => setQualityFilter("all")} className="text-xs h-7">
+                    Show All Packages ({categoryServices.length})
+                  </Button>
                 </div>
               ) : (
                 <div className="space-y-2.5">
                   {filteredServices.map((service) => {
                     const isPkg = isFixedPackage(service);
+                    const quality = detectDropQuality(service.name, service.category, service);
                     return (
                       <Card
                         key={service.service}
                         onClick={() => handleSelectService(service)}
-                        className="cursor-pointer p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 hover:border-fuchsia-500/50 transition-all flex items-center justify-between group"
+                        className={`cursor-pointer p-3.5 rounded-xl bg-zinc-900/80 border transition-all flex items-center justify-between group ${
+                          quality.isNonDrop
+                            ? "border-emerald-500/40 hover:border-emerald-400 bg-gradient-to-r from-zinc-900 to-emerald-950/20"
+                            : "border-zinc-800 hover:border-amber-500/50"
+                        }`}
                       >
                         <div className="space-y-1 pr-3">
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-bold text-xs text-white group-hover:text-fuchsia-300 transition-colors">
                               {service.name}
                             </span>
-                            {isPkg ? (
-                              <Badge className="bg-emerald-500/20 text-emerald-300 text-[9px] py-0 font-bold border-emerald-500/30">
-                                Fixed {service.min.toLocaleString()} Pack
-                              </Badge>
-                            ) : service.refill ? (
-                              <Badge className="bg-emerald-500/20 text-emerald-400 text-[9px] py-0">
-                                30d Refill
-                              </Badge>
-                            ) : null}
+                            <Badge className={`${quality.badgeColor} text-[9px] py-0 font-bold`}>
+                              {quality.badgeLabel}
+                            </Badge>
                           </div>
                           <div className="text-[11px] text-zinc-400">
-                            {isPkg ? (
-                              <span className="text-emerald-400 font-medium">Fixed Quantity: <b>{service.min.toLocaleString()}</b> units</span>
+                            {quality.isNonDrop ? (
+                              <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                                <ShieldCheck className="size-3" /> Fixed: <b>{service.min.toLocaleString()}</b> units (0% Drop)
+                              </span>
                             ) : (
-                              <>Min: <b>{service.min.toLocaleString()}</b> • Max: <b>{service.max.toLocaleString()}</b></>
+                              <span className="text-amber-300 font-medium flex items-center gap-1">
+                                <Zap className="size-3" /> Min: <b>{service.min.toLocaleString()}</b> • Max: <b>{service.max.toLocaleString()}</b> (May Drop)
+                              </span>
                             )}
                           </div>
                         </div>
@@ -638,6 +687,36 @@ export const SocialBoostDialog = ({
                   <span className="text-fuchsia-400">{selectedService.name}</span>
                 </div>
               </div>
+
+              {/* Quality indicator banner in Step 3 */}
+              {selectedQualityInfo && (
+                <div
+                  className={`p-3 rounded-xl border flex items-start gap-2.5 text-xs ${
+                    selectedQualityInfo.isNonDrop
+                      ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-200"
+                      : "bg-amber-950/30 border-amber-500/40 text-amber-200"
+                  }`}
+                >
+                  {selectedQualityInfo.isNonDrop ? (
+                    <ShieldCheck className="size-4 text-emerald-400 shrink-0 mt-0.5" />
+                  ) : (
+                    <Zap className="size-4 text-amber-400 shrink-0 mt-0.5" />
+                  )}
+                  <div>
+                    <div className="font-bold text-white flex items-center gap-1.5 flex-wrap">
+                      <span>{selectedQualityInfo.isNonDrop ? "100% Non-Drop Guaranteed" : "Standard Speed (May Drop)"}</span>
+                      <Badge className={`${selectedQualityInfo.badgeColor} text-[9px] py-0`}>
+                        {selectedQualityInfo.badgeLabel}
+                      </Badge>
+                    </div>
+                    <p className="opacity-80 mt-0.5 text-[11px]">
+                      {selectedQualityInfo.isNonDrop
+                        ? `Fixed package of ${selectedService.min.toLocaleString()} units with permanent retention and 0% drop.`
+                        : `Customizable quantity between ${selectedService.min.toLocaleString()} and ${selectedService.max.toLocaleString()} units.`}
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Target Link */}
               <div className="space-y-1.5">
