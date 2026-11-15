@@ -463,8 +463,15 @@ const AdminServices = () => {
       if (error || data?.error) {
         toast.error(data?.error || error?.message || "Failed to fetch BoostUpGH balance");
       } else {
-        setBoostUpBalance(data.balance ? `${data.balance} ${data.currency || "GHS"}` : "0 GHS");
-        toast.success(`BoostUpGH Balance: ${data.balance} ${data.currency || "GHS"}`);
+        const balValue = data?.balance !== undefined ? data.balance : data?.data?.balance;
+        const curValue = data?.currency || data?.data?.currency || "GHS";
+        if (balValue !== undefined && balValue !== null) {
+          const displayBal = `${balValue} ${curValue}`;
+          setBoostUpBalance(displayBal);
+          toast.success(`BoostUpGH Balance: ${displayBal}`);
+        } else {
+          toast.error("Could not parse balance from BoostUpGH response");
+        }
       }
     } catch (e: any) {
       toast.error(e?.message || "Error fetching BoostUpGH balance");

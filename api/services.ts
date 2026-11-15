@@ -554,7 +554,16 @@ export async function getBoostOrderStatus(supabase: any, boostOrderId: string | 
   if (!apiKey) return { ok: false, error: "BoostUpGH API key not configured" };
 
   const res = await callBoostUpGh("status", { order: boostOrderId }, apiKey);
-  return res;
+  if (!res.ok) {
+    return { ok: false, error: res.data?.error || res.error || "Failed to check order status from BoostUpGH" };
+  }
+  if (res.data?.error) {
+    return { ok: false, error: res.data.error };
+  }
+  return {
+    ok: true,
+    ...(typeof res.data === "object" ? res.data : {}),
+  };
 }
 
 export async function getBoostBalance(supabase: any, apiKey?: string) {
@@ -565,7 +574,18 @@ export async function getBoostBalance(supabase: any, apiKey?: string) {
   if (!apiKey) return { ok: false, error: "BoostUpGH API key not configured" };
 
   const res = await callBoostUpGh("balance", {}, apiKey);
-  return res;
+  if (!res.ok) {
+    return { ok: false, error: res.data?.error || res.error || "Failed to fetch balance from BoostUpGH" };
+  }
+  if (res.data?.error) {
+    return { ok: false, error: res.data.error };
+  }
+  const bal = res.data?.balance !== undefined ? String(res.data.balance) : undefined;
+  return {
+    ok: true,
+    balance: bal,
+    currency: res.data?.currency || "GHS",
+  };
 }
 
 function safeCallbackUrl(raw: unknown): string | undefined {
@@ -1689,6 +1709,9 @@ export default async function handler(req: any, res: any) {
           return res.status(401).json({ error: auth.error || "Unauthorized" });
         }
         const bal = await getBoostBalance(supabase);
+        if (!bal.ok) {
+          return res.status(400).json({ error: bal.error || "Failed to fetch BoostUpGH balance" });
+        }
         return res.status(200).json(bal);
       } catch (err: any) {
         return res.status(500).json({ error: err?.message || "Balance check failed" });
@@ -2204,6 +2227,7 @@ export default async function handler(req: any, res: any) {
           mashup_price: Number(smap.mashup_price) > 0 ? Number(smap.mashup_price) : 25,
           boost_markup_percent: Number(smap.boost_markup_percent) >= 0 ? Number(smap.boost_markup_percent) : 40,
           boostupgh_api_key_configured: Boolean(boostCreds.apiKey),
+          boostupgh_api_key: smap.boostupgh_api_key || "",
         });
       } catch (err: any) {
         console.error("admin-services in services.ts error:", err);
