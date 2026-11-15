@@ -1280,6 +1280,9 @@ const Track = () => {
 
             <div className="space-y-2 text-sm">
               <Row label="Reference" value={serviceOrder.reference} />
+              {serviceOrder.boost_service_name && (
+                <Row label="Package" value={serviceOrder.boost_service_name} />
+              )}
               <Row label="Phone" value={maskPhone(serviceOrder.customer_phone)} />
               <Row label="Amount" value={`GH₵ ${Number(serviceOrder.amount).toFixed(2)}`} />
               <Row label="Payment Status" value={serviceOrder.payment_status} />
@@ -1291,40 +1294,6 @@ const Track = () => {
                 />
               )}
             </div>
-
-            {serviceOrder.service === "boost" && (
-              <div className="rounded-xl bg-gradient-to-br from-violet-600/10 via-fuchsia-600/10 to-pink-600/10 border border-fuchsia-500/30 p-4 space-y-2 text-xs">
-                <div className="flex items-center gap-2 font-bold text-sm text-fuchsia-600 dark:text-fuchsia-400">
-                  <Rocket className="size-4" /> Boost Details
-                </div>
-                {serviceOrder.boost_service_name && (
-                  <Row label="Package" value={serviceOrder.boost_service_name} />
-                )}
-                {serviceOrder.boost_quantity && (
-                  <Row label="Quantity" value={Number(serviceOrder.boost_quantity).toLocaleString()} />
-                )}
-                {serviceOrder.boost_link && (
-                  <div className="flex justify-between items-center gap-2 text-xs">
-                    <span className="text-muted-foreground">Target Link</span>
-                    <a
-                      href={serviceOrder.boost_link}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-fuchsia-600 dark:text-fuchsia-400 font-mono truncate max-w-[200px] hover:underline flex items-center gap-1"
-                    >
-                      {serviceOrder.boost_link} <ExternalLink className="size-3" />
-                    </a>
-                  </div>
-                )}
-                {serviceOrder.boost_order_id && (
-                  <Row label="Boost Order ID" value={`#${serviceOrder.boost_order_id}`} />
-                )}
-                <div className="pt-1 flex items-center justify-between text-[11px] text-muted-foreground border-t border-border/40">
-                  <span>Status: <strong className="capitalize">{serviceOrder.delivery_status}</strong></span>
-                  <span className="text-emerald-500 font-semibold">Active &amp; Processing</span>
-                </div>
-              </div>
-            )}
 
             {serviceOrder.service === "netflix" && serviceOrder.netflix_last_code && (
               <div className="rounded-xl bg-gradient-to-br from-red-600 to-red-900 p-4 text-white text-center">

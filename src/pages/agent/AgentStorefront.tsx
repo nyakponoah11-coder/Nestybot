@@ -341,25 +341,25 @@ export const AgentStorefront: React.FC = () => {
     try {
       const local = localStorage.getItem("data1gh_flash_sale_enabled");
       if (local !== null) return local === "true";
-    } catch (_) { }
+    } catch (_) {}
     return false;
   });
   const [flashSaleEndTime, setFlashSaleEndTime] = useState(() => {
     try {
       return localStorage.getItem("data1gh_flash_sale_end_time") || "";
-    } catch (_) { }
+    } catch (_) {}
     return "";
   });
   const [flashSaleTitle, setFlashSaleTitle] = useState(() => {
     try {
       return localStorage.getItem("data1gh_flash_sale_title") || "⚡ LIMITED TIME MTN FLASH SALE ⚡";
-    } catch (_) { }
+    } catch (_) {}
     return "⚡ LIMITED TIME MTN FLASH SALE ⚡";
   });
   const [flashSaleNotice, setFlashSaleNotice] = useState(() => {
     try {
       return localStorage.getItem("data1gh_flash_sale_notice") || "Exclusive discounted MTN bundles! Grab yours before time runs out.";
-    } catch (_) { }
+    } catch (_) {}
     return "Exclusive discounted MTN bundles! Grab yours before time runs out.";
   });
   const [flashSaleProducts, setFlashSaleProducts] = useState<any[]>(() => {
@@ -369,7 +369,7 @@ export const AgentStorefront: React.FC = () => {
         const parsed = JSON.parse(local);
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
-    } catch (_) { }
+    } catch (_) {}
     return [
       { id: "fs-1", capacity: 1, price: 4.5, original_price: 5.5, in_stock: true, mb: 1000 },
       { id: "fs-2", capacity: 2, price: 8.5, original_price: 10.0, in_stock: true, mb: 2000 },
@@ -630,7 +630,7 @@ export const AgentStorefront: React.FC = () => {
         try {
           const cleanPath = window.location.pathname;
           window.history.replaceState({}, document.title, cleanPath);
-        } catch (_) { }
+        } catch (_) {}
       }
     };
 
@@ -652,7 +652,7 @@ export const AgentStorefront: React.FC = () => {
       try {
         localStorage.removeItem(cacheKey);
         localStorage.removeItem(`cache_${cacheKey}`);
-      } catch (_) { }
+      } catch (_) {}
     }
 
     try {
@@ -711,7 +711,7 @@ export const AgentStorefront: React.FC = () => {
           if (iconLink) iconLink.setAttribute("href", s.logo_url || "/store-banner.jpg");
           const appleIcon = document.querySelector('link[rel="apple-touch-icon"]');
           if (appleIcon) appleIcon.setAttribute("href", s.logo_url || "/store-banner.jpg");
-        } catch (_) { }
+        } catch (_) {}
       } else {
         if (forceRefresh) {
           toast.error(res?.data?.error || "Could not refresh store.");
@@ -769,7 +769,7 @@ export const AgentStorefront: React.FC = () => {
           }, 600);
           return () => clearTimeout(timer);
         }
-      } catch (_) { }
+      } catch (_) {}
     }
   }, [
     store?.id,
@@ -807,10 +807,10 @@ export const AgentStorefront: React.FC = () => {
           try {
             const parsed = JSON.parse(settings.flash_sale_products);
             if (Array.isArray(parsed) && parsed.length > 0) setFlashSaleProducts(parsed);
-          } catch (_) { }
+          } catch (_) {}
         }
       })
-      .catch(() => { });
+      .catch(() => {});
 
     const handleInvalidate = () => {
       try {
@@ -822,7 +822,7 @@ export const AgentStorefront: React.FC = () => {
         if (local !== null) setFlashSaleEnabled(local === "true");
         const end = localStorage.getItem("data1gh_flash_sale_end_time");
         if (end) setFlashSaleEndTime(end);
-      } catch (_) { }
+      } catch (_) {}
       fetchStorefront(true);
     };
     window.addEventListener("shop-cache-invalidated", handleInvalidate);
@@ -909,8 +909,8 @@ export const AgentStorefront: React.FC = () => {
     : cleanSupportNumber;
   const customerSupportWaUrl = formattedSupportNumber
     ? `https://wa.me/${formattedSupportNumber}?text=${encodeURIComponent(
-      `Hello ${store.store_name}, I am a customer on your store and I need some assistance.`
-    )}`
+        `Hello ${store.store_name}, I am a customer on your store and I need some assistance.`
+      )}`
     : null;
 
   const channelGroupUrl =
@@ -981,16 +981,16 @@ export const AgentStorefront: React.FC = () => {
           {/* Announcement Pop-Up Trigger Button */}
           {((store.announcement_popup_enabled && (store.announcement_popup_title || store.announcement_popup_message)) ||
             (store.announcement_enabled && store.announcement)) && (
-              <button
-                type="button"
-                onClick={() => setAnnouncementPopupOpen(true)}
-                className="h-9 px-3 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/40 text-purple-300 text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs"
-                title="View Store Announcement"
-              >
-                <Megaphone className="size-3.5 animate-bounce" />
-                <span className="hidden sm:inline">Notice</span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setAnnouncementPopupOpen(true)}
+              className="h-9 px-3 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/40 text-purple-300 text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs"
+              title="View Store Announcement"
+            >
+              <Megaphone className="size-3.5 animate-bounce" />
+              <span className="hidden sm:inline">Notice</span>
+            </button>
+          )}
 
           {/* Channel Button */}
           <a
@@ -1111,10 +1111,11 @@ export const AgentStorefront: React.FC = () => {
           <button
             type="button"
             onClick={() => setMainCategory("data")}
-            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${mainCategory === "data"
+            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${
+              mainCategory === "data"
                 ? `${theme.badgeContainer} font-black shadow-sm`
                 : "text-zinc-400 hover:text-white"
-              }`}
+            }`}
           >
             <Package className="size-3.5" />
             <span>Data Bundles</span>
@@ -1122,10 +1123,11 @@ export const AgentStorefront: React.FC = () => {
           <button
             type="button"
             onClick={() => setMainCategory("boost")}
-            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${mainCategory === "boost"
+            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${
+              mainCategory === "boost"
                 ? "bg-gradient-to-r from-fuchsia-600 to-pink-600 text-white font-black shadow-lg shadow-fuchsia-600/30"
                 : "text-zinc-400 hover:text-white"
-              }`}
+            }`}
           >
             <Rocket className="size-3.5 text-fuchsia-300" />
             <span>Social Boost 🚀</span>
@@ -1133,10 +1135,11 @@ export const AgentStorefront: React.FC = () => {
           <button
             type="button"
             onClick={() => setMainCategory("services")}
-            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${mainCategory === "services"
+            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${
+              mainCategory === "services"
                 ? `${theme.badgeContainer} font-black shadow-sm`
                 : "text-zinc-400 hover:text-white"
-              }`}
+            }`}
           >
             <Play className="size-3.5 fill-current" />
             <span>Services</span>
@@ -1144,10 +1147,11 @@ export const AgentStorefront: React.FC = () => {
           <button
             type="button"
             onClick={() => setMainCategory("checkers")}
-            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${mainCategory === "checkers"
+            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${
+              mainCategory === "checkers"
                 ? `${theme.badgeContainer} font-black shadow-sm`
                 : "text-zinc-400 hover:text-white"
-              }`}
+            }`}
           >
             <GraduationCap className="size-3.5" />
             <span>Checkers</span>
@@ -1162,10 +1166,11 @@ export const AgentStorefront: React.FC = () => {
                 key={net}
                 type="button"
                 onClick={() => setSelectedNetwork(net)}
-                className={`py-2.5 rounded-xl font-black text-xs uppercase tracking-wider transition-all ${selectedNetwork === net
+                className={`py-2.5 rounded-xl font-black text-xs uppercase tracking-wider transition-all ${
+                  selectedNetwork === net
                     ? theme.networkTabActive[net as keyof typeof theme.networkTabActive] || "bg-white text-black"
                     : "text-zinc-400 hover:text-white"
-                  }`}
+                }`}
               >
                 {NETWORK_LABEL[net] || net}
               </button>
@@ -1970,18 +1975,18 @@ export const AgentStorefront: React.FC = () => {
               const StatusIcon = paymentFailed || deliveryFailed
                 ? XCircle
                 : delivered
-                  ? CheckCircle2
-                  : waiting || processing
-                    ? Clock
-                    : CheckCircle2;
+                ? CheckCircle2
+                : waiting || processing
+                ? Clock
+                : CheckCircle2;
 
               const tone = paymentFailed || deliveryFailed
                 ? "text-rose-400 border-rose-500/30 bg-rose-500/10"
                 : delivered
-                  ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
-                  : waiting || processing
-                    ? "text-cyan-400 border-cyan-500/30 bg-cyan-500/10"
-                    : "text-amber-400 border-amber-500/30 bg-amber-500/10";
+                ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
+                : waiting || processing
+                ? "text-cyan-400 border-cyan-500/30 bg-cyan-500/10"
+                : "text-amber-400 border-amber-500/30 bg-amber-500/10";
 
               let title = "Awaiting Payment";
               let subtitle = "Complete payment to have your order delivered.";
@@ -2066,20 +2071,22 @@ export const AgentStorefront: React.FC = () => {
                           <span className="text-[9px] text-zinc-400">Received</span>
                         </div>
                         <div className="flex flex-col items-center">
-                          <div className={`size-6 rounded-full flex items-center justify-center mb-1 text-[11px] font-black ${delivered
+                          <div className={`size-6 rounded-full flex items-center justify-center mb-1 text-[11px] font-black ${
+                            delivered
                               ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
                               : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
-                            }`}>
+                          }`}>
                             {delivered ? "✓" : "⚡"}
                           </div>
                           <span className={`text-[10px] font-bold ${delivered ? "text-emerald-400" : "text-cyan-300"}`}>Order</span>
                           <span className="text-[9px] text-zinc-400">In Processing</span>
                         </div>
                         <div className="flex flex-col items-center">
-                          <div className={`size-6 rounded-full flex items-center justify-center mb-1 text-[11px] font-black ${delivered
+                          <div className={`size-6 rounded-full flex items-center justify-center mb-1 text-[11px] font-black ${
+                            delivered
                               ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
                               : "bg-white/5 text-zinc-500 border border-white/10"
-                            }`}>
+                          }`}>
                             {delivered ? "✓" : "•"}
                           </div>
                           <span className={`text-[10px] font-bold ${delivered ? "text-emerald-400" : "text-zinc-500"}`}>Delivery</span>
@@ -2139,14 +2146,15 @@ export const AgentStorefront: React.FC = () => {
 
                     <div className="flex items-center justify-between pt-1">
                       <span className="text-zinc-400 font-medium">Delivery Status</span>
-                      <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${delivered
+                      <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                        delivered
                           ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
                           : processing
-                            ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
-                            : deliveryFailed
-                              ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
-                              : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                        }`}>
+                          ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
+                          : deliveryFailed
+                          ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                          : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                      }`}>
                         {ord.delivery_status || ord.status || "Pending"}
                       </span>
                     </div>
@@ -2213,14 +2221,15 @@ export const AgentStorefront: React.FC = () => {
                           <span>{ord.reference || ord.id}</span>
                           <ArrowRight className="size-3 text-cyan-400 group-hover:translate-x-0.5 transition-transform" />
                         </span>
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${isDelivered
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                          isDelivered
                             ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
                             : isProcessing
-                              ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
-                              : isFailed
-                                ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
-                                : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                          }`}>
+                            ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
+                            : isFailed
+                            ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                            : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                        }`}>
                           {ord.delivery_status || ord.status || "Pending"}
                         </span>
                       </div>
@@ -2317,8 +2326,8 @@ export const AgentStorefront: React.FC = () => {
               {verifyingOrder
                 ? "Confirming Order..."
                 : placedOrder?.payment_status === "failed"
-                  ? "Payment Incomplete / Failed"
-                  : "Order Placed Successfully! 🎉"}
+                ? "Payment Incomplete / Failed"
+                : "Order Placed Successfully! 🎉"}
             </DialogTitle>
             <p className="text-xs text-zinc-400">
               {store?.store_name} &bull; {placedOrder?.payment_status === "failed" ? "Mobile Money Payment Issue" : "Instant Automated Delivery"}
@@ -2334,12 +2343,12 @@ export const AgentStorefront: React.FC = () => {
                   {placedOrder?.payment_status === "failed"
                     ? "Payment Incomplete (Low Balance / Declined)"
                     : String(placedOrder?.reference || incomingRef || "").startsWith("NF")
-                      ? "Netflix Order Confirmed"
-                      : String(placedOrder?.reference || incomingRef || "").startsWith("CK")
-                        ? "Result Checker Delivered"
-                        : placedOrder?.delivery_status === "delivered" || placedOrder?.delivery_status === "completed"
-                          ? "Delivered Successfully"
-                          : "Sent to Delivery Gateway"}
+                    ? "Netflix Order Confirmed"
+                    : String(placedOrder?.reference || incomingRef || "").startsWith("CK")
+                    ? "Result Checker Delivered"
+                    : placedOrder?.delivery_status === "delivered" || placedOrder?.delivery_status === "completed"
+                    ? "Delivered Successfully"
+                    : "Sent to Delivery Gateway"}
                 </span>
               </div>
               <span className={`text-[10px] font-mono px-2 py-0.5 rounded-md font-bold uppercase ${placedOrder?.payment_status === "failed" ? "bg-amber-500/20 text-amber-300 border border-amber-500/40" : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"}`}>
@@ -2358,94 +2367,94 @@ export const AgentStorefront: React.FC = () => {
             {(String(placedOrder?.reference || incomingRef || "").startsWith("NF") ||
               placedOrder?.service === "netflix" ||
               storeNetflixCode) && (
-                <div className="p-4 rounded-2xl bg-gradient-to-br from-red-950/40 via-zinc-900 to-black border border-red-500/40 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] uppercase font-black tracking-wider text-red-400 flex items-center gap-1">
-                      <Play className="size-3 fill-red-400" /> Netflix Sign-In Code
+              <div className="p-4 rounded-2xl bg-gradient-to-br from-red-950/40 via-zinc-900 to-black border border-red-500/40 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] uppercase font-black tracking-wider text-red-400 flex items-center gap-1">
+                    <Play className="size-3 fill-red-400" /> Netflix Sign-In Code
+                  </span>
+                  {storeNetflixCodeAt && (
+                    <span className="text-[10px] font-mono text-zinc-500">
+                      {new Date(storeNetflixCodeAt).toLocaleTimeString("en-GB")}
                     </span>
-                    {storeNetflixCodeAt && (
-                      <span className="text-[10px] font-mono text-zinc-500">
-                        {new Date(storeNetflixCodeAt).toLocaleTimeString("en-GB")}
-                      </span>
-                    )}
-                  </div>
+                  )}
+                </div>
 
-                  {/* Account Email */}
-                  <div className="p-2.5 rounded-xl bg-black/60 border border-white/10 flex items-center justify-between">
-                    <div>
-                      <span className="text-[10px] text-zinc-500 uppercase block font-semibold">Account Email</span>
-                      <span className="text-xs font-mono font-bold text-white break-all">{storeNetflixEmail}</span>
+                {/* Account Email */}
+                <div className="p-2.5 rounded-xl bg-black/60 border border-white/10 flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] text-zinc-500 uppercase block font-semibold">Account Email</span>
+                    <span className="text-xs font-mono font-bold text-white break-all">{storeNetflixEmail}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(storeNetflixEmail);
+                      toast.success("Netflix email copied!");
+                    }}
+                    className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white"
+                  >
+                    <Copy className="size-3.5" />
+                  </button>
+                </div>
+
+                {/* Big Code Box */}
+                <div className="p-3.5 rounded-xl bg-black/80 border border-red-500/30 text-center">
+                  <span className="text-[10px] uppercase font-bold text-zinc-400 block mb-1">
+                    Temporary 8-Digit TV Code
+                  </span>
+                  {(storeNetflixCode || placedOrder?.netflix_last_code) ? (
+                    <div className="flex items-center justify-center gap-3">
+                      <div className="text-3xl font-mono font-black tracking-widest text-white">
+                        {storeNetflixCode || placedOrder?.netflix_last_code}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const c = storeNetflixCode || placedOrder?.netflix_last_code;
+                          if (c) navigator.clipboard.writeText(c);
+                          setCopiedNetflixCode(true);
+                          setTimeout(() => setCopiedNetflixCode(false), 2000);
+                          toast.success("Netflix code copied!");
+                        }}
+                        className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white"
+                      >
+                        {copiedNetflixCode ? <Check className="size-4 text-emerald-400" /> : <Copy className="size-4" />}
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(storeNetflixEmail);
-                        toast.success("Netflix email copied!");
-                      }}
-                      className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white"
-                    >
-                      <Copy className="size-3.5" />
-                    </button>
-                  </div>
-
-                  {/* Big Code Box */}
-                  <div className="p-3.5 rounded-xl bg-black/80 border border-red-500/30 text-center">
-                    <span className="text-[10px] uppercase font-bold text-zinc-400 block mb-1">
-                      Temporary 8-Digit TV Code
-                    </span>
-                    {(storeNetflixCode || placedOrder?.netflix_last_code) ? (
-                      <div className="flex items-center justify-center gap-3">
-                        <div className="text-3xl font-mono font-black tracking-widest text-white">
-                          {storeNetflixCode || placedOrder?.netflix_last_code}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const c = storeNetflixCode || placedOrder?.netflix_last_code;
-                            if (c) navigator.clipboard.writeText(c);
-                            setCopiedNetflixCode(true);
-                            setTimeout(() => setCopiedNetflixCode(false), 2000);
-                            toast.success("Netflix code copied!");
-                          }}
-                          className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white"
-                        >
-                          {copiedNetflixCode ? <Check className="size-4 text-emerald-400" /> : <Copy className="size-4" />}
-                        </button>
-                      </div>
-                    ) : fetchingStoreNetflix ? (
-                      <div className="py-2 flex items-center justify-center gap-2 text-xs text-zinc-400">
-                        <Loader2 className="size-4 animate-spin text-red-500" />
-                        <span>Retrieving code from Gmail...</span>
-                      </div>
-                    ) : (
-                      <div className="py-1 text-xs text-zinc-400">
-                        Code not generated yet. Request it on your TV, then click Fetch below.
-                      </div>
-                    )}
-                  </div>
-
-                  {storeNetflixError && (
-                    <div className="text-[11px] text-red-400 bg-red-500/10 p-2 rounded-lg border border-red-500/20">
-                      {storeNetflixError}
+                  ) : fetchingStoreNetflix ? (
+                    <div className="py-2 flex items-center justify-center gap-2 text-xs text-zinc-400">
+                      <Loader2 className="size-4 animate-spin text-red-500" />
+                      <span>Retrieving code from Gmail...</span>
+                    </div>
+                  ) : (
+                    <div className="py-1 text-xs text-zinc-400">
+                      Code not generated yet. Request it on your TV, then click Fetch below.
                     </div>
                   )}
-
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={() => fetchStoreNetflixCode(placedOrder?.reference || incomingRef || "", true)}
-                    disabled={fetchingStoreNetflix}
-                    className="w-full h-9 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:opacity-95 text-white font-black text-xs gap-1.5 shadow-md shadow-red-600/20"
-                  >
-                    {fetchingStoreNetflix ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-                    <span>{fetchingStoreNetflix ? "Checking Gmail..." : "Fetch Latest Code Live"}</span>
-                  </Button>
-
-                  <p className="text-[11px] text-zinc-400 leading-snug">
-                    Go to <strong className="text-red-400">netflix.com/tv8</strong> on your browser and enter this code to link your TV screen.
-                  </p>
                 </div>
-              )}
+
+                {storeNetflixError && (
+                  <div className="text-[11px] text-red-400 bg-red-500/10 p-2 rounded-lg border border-red-500/20">
+                    {storeNetflixError}
+                  </div>
+                )}
+
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => fetchStoreNetflixCode(placedOrder?.reference || incomingRef || "", true)}
+                  disabled={fetchingStoreNetflix}
+                  className="w-full h-9 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:opacity-95 text-white font-black text-xs gap-1.5 shadow-md shadow-red-600/20"
+                >
+                  {fetchingStoreNetflix ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+                  <span>{fetchingStoreNetflix ? "Checking Gmail..." : "Fetch Latest Code Live"}</span>
+                </Button>
+
+                <p className="text-[11px] text-zinc-400 leading-snug">
+                  Go to <strong className="text-red-400">netflix.com/tv8</strong> on your browser and enter this code to link your TV screen.
+                </p>
+              </div>
+            )}
 
             {/* CHECKER SERIAL & PIN (IF CHECKER ORDER) */}
             {(String(placedOrder?.reference || incomingRef || "").startsWith("CK") || checkerResult) && (
@@ -2673,7 +2682,7 @@ export const AgentStorefront: React.FC = () => {
             if (!open && store?.id) {
               try {
                 sessionStorage.setItem(`data1_agent_popup_dismissed_${store.id}`, "true");
-              } catch (_) { }
+              } catch (_) {}
             }
           }}
           title={
