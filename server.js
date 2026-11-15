@@ -2518,8 +2518,8 @@ async function handleDirectDataPull(rawText, from, isOwner = false, session = nu
   if (/\b(service|services|netflix|afa|mashup|checker|checkers|waec|bece)\b/i.test(lower)) {
     try {
       const [sRes, cRes] = await Promise.all([
-        supabase.from("service_orders").select("reference, service, amount, payment_status, delivery_status, customer_phone").order("created_at", { ascending: false }).limit(6),
-        supabase.from("checker_orders").select("reference, checker_type, amount, payment_status, delivery_status, customer_phone").order("created_at", { ascending: false }).limit(6)
+        supabase.from("service_orders").select("reference, service, amount, status, delivery_status, customer_phone").order("created_at", { ascending: false }).limit(6),
+        supabase.from("checker_orders").select("reference, checker_type, amount, status, delivery_status, customer_phone").order("created_at", { ascending: false }).limit(6)
       ]);
       const services = sRes.data || [];
       const checkers = cRes.data || [];
@@ -2801,27 +2801,25 @@ async function updateOrderDeliveryStatusSafely(ref, newStatus) {
     const { data: sOrd } = await supabase
       .from("service_orders")
       .update({
-        delivery_status: newStatus,
-        updated_at: new Date().toISOString()
+        delivery_status: newStatus
       })
       .or(sFilter)
-      .select("reference, recipient_phone, service_type")
+      .select("reference, customer_phone, service_type")
       .maybeSingle();
 
-    if (sOrd) return { table: "service_orders", reference: sOrd.reference, phone: sOrd.recipient_phone, data: sOrd };
+    if (sOrd) return { table: "service_orders", reference: sOrd.reference, phone: sOrd.customer_phone, data: sOrd };
 
     // 3. Check & update in checker_orders table
     const { data: cOrd } = await supabase
       .from("checker_orders")
       .update({
-        delivery_status: newStatus,
-        updated_at: new Date().toISOString()
+        delivery_status: newStatus
       })
       .or(sFilter)
-      .select("reference, recipient_phone, exam_type")
+      .select("reference, customer_phone, checker_type")
       .maybeSingle();
 
-    if (cOrd) return { table: "checker_orders", reference: cOrd.reference, phone: cOrd.recipient_phone, data: cOrd };
+    if (cOrd) return { table: "checker_orders", reference: cOrd.reference, phone: cOrd.customer_phone, data: cOrd };
 
     // 4. Check & update in sessions table (direct bot transactions)
     const { data: sess } = await supabase
@@ -2867,27 +2865,25 @@ async function updateOrderPaymentStatusSafely(ref, newPaymentStatus) {
     const { data: sOrd } = await supabase
       .from("service_orders")
       .update({
-        payment_status: newPaymentStatus,
-        updated_at: new Date().toISOString()
+        status: newPaymentStatus
       })
       .or(sFilter)
-      .select("reference, recipient_phone, service_type, payment_status")
+      .select("reference, customer_phone, service_type, status")
       .maybeSingle();
 
-    if (sOrd) return { table: "service_orders", reference: sOrd.reference, phone: sOrd.recipient_phone, data: sOrd };
+    if (sOrd) return { table: "service_orders", reference: sOrd.reference, phone: sOrd.customer_phone, data: sOrd };
 
     // 3. Checker orders table
     const { data: cOrd } = await supabase
       .from("checker_orders")
       .update({
-        payment_status: newPaymentStatus,
-        updated_at: new Date().toISOString()
+        status: newPaymentStatus
       })
       .or(sFilter)
-      .select("reference, recipient_phone, exam_type, payment_status")
+      .select("reference, customer_phone, checker_type, status")
       .maybeSingle();
 
-    if (cOrd) return { table: "checker_orders", reference: cOrd.reference, phone: cOrd.recipient_phone, data: cOrd };
+    if (cOrd) return { table: "checker_orders", reference: cOrd.reference, phone: cOrd.customer_phone, data: cOrd };
   } catch (err) {
     console.warn("updateOrderPaymentStatusSafely warning:", err.message);
   }
@@ -3914,7 +3910,7 @@ async function executeOwnerDirectAction(type, payload = {}) {
       const ref = payload.reference || payload.ref;
       const st = payload.status || payload.delivery_status || "delivered";
       if (ref) {
-        await supabase.from("service_orders").update({ delivery_status: st, updated_at: new Date().toISOString() }).or(`reference.ilike.%${ref}%`);
+        await supabase.from("service_orders").update({ delivery_status: st }).or(`reference.ilike.%${ref}%`);
         return `Digital service order ${ref} marked as ${st.toUpperCase()}!`;
       }
     }
@@ -3924,7 +3920,7 @@ async function executeOwnerDirectAction(type, payload = {}) {
       const ref = payload.reference || payload.ref;
       const st = payload.status || payload.delivery_status || "delivered";
       if (ref) {
-        await supabase.from("checker_orders").update({ delivery_status: st, updated_at: new Date().toISOString() }).or(`reference.ilike.%${ref}%`);
+        await supabase.from("checker_orders").update({ delivery_status: st }).or(`reference.ilike.%${ref}%`);
         return `Result checker order ${ref} marked as ${st.toUpperCase()}!`;
       }
     }
@@ -5392,8 +5388,8 @@ async function generateFullAdminReport() {
       safeQuery(supabase.from("orders").select("id, reference, amount, payment_status, delivery_status, network, capacity, created_at").gte("created_at", startOfDay)),
       safeQuery(supabase.from("orders").select("id, reference, amount, payment_status, delivery_status, network, capacity, created_at").order("created_at", { ascending: false }).limit(100)),
       safeQuery(supabase.from("sessions").select("*")),
-      safeQuery(supabase.from("service_orders").select("id, service, amount, payment_status, delivery_status, created_at")),
-      safeQuery(supabase.from("checker_orders").select("id, checker_type, amount, payment_status, delivery_status, created_at")),
+      safeQuery(supabase.from("service_orders").select("id, service, amount, status, delivery_status, created_at")),
+      safeQuery(supabase.from("checker_orders").select("id, checker_type, amount, status, delivery_status, created_at")),
       safeQuery(supabase.from("free_data_codes").select("id, code, claimed")),
       safeQuery(supabase.from("scratch_codes").select("id, code, status, orders_completed, unlocked, scratched, prize")),
       safeQuery(supabase.from("referrals").select("id, code, total_clicks, total_earnings")),
@@ -6538,7 +6534,7 @@ app.post("/webhook", async (req, res) => {
         if (type === "update_service_status" && targetRefs.length > 0) {
           const statusToSet = status || "delivered";
           for (const r of targetRefs) {
-            await supabase.from("service_orders").update({ delivery_status: statusToSet, updated_at: new Date().toISOString() }).or(`reference.ilike.%${r}%`);
+            await supabase.from("service_orders").update({ delivery_status: statusToSet }).or(`reference.ilike.%${r}%`);
             // Per owner instruction: Stop sending SMS when delivery status is updated
           }
           return sendWhatsApp(from, `✅ *SERVICE ORDER UPDATED!*\n\nReference(s): ${targetRefs.join(", ")}\nNew Status: *${statusToSet.toUpperCase()}*`);
@@ -6548,7 +6544,7 @@ app.post("/webhook", async (req, res) => {
         if (type === "update_checker_status" && targetRefs.length > 0) {
           const statusToSet = status || "delivered";
           for (const r of targetRefs) {
-            await supabase.from("checker_orders").update({ delivery_status: statusToSet, updated_at: new Date().toISOString() }).or(`reference.ilike.%${r}%`);
+            await supabase.from("checker_orders").update({ delivery_status: statusToSet }).or(`reference.ilike.%${r}%`);
           }
           return sendWhatsApp(from, `✅ *RESULT CHECKER ORDER UPDATED!*\n\nReference(s): ${targetRefs.join(", ")}\nNew Status: *${statusToSet.toUpperCase()}*`);
         }
@@ -7010,8 +7006,8 @@ app.post("/webhook", async (req, res) => {
           supabase.from("orders").select("id, reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes, datamart_reference").order("created_at", { ascending: false }).limit(300),
           supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes").gte("created_at", startOfDay.toISOString()).order("created_at", { ascending: false }),
           supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes").order("created_at", { ascending: false }).limit(15),
-          supabase.from("service_orders").select("id, reference, service, amount, delivery_status, payment_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
-          supabase.from("checker_orders").select("id, reference, checker_type, amount, delivery_status, payment_status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
+          supabase.from("service_orders").select("id, reference, service, amount, delivery_status, status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
+          supabase.from("checker_orders").select("id, reference, checker_type, amount, delivery_status, status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
           supabase.from("chat_conversations").select("id, unread_for_support").eq("status", "open"),
           supabase.from("products").select("id, name, network, capacity, price, in_stock"),
           supabase.from("scratch_codes").select("id, code, orders_completed, status").limit(20),
@@ -9551,9 +9547,8 @@ app.post("/paystack-webhook", async (req, res) => {
         await supabase
           .from("service_orders")
           .update({
-            payment_status: "paid",
-            delivery_status: webService.service === "netflix" ? "active" : "pending",
-            updated_at: new Date().toISOString()
+            status: "paid",
+            delivery_status: webService.service === "netflix" ? "active" : "pending"
           })
           .eq("reference", ref);
 
@@ -9587,8 +9582,7 @@ app.post("/paystack-webhook", async (req, res) => {
         await supabase
           .from("checker_orders")
           .update({
-            payment_status: "paid",
-            updated_at: new Date().toISOString()
+            status: "paid"
           })
           .eq("reference", ref);
 
