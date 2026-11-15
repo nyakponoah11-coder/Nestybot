@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Buy MTN, Telecel &amp; AirtelTigo Data Bundles in Ghana</title>
+    <meta name="description" content="Buy cheap MTN, Telecel and AirtelTigo data bundles online. Pay via Mobile Money or card." />
+
+    <link rel="canonical" href="https://www.data1gh.com" />
+    <meta property="og:url" content="https://www.data1gh.com" />
+    <meta property="og:type" content="website" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <meta property="og:image" content="https://www.data1gh.com/logo.png" />
+    <meta name="twitter:image" content="https://www.data1gh.com/logo.png" />
+
+    <meta property="og:title" content="Buy MTN, Telecel &amp; AirtelTigo Data Bundles in Ghana · Data1gh" />
+    <meta name="twitter:title" content="Buy MTN, Telecel &amp; AirtelTigo Data Bundles in Ghana · Data1gh" />
+    <meta property="og:description" content="Buy cheap MTN, Telecel and AirtelTigo data bundles online with instant delivery. Pay via Mobile Money or card." />
+    <meta name="twitter:description" content="Buy cheap MTN, Telecel and AirtelTigo data bundles online with instant delivery. Pay via Mobile Money or card." />
+
+    <!-- Mobile & PWA Configuration -->
+    <meta name="theme-color" content="#0a0d14" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Data1gh" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <link rel="shortcut icon" href="/logo.png" />
+    <link rel="apple-touch-icon" href="/logo.png" />
+    <link rel="preload" as="video" href="/intro.mp4" type="video/mp4" />
+  </head>
+
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script>
+      if ("serviceWorker" in navigator) {
+        var isPreviewOrDev =
+          window.location.hostname.includes("ais-dev") ||
+          window.location.hostname.includes("ais-pre") ||
+          window.location.hostname.includes("localhost") ||
+          window.location.hostname.includes("127.0.0.1") ||
+          window.location.port === "3000";
+
+        if (isPreviewOrDev) {
+          navigator.serviceWorker.getRegistrations().then(function(registrations) {
+            for (var i = 0; i < registrations.length; i++) {
+              registrations[i].unregister();
+            }
+          });
+          if ("caches" in window) {
+            caches.keys().then(function(names) {
+              for (var i = 0; i < names.length; i++) {
+                caches.delete(names[i]);
+              }
+            });
+          }
+        } else {
+          window.addEventListener("load", function () {
+            navigator.serviceWorker.register("/sw.js").catch(function (err) {
+              console.log("ServiceWorker registration failed: ", err);
+            });
+          });
+        }
+      }
+    </script>
+  </body>
+</html>

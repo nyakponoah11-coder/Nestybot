@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { invokeApiFunction } from "@/integrations/supabase/client";
 import { getSavedPhone, saveOrderToHistory } from "@/lib/orderHistory";
+import { SocialPlatformIcon } from "@/components/SocialPlatformIcon";
 
 export interface BoostServiceItem {
   service: number | string;
@@ -503,7 +504,7 @@ export const SocialBoost = () => {
                     <div
                       className={`size-12 rounded-xl bg-gradient-to-br ${platform.iconColor} p-2.5 grid place-items-center shadow-md group-hover:scale-110 transition-transform`}
                     >
-                      <Rocket className="size-6 text-white" />
+                      <SocialPlatformIcon platform={platform.id} className="size-6 text-white" />
                     </div>
                     <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-white/10 text-zinc-200 border border-white/10">
                       {platform.badge}
@@ -563,7 +564,7 @@ export const SocialBoost = () => {
               </Button>
 
               <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900 border border-zinc-700">
-                <span className="size-2 rounded-full bg-emerald-400 animate-pulse" />
+                <SocialPlatformIcon platform={currentPlatformObj.id} className="size-4 text-fuchsia-400" />
                 <span className="text-xs text-zinc-400">Selected Platform:</span>
                 <span className="text-xs font-bold text-white capitalize">
                   {currentPlatformObj.name}
@@ -703,17 +704,22 @@ export const SocialBoost = () => {
 
             {/* Selected Package Banner */}
             <Card className="p-4 rounded-2xl bg-gradient-to-r from-violet-950/60 via-fuchsia-950/40 to-black border border-violet-500/30 flex items-center justify-between flex-wrap gap-3">
-              <div>
-                <span className="text-[10px] uppercase font-bold tracking-wider text-violet-400">
-                  Active Package
-                </span>
-                <h3 className="text-base font-bold text-white mt-0.5">
-                  {selectedService.name}
-                </h3>
-                <p className="text-xs text-zinc-400 mt-1">
-                  Rate: <b className="text-zinc-200">GH₵ {Number(selectedService.rate).toFixed(2)}</b> per 1,000 units
-                  {selectedService.refill && <span className="ml-2 text-emerald-400 font-bold">• 30d Refill</span>}
-                </p>
+              <div className="flex items-center gap-3">
+                <div className={`size-11 rounded-xl bg-gradient-to-br ${currentPlatformObj.iconColor} p-2.5 grid place-items-center shadow shrink-0`}>
+                  <SocialPlatformIcon platform={currentPlatformObj.id} className="size-6 text-white" />
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-violet-400">
+                    Active Package • {currentPlatformObj.name}
+                  </span>
+                  <h3 className="text-base font-bold text-white mt-0.5">
+                    {selectedService.name}
+                  </h3>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Rate: <b className="text-zinc-200">GH₵ {Number(selectedService.rate).toFixed(2)}</b> per 1,000 units
+                    {selectedService.refill && <span className="ml-2 text-emerald-400 font-bold">• 30d Refill</span>}
+                  </p>
+                </div>
               </div>
 
               <div className="text-right">

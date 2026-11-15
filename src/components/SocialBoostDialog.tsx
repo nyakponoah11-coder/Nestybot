@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { invokeApiFunction } from "@/integrations/supabase/client";
 import { getSavedPhone, saveOrderToHistory } from "@/lib/orderHistory";
+import { SocialPlatformIcon } from "@/components/SocialPlatformIcon";
 
 export interface BoostServiceItem {
   service: number | string;
@@ -464,7 +465,7 @@ export const SocialBoostDialog = ({
                   >
                     <div className="flex items-center gap-3">
                       <div className={`size-10 rounded-lg bg-gradient-to-br ${platform.iconColor} p-2 grid place-items-center shadow`}>
-                        <Rocket className="size-5 text-white" />
+                        <SocialPlatformIcon platform={platform.id} className="size-5 text-white" />
                       </div>
                       <div>
                         <div className="flex items-center gap-2">
@@ -500,8 +501,9 @@ export const SocialBoostDialog = ({
                   <ArrowLeft className="size-3 mr-1" /> Platforms
                 </Button>
 
-                <Badge variant="secondary" className="capitalize text-xs font-bold bg-zinc-800 text-white">
-                  {currentPlatformObj.name}
+                <Badge variant="secondary" className="capitalize text-xs font-bold bg-zinc-800 text-white flex items-center gap-1.5 py-1 px-2.5">
+                  <SocialPlatformIcon platform={currentPlatformObj.id} className="size-3.5 text-fuchsia-400" />
+                  <span>{currentPlatformObj.name}</span>
                 </Badge>
               </div>
 

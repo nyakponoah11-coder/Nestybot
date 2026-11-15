@@ -1,0 +1,42 @@
+[
+  {
+    "key": "shop_name",
+    "value": "DataOne GH",
+    "updated_at": "2026-10-20T17:15:09.139Z"
+  },
+  {
+    "key": "admin_alert_phone",
+    "value": "0547100951",
+    "updated_at": "2026-10-20T17:15:09.139Z"
+  },
+  {
+    "key": "admin_whatsapp_number",
+    "value": "0547100951",
+    "updated_at": "2026-10-20T17:15:09.139Z"
+  },
+  {
+    "key": "support_phone",
+    "value": "0547100951",
+    "updated_at": "2026-10-20T17:15:09.139Z"
+  },
+  {
+    "key": "auto_payment_sms_enabled",
+    "value": "true",
+    "updated_at": "2026-10-20T17:15:09.139Z"
+  },
+  {
+    "key": "customer_payment_sms_enabled",
+    "value": "false",
+    "updated_at": "2026-10-20T17:15:09.139Z"
+  },
+  {
+    "key": "database_mode",
+    "value": "standalone",
+    "updated_at": "2026-10-20T17:15:09.139Z"
+  },
+  {
+    "key": "copilot_trigger_rules",
+    "value": "[{\"id\":\"rule-delivery-time\",\"trigger\":\"delivery time\",\"matchType\":\"contains\",\"responseType\":\"action\",\"actionType\":\"query_delivery_times\",\"replyText\":\"\",\"active\":true},{\"id\":\"rule-most-orders\",\"trigger\":\"most orders\",\"matchType\":\"contains\",\"responseType\":\"action\",\"actionType\":\"query_top_customers\",\"replyText\":\"\",\"active\":true},{\"id\":\"rule-recent-orders\",\"trigger\":\"recent orders\",\"matchType\":\"contains\",\"responseType\":\"action\",\"actionType\":\"list_recent_orders\",\"replyText\":\"\",\"active\":true},{\"id\":\"rule-live-balance\",\"trigger\":\"balance\",\"matchType\":\"contains\",\"responseType\":\"action\",\"actionType\":\"check_balances\",\"replyText\":\"\",\"active\":true},{\"id\":\"rule-how-to-buy\",\"trigger\":\"how to buy\",\"matchType\":\"contains\",\"responseType\":\"reply\",\"replyText\":\"🛒 *HOW TO BUY DATA ON DATA ONE:*\\n\\n1. Visit our store: https://www.data1gh.com\\n2. Select your network (MTN, Telecel, or AT)\\n3. Choose your bundle package\\n4. Enter recipient phone number & complete Mobile Money payment\\n\\n⚡ Data bundle is dispatched automatically within 60 seconds!\",\"active\":true},{\"id\":\"rule-payment-momo\",\"trigger\":\"payment\",\"matchType\":\"contains\",\"responseType\":\"reply\",\"replyText\":\"💳 *OFFICIAL PAYMENT METHODS AT DATA ONE:*\\n\\n• Automated Instant Checkout: MTN MoMo, Telecel Cash & Cards directly on https://www.data1gh.com\\n• Manual MoMo Support: 0547100951 (DATA ONE)\\n\\nAll payments are 100% automated and safe! ✅\",\"active\":true}]",
+    "updated_at": "2026-10-22T08:00:00.000Z"
+  }
+]

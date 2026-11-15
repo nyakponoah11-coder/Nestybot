@@ -1,0 +1,6 @@
+{
+  "name": "Data Ease Shop",
+  "description": "Buy MTN, Telecel & AirtelTigo Data Bundles in Ghana",
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

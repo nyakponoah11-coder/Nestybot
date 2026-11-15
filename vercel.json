@@ -1,0 +1,233 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+
+  "rewrites": [
+    {
+      "source": "/api/ai-chat",
+      "destination": "/api/chat?fn=ai-chat"
+    },
+    {
+      "source": "/api/agent",
+      "destination": "/api/agent"
+    },
+    {
+      "source": "/api/admin-agents",
+      "destination": "/api/agent"
+    },
+    {
+      "source": "/api/admin-ai-settings",
+      "destination": "/api/admin?fn=admin-ai-settings"
+    },
+    {
+      "source": "/api/admin-stats",
+      "destination": "/api/admin?fn=admin-stats"
+    },
+    {
+      "source": "/api/admin-services",
+      "destination": "/api/services?fn=admin-services"
+    },
+    {
+      "source": "/api/admin-analytics",
+      "destination": "/api/admin?fn=admin-analytics"
+    },
+    {
+      "source": "/api/admin-data",
+      "destination": "/api/admin?fn=admin-data"
+    },
+    {
+      "source": "/api/admin-checkers",
+      "destination": "/api/checkers?fn=admin-checkers"
+    },
+    {
+      "source": "/api/checker-products",
+      "destination": "/api/checkers?fn=checker-products"
+    },
+    {
+      "source": "/api/checker-init",
+      "destination": "/api/checkers?fn=checker-init"
+    },
+    {
+      "source": "/api/checker-verify",
+      "destination": "/api/checkers?fn=checker-verify"
+    },
+    {
+      "source": "/api/service-init",
+      "destination": "/api/services?fn=service-init"
+    },
+    {
+      "source": "/api/service-verify",
+      "destination": "/api/services?fn=service-verify"
+    },
+    {
+      "source": "/api/netflix-fetch-code",
+      "destination": "/api/services?fn=netflix-fetch-code"
+    },
+    {
+      "source": "/api/partner/netflix/order",
+      "destination": "/api/partner?action=create-order"
+    },
+    {
+      "source": "/api/partner/netflix/fetch-code",
+      "destination": "/api/partner?action=fetch-code"
+    },
+    {
+      "source": "/api/partner/netflix/code",
+      "destination": "/api/partner?action=fetch-code"
+    },
+    {
+      "source": "/api/partner/netflix/status",
+      "destination": "/api/partner?action=status"
+    },
+    {
+      "source": "/api/partner/netflix/stock",
+      "destination": "/api/partner?action=stock"
+    },
+    {
+      "source": "/api/partner/stock",
+      "destination": "/api/partner?action=stock"
+    },
+    {
+      "source": "/api/partner/netflix/products",
+      "destination": "/api/partner?action=products"
+    },
+    {
+      "source": "/api/partner/products",
+      "destination": "/api/partner?action=products"
+    },
+    {
+      "source": "/api/partner/netflix",
+      "destination": "/api/partner?action=info"
+    },
+    {
+      "source": "/api/partner/info",
+      "destination": "/api/partner?action=info"
+    },
+    {
+      "source": "/api/partner",
+      "destination": "/api/partner"
+    },
+    {
+      "source": "/api/shop-data",
+      "destination": "/api/services?fn=shop-data"
+    },
+    {
+      "source": "/api/db",
+      "destination": "/api/db"
+    },
+    {
+      "source": "/api/bulk-sms",
+      "destination": "/api/bulk-sms"
+    },
+    {
+      "source": "/api/test-arkesel",
+      "destination": "/api/bulk-sms?action=testArkesel"
+    },
+    {
+      "source": "/api/spin-claim",
+      "destination": "/api/free-data?fn=spin-claim"
+    },
+    {
+      "source": "/api/paystack-init",
+      "destination": "/api/paystack?fn=paystack-init"
+    },
+    {
+      "source": "/api/paystack-verify",
+      "destination": "/api/paystack?fn=paystack-verify"
+    },
+    {
+      "source": "/api/webhook",
+      "destination": "/api/webhook"
+    },
+    {
+      "source": "/api/paystack-webhook",
+      "destination": "/api/webhook?source=paystack"
+    },
+    {
+      "source": "/api/datamart-webhook",
+      "destination": "/api/webhook?source=datamart"
+    },
+    {
+      "source": "/api/track-order",
+      "destination": "/api/track-order"
+    },
+    {
+      "source": "/api/verify-number",
+      "destination": "/api/track-order?fn=verify-number"
+    },
+    {
+      "source": "/api/delivery-tracker",
+      "destination": "/api/track-order?fn=delivery-tracker"
+    },
+    {
+      "source": "/api/whatsapp-orders",
+      "destination": "/api/admin?fn=whatsapp-orders"
+    },
+    {
+      "source": "/api/whatsapp-bot",
+      "destination": "/api/admin?fn=whatsapp-bot"
+    },
+    {
+      "source": "/api/free-data",
+      "destination": "/api/free-data"
+    },
+    {
+      "source": "/api/netflix-settings",
+      "destination": "/api/services?fn=netflix-settings"
+    },
+    {
+      "source": "/api/test-gmail",
+      "destination": "/api/services?fn=test-gmail"
+    },
+    {
+      "source": "/api/gmail-auth-url",
+      "destination": "/api/services?fn=gmail-auth-url"
+    },
+    {
+      "source": "/api/gmail-callback",
+      "destination": "/api/services?fn=gmail-callback"
+    },
+    {
+      "source": "/s-image/:slug",
+      "destination": "/api/agent?action=storeLogo&slug=:slug"
+    },
+    {
+      "source": "/s/:slug",
+      "destination": "/api/agent?action=storePreview&slug=:slug"
+    },
+    {
+      "source": "/s/:slug/",
+      "destination": "/api/agent?action=storePreview&slug=:slug"
+    },
+    {
+      "source": "/.env(.*)",
+      "destination": "/api/security-trap?probe=env"
+    },
+    {
+      "source": "/.git(.*)",
+      "destination": "/api/security-trap?probe=git"
+    },
+    {
+      "source": "/powershell(.*)",
+      "destination": "/api/security-trap?probe=powershell"
+    },
+    {
+      "source": "/cmd(.*)",
+      "destination": "/api/security-trap?probe=cmd"
+    },
+    {
+      "source": "/wp-(.*)",
+      "destination": "/api/security-trap?probe=wordpress"
+    },
+    {
+      "source": "/phpmyadmin(.*)",
+      "destination": "/api/security-trap?probe=phpmyadmin"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}
