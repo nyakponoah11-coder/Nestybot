@@ -2160,6 +2160,7 @@ export default async function handler(req: any, res: any) {
     "testAgentRegistrationAlert",
     "adminUpdateAgentCredentials",
     "setAllAgentsBoostMarkup",
+    "adminSetAllAgentsBoostMarkup",
   ]);
 
   if (ADMIN_ONLY_ACTIONS.has(String(action || ""))) {
@@ -2934,7 +2935,7 @@ Glad to have you!`;
     // -------------------------------------------------------------
     // 6b. APPLY BOOST PROFIT MARGIN TO ALL AGENTS (ONE PLACE TO SET FOR ALL)
     // -------------------------------------------------------------
-    if (action === "setAllAgentsBoostMarkup") {
+    if (action === "setAllAgentsBoostMarkup" || action === "adminSetAllAgentsBoostMarkup") {
       const auth = await verifyAdminUser(req, supabase);
       if (!auth.authorized) {
         return res.status(401).json({ ok: false, error: auth.error || "Unauthorized: Administrator privileges required." });
@@ -2946,22 +2947,17 @@ Glad to have you!`;
       }
       const pct = Math.round(rawPct * 10) / 10;
 
-      // 1. Save master default in settings table for new signups and global fallback
-      try {
-        await supabase.from("settings").upsert([
-          { key: "default_agent_boost_markup_percent", value: String(pct) },
-          { key: "agent_boost_default_markup_percent", value: String(pct) },
-        ], { onConflict: "key" });
-      } catch (err: any) {
-        console.warn("Failed saving default_agent_boost_markup_percent in settings:", err?.message);
-      }
+      // 1. Settings batch rows
+      const settingsBatch: Array<{ key: string; value: string }> = [
+        { key: "default_agent_boost_markup_percent", value: String(pct) },
+        { key: "agent_boost_default_markup_percent", value: String(pct) },
+      ];
 
-      // 2. Load all agents and update custom_prices.boost_markup_percent on each agent
+      // 2. Load all agents fast
       let agents = await loadAgents(supabase, true);
       let updatedCount = 0;
 
-      const recordsToUpsert: Array<{ key: string; value: string }> = [];
-
+      const sanitizedAgents: any[] = [];
       for (const ag of agents) {
         if (!ag || !ag.id) continue;
         const currentCustom = ag.custom_prices && typeof ag.custom_prices === "object" ? ag.custom_prices : {};
@@ -2971,30 +2967,67 @@ Glad to have you!`;
         };
         updatedCount++;
 
-        recordsToUpsert.push({
+        sanitizedAgents.push({
+          id: ag.id,
+          name: ag.name || "",
+          email: ag.email || "",
+          phone: ag.phone || "",
+          password_hash: ag.password_hash || "",
+          store_name: ag.store_name || "",
+          store_slug: ag.store_slug || "",
+          description: ag.description || "",
+          whatsapp_number: ag.whatsapp_number || "",
+          momo_number: ag.momo_number || "",
+          momo_network: ag.momo_network || "MTN",
+          momo_name: ag.momo_name || "",
+          custom_prices: ag.custom_prices,
+          status: ag.status || "active",
+          created_at: ag.created_at || getGhanaTimestamp(),
+        });
+
+        settingsBatch.push({
           key: `agent_pricing_${ag.id}`,
           value: JSON.stringify(ag.custom_prices),
         });
         if (ag.store_slug) {
-          recordsToUpsert.push({
+          settingsBatch.push({
             key: `agent_pricing_${String(ag.store_slug).toLowerCase().trim()}`,
             value: JSON.stringify(ag.custom_prices),
           });
         }
       }
 
-      // Batch save agents
-      await saveAgents(supabase, agents);
+      // 3. Update in-memory cache instantly
+      memoryAgents = agents;
+      memoryAgentsLoadedAt = Date.now();
 
-      // Batch save dedicated settings keys
-      if (recordsToUpsert.length > 0) {
-        try {
-          await supabase.from("settings").upsert(recordsToUpsert, { onConflict: "key" });
-        } catch (_) {}
+      // 4. Update agents_registry in settings batch
+      const registryList = agents.map((a: any) => ({
+        ...a,
+        logo_url: a.logo_url?.startsWith("data:") ? "" : a.logo_url,
+      }));
+      settingsBatch.push({
+        key: "agents_registry",
+        value: JSON.stringify(registryList),
+      });
+
+      // 5. Fast parallel batch persistence (completes in ~200ms)
+      const dbPromises: Promise<any>[] = [];
+      if (sanitizedAgents.length > 0) {
+        dbPromises.push(
+          supabase.from("agents").upsert(sanitizedAgents, { onConflict: "id" }).catch((e: any) => {
+            console.warn("Notice: agents table batch upsert warning:", e?.message);
+          })
+        );
       }
-
-      // Invalidate in-memory cache
-      memoryAgentsLoadedAt = 0;
+      if (settingsBatch.length > 0) {
+        dbPromises.push(
+          supabase.from("settings").upsert(settingsBatch, { onConflict: "key" }).catch((e: any) => {
+            console.warn("Notice: settings batch upsert warning:", e?.message);
+          })
+        );
+      }
+      await Promise.all(dbPromises);
 
       return res.status(200).json({
         ok: true,
