@@ -669,7 +669,36 @@ export default async function handler(req: any, res: any) {
       console.warn("Database order lookup error:", orderErr.message);
     }
 
-    if (!order && PAYSTACK_SECRET_KEY) {
+    const isServiceRef =
+      reference.startsWith("SB") ||
+      reference.startsWith("NF") ||
+      reference.startsWith("AF") ||
+      reference.startsWith("MU") ||
+      reference.startsWith("CK");
+
+    if (isServiceRef) {
+      const { data: sOrder } = await supabase
+        .from("service_orders")
+        .select("*")
+        .eq("reference", reference)
+        .maybeSingle();
+
+      if (sOrder) {
+        return res.status(200).json({
+          status: "success",
+          message: "Service order loaded",
+          order: {
+            ...sOrder,
+            is_service: true,
+            recipient_phone: sOrder.customer_phone,
+            delivery_status: sOrder.delivery_status || "in_progress",
+            payment_status: sOrder.status || "paid",
+          },
+        });
+      }
+    }
+
+    if (!order && !isServiceRef && PAYSTACK_SECRET_KEY) {
       try {
         const psRes = await fetch(
           `${PAYSTACK_BASE}/transaction/verify/${encodeURIComponent(reference)}`,
@@ -678,6 +707,19 @@ export default async function handler(req: any, res: any) {
         const psData = await psRes.json().catch(() => ({}));
         if (psRes.ok && psData.status && psData.data?.status === "success") {
           const meta = psData.data.metadata || {};
+          if (meta.is_service || meta.service === "boost" || meta.service === "netflix" || meta.service === "afa" || meta.service === "mashup") {
+            // Service order, not a data bundle order
+            return res.status(200).json({
+              status: "success",
+              message: "Service order confirmed",
+              order: {
+                reference,
+                is_service: true,
+                payment_status: "paid",
+                delivery_status: "in_progress",
+              },
+            });
+          }
           const custom = Array.isArray(meta.custom_fields) ? meta.custom_fields : [];
           const findCust = (k: string) => custom.find((c: any) => c.variable_name === k)?.value;
           const phone = meta.recipient_phone || findCust("recipient_phone") || psData.data.customer?.phone || "";

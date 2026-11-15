@@ -10,12 +10,13 @@ import { AfaWhatsAppPrompt } from "@/components/AfaWhatsAppPrompt";
 import { DeliveryTracker } from "@/components/DeliveryTracker";
 import { updateOrderInHistory } from "@/lib/orderHistory";
 import { brandText } from "@/lib/brand";
+import { SocialPlatformIcon } from "@/components/SocialPlatformIcon";
 
 const PaymentCallback = () => {
   const [params] = useSearchParams();
   const reference = params.get("reference") || params.get("trxref");
   const [order, setOrder] = useState<any>(null);
-  const [kind, setKind] = useState<"data" | "netflix" | "afa" | "mashup" | "checker">("data");
+  const [kind, setKind] = useState<"data" | "netflix" | "afa" | "mashup" | "checker" | "boost">("data");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
@@ -32,7 +33,7 @@ const PaymentCallback = () => {
     if (!reference) return;
     if (!silent) setVerifying(true);
     const isChecker = reference.startsWith("CK");
-    const isService = reference.startsWith("NF") || reference.startsWith("AF") || reference.startsWith("MU");
+    const isService = reference.startsWith("NF") || reference.startsWith("AF") || reference.startsWith("MU") || reference.startsWith("SB");
     const fn = isChecker ? "checker-verify" : isService ? "service-verify" : "paystack-verify";
 
     try {
@@ -62,6 +63,8 @@ const PaymentCallback = () => {
               ? "netflix"
               : reference.startsWith("MU")
               ? "mashup"
+              : reference.startsWith("SB")
+              ? "boost"
               : "afa"
           );
         }
@@ -469,7 +472,11 @@ const PaymentCallback = () => {
                       </div>
 
                       <p className="text-xs text-foreground/90 font-medium pt-1.5 border-t border-border/40">
-                        {isDelivered
+                        {kind === "boost"
+                          ? isDelivered
+                            ? `Your social media boost order has completed successfully!`
+                            : `Payment of GH₵ ${Number(order.amount).toFixed(2)} received. Your boost order has been submitted to the provider network and is actively processing.`
+                          : isDelivered
                           ? `Your ${order.capacity}GB bundle has been credited to ${order.recipient_phone}!`
                           : isRefunded
                           ? `This order has been refunded. If you have questions, please contact support.`
@@ -561,64 +568,151 @@ const PaymentCallback = () => {
               </div>
             )}
 
-            {/* Real Delivery Tracker */}
-            <div className="my-3 text-left">
-              <DeliveryTracker />
-            </div>
+            {/* Real Delivery Tracker (Data orders only) */}
+            {kind === "data" && (
+              <div className="my-3 text-left">
+                <DeliveryTracker />
+              </div>
+            )}
 
             {/* Order Details Table */}
-            <div className="mt-4 text-left rounded-lg border p-4 space-y-2 text-sm bg-card/60">
-              <div className="flex justify-between items-center gap-3">
-                <span className="text-muted-foreground">Reference</span>
-                <div className="flex items-center gap-1.5">
-                  <span className="font-mono font-bold">{order.reference}</span>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-6 text-muted-foreground hover:text-foreground"
-                    onClick={() => handleCopyRef(order.reference)}
-                    title="Copy reference"
-                  >
-                    {copiedRef ? <Check className="size-3 text-emerald-400" /> : <Copy className="size-3" />}
+            {kind === "boost" ? (
+              <div className="mt-4 text-left rounded-2xl border border-fuchsia-500/40 p-4 space-y-3 bg-gradient-to-br from-violet-950/40 via-card to-pink-950/20 text-sm">
+                <div className="flex items-center gap-2.5 pb-2 border-b border-border/60">
+                  <div className="size-8 rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-600 grid place-items-center shrink-0">
+                    <SocialPlatformIcon platform={order.boost_platform || "boost"} className="size-4 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm text-foreground">Social Media Boost Order</h3>
+                    <p className="text-[11px] text-muted-foreground">Automated High-Retention Delivery</p>
+                  </div>
+                </div>
+
+                <div className="space-y-2 text-xs">
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Reference</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono font-bold text-foreground">{order.reference}</span>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-5 text-muted-foreground hover:text-foreground"
+                        onClick={() => handleCopyRef(order.reference)}
+                        title="Copy reference"
+                      >
+                        {copiedRef ? <Check className="size-3 text-emerald-400" /> : <Copy className="size-3" />}
+                      </Button>
+                    </div>
+                  </div>
+                  {order.boost_service_name && (
+                    <div className="flex justify-between items-center gap-2">
+                      <span className="text-muted-foreground">Service Package</span>
+                      <span className="font-bold text-right text-foreground truncate max-w-[220px]">
+                        {order.boost_service_name}
+                      </span>
+                    </div>
+                  )}
+                  {order.boost_quantity && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-muted-foreground">Quantity</span>
+                      <span className="font-bold text-foreground font-mono">
+                        {Number(order.boost_quantity).toLocaleString()} units
+                      </span>
+                    </div>
+                  )}
+                  {order.boost_link && (
+                    <div className="flex justify-between items-center gap-2">
+                      <span className="text-muted-foreground">Target Link</span>
+                      <a
+                        href={order.boost_link}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-fuchsia-400 font-mono truncate max-w-[200px] hover:underline"
+                      >
+                        {order.boost_link}
+                      </a>
+                    </div>
+                  )}
+                  {order.boost_order_id && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-muted-foreground">Provider Order ID</span>
+                      <span className="font-mono font-bold text-emerald-400">#{order.boost_order_id}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Amount Paid</span>
+                    <span className="font-bold text-fuchsia-400">GH₵ {Number(order.amount).toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Delivery Status</span>
+                    <span className="font-bold text-emerald-400 capitalize">
+                      {order.delivery_status === "in_progress" ? "In Progress (Processing on BoostUpGH)" : order.delivery_status}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="pt-2 flex gap-2">
+                  <Button asChild className="w-full bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white font-bold text-xs h-9">
+                    <Link to={`/track?q=${order.reference}`}>
+                      Track Boost Live
+                    </Link>
                   </Button>
                 </div>
               </div>
-              <Row label="Network" value={NETWORK_LABEL[order.network] || order.network} />
-              <Row label="Bundle" value={`${order.capacity}GB`} />
-              <Row label="Recipient" value={order.recipient_phone} />
-              <Row label="Amount" value={formatGHS(order.amount)} />
-              <Row
-                label="Payment Status"
-                value={
-                  order.payment_status === "paid" ? (
-                    <span className="font-bold text-emerald-400 uppercase flex items-center gap-1">
-                      <CheckCircle2 className="size-3.5 inline text-emerald-400" /> Payment Received
-                    </span>
-                  ) : order.payment_status === "failed" ? (
-                    <span className="font-bold text-destructive uppercase">FAILED</span>
-                  ) : (
-                    <span className="font-semibold text-amber-400 capitalize">{order.payment_status || "Pending"}</span>
-                  )
-                }
-              />
-              <Row
-                label="Delivery Status"
-                value={
-                  order.delivery_status === "delivered" || order.delivery_status === "completed"
-                    ? "Delivered"
-                    : (order.delivery_status === "failed" || order.delivery_status === "cancelled")
-                    ? "Failed"
-                    : order.delivery_status === "refunded"
-                    ? "Refunded"
-                    : (order.delivery_status === "waiting" || order.delivery_status === "pending")
-                    ? "Queued for delivery"
-                    : "Order is in Processing"
-                }
-              />
-              {order.error_message && (order.payment_status !== "paid" || order.delivery_status === "failed") && (
-                <Row label="Note" value={brandText(order.error_message)} />
-              )}
-            </div>
+            ) : (
+              <div className="mt-4 text-left rounded-lg border p-4 space-y-2 text-sm bg-card/60">
+                <div className="flex justify-between items-center gap-3">
+                  <span className="text-muted-foreground">Reference</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono font-bold">{order.reference}</span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-6 text-muted-foreground hover:text-foreground"
+                      onClick={() => handleCopyRef(order.reference)}
+                      title="Copy reference"
+                    >
+                      {copiedRef ? <Check className="size-3 text-emerald-400" /> : <Copy className="size-3" />}
+                    </Button>
+                  </div>
+                </div>
+                <Row label="Network" value={NETWORK_LABEL[order.network] || order.network} />
+                <Row label="Bundle" value={`${order.capacity}GB`} />
+                <Row label="Recipient" value={order.recipient_phone} />
+                <Row label="Amount" value={formatGHS(order.amount)} />
+                <Row
+                  label="Payment Status"
+                  value={
+                    order.payment_status === "paid" ? (
+                      <span className="font-bold text-emerald-400 uppercase flex items-center gap-1">
+                        <CheckCircle2 className="size-3.5 inline text-emerald-400" /> Payment Received
+                      </span>
+                    ) : order.payment_status === "failed" ? (
+                      <span className="font-bold text-destructive uppercase">FAILED</span>
+                    ) : (
+                      <span className="font-semibold text-amber-400 capitalize">{order.payment_status || "Pending"}</span>
+                    )
+                  }
+                />
+                <Row
+                  label="Delivery Status"
+                  value={
+                    order.delivery_status === "delivered" || order.delivery_status === "completed"
+                      ? "Delivered"
+                      : (order.delivery_status === "failed" || order.delivery_status === "cancelled")
+                      ? "Failed"
+                      : order.delivery_status === "refunded"
+                      ? "Refunded"
+                      : (order.delivery_status === "waiting" || order.delivery_status === "pending")
+                      ? "Queued for delivery"
+                      : "Order is in Processing"
+                  }
+                />
+                {order.error_message && (order.payment_status !== "paid" || order.delivery_status === "failed") && (
+                  <Row label="Note" value={brandText(order.error_message)} />
+                )}
+              </div>
+            )}
 
             {order.payment_status === "paid" && (
               <ApplyReferralPrompt orderReference={order.reference} />
