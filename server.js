@@ -111,6 +111,19 @@ DATA 1 GH — COMPLETE SITE KNOWLEDGE BASE (FROM HTTPS://WWW.DATA1GH.COM):
   - Telecel Cash: Approve prompt or dial *110#.
   - AirtelTigo Money: Approve prompt or dial *110#.
   - Fallback Paystack Link: If direct prompt doesn't pop up, a secure online link is generated for instant payment.
+
+6. SOCIAL MEDIA BOOST SERVICES (POWERED BY BOOSTUPGH SMM):
+• Direct Portal: ${STORE_FRONTEND_URL}/services (or /s/[store-slug]/services on agent storefronts)
+• Supported Platforms: TikTok, Instagram, YouTube, Facebook, Twitter (X), Telegram, Spotify, Audiomack, Threads
+• Service Offerings:
+  - Followers, Likes, Views, Retweets/Reposts, Comments, Watch Time Hours, Live Stream Viewers, Telegram Members
+• Two-Tier Pricing Hierarchy & Architecture:
+  - Wholesale Rate: Direct wholesale cost from provider (BoostUpGH API: https://www.boostupgh.com/api/v2).
+  - Admin Increment (% Markup from Provider): Configured in settings.boost_markup_percent (e.g. +10%). This is our profit margin when selling wholesale to resellers or platform base rate.
+  - Reseller Selling Profit Margin (% Markup on Storefronts): Configured in settings.default_agent_boost_markup_percent (and each agent's custom_prices.boost_markup_percent). This is the margin resellers charge their retail buyers.
+  - Platform Minimum Rule: An agent's selling margin CANNOT be less than the admin wholesale increment (M_agent >= M_admin). The system automatically enforces this constraint.
+• Provider API Balance: Real-time balance on BoostUpGH API (action: "balance").
+• Automatic SMM Dispatch: Once payment is verified on Paystack, boost orders are submitted directly to BoostUpGH API (action: "add"), recording the provider order ID and dispatch timestamp in service_orders.
 `;
 
 /* =========================================================
@@ -3729,6 +3742,75 @@ async function getOrderFullDetails(query) {
   return results;
 }
 
+/* =========================================================
+BOOSTUPGH SMM PROVIDER BALANCE & ORDER HELPERS
+========================================================= */
+async function getBoostUpGhLiveBalance() {
+  let apiKey = process.env.BOOSTUPGH_API_KEY || process.env.BOOST_API_KEY || "";
+  if (!apiKey) {
+    const { data: sRow } = await supabase.from("settings").select("value").in("key", ["boostupgh_api_key", "boost_api_key", "smm_api_key", "BOOSTUPGH_API_KEY"]).maybeSingle();
+    if (sRow?.value) apiKey = String(sRow.value).trim();
+  }
+  if (!apiKey) return { ok: false, error: "BoostUpGH API key not configured in settings." };
+
+  try {
+    const form = new URLSearchParams();
+    form.append("key", apiKey);
+    form.append("action", "balance");
+    const res = await axios.post("https://www.boostupgh.com/api/v2", form.toString(), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      timeout: 8000,
+    });
+    const d = res.data;
+    if (d?.error) return { ok: false, error: d.error };
+    const bal = d?.balance;
+    if (bal !== undefined && bal !== null) {
+      return { ok: true, balance: String(bal).trim(), currency: d?.currency || "GHS" };
+    }
+    return { ok: false, error: "Could not parse balance from BoostUpGH." };
+  } catch (err) {
+    return { ok: false, error: err?.message || "Network error calling BoostUpGH API" };
+  }
+}
+
+async function queryBoostOrdersSummary(limit = 8) {
+  try {
+    const { data: ords } = await supabase
+      .from("service_orders")
+      .select("id, reference, service, customer_phone, amount, delivery_status, notes, created_at")
+      .eq("service", "boost")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (!ords || ords.length === 0) {
+      return "No Social Media Boost orders found in database.";
+    }
+
+    const lines = ords.map((o, idx) => {
+      const notes = o.notes || "";
+      const sNameMatch = notes.match(/\[boost_service_name:([^\]]+)\]/i);
+      const qtyMatch = notes.match(/\[boost_quantity:([^\]]+)\]/i);
+      const linkMatch = notes.match(/\[boost_link:([^\]]+)\]/i);
+      const smmIdMatch = notes.match(/\[boost_order_id:([^\]]+)\]/i);
+      const serviceName = sNameMatch ? sNameMatch[1] : "Social Media Boost";
+      const qty = qtyMatch ? qtyMatch[1] : "";
+      const link = linkMatch ? linkMatch[1] : "";
+      const smmId = smmIdMatch ? smmIdMatch[1] : "";
+      const timeStr = o.created_at ? formatGhanaTime(new Date(o.created_at)) : "";
+
+      return `${idx + 1}. *${o.reference}* — ${serviceName}${qty ? ` (${qty})` : ""}\n` +
+        `   • Amount: GH₵ ${Number(o.amount || 0).toFixed(2)} | Status: *${(o.delivery_status || "processing").toUpperCase()}*` +
+        (smmId ? ` | SMM ID: ${smmId}` : "") +
+        (timeStr ? `\n   • Placed: ${timeStr}` : "") +
+        (link ? `\n   • Link: ${link}` : "");
+    });
+
+    return `🚀 *RECENT SOCIAL MEDIA BOOST ORDERS:*\n━━━━━━━━━━━━━━━━━━━━━\n${lines.join("\n\n")}`;
+  } catch (err) {
+    return `Error querying boost orders: ${err.message}`;
+  }
+}
+
 async function executeOwnerDirectAction(type, payload = {}) {
   const cleanType = String(type || "").toLowerCase().trim();
 
@@ -4106,6 +4188,91 @@ async function executeOwnerDirectAction(type, payload = {}) {
       return `📢 *WhatsApp Channel Broadcast Ready!*\n🔗 Channel: ${res.channelUrl}\n` +
         (res.apiErrorNote ? `⚠️ Note: ${res.apiErrorNote}\n` : `💡 *(Reply "pair channel" to get an 8-digit code to link your WhatsApp Channel for 100% automatic direct posting)*`) +
         `\n━━━━━━━━━━━━━━━━━━━━\n${res.postText}`;
+    }
+
+    // 24. Query Boost Provider Balance (BoostUpGH)
+    if (cleanType === "query_boost_balance" || cleanType === "boost_balance" || cleanType === "smm_balance") {
+      const bRes = await getBoostUpGhLiveBalance();
+      const { data: sRows } = await supabase.from("settings").select("key, value").in("key", ["boost_markup_percent", "default_agent_boost_markup_percent"]);
+      const sMap = {};
+      (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+      const wholesaleInc = sMap["boost_markup_percent"] || "10";
+      const resellerInc = sMap["default_agent_boost_markup_percent"] || "20";
+
+      if (!bRes.ok) {
+        return `⚠️ BoostUpGH API Note: ${bRes.error}\nWholesale Markup: +${wholesaleInc}% | Reseller Margin: +${resellerInc}%`;
+      }
+      return `⚡ *BOOSTUPGH SMM PROVIDER BALANCE:*\n━━━━━━━━━━━━━━━━━━━━━\n` +
+        `💰 *Available Balance:* GH₵ ${Number(bRes.balance).toFixed(2)} (${bRes.currency})\n` +
+        `📈 *Wholesale Markup from Provider:* +${wholesaleInc}%\n` +
+        `👥 *Universal Reseller Margin:* +${resellerInc}% (Enforced: Reseller margin >= Wholesale markup)\n` +
+        `🚀 *Status:* Connected & Ready`;
+    }
+
+    // 25. Set Provider Wholesale Markup %
+    if (cleanType === "set_boost_provider_markup" || cleanType === "set_provider_boost_markup" || cleanType === "update_boost_provider_markup") {
+      const pct = Math.max(0, Math.min(500, parseFloat(payload.percent || payload.markup || payload.value || 10)));
+      await supabase.from("settings").upsert({ key: "boost_markup_percent", value: String(pct) }, { onConflict: "key" });
+
+      // Check if universal reseller margin needs to be bumped to satisfy M_agent >= M_admin
+      const { data: curRes } = await supabase.from("settings").select("value").eq("key", "default_agent_boost_markup_percent").maybeSingle();
+      let resPct = Number(curRes?.value);
+      if (isNaN(resPct) || resPct < pct) {
+        resPct = pct;
+        await supabase.from("settings").upsert([
+          { key: "default_agent_boost_markup_percent", value: String(resPct) },
+          { key: "agent_boost_default_markup_percent", value: String(resPct) }
+        ], { onConflict: "key" });
+      }
+
+      return `✅ *PROVIDER WHOLESALE INCREMENT UPDATED!*\n━━━━━━━━━━━━━━━━━━━━━\n` +
+        `📈 *Wholesale Markup:* +${pct}% from BoostUpGH\n` +
+        `👥 *Universal Reseller Margin:* +${resPct}% (Constraint satisfied: M_agent >= M_admin)\n` +
+        `💡 All reseller base prices and platform rates now reflect this wholesale base!`;
+    }
+
+    // 26. Set Universal All Agents Boost Markup
+    if (cleanType === "set_all_agents_boost_markup" || cleanType === "set_agent_boost_markup") {
+      let pct = Math.max(0, Math.min(500, parseFloat(payload.percent || payload.markup || payload.value || 20)));
+      const { data: sRow } = await supabase.from("settings").select("value").eq("key", "boost_markup_percent").maybeSingle();
+      const adminMarkup = Number(sRow?.value || 10);
+      if (pct < adminMarkup) {
+        pct = adminMarkup;
+      }
+
+      const { data: ags } = await supabase.from("agents").select("id, store_slug, custom_prices");
+      let count = 0;
+      if (Array.isArray(ags)) {
+        const settingsRows = [];
+        for (const ag of ags) {
+          const updated = { ...(ag.custom_prices || {}), boost_markup_percent: pct };
+          await supabase.from("agents").update({ custom_prices: updated }).eq("id", ag.id);
+          settingsRows.push({ key: `agent_pricing_${ag.id}`, value: JSON.stringify(updated) });
+          if (ag.store_slug) {
+            settingsRows.push({ key: `agent_pricing_${String(ag.store_slug).toLowerCase().trim()}`, value: JSON.stringify(updated) });
+          }
+          count++;
+        }
+        if (settingsRows.length > 0) {
+          try { await supabase.from("settings").upsert(settingsRows, { onConflict: "key" }); } catch (_) {}
+        }
+      }
+
+      await supabase.from("settings").upsert([
+        { key: "default_agent_boost_markup_percent", value: String(pct) },
+        { key: "agent_boost_default_markup_percent", value: String(pct) },
+      ], { onConflict: "key" });
+
+      return `✅ *UNIVERSAL RESELLER BOOST MARGIN APPLIED!*\n━━━━━━━━━━━━━━━━━━━━━\n` +
+        `👥 *Reseller Margin:* +${pct}% applied across *${count}* active agents!\n` +
+        `📈 *Platform Base Rule:* Enforced (M_agent ${pct}% >= Wholesale ${adminMarkup}%)\n` +
+        `🚀 Reseller storefronts now sell all social boost services at +${pct}% profit!`;
+    }
+
+    // 27. Query Boost Orders
+    if (cleanType === "query_boost_orders" || cleanType === "list_boost_orders") {
+      const limit = Math.min(30, Math.max(1, parseInt(payload.limit || "8", 10)));
+      return await queryBoostOrdersSummary(limit);
     }
   } catch (e) {
     console.warn("executeOwnerDirectAction error:", e.message);
@@ -7315,6 +7482,16 @@ app.post("/webhook", async (req, res) => {
           RUNTIME_ERROR_LOG.slice(0, 5).map(e => `• [${e.time}] ${e.level}: ${e.message}`).join("\n")
         : `\nRECENT SERVER RUNTIME LOGS: Zero runtime errors (All background workers healthy).`;
 
+      let boostLiveContext = "";
+      try {
+        const { data: bSettings } = await supabase.from("settings").select("key, value").in("key", ["boost_markup_percent", "default_agent_boost_markup_percent"]);
+        const bMap = {};
+        (bSettings || []).forEach(r => { bMap[r.key] = r.value; });
+        const admInc = bMap["boost_markup_percent"] || "10";
+        const agInc = bMap["default_agent_boost_markup_percent"] || "20";
+        boostLiveContext = `- Social Media Boost Services (BoostUpGH SMM): Wholesale Markup from Provider: +${admInc}% | Universal Reseller Margin: +${agInc}% (Rule: Reseller margin >= Provider markup)\n`;
+      } catch (_) {}
+
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
       let ownerSystemPrompt =
         "You are Stony, the owner's personal AI Senior Full-Stack Engineer, System Architect, and Commercial Co-Pilot at DATA 1 GH.\n" +
@@ -7375,7 +7552,13 @@ app.post("/webhook", async (req, res) => {
         "  16. Direct DataMart Bundle Dispatch: Send/dispatch any MTN, Telecel, or AirtelTigo data bundle directly from the DataMart API wallet to any recipient phone number (e.g. '0549992958 1GB' or 'send 2GB MTN to 0549992958') using {\"type\": \"dispatch_datamart_bundle\", \"phone\": \"0549992958\", \"capacity\": 1, \"network\": \"MTN\"}\n" +
         "  17. All-Corners System Diagnostic, Auto-Heal & Live Codebase Inspection: Scan every corner of the system (Paystack unverified payments, DataMart status desyncs, missing WhatsApp alerts, stale [dm_inflight] locks, runtime logs) and auto-heal them using {\"type\": \"diagnose_system\", \"autoFix\": true} or inspect any codebase file using {\"type\": \"inspect_codebase\", \"file\": \"AdminOrders.tsx\", \"keyword\": \"syncOrderStatus\"}\n" +
         "  18. Official WhatsApp Channel Broadcasting (https://whatsapp.com/channel/0029Vb7vwLN5kg70GeNMsB2w): Post live bundle prices, flash sales, free data voucher drops, or custom marketing promos to the DATA 1 GH WhatsApp Channel using {\"type\": \"post_to_channel\", \"topic\": \"prices\"|\"flash\"|\"vouchers\"|\"custom\", \"message\": \"your formatted channel post\"}\n" +
-        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\", ...}] at the end of your reply.\n" +
+        "  19. Social Media Boost Services & SMM Provider Operations (BoostUpGH API: https://www.boostupgh.com/api/v2):\n" +
+        "      - Check BoostUpGH SMM provider API balance: {\"type\": \"query_boost_balance\"}\n" +
+        "      - Set Admin wholesale increment % markup from provider: {\"type\": \"set_boost_provider_markup\", \"percent\": 10}\n" +
+        "      - Set universal reseller boost profit margin % for all agents: {\"type\": \"set_all_agents_boost_markup\", \"percent\": 20}\n" +
+        "      - Query recent Social Media Boost orders: {\"type\": \"query_boost_orders\", \"limit\": 8}\n" +
+        "      - Two-Tier Rule: Reseller profit margin must ALWAYS be >= provider wholesale markup (M_agent >= M_admin).\n" +
+        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\", ...}] at the end of your reply.\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
         "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
@@ -7402,6 +7585,7 @@ app.post("/webhook", async (req, res) => {
         (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
         (specificOrderCtx ? `\n${specificOrderCtx}` : "") +
         (recentRuntimeLogSummary ? `\n${recentRuntimeLogSummary}\n` : "") +
+        (boostLiveContext ? `\n${boostLiveContext}` : "") +
         (liveCornerDiagnosticsCtx ? `\n${liveCornerDiagnosticsCtx}\n` : "");
 
       if (aiConfig.copilotCustomInstructions) {
@@ -8158,6 +8342,39 @@ app.post("/webhook", async (req, res) => {
           `🚀 Social Media Boost profit margin set to *+${pct}%* across all *${count}* registered resellers!\n\n` +
           `Every reseller storefront will now sell boost services with a +${pct}% margin.`
         );
+      }
+
+      // Direct Action Command 9b: Boost Provider Balance (BoostUpGH)
+      const boostBalanceMatch =
+        cmdText.match(/^(?:check\s+)?(?:boost|smm|boostup|boostupgh)\s*(?:wallet\s+)?balance$/i) ||
+        cmdText.match(/^(?:what\s+is\s+)?(?:our\s+|the\s+)?(?:boost|smm|boostupgh)\s+balance/i) ||
+        cmdText.match(/^boost\s+balance$/i);
+
+      if (boostBalanceMatch) {
+        const msg = await executeOwnerDirectAction("query_boost_balance");
+        return sendWhatsApp(from, msg);
+      }
+
+      // Direct Action Command 9c: Set Provider Wholesale Boost Markup %
+      const providerBoostMatch =
+        cmdText.match(/(?:set|change|update)\s+(?:provider\s+|wholesale\s+)?(?:boost\s+)?(?:markup|increment|rate)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|change|update)\s+boost\s+(?:provider\s+|wholesale\s+)?(?:markup|increment|rate)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|change|update)\s+wholesale\s+(?:boost\s+)?(?:markup|increment)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i);
+
+      if (providerBoostMatch) {
+        const pct = parseFloat(providerBoostMatch[1]);
+        const msg = await executeOwnerDirectAction("set_boost_provider_markup", { percent: pct });
+        return sendWhatsApp(from, msg);
+      }
+
+      // Direct Action Command 9d: Query Boost Orders
+      const boostOrdersMatch =
+        cmdText.match(/^(?:check\s+|list\s+|show\s+|get\s+)?(?:recent\s+)?(?:boost|smm)\s+orders/i) ||
+        cmdText.match(/^boost\s+orders$/i);
+
+      if (boostOrdersMatch) {
+        const msg = await executeOwnerDirectAction("query_boost_orders", { limit: 8 });
+        return sendWhatsApp(from, msg);
       }
 
       // ── STEP 1: FAST DIRECT IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──
@@ -10471,7 +10688,7 @@ async function notifyAgentNewOrder(order) {
   try {
     const { data: freshOrd } = await supabase
       .from("orders")
-      .select("id, notes, agent_id, base_price")
+      .select("id, notes, agent_id, base_price, created_at")
       .eq("reference", ref)
       .maybeSingle();
 
@@ -10618,7 +10835,7 @@ async function notifyOrderDelivered(order) {
   try {
     const { data: freshOrd } = await supabase
       .from("orders")
-      .select("id, notes, agent_id, base_price")
+      .select("id, notes, agent_id, base_price, created_at")
       .eq("reference", ref)
       .maybeSingle();
 
@@ -10664,6 +10881,17 @@ async function notifyOrderDelivered(order) {
   const now = new Date();
   const dateStr = now.toLocaleDateString("en-GB", { timeZone: "Africa/Accra" });
   const timeStr = now.toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" });
+
+  const rawCreatedAt = order.created_at || freshOrd?.created_at;
+  let orderedAtLine = "";
+  if (rawCreatedAt) {
+    try {
+      const oDate = new Date(rawCreatedAt);
+      const oDateStr = oDate.toLocaleDateString("en-GB", { timeZone: "Africa/Accra" });
+      const oTimeStr = oDate.toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" });
+      orderedAtLine = `\n📅 *Ordered At:* ${oDateStr} ${oTimeStr}`;
+    } catch (_) {}
+  }
 
   // Resolve Agent details + update Agent Order status if order belongs to an Agent Store
   let agPhone = "";
@@ -10770,7 +10998,7 @@ async function notifyOrderDelivered(order) {
 📶 *Item:* ${itemDesc}
 📱 *Recipient:* ${cleanPhone}
 💰 *Amount:* GHS ${amount}
-⚡ *Status:* ✅ Delivered to Phone
+⚡ *Status:* ✅ Delivered to Phone${orderedAtLine}
 ⏰ *Delivered At:* ${dateStr} ${timeStr}`;
 
   await sendAdminWhatsApp(deliveredText);
@@ -10788,7 +11016,7 @@ async function notifyOrderDelivered(order) {
 📶 *Item:* ${itemDesc}
 📱 *Recipient:* ${cleanPhone}
 💰 *Amount:* GHS ${amount}${profitLine}
-⚡ *Status:* ✅ Delivered to Phone
+⚡ *Status:* ✅ Delivered to Phone${orderedAtLine}
 ⏰ *Delivered At:* ${dateStr} ${timeStr}`;
 
       if (agPhone) {

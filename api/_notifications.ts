@@ -2964,7 +2964,7 @@ export async function sendOrderDeliveredNotification(
     try {
       const { data: existingOrd } = await supabase
         .from("orders")
-        .select("id, reference, notes, agent_id, capacity, network, amount, base_price, recipient_phone, phone_number, phone")
+        .select("id, reference, notes, agent_id, capacity, network, amount, base_price, recipient_phone, phone_number, phone, created_at")
         .eq("reference", reference)
         .maybeSingle();
 
@@ -3125,8 +3125,21 @@ export async function sendOrderDeliveredNotification(
       }
     }
 
-    const dateStr = new Date().toLocaleDateString("en-GB", { timeZone: "Africa/Accra" });
-    const timeStr = new Date().toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" });
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("en-GB", { timeZone: "Africa/Accra" });
+    const timeStr = now.toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" });
+
+    // Format order placement timestamp (Ghana Africa/Accra timezone)
+    const rawOrderCreated = params.createdAt || ordData?.created_at;
+    let orderedAtLine = "";
+    if (rawOrderCreated) {
+      try {
+        const oDate = new Date(rawOrderCreated);
+        const oDateStr = oDate.toLocaleDateString("en-GB", { timeZone: "Africa/Accra" });
+        const oTimeStr = oDate.toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" });
+        orderedAtLine = `\n📅 *Ordered At:* ${oDateStr} ${oTimeStr}`;
+      } catch (_) {}
+    }
 
     let adminWhatsAppSent = false;
 
@@ -3138,7 +3151,7 @@ export async function sendOrderDeliveredNotification(
 📶 *Item:* ${itemDesc}
 📱 *Recipient:* ${cleanPhone}
 💰 *Amount:* GHS ${formattedAmount}
-⚡ *Status:* ✅ Delivered to Phone
+⚡ *Status:* ✅ Delivered to Phone${orderedAtLine}
 ⏰ *Delivered At:* ${dateStr} ${timeStr}`;
 
     if (waToken && waPhoneId && adminWhatsAppPhones.length > 0) {
@@ -3253,7 +3266,7 @@ export async function sendOrderDeliveredNotification(
 📶 *Item:* ${itemDesc}
 📱 *Recipient:* ${cleanPhone}
 💰 *Amount:* GHS ${formattedAmount}${profitLine}
-⚡ *Status:* ✅ Delivered to Phone
+⚡ *Status:* ✅ Delivered to Phone${orderedAtLine}
 ⏰ *Delivered At:* ${dateStr} ${timeStr}
 
 👉 *Dashboard:* https://www.data1gh.com/agent/dashboard`;

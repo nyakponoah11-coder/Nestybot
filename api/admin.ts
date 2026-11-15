@@ -24,6 +24,7 @@ import {
   extractPaystackMomoPhone,
 } from "./_notifications.js";
 import { generateFreeDataVouchersDirect, updateOrderDeliveryStatusDirect, sendArkeselSmsDirect, sendArkeselBulkSmsDirect, normalizeGhanaPhone } from "./_whatsapp-bot.js";
+import { getBoostBalance } from "./services.js";
 
 function setCorsHeaders(res: any) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -1837,6 +1838,119 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
             return "No recent orders found in database.";
           }
 
+          if (actionType === "query_boost_balance" || actionType === "boost_balance" || actionType === "smm_balance") {
+            const bal = await getBoostBalance(admin);
+            const { data: sRows } = await admin.from("settings").select("key, value").in("key", ["boost_markup_percent", "default_agent_boost_markup_percent"]);
+            const sMap: Record<string, string> = {};
+            (sRows || []).forEach((r: any) => { sMap[r.key] = r.value; });
+            const admInc = sMap["boost_markup_percent"] || "10";
+            const agInc = sMap["default_agent_boost_markup_percent"] || "20";
+
+            if (!bal.ok) {
+              return `⚠️ BoostUpGH API Note: ${bal.error}\nWholesale Markup: +${admInc}% | Reseller Margin: +${agInc}%`;
+            }
+            return `⚡ *BOOSTUPGH SMM PROVIDER BALANCE:*\n━━━━━━━━━━━━━━━━━━━━━\n` +
+              `💰 *Available Balance:* GH₵ ${Number(bal.balance).toFixed(2)} (${bal.currency})\n` +
+              `📈 *Wholesale Markup from Provider:* +${admInc}%\n` +
+              `👥 *Universal Reseller Margin:* +${agInc}% (Rule: M_agent >= M_admin)\n` +
+              `🚀 *Status:* Connected & Ready`;
+          }
+
+          if (actionType === "set_boost_provider_markup" || actionType === "set_provider_boost_markup") {
+            const pct = Math.max(0, Math.min(500, parseFloat(String(actionPayload.percent || actionPayload.markup || 10))));
+            await admin.from("settings").upsert({ key: "boost_markup_percent", value: String(pct) }, { onConflict: "key" });
+            try { await localDb.from("settings").upsert({ key: "boost_markup_percent", value: String(pct) }, { onConflict: "key" }); } catch (_) {}
+
+            const { data: curRes } = await admin.from("settings").select("value").eq("key", "default_agent_boost_markup_percent").maybeSingle();
+            let resPct = Number(curRes?.value);
+            if (isNaN(resPct) || resPct < pct) {
+              resPct = pct;
+              const rows = [
+                { key: "default_agent_boost_markup_percent", value: String(resPct) },
+                { key: "agent_boost_default_markup_percent", value: String(resPct) },
+              ];
+              await admin.from("settings").upsert(rows, { onConflict: "key" });
+              try { await localDb.from("settings").upsert(rows, { onConflict: "key" }); } catch (_) {}
+            }
+            invalidateSettingsCache();
+
+            return `✅ *PROVIDER WHOLESALE INCREMENT UPDATED!*\n━━━━━━━━━━━━━━━━━━━━━\n` +
+              `📈 *Wholesale Markup:* +${pct}% from BoostUpGH\n` +
+              `👥 *Universal Reseller Margin:* +${resPct}% (Constraint satisfied: M_agent >= M_admin)\n` +
+              `💡 All reseller base prices and platform rates now reflect this wholesale base!`;
+          }
+
+          if (actionType === "set_all_agents_boost_markup") {
+            let pct = Math.max(0, Math.min(500, parseFloat(String(actionPayload.percent || actionPayload.markup || 20))));
+            const { data: sRow } = await admin.from("settings").select("value").eq("key", "boost_markup_percent").maybeSingle();
+            const adminMarkup = Number(sRow?.value || 10);
+            if (pct < adminMarkup) pct = adminMarkup;
+
+            const { data: ags } = await admin.from("agents").select("id, store_slug, custom_prices");
+            let count = 0;
+            if (Array.isArray(ags)) {
+              const settingsRows: Array<{ key: string; value: string }> = [];
+              for (const ag of ags) {
+                const updated = { ...(ag.custom_prices || {}), boost_markup_percent: pct };
+                await admin.from("agents").update({ custom_prices: updated }).eq("id", ag.id);
+                try { await localDb.from("agents").update({ custom_prices: updated }).eq("id", ag.id); } catch (_) {}
+                settingsRows.push({ key: `agent_pricing_${ag.id}`, value: JSON.stringify(updated) });
+                if (ag.store_slug) {
+                  settingsRows.push({ key: `agent_pricing_${String(ag.store_slug).toLowerCase().trim()}`, value: JSON.stringify(updated) });
+                }
+                count++;
+              }
+              if (settingsRows.length > 0) {
+                try { await admin.from("settings").upsert(settingsRows, { onConflict: "key" }); } catch (_) {}
+              }
+            }
+            const sRows = [
+              { key: "default_agent_boost_markup_percent", value: String(pct) },
+              { key: "agent_boost_default_markup_percent", value: String(pct) },
+            ];
+            await admin.from("settings").upsert(sRows, { onConflict: "key" });
+            try { await localDb.from("settings").upsert(sRows, { onConflict: "key" }); } catch (_) {}
+            invalidateSettingsCache();
+
+            return `✅ *UNIVERSAL RESELLER BOOST MARGIN APPLIED!*\n━━━━━━━━━━━━━━━━━━━━━\n` +
+              `👥 *Reseller Margin:* +${pct}% applied across *${count}* active agents!\n` +
+              `📈 *Platform Base Rule:* Enforced (M_agent ${pct}% >= Wholesale ${adminMarkup}%)\n` +
+              `🚀 Reseller storefronts now sell all social boost services at +${pct}% profit!`;
+          }
+
+          if (actionType === "query_boost_orders" || actionType === "list_boost_orders") {
+            const limit = Math.min(30, Math.max(1, parseInt(actionPayload.limit || "8", 10)));
+            const { data: ords } = await admin
+              .from("service_orders")
+              .select("id, reference, service, customer_phone, amount, delivery_status, notes, created_at")
+              .eq("service", "boost")
+              .order("created_at", { ascending: false })
+              .limit(limit);
+
+            if (!ords || ords.length === 0) return "No Social Media Boost orders found in database.";
+
+            const lines = ords.map((o: any, idx: number) => {
+              const notes = o.notes || "";
+              const sNameMatch = notes.match(/\[boost_service_name:([^\]]+)\]/i);
+              const qtyMatch = notes.match(/\[boost_quantity:([^\]]+)\]/i);
+              const linkMatch = notes.match(/\[boost_link:([^\]]+)\]/i);
+              const smmIdMatch = notes.match(/\[boost_order_id:([^\]]+)\]/i);
+              const serviceName = sNameMatch ? sNameMatch[1] : "Social Media Boost";
+              const qty = qtyMatch ? qtyMatch[1] : "";
+              const link = linkMatch ? linkMatch[1] : "";
+              const smmId = smmIdMatch ? smmIdMatch[1] : "";
+              const timeStr = o.created_at ? new Date(o.created_at).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "";
+
+              return `${idx + 1}. *${o.reference}* — ${serviceName}${qty ? ` (${qty})` : ""}\n` +
+                `   • Amount: GH₵ ${Number(o.amount || 0).toFixed(2)} | Status: *${(o.delivery_status || "processing").toUpperCase()}*` +
+                (smmId ? ` | SMM ID: ${smmId}` : "") +
+                (timeStr ? `\n   • Placed: ${timeStr}` : "") +
+                (link ? `\n   • Link: ${link}` : "");
+            });
+
+            return `🚀 *RECENT SOCIAL MEDIA BOOST ORDERS:*\n━━━━━━━━━━━━━━━━━━━━━\n${lines.join("\n\n")}`;
+          }
+
           return "Action executed.";
         };
 
@@ -2232,6 +2346,16 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
           } catch (_) {}
         }
 
+        let boostLiveCtx = "";
+        try {
+          const { data: bRows } = await admin.from("settings").select("key, value").in("key", ["boost_markup_percent", "default_agent_boost_markup_percent"]);
+          const bMap: Record<string, string> = {};
+          (bRows || []).forEach((r: any) => { bMap[r.key] = r.value; });
+          const admInc = bMap["boost_markup_percent"] || "10";
+          const agInc = bMap["default_agent_boost_markup_percent"] || "20";
+          boostLiveCtx = `• Social Media Boost Services (BoostUpGH): Wholesale Increment: +${admInc}% | Reseller Margin: +${agInc}% (Rule: M_agent >= M_admin)`;
+        } catch (_) {}
+
         const liveContext = [
           `• Storefront URL: https://www.data1gh.com (Admin: https://www.data1gh.com/admin)`,
           `• Total All-Time Store Orders in Database: ${totalOrdersDbCount}+ orders (Recorded revenue: ~GH₵ ${allGrossRevenue.toFixed(2)})`,
@@ -2240,6 +2364,7 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
           mergedAgentsList.length > 0 ? `  - Registered Agents Directory: ${mergedAgentsList.slice(0, 15).map((a: any) => `${a.name || a.store_name} (${a.phone || "N/A"}, /s/${a.store_slug || "store"}, Wallet: GH₵ ${Number(a.wallet_balance || 0).toFixed(2)}, Status: ${a.status || "active"})`).join(" | ")}` : "",
           `• Flash Sale Status: ${flashSaleState.isActive ? "ACTIVE & LIVE ON STORE" : (flashSaleState.isEnabled ? "ACTIVE (Timer ended / Needs renewal)" : "DISABLED")} | Title: "${flashSaleState.title}" | End Time: ${flashSaleState.endTime || "None"}`,
           `  - Configured Flash Sale Live Prices: ${flashProductsSummary}`,
+          boostLiveCtx,
           `• DataMart API Wallet: ${dmBalance?.balance ? `GH₵ ${Number(dmBalance.balance).toFixed(2)}` : "Connected"}`,
           `• Arkesel SMS Balance: ${arkeselBal !== null ? `${arkeselBal} SMS` : "Connected"}`,
           `• Live Accurate Delivery Speeds: MTN (${delivStats.mtnSpeed}), Telecel (${delivStats.telecelSpeed}), AT (${delivStats.atSpeed}) | FastLane: ${delivStats.fastLaneMinutes || 1}m | Queue: ${delivStats.pendingBatches} batches`,
@@ -2682,6 +2807,35 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
             executed: true,
             action_type: "set_all_agents_boost_markup",
           });
+        }
+
+        // I6. Boost Provider Balance (BoostUpGH)
+        const boostBalanceMatch = cleanCmd.match(/^(?:check\s+)?(?:boost|smm|boostup|boostupgh)\s*(?:wallet\s+)?balance$/i) ||
+          cleanCmd.match(/^(?:what\s+is\s+)?(?:our\s+|the\s+)?(?:boost|smm|boostupgh)\s+balance/i) ||
+          cleanCmd.match(/^boost\s+balance$/i);
+        if (boostBalanceMatch) {
+          const reply = await executeDirectAction("query_boost_balance", {});
+          return res.status(200).json({ ok: true, reply, executed: true, action_type: "query_boost_balance" });
+        }
+
+        // I7. Set Provider Wholesale Boost Markup %
+        const providerBoostMatch =
+          cleanCmd.match(/(?:set|change|update)\s+(?:provider\s+|wholesale\s+)?(?:boost\s+)?(?:markup|increment|rate)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+          cleanCmd.match(/(?:set|change|update)\s+boost\s+(?:provider\s+|wholesale\s+)?(?:markup|increment|rate)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+          cleanCmd.match(/(?:set|change|update)\s+wholesale\s+(?:boost\s+)?(?:markup|increment)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i);
+        if (providerBoostMatch) {
+          const pct = parseFloat(providerBoostMatch[1]);
+          const reply = await executeDirectAction("set_boost_provider_markup", { percent: pct });
+          return res.status(200).json({ ok: true, reply, executed: true, action_type: "set_boost_provider_markup" });
+        }
+
+        // I8. Query Boost Orders
+        const boostOrdersMatch =
+          cleanCmd.match(/^(?:check\s+|list\s+|show\s+|get\s+)?(?:recent\s+)?(?:boost|smm)\s+orders/i) ||
+          cleanCmd.match(/^boost\s+orders$/i);
+        if (boostOrdersMatch) {
+          const reply = await executeDirectAction("query_boost_orders", { limit: 8 });
+          return res.status(200).json({ ok: true, reply, executed: true, action_type: "query_boost_orders" });
         }
 
         // J. Site Theme Color
