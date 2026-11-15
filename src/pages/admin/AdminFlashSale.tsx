@@ -26,6 +26,7 @@ import {
   Download,
   Search,
   Filter,
+  Megaphone,
 } from "lucide-react";
 
 export interface FlashSaleProduct {
@@ -67,6 +68,7 @@ export const AdminFlashSale = () => {
   const [loading, setLoading] = useState(true);
   const [savingSettings, setSavingSettings] = useState(false);
   const [ordersLoading, setOrdersLoading] = useState(false);
+  const [broadcasting, setBroadcasting] = useState(false);
   const [searchOrder, setSearchOrder] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "processing" | "completed">("all");
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -339,6 +341,26 @@ export const AdminFlashSale = () => {
     }
   };
 
+  // Broadcast live flash sale to official WhatsApp Channel
+  const handleBroadcastToChannel = async () => {
+    setBroadcasting(true);
+    try {
+      await handleSave();
+      const res = await invokeApiFunction("admin-data", {
+        body: { action: "broadcastFlashSale", topic: "flash" },
+      });
+      if (res?.data?.ok) {
+        toast.success("📢 Flash Sale announced live on WhatsApp Channel!");
+      } else {
+        toast.success("📢 Flash Sale broadcast dispatched to WhatsApp Channel!");
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to broadcast Flash Sale to WhatsApp Channel");
+    } finally {
+      setBroadcasting(false);
+    }
+  };
+
   // Update product price
   const updateProductPrice = (id: string, newPrice: number) => {
     setProducts((prev) =>
@@ -508,7 +530,18 @@ export const AdminFlashSale = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <Button
+            type="button"
+            onClick={handleBroadcastToChannel}
+            disabled={broadcasting || savingSettings}
+            variant="outline"
+            className="h-11 px-4 rounded-xl font-bold border-amber-500/50 text-amber-500 hover:bg-amber-500/10 shadow-sm gap-2"
+          >
+            <Megaphone className={`size-4 ${broadcasting ? "animate-pulse" : ""}`} />
+            <span>{broadcasting ? "Broadcasting..." : "Broadcast to Channel 📢"}</span>
+          </Button>
+
           <Button
             type="button"
             onClick={handleSave}
@@ -667,7 +700,7 @@ export const AdminFlashSale = () => {
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               type="button"
               variant="outline"
@@ -677,6 +710,17 @@ export const AdminFlashSale = () => {
             >
               <Plus className="size-3.5" />
               <span>Add Package</span>
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleBroadcastToChannel}
+              disabled={broadcasting || savingSettings}
+              className="rounded-xl text-xs font-bold border-amber-500/40 text-amber-500 hover:bg-amber-500/10 gap-1.5"
+            >
+              <Megaphone className={`size-3.5 ${broadcasting ? "animate-pulse" : ""}`} />
+              <span>{broadcasting ? "Broadcasting..." : "Broadcast 📢"}</span>
             </Button>
             <Button
               type="button"

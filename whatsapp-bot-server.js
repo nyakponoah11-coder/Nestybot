@@ -1520,17 +1520,48 @@ async function buildChannelPostFromSystem(topicOrMode = "general", customBody = 
 
   // 2. Flash Sale Channel Broadcast
   if (/flash/i.test(mode)) {
-    const flashInfo = await getFlashSaleLiveInfo().catch(() => null);
-    const items = flashInfo?.products || [];
+    const flashInfo = await getFlashSaleDetails().catch(() => null);
+    let items = (flashInfo?.products || []).filter(p => p.in_stock !== false);
+    if (!items || items.length === 0) {
+      items = [
+        { capacity: "1", price: 4.5, original_price: 6.0 },
+        { capacity: "2", price: 8.5, original_price: 11.0 },
+        { capacity: "3", price: 12.5, original_price: 16.0 },
+        { capacity: "4", price: 16.5, original_price: 21.0 },
+        { capacity: "5", price: 20.0, original_price: 26.0 },
+        { capacity: "6", price: 24.5, original_price: 31.0 },
+        { capacity: "8", price: 32.5, original_price: 41.0 },
+        { capacity: "10", price: 40.0, original_price: 50.0 },
+        { capacity: "15", price: 60.0, original_price: 75.0 },
+        { capacity: "20", price: 78.0, original_price: 98.0 },
+      ];
+    }
+    const saleTitle = flashInfo?.title || "LIMITED TIME MTN FLASH SALE";
+    const saleNotice = flashInfo?.notice || "Special mega-discounted MTN non-expiry bundles! Immediate automated delivery.";
+
     let msg = `⚡🔥 *FLASH SALE IS LIVE ON DATA 1 GH!* 🔥⚡\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
-      `Grab discounted *${flashInfo?.title || "MTN Non-Expiry Data Bundles"}* right now before the timer runs out!\n\n`;
-    if (items.length > 0) {
-      msg += items.slice(0, 10).map(p => `🔥 *${p.capacity}GB* — *GH₵ ${Number(p.price).toFixed(2)}*`).join("\n") + `\n\n`;
+      `*${saleTitle}*\n` +
+      (saleNotice ? `📢 ${saleNotice}\n\n` : `\n`) +
+      `Grab mega-discounted *MTN Non-Expiry Bundles* right now before the sale ends!\n\n`;
+
+    msg += items.slice(0, 10).map(p => {
+      const orig = p.original_price ? ` ~(₵${Number(p.original_price).toFixed(2)})~` : "";
+      return `🔥 *${p.capacity}GB* — *GH₵ ${Number(p.price).toFixed(2)}*${orig}`;
+    }).join("\n") + `\n\n`;
+
+    if (flashInfo?.endTime) {
+      try {
+        const endD = new Date(flashInfo.endTime);
+        if (!isNaN(endD.getTime())) {
+          msg += `⏳ *Ends:* ${endD.toLocaleString("en-GB", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" })} (or while stock lasts!)\n\n`;
+        }
+      } catch (_) {}
     }
-    msg += `👉 *Rush to the Store Now:* ${STORE_FRONTEND_URL}\n` +
-      `📍 *Track Orders:* ${TRACK_ORDER_URL}\n` +
-      `🤖 *Or Order on WhatsApp Bot:* https://wa.me/233200598553?text=Hi`;
+
+    msg += `👉 *Order Instantly On Store:* ${STORE_FRONTEND_URL}\n` +
+      `📍 *Track Delivery Live:* ${TRACK_ORDER_URL}\n` +
+      `🤖 *WhatsApp Bot:* https://wa.me/233200598553?text=Hi`;
     return msg;
   }
 
@@ -8048,6 +8079,28 @@ app.post("/webhook", async (req, res) => {
         const target = chatCmdMatch[1]?.trim() || "";
         await executeOwnerDirectAction("resolve_support_chat", { phone: target || null });
         return sendWhatsApp(from, `✅ *SUPPORT CHAT RESOLVED BOSS!*\n\n💬 Marked open customer support conversation${target ? ` for *${target}*` : ""} as resolved!`);
+      }
+
+      // Direct Action Command 8: WhatsApp Channel Broadcast (Flash Sale, Bundles/Prices, Vouchers, Custom)
+      const channelPostMatch =
+        cmdText.match(/(?:post|broadcast|publish|send|drop)\s+(?:the\s+)?(flash\s*sale|flash|prices?|bundles?|rates?|catalog|vouchers?|giveaway)(?:\s+(?:update|promo|alert))?(?:\s+(?:to|in|on)\s+(?:the\s+)?channel)?/i) ||
+        cmdText.match(/(?:post|broadcast|publish|drop)\s+(?:to|in|on)\s+(?:the\s+)?channel(?:\s*:\s*|\s+)([\s\S]+)/i) ||
+        cmdText.match(/^channel\s+(?:post|broadcast|update)(?:\s*:\s*|\s+)?(flash|prices?|vouchers?)?/i) ||
+        cmdText.match(/(?:flash\s*sale|flash)\s+update\s+(?:in|on|to)\s+(?:the\s+)?channel/i);
+
+      if (channelPostMatch) {
+        let topic = "general";
+        let customMsg = "";
+        const m1 = channelPostMatch[1] ? channelPostMatch[1].toLowerCase().trim() : "";
+        if (/flash/i.test(cmdText) || /flash/i.test(m1)) topic = "flash";
+        else if (/price|bundle|rate|catalog/i.test(m1)) topic = "prices";
+        else if (/voucher|giveaway/i.test(m1)) topic = "vouchers";
+        else if (m1 && m1.length > 10) {
+          topic = "custom";
+          customMsg = m1;
+        }
+        const execMsg = await executeOwnerDirectAction("post_to_channel", { topic, message: customMsg, phone: String(from) });
+        return sendWhatsApp(from, `✅ *CHANNEL BROADCAST DISPATCHED BOSS!*\n\n${execMsg}`);
       }
 
       // ── STEP 1: FAST DIRECT IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──

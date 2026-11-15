@@ -2524,6 +2524,53 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
           }
         }
 
+        // I3b. Direct WhatsApp Channel Broadcast (Flash Sale, Bundles/Prices, Vouchers, Custom)
+        const channelPostMatch =
+          cleanCmd.match(/(?:post|broadcast|publish|send|drop)\s+(?:the\s+)?(flash\s*sale|flash|prices?|bundles?|rates?|catalog|vouchers?|giveaway)(?:\s+(?:update|promo|alert))?(?:\s+(?:to|in|on)\s+(?:the\s+)?channel)?/i) ||
+          cleanCmd.match(/(?:post|broadcast|publish|drop)\s+(?:to|in|on)\s+(?:the\s+)?channel(?:\s*:\s*|\s+)([\s\S]+)/i) ||
+          cleanCmd.match(/^channel\s+(?:post|broadcast|update)(?:\s*:\s*|\s+)?(flash|prices?|vouchers?)?/i) ||
+          cleanCmd.match(/(?:flash\s*sale|flash)\s+update\s+(?:in|on|to)\s+(?:the\s+)?channel/i);
+
+        if (channelPostMatch) {
+          let topic = "general";
+          let customMsg = "";
+          const m1 = channelPostMatch[1] ? channelPostMatch[1].toLowerCase().trim() : "";
+          if (/flash/i.test(cleanCmd) || /flash/i.test(m1)) topic = "flash";
+          else if (/price|bundle|rate|catalog/i.test(m1)) topic = "prices";
+          else if (/voucher|giveaway/i.test(m1)) topic = "vouchers";
+          else if (m1 && m1.length > 10) {
+            topic = "custom";
+            customMsg = m1;
+          }
+
+          const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com").replace(/\/+$/, "");
+          let channelResult = "";
+          try {
+            const resp = await fetch(`${botUrl}/api/channel-post`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ topic, text: customMsg, ownerPhone: body.phone || "233547100951" }),
+            });
+            const data: any = await resp.json().catch(() => ({}));
+            if (data?.directPosted) {
+              channelResult = `📢 *Posted Live to WhatsApp Channel (${data.channelUrl})!*`;
+            } else if (data?.pairingCode) {
+              channelResult = `🔐 *1-Time WhatsApp Channel Link Needed!* Enter Pairing Code *${data.pairingCode}* in WhatsApp → Linked Devices.`;
+            } else {
+              channelResult = `📢 *Broadcast dispatched to WhatsApp Channel (${data?.channelUrl || "https://whatsapp.com/channel/0029Vb7vwLN5kg70GeNMsB2w"})!*`;
+            }
+          } catch (err: any) {
+            channelResult = `Broadcast error: ${err?.message}`;
+          }
+
+          return res.status(200).json({
+            ok: true,
+            reply: `📢 *CHANNEL BROADCAST DISPATCHED BOSS!*\n\n${channelResult}`,
+            executed: true,
+            action_type: "post_to_channel",
+          });
+        }
+
         // I4. Flash Sale Toggle (Turn On / Turn Off)
         const enableFlashMatch = cleanCmd.match(/(?:turn\s*on|enable|start|activate)\s+flash\s*sale(?:\s+(?:for\s+)?(\d+)\s*(?:hours?|hrs?))?/i);
         if (enableFlashMatch) {
@@ -2536,12 +2583,30 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
           try { await localDb.from("settings").upsert(updateRows, { onConflict: "key" }); } catch (_) {}
           await admin.from("settings").upsert(updateRows, { onConflict: "key" });
           invalidateSettingsCache();
+
+          // Auto-broadcast Flash Sale update to WhatsApp Channel
+          let channelNote = "";
+          try {
+            const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com").replace(/\/+$/, "");
+            const cResp = await fetch(`${botUrl}/api/channel-post`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ topic: "flash", ownerPhone: body.phone || "233547100951" }),
+            });
+            const cData: any = await cResp.json().catch(() => ({}));
+            if (cData?.directPosted) {
+              channelNote = `\n📢 *Broadcasted Live to Official WhatsApp Channel!*`;
+            } else if (cData?.channelUrl) {
+              channelNote = `\n📢 *Broadcast sent to WhatsApp Channel!*`;
+            }
+          } catch (_) {}
+
           return res.status(200).json({
             ok: true,
             reply: `⚡ *FLASH SALE ACTIVATED BOSS!*\n\n` +
               `🔥 The Flash Sale banner & discounted rates are now *LIVE* on the storefront!\n` +
               `⏳ *Active Until:* *${endStr.replace("T", " ")}* (${hours} hours)\n\n` +
-              `💡 Customers can now purchase MTN Flash bundles directly on the site!`,
+              `💡 Customers can now purchase MTN Flash bundles directly on the site!${channelNote}`,
             executed: true,
             action_type: "toggle_flash_sale",
           });
@@ -2958,7 +3023,37 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
         try {
           data1db.setTableRecords("settings", deduped);
         } catch (_) {}
+
+        // If saving flash sale settings and auto_broadcast_channel was requested
+        if (body?.auto_broadcast_channel || body?.broadcast_channel) {
+          try {
+            const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com").replace(/\/+$/, "");
+            fetch(`${botUrl}/api/channel-post`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ topic: "flash", ownerPhone: "233547100951" }),
+            }).catch(() => {});
+          } catch (_) {}
+        }
+
         return res.status(200).json({ ok: true });
+      }
+
+      if (action === "postToChannel" || action === "broadcastChannel" || action === "broadcastFlashSale") {
+        const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com").replace(/\/+$/, "");
+        const topic = String(body?.topic || (action === "broadcastFlashSale" ? "flash" : "prices")).trim();
+        const text = String(body?.text || body?.message || "").trim();
+        try {
+          const resp = await fetch(`${botUrl}/api/channel-post`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ topic, text, ownerPhone: "233547100951" }),
+          });
+          const data: any = await resp.json().catch(() => ({}));
+          return res.status(200).json({ ok: true, data });
+        } catch (err: any) {
+          return res.status(500).json({ ok: false, error: err.message });
+        }
       }
 
       if (action === "testDatamart") {
