@@ -35,13 +35,24 @@ export interface BoostServiceItem {
   name: string;
   category: string;
   platform: string;
-  rate: number; // in GHS per 1,000
+  rate: number; // in GHS per 1,000 OR flat package price if is_package
+  wholesale_rate?: number;
   min: number;
   max: number;
   type?: string;
+  is_package?: boolean;
   refill?: boolean;
   cancel?: boolean;
   description?: string;
+}
+
+export function isFixedPackage(service?: BoostServiceItem | null): boolean {
+  if (!service) return false;
+  return Boolean(
+    service.is_package ||
+    service.type?.toLowerCase() === "package" ||
+    (service.min === service.max && service.min > 0)
+  );
 }
 
 export type ActionCategory = "followers" | "likes" | "views" | "comments" | "shares" | "other";
@@ -228,13 +239,31 @@ export const SocialBoost = () => {
     );
   }, [platformServices, selectedActionCategory]);
 
+  // Whether currently selected service is a fixed package
+  const isSelectedPackage = useMemo(() => isFixedPackage(selectedService), [selectedService]);
+
   // Live Price calculation
-  const currentRate = selectedService?.rate || 10;
   const totalPrice = useMemo(() => {
-    const q = Number(quantity) || 0;
-    const raw = (q * currentRate) / 1000;
+    if (!selectedService) return 0;
+    if (isSelectedPackage) {
+      // Fixed package rate IS the flat total price
+      return Math.max(1, Math.round(selectedService.rate * 100) / 100);
+    }
+    const q = Number(quantity) || selectedService.min || 0;
+    const raw = (q * selectedService.rate) / 1000;
     return Math.max(1, Math.round(raw * 100) / 100);
-  }, [quantity, currentRate]);
+  }, [selectedService, isSelectedPackage, quantity]);
+
+  // Fixed preset quantities for variable packages
+  const presetQuantities = useMemo(() => {
+    if (!selectedService || isSelectedPackage) return [];
+    const min = selectedService.min || 10;
+    const max = selectedService.max || 100000;
+    const candidates = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000, 50000];
+    const filtered = candidates.filter((c) => c >= min && c <= max);
+    if (!filtered.includes(min)) filtered.unshift(min);
+    return Array.from(new Set(filtered)).slice(0, 6);
+  }, [selectedService, isSelectedPackage]);
 
   // Choose platform handler
   const handleSelectPlatform = (platformId: string) => {
@@ -247,7 +276,7 @@ export const SocialBoost = () => {
   // Choose service package handler
   const handleSelectService = (service: BoostServiceItem) => {
     setSelectedService(service);
-    setQuantity(service.min || 1000);
+    setQuantity(service.min || 100);
     setStep(3);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -308,7 +337,9 @@ export const SocialBoost = () => {
 
     const min = selectedService.min || 100;
     const max = selectedService.max || 50000;
-    if (quantity < min || quantity > max) {
+    const orderQuantity = isSelectedPackage ? min : quantity;
+
+    if (!isSelectedPackage && (orderQuantity < min || orderQuantity > max)) {
       toast.error(`Quantity must be between ${min.toLocaleString()} and ${max.toLocaleString()}`);
       return;
     }
@@ -333,8 +364,8 @@ export const SocialBoost = () => {
           boost_service_name: selectedService.name,
           boost_platform: selectedPlatform,
           boost_link: link.trim(),
-          boost_quantity: quantity,
-          notes: `${selectedService.name} | Qty: ${quantity.toLocaleString()} | Link: ${link.trim()}`,
+          boost_quantity: orderQuantity,
+          notes: `${selectedService.name} | Qty: ${orderQuantity.toLocaleString()} | Link: ${link.trim()}`,
         },
       });
 
@@ -627,6 +658,7 @@ export const SocialBoost = () => {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {filteredServices.map((service) => {
+                  const isPkg = isFixedPackage(service);
                   return (
                     <Card
                       key={service.service}
@@ -634,15 +666,19 @@ export const SocialBoost = () => {
                       className="cursor-pointer p-5 rounded-2xl bg-zinc-900/90 border border-zinc-800 hover:border-fuchsia-500/50 hover:bg-zinc-800/80 transition-all duration-200 group relative flex flex-col justify-between shadow-lg"
                     >
                       <div>
-                        <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-start justify-between gap-2 flex-wrap">
                           <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
                             {service.category}
                           </span>
-                          {service.refill && (
+                          {isPkg ? (
+                            <Badge className="bg-emerald-500/20 text-emerald-300 border-emerald-500/30 text-[10px] font-bold">
+                              Fixed {service.min.toLocaleString()} Pack
+                            </Badge>
+                          ) : service.refill ? (
                             <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-[10px]">
                               30-Day Refill Guarantee
                             </Badge>
-                          )}
+                          ) : null}
                         </div>
 
                         <h4 className="text-base font-bold text-white mt-3 group-hover:text-fuchsia-300 transition-colors leading-snug">
@@ -650,9 +686,17 @@ export const SocialBoost = () => {
                         </h4>
 
                         <div className="mt-3 flex items-center gap-3 text-xs text-zinc-400">
-                          <span>Min: <b>{service.min.toLocaleString()}</b></span>
-                          <span>•</span>
-                          <span>Max: <b>{service.max.toLocaleString()}</b></span>
+                          {isPkg ? (
+                            <span className="text-emerald-400 font-semibold">
+                              Fixed Quantity: <b>{service.min.toLocaleString()}</b> units
+                            </span>
+                          ) : (
+                            <>
+                              <span>Min: <b>{service.min.toLocaleString()}</b></span>
+                              <span>•</span>
+                              <span>Max: <b>{service.max.toLocaleString()}</b></span>
+                            </>
+                          )}
                         </div>
                       </div>
 
@@ -661,7 +705,9 @@ export const SocialBoost = () => {
                           <div className="text-lg font-black text-fuchsia-400">
                             GH₵ {Number(service.rate).toFixed(2)}
                           </div>
-                          <div className="text-[10px] text-zinc-500 font-medium">per 1,000 units</div>
+                          <div className="text-[10px] text-zinc-500 font-medium">
+                            {isPkg ? `Total for ${service.min.toLocaleString()} units` : "per 1,000 units"}
+                          </div>
                         </div>
 
                         <Button
@@ -716,7 +762,11 @@ export const SocialBoost = () => {
                     {selectedService.name}
                   </h3>
                   <p className="text-xs text-zinc-400 mt-0.5">
-                    Rate: <b className="text-zinc-200">GH₵ {Number(selectedService.rate).toFixed(2)}</b> per 1,000 units
+                    {isSelectedPackage ? (
+                      <>Fixed Package: <b className="text-zinc-200">{selectedService.min.toLocaleString()} units</b> for <b className="text-fuchsia-400">GH₵ {totalPrice.toFixed(2)}</b></>
+                    ) : (
+                      <>Rate: <b className="text-zinc-200">GH₵ {Number(selectedService.rate).toFixed(2)}</b> per 1,000 units</>
+                    )}
                     {selectedService.refill && <span className="ml-2 text-emerald-400 font-bold">• 30d Refill</span>}
                   </p>
                 </div>
@@ -771,78 +821,98 @@ export const SocialBoost = () => {
                 </p>
               </div>
 
-              {/* Quantity Input */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="qty" className="text-sm font-bold text-zinc-200">
-                    Quantity Needed
-                  </Label>
-                  <span className="text-xs font-mono text-zinc-400">
-                    Min: <b>{selectedService.min.toLocaleString()}</b> • Max: <b>{selectedService.max.toLocaleString()}</b>
-                  </span>
+              {/* Quantity Input / Fixed Package Display */}
+              {isSelectedPackage ? (
+                <div className="p-4 rounded-xl bg-zinc-800/60 border border-zinc-700/80 flex items-center justify-between gap-4">
+                  <div>
+                    <Label className="text-xs font-bold text-zinc-300">
+                      Package Quantity (Fixed by Provider)
+                    </Label>
+                    <div className="text-2xl font-black text-white mt-1">
+                      {selectedService.min.toLocaleString()} units
+                    </div>
+                    <p className="text-[11px] text-zinc-400 mt-1">
+                      This package delivers exactly {selectedService.min.toLocaleString()} {selectedActionCategory} for a flat total price of GH₵ {totalPrice.toFixed(2)}.
+                    </p>
+                  </div>
+                  <Badge className="bg-emerald-500/20 text-emerald-300 border-emerald-500/30 text-xs px-3 py-1 font-bold shrink-0">
+                    Fixed Pack
+                  </Badge>
                 </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="qty" className="text-sm font-bold text-zinc-200">
+                      Quantity Needed
+                    </Label>
+                    <span className="text-xs font-mono text-zinc-400">
+                      Min: <b>{selectedService.min.toLocaleString()}</b> • Max: <b>{selectedService.max.toLocaleString()}</b>
+                    </span>
+                  </div>
 
-                <div className="flex items-center gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => handleAdjustQuantity(-100)}
-                    className="h-12 w-12 text-lg font-black bg-zinc-800 border-zinc-700 hover:bg-zinc-700 shrink-0 text-white"
-                  >
-                    -
-                  </Button>
-                  <Input
-                    id="qty"
-                    type="number"
-                    min={selectedService.min}
-                    max={selectedService.max}
-                    value={quantity}
-                    onChange={(e) => setQuantity(Number(e.target.value))}
-                    className="bg-black/60 border-zinc-700 h-12 text-center text-xl font-mono font-black text-white focus:border-fuchsia-500"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => handleAdjustQuantity(100)}
-                    className="h-12 w-12 text-lg font-black bg-zinc-800 border-zinc-700 hover:bg-zinc-700 shrink-0 text-white"
-                  >
-                    +
-                  </Button>
-                </div>
+                  {/* Fixed Preset Quantities with Prices */}
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] text-zinc-400 font-semibold">Choose Quantity Package:</div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {presetQuantities.map((preset) => {
+                        const cost = (preset * selectedService.rate) / 1000;
+                        const active = quantity === preset;
+                        return (
+                          <button
+                            key={preset}
+                            type="button"
+                            onClick={() => handleSetExactPreset(preset)}
+                            className={`p-2.5 rounded-xl border text-left transition flex flex-col justify-between ${
+                              active
+                                ? "bg-fuchsia-600/20 border-fuchsia-500 text-white shadow-sm ring-1 ring-fuchsia-500"
+                                : "bg-zinc-800/80 border-zinc-700 text-zinc-300 hover:bg-zinc-700/80 hover:border-zinc-600"
+                            }`}
+                          >
+                            <span className="font-extrabold text-sm text-white">
+                              {preset >= 1000 ? `${(preset / 1000).toLocaleString()}K` : preset.toLocaleString()}
+                            </span>
+                            <span className="text-[11px] text-fuchsia-300 font-bold mt-0.5">
+                              GH₵ {cost.toFixed(2)}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
 
-                {/* Quick Increment Chips */}
-                <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                  <span className="text-[11px] text-zinc-500 mr-1">Quick Select:</span>
-                  {[500, 1000, 2500, 5000, 10000].map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      onClick={() => handleSetExactPreset(preset)}
-                      className={`text-xs px-2.5 py-1 rounded-lg font-semibold transition ${
-                        quantity === preset
-                          ? "bg-fuchsia-600 text-white font-bold"
-                          : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-                      }`}
-                    >
-                      {preset >= 1000 ? `${preset / 1000}K` : preset}
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={() => handleAddPreset(1000)}
-                    className="text-xs px-2.5 py-1 rounded-lg bg-zinc-800/80 text-fuchsia-400 hover:bg-zinc-700 font-bold"
-                  >
-                    +1K
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleAddPreset(5000)}
-                    className="text-xs px-2.5 py-1 rounded-lg bg-zinc-800/80 text-fuchsia-400 hover:bg-zinc-700 font-bold"
-                  >
-                    +5K
-                  </button>
+                  {/* Custom Quantity Stepper */}
+                  <div className="pt-2">
+                    <div className="text-[11px] text-zinc-500 mb-1.5">Or enter custom quantity:</div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => handleAdjustQuantity(-100)}
+                        className="h-11 w-11 text-lg font-black bg-zinc-800 border-zinc-700 hover:bg-zinc-700 shrink-0 text-white"
+                      >
+                        -
+                      </Button>
+                      <Input
+                        id="qty"
+                        type="number"
+                        min={selectedService.min}
+                        max={selectedService.max}
+                        value={quantity}
+                        onChange={(e) => setQuantity(Number(e.target.value))}
+                        className="bg-black/60 border-zinc-700 h-11 text-center text-lg font-mono font-black text-white focus:border-fuchsia-500"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => handleAdjustQuantity(100)}
+                        className="h-11 w-11 text-lg font-black bg-zinc-800 border-zinc-700 hover:bg-zinc-700 shrink-0 text-white"
+                      >
+                        +
+                      </Button>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Customer Contact */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-zinc-800">

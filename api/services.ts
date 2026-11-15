@@ -452,6 +452,9 @@ export async function fetchBoostServices(supabase: any, forceRefresh = false) {
         const mapped = res.data.map((item: any) => {
           const rawRate = Number(item.rate) || 1;
           const userRate = Math.round(rawRate * multiplier * 100) / 100;
+          const min = Number(item.min) || 1;
+          const max = Number(item.max) || 100000;
+          const isPackage = String(item.type || "").toLowerCase() === "package" || (min === max && min > 0);
           return {
             service: item.service,
             name: item.name,
@@ -459,9 +462,10 @@ export async function fetchBoostServices(supabase: any, forceRefresh = false) {
             platform: detectPlatform(item.category || "", item.name || ""),
             rate: userRate,
             wholesale_rate: rawRate,
-            min: Number(item.min) || 50,
-            max: Number(item.max) || 100000,
+            min,
+            max,
             type: item.type || "Default",
+            is_package: isPackage,
             refill: Boolean(item.refill),
             cancel: Boolean(item.cancel),
           };

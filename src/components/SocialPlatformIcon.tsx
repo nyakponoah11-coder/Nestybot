@@ -105,3 +105,4 @@ export const SocialPlatformIcon = ({
 };
 
 export default SocialPlatformIcon;
+
