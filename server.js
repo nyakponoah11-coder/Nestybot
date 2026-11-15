@@ -4048,6 +4048,53 @@ async function executeOwnerDirectAction(type, payload = {}) {
       return "Customer support chat marked as resolved!";
     }
 
+    // 16b. Reply to Customer Support Chat
+    if (cleanType === "reply_support_chat" || cleanType === "send_support_reply" || cleanType === "reply_customer") {
+      const cId = payload.conversation_id || payload.conversationId;
+      const targetPhone = payload.phone || payload.customer_phone;
+      const replyMsg = String(payload.message || payload.text || payload.reply || "").trim();
+
+      if (!replyMsg) {
+        return "Please provide the message text you want to send to the customer.";
+      }
+
+      let activeConv = null;
+      if (cId) {
+        const { data } = await supabase.from("chat_conversations").select("*").eq("id", cId).maybeSingle();
+        activeConv = data;
+      } else if (targetPhone) {
+        const cleanP = String(targetPhone).replace(/\D/g, "");
+        const { data } = await supabase.from("chat_conversations").select("*").or(`customer_phone.ilike.%${cleanP}%,customer_name.ilike.%${targetPhone}%`).order("updated_at", { ascending: false }).limit(1).maybeSingle();
+        activeConv = data;
+      } else {
+        const { data } = await supabase.from("chat_conversations").select("*").eq("status", "open").order("updated_at", { ascending: false }).limit(1).maybeSingle();
+        activeConv = data;
+      }
+
+      if (!activeConv || !activeConv.id) {
+        return "No matching active customer support conversation found to reply to.";
+      }
+
+      const { error: msgErr } = await supabase.from("chat_messages").insert({
+        conversation_id: activeConv.id,
+        sender: "support",
+        message: replyMsg,
+        created_at: new Date().toISOString(),
+      });
+
+      if (msgErr) {
+        return `Failed to post support reply: ${msgErr.message}`;
+      }
+
+      await supabase.from("chat_conversations").update({
+        updated_at: new Date().toISOString(),
+        unread_for_customer: ((activeConv.unread_for_customer || 0) + 1),
+      }).eq("id", activeConv.id);
+
+      const customerLabel = activeConv.customer_name || activeConv.customer_phone || `Chat #${activeConv.id.slice(0, 8)}`;
+      return `Reply sent to *${customerLabel}* in live Support Chat!\n\n💬 *Message:* "${replyMsg}"`;
+    }
+
     // 17. Flash Sale Toggle
     if (cleanType === "toggle_flash_sale") {
       const active = Boolean(payload.active ?? payload.enabled);
@@ -4373,10 +4420,23 @@ async function runAllCornersSystemXRay(autoFix = false) {
     const dmKey = DATA_API_KEY || process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY;
     const dmSec = process.env.DATAMART_API_SECRET || DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET;
     try {
-      const dmRes = await axios.get(`${DATAMART_BASE}/transactions?limit=60`, {
-        headers: { "x-api-key": dmKey, ...(dmSec ? { "x-api-secret": dmSec } : {}) },
-        timeout: 8000,
-      });
+      let dmRes = null;
+      try {
+        dmRes = await axios.get(`${DATAMART_BASE}/transactions?limit=60`, {
+          headers: { "x-api-key": dmKey, "x-api-secret": dmSec },
+          timeout: 8000,
+        });
+      } catch (firstErr) {
+        if (firstErr.response && (firstErr.response.status === 401 || firstErr.response.status === 403)) {
+          // Fallback to verified credentials pair
+          dmRes = await axios.get(`${DATAMART_BASE}/transactions?limit=60`, {
+            headers: { "x-api-key": VERIFIED_DATAMART_KEY, "x-api-secret": VERIFIED_DATAMART_SECRET },
+            timeout: 8000,
+          });
+        } else {
+          throw firstErr;
+        }
+      }
       dmTransactions = dmRes.data?.data?.transactions || dmRes.data?.transactions || dmRes.data?.data || [];
       if (!Array.isArray(dmTransactions)) dmTransactions = [];
     } catch (dmErr) {
@@ -5681,11 +5741,23 @@ async function generateFullAdminReport() {
     let dmPurchases = [];
     if (activeDatamartKey) {
       try {
-        const dmRes = await axios.get(`${DATAMART_BASE}/transactions?page=1&limit=100`, {
-          headers: { "x-api-key": activeDatamartKey },
-          timeout: 4000
-        });
-        const rows = dmRes.data?.data?.transactions || dmRes.data?.transactions || [];
+        let dmRes = null;
+        try {
+          dmRes = await axios.get(`${DATAMART_BASE}/transactions?page=1&limit=100`, {
+            headers: { "x-api-key": activeDatamartKey, "x-api-secret": activeDatamartSecret },
+            timeout: 6000
+          });
+        } catch (fErr) {
+          if (fErr.response && (fErr.response.status === 401 || fErr.response.status === 403)) {
+            dmRes = await axios.get(`${DATAMART_BASE}/transactions?page=1&limit=100`, {
+              headers: { "x-api-key": VERIFIED_DATAMART_KEY, "x-api-secret": VERIFIED_DATAMART_SECRET },
+              timeout: 6000
+            });
+          } else {
+            throw fErr;
+          }
+        }
+        const rows = dmRes?.data?.data?.transactions || dmRes?.data?.transactions || [];
         dmPurchases = rows.filter(t => t?.type === "purchase" || t?.relatedPurchase);
       } catch { }
     }
@@ -8260,6 +8332,42 @@ app.post("/webhook", async (req, res) => {
         const target = chatCmdMatch[1]?.trim() || "";
         await executeOwnerDirectAction("resolve_support_chat", { phone: target || null });
         return sendWhatsApp(from, `✅ *SUPPORT CHAT RESOLVED BOSS!*\n\n💬 Marked open customer support conversation${target ? ` for *${target}*` : ""} as resolved!`);
+      }
+
+      // Direct Action Command 7b: Reply to customer support chat
+      const replyChatMatch =
+        cmdText.match(/(?:reply|respond|answer)\s+(?:to\s+)?(?:support\s+)?(?:chat|customer|user|ticket)(?:\s+(?:with|for|to)\s+([A-Za-z0-9_-]+))?(?:\s*:\s*|\s+)([\s\S]+)/i) ||
+        cmdText.match(/^support\s+reply(?:\s+(?:to|for)\s+([A-Za-z0-9_-]+))?(?:\s*:\s*|\s+)([\s\S]+)/i);
+
+      if (replyChatMatch) {
+        const target = replyChatMatch[1]?.trim() || null;
+        const msgText = (replyChatMatch[2] || replyChatMatch[1])?.trim();
+        const execMsg = await executeOwnerDirectAction("reply_support_chat", { phone: target, message: msgText });
+        return sendWhatsApp(from, `✅ *SUPPORT CHAT REPLY DISPATCHED!*\n\n${execMsg}`);
+      }
+
+      // Direct Action Command 7c: Set DataMart login credentials
+      const dmLoginMatch = cmdText.match(/(?:set|save)\s+datamart\s+(?:login|credentials?|account)\s+(\S+@\S+)\s+(\S+)/i);
+      if (dmLoginMatch) {
+        const email = dmLoginMatch[1].trim();
+        const password = dmLoginMatch[2].trim();
+        await supabase.from("settings").upsert([
+          { key: "datamart_login_email", value: email },
+          { key: "datamart_login_password", value: password }
+        ], { onConflict: "key" });
+
+        // Attempt instant login to fetch token
+        let tokenMsg = "";
+        try {
+          const lRes = await axios.post("https://api.datamartgh.shop/api/v1/login", { email, password }, { timeout: 10000 });
+          if (lRes.data?.token) {
+            await supabase.from("settings").upsert({ key: "datamart_auth_token", value: lRes.data.token }, { onConflict: "key" });
+            tokenMsg = "\n🔑 *DataMart Token:* Connected & active for automated 1-click MoMo cashout topup!";
+          }
+        } catch (_) {
+          tokenMsg = "\n⚠️ Could not authenticate with DataMart API yet. Please verify email/password.";
+        }
+        return sendWhatsApp(from, `✅ *DATAMART CREDENTIALS SAVED BOSS!*\n\n📧 *Email:* ${email}${tokenMsg}`);
       }
 
       // Direct Action Command 8: WhatsApp Channel Broadcast (Flash Sale, Bundles/Prices, Vouchers, Custom)
