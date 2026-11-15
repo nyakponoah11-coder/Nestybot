@@ -8103,6 +8103,49 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, `✅ *CHANNEL BROADCAST DISPATCHED BOSS!*\n\n${execMsg}`);
       }
 
+      // Direct Action Command 9: Universal Agent Boost Margin (Apply to All Agents)
+      const allAgentsBoostMatch =
+        cmdText.match(/(?:set|apply|update|change)\s+(?:all\s+agents?|resellers?)\s+(?:boost\s+)?(?:profit|markup|margin)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|apply|update|change)\s+(?:agent\s+)?(?:boost\s+)?(?:profit|markup|margin)\s+(?:for\s+all|to\s+all)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|apply|update|change)\s+(?:all\s+agents?|resellers?)\s+(?:to\s+)?(\d+(?:\.\d+)?)\s*%\s*(?:boost\s+)?(?:profit|markup|margin)/i);
+
+      if (allAgentsBoostMatch) {
+        const pct = Math.max(0, Math.min(500, parseFloat(allAgentsBoostMatch[1])));
+        const { data: ags } = await supabase.from("agents").select("id, store_slug, custom_prices");
+        let count = 0;
+        if (Array.isArray(ags)) {
+          const settingsRows = [];
+          for (const ag of ags) {
+            const updated = { ...(ag.custom_prices || {}), boost_markup_percent: pct };
+            await supabase.from("agents").update({ custom_prices: updated }).eq("id", ag.id);
+            settingsRows.push({
+              key: `agent_pricing_${ag.id}`,
+              value: JSON.stringify(updated),
+            });
+            if (ag.store_slug) {
+              settingsRows.push({
+                key: `agent_pricing_${String(ag.store_slug).toLowerCase().trim()}`,
+                value: JSON.stringify(updated),
+              });
+            }
+            count++;
+          }
+          if (settingsRows.length > 0) {
+            try { await supabase.from("settings").upsert(settingsRows, { onConflict: "key" }); } catch (_) {}
+          }
+        }
+        await supabase.from("settings").upsert([
+          { key: "default_agent_boost_markup_percent", value: String(pct) },
+          { key: "agent_boost_default_markup_percent", value: String(pct) },
+        ], { onConflict: "key" });
+
+        return sendWhatsApp(from,
+          `✅ *ALL AGENTS UPDATED BOSS!*\n\n` +
+          `🚀 Social Media Boost profit margin set to *+${pct}%* across all *${count}* registered resellers!\n\n` +
+          `Every reseller storefront will now sell boost services with a +${pct}% margin.`
+        );
+      }
+
       // ── STEP 1: FAST DIRECT IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──
       let aiReply = "";
       try {

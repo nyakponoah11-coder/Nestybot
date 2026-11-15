@@ -2626,6 +2626,50 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
           });
         }
 
+        // I5. Universal Agent Boost Margin (Apply to All Agents)
+        const allAgentsBoostMatch = cleanCmd.match(/(?:set|apply|update|change)\s+(?:all\s+agents?|resellers?)\s+(?:boost\s+)?(?:profit|markup|margin)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+          cleanCmd.match(/(?:set|apply|update|change)\s+(?:agent\s+)?(?:boost\s+)?(?:profit|markup|margin)\s+(?:for\s+all|to\s+all)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+          cleanCmd.match(/(?:set|apply|update|change)\s+(?:all\s+agents?|resellers?)\s+(?:to\s+)?(\d+(?:\.\d+)?)\s*%\s*(?:boost\s+)?(?:profit|markup|margin)/i);
+
+        if (allAgentsBoostMatch) {
+          const pct = Math.max(0, Math.min(500, parseFloat(allAgentsBoostMatch[1])));
+          const { data: ags } = await admin.from("agents").select("id, store_slug, custom_prices");
+          let count = 0;
+          if (Array.isArray(ags)) {
+            const settingsRows: Array<{ key: string; value: string }> = [];
+            for (const ag of ags) {
+              const updated = { ...(ag.custom_prices || {}), boost_markup_percent: pct };
+              await admin.from("agents").update({ custom_prices: updated }).eq("id", ag.id);
+              settingsRows.push({
+                key: `agent_pricing_${ag.id}`,
+                value: JSON.stringify(updated),
+              });
+              if (ag.store_slug) {
+                settingsRows.push({
+                  key: `agent_pricing_${String(ag.store_slug).toLowerCase().trim()}`,
+                  value: JSON.stringify(updated),
+                });
+              }
+              count++;
+            }
+            if (settingsRows.length > 0) {
+              try { await admin.from("settings").upsert(settingsRows, { onConflict: "key" }); } catch (_) {}
+            }
+          }
+          await admin.from("settings").upsert([
+            { key: "default_agent_boost_markup_percent", value: String(pct) },
+            { key: "agent_boost_default_markup_percent", value: String(pct) },
+          ], { onConflict: "key" });
+          invalidateSettingsCache();
+
+          return res.status(200).json({
+            ok: true,
+            reply: `✅ *DONE BOSSU! ALL AGENTS UPDATED!*\n\n🚀 Social Boost profit margin has been set to *+${pct}%* across all *${count}* active resellers!\n\nEvery agent storefront now automatically prices social media boost services at +${pct}% margin.`,
+            executed: true,
+            action_type: "set_all_agents_boost_markup",
+          });
+        }
+
         // J. Site Theme Color
         const themeMatch = cleanCmd.match(/(?:change|set|update)\s+(?:the\s+)?(?:site\s+|store\s+|theme\s+)?color\s+(?:to\s+)?([a-zA-Z_-]+)/i) ||
           cleanCmd.match(/(?:switch\s+to|set|enable)\s+(dark\s*mode|light\s*mode)/i);

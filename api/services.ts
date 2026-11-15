@@ -1713,7 +1713,18 @@ export default async function handler(req: any, res: any) {
         const agentId = String(req.query?.agent_id || body?.agent_id || "").trim();
 
         if (agentSlug || agentId) {
-          let agentMarkup = 25; // Default 25% agent profit
+          let agentMarkup = 25; // Fallback
+          try {
+            const { data: defRow } = await supabase
+              .from("settings")
+              .select("value")
+              .in("key", ["default_agent_boost_markup_percent", "agent_boost_default_markup_percent"])
+              .maybeSingle();
+            if (defRow?.value && Number.isFinite(Number(defRow.value))) {
+              agentMarkup = Number(defRow.value);
+            }
+          } catch (_) {}
+
           try {
             let q = supabase.from("agents").select("id, store_slug, custom_prices");
             if (agentId) {
@@ -2203,6 +2214,8 @@ export default async function handler(req: any, res: any) {
           const afa = Number(body.afa_price);
           const mashup = Number(body.mashup_price);
           const boostMarkup = Number(body.boost_markup_percent);
+          const defaultAgentBoostMarkup = Number(body.default_agent_boost_markup_percent);
+          const applyToAll = body.apply_to_all_agents === true || body.apply_to_all === true;
           const boostKey = body.boostupgh_api_key !== undefined ? cleanApiKey(body.boostupgh_api_key) : undefined;
 
           const upserts: { key: string; value: string }[] = [];
@@ -2219,6 +2232,10 @@ export default async function handler(req: any, res: any) {
           if (Number.isFinite(boostMarkup) && boostMarkup >= 0) {
             upserts.push({ key: "boost_markup_percent", value: String(boostMarkup) });
           }
+          if (Number.isFinite(defaultAgentBoostMarkup) && defaultAgentBoostMarkup >= 0) {
+            upserts.push({ key: "default_agent_boost_markup_percent", value: String(defaultAgentBoostMarkup) });
+            upserts.push({ key: "agent_boost_default_markup_percent", value: String(defaultAgentBoostMarkup) });
+          }
           if (boostKey !== undefined) {
             upserts.push({ key: "boostupgh_api_key", value: boostKey });
           }
@@ -2231,6 +2248,40 @@ export default async function handler(req: any, res: any) {
           if (upErr) {
             console.error("Failed to upsert service prices to settings:", upErr);
             return res.status(500).json({ error: upErr.message || "Database failed to save prices" });
+          }
+
+          // If requested, batch apply this boost profit percentage to all existing agent records
+          let batchAgentCount = 0;
+          if (applyToAll && Number.isFinite(defaultAgentBoostMarkup) && defaultAgentBoostMarkup >= 0) {
+            try {
+              const { data: allAgents } = await supabase.from("agents").select("id, store_slug, custom_prices");
+              if (Array.isArray(allAgents)) {
+                const settingsRecords: Array<{ key: string; value: string }> = [];
+                for (const ag of allAgents) {
+                  const updatedCustom = {
+                    ...(ag.custom_prices || {}),
+                    boost_markup_percent: defaultAgentBoostMarkup,
+                  };
+                  await supabase.from("agents").update({ custom_prices: updatedCustom }).eq("id", ag.id);
+                  settingsRecords.push({
+                    key: `agent_pricing_${ag.id}`,
+                    value: JSON.stringify(updatedCustom),
+                  });
+                  if (ag.store_slug) {
+                    settingsRecords.push({
+                      key: `agent_pricing_${String(ag.store_slug).toLowerCase().trim()}`,
+                      value: JSON.stringify(updatedCustom),
+                    });
+                  }
+                  batchAgentCount++;
+                }
+                if (settingsRecords.length > 0) {
+                  await supabase.from("settings").upsert(settingsRecords, { onConflict: "key" });
+                }
+              }
+            } catch (batchErr: any) {
+              console.warn("Failed batch applying boost markup to all agents:", batchErr?.message);
+            }
           }
 
           // Bust shop-data in-memory settings cache so storefront displays new prices immediately
@@ -2278,7 +2329,7 @@ export default async function handler(req: any, res: any) {
         // Default: Return overview data (lean, zero redundant queries)
         const [servicesRes, settingsRes, boostCreds] = await Promise.all([
           supabase.from("service_orders").select("*").order("created_at", { ascending: false }).limit(80),
-          supabase.from("settings").select("key,value").in("key", ["promo_enabled", "netflix_price", "afa_price", "mashup_price", "spin_game_enabled", "boost_markup_percent", "boostupgh_api_key"]),
+          supabase.from("settings").select("key,value").in("key", ["promo_enabled", "netflix_price", "afa_price", "mashup_price", "spin_game_enabled", "boost_markup_percent", "default_agent_boost_markup_percent", "boostupgh_api_key"]),
           resolveBoostUpGhCredentials(supabase),
         ]);
 
@@ -2296,6 +2347,7 @@ export default async function handler(req: any, res: any) {
           afa_price: Number(smap.afa_price) > 0 ? Number(smap.afa_price) : 20,
           mashup_price: Number(smap.mashup_price) > 0 ? Number(smap.mashup_price) : 25,
           boost_markup_percent: Number(smap.boost_markup_percent) >= 0 ? Number(smap.boost_markup_percent) : 40,
+          default_agent_boost_markup_percent: Number(smap.default_agent_boost_markup_percent) >= 0 ? Number(smap.default_agent_boost_markup_percent) : 25,
           boostupgh_api_key_configured: Boolean(boostCreds.apiKey),
           boostupgh_api_key: smap.boostupgh_api_key || "",
         });

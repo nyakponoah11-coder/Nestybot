@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { invokeApiFunction } from "@/integrations/supabase/client";
+import { invokeApiFunction, supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -141,6 +141,67 @@ export const AdminAgents: React.FC = () => {
       toast.error(err?.message || "Failed to save margin.");
     } finally {
       setSavingAgentBoost(false);
+    }
+  };
+
+  // Universal Batch Boost Margin Control (One place to set for all agents)
+  const [globalBoostMarkupInput, setGlobalBoostMarkupInput] = useState("25");
+  const [applyingGlobalBoost, setApplyingGlobalBoost] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from("settings")
+          .select("value")
+          .in("key", ["default_agent_boost_markup_percent", "agent_boost_default_markup_percent"])
+          .maybeSingle();
+        if (data?.value && Number.isFinite(Number(data.value))) {
+          setGlobalBoostMarkupInput(String(data.value));
+        }
+      } catch (_) {}
+    })();
+  }, []);
+
+  const handleApplyBoostMarginToAll = async () => {
+    const num = Number(globalBoostMarkupInput);
+    if (isNaN(num) || num < 0 || num > 500) {
+      toast.error("Please enter a valid percentage between 0% and 500%.");
+      return;
+    }
+
+    if (!confirm(`Are you sure you want to set +${num}% Social Boost profit margin for ALL ${agents.length} resellers?`)) {
+      return;
+    }
+
+    setApplyingGlobalBoost(true);
+    try {
+      const res = await invokeApiFunction("agent", {
+        body: {
+          action: "setAllAgentsBoostMarkup",
+          boost_markup_percent: num,
+        },
+      });
+
+      if (res?.data?.ok) {
+        toast.success(`🎉 Applied +${num}% Social Boost margin to all ${res?.data?.updated_count || agents.length} agents!`);
+        setAgents((prev) =>
+          prev.map((ag) => ({
+            ...ag,
+            custom_prices: {
+              ...(ag.custom_prices || {}),
+              boost_markup_percent: num,
+            },
+          }))
+        );
+        loadAgents(true);
+      } else {
+        toast.error(res?.data?.error || "Failed to apply margin to all agents.");
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to apply margin to all agents.");
+    } finally {
+      setApplyingGlobalBoost(false);
     }
   };
 
@@ -1398,6 +1459,83 @@ export const AdminAgents: React.FC = () => {
                       {agents.length}
                     </span>
                   </div>
+                </div>
+              </Card>
+
+              {/* ONE PLACE TO SET PERCENTAGE FOR ALL AGENTS */}
+              <Card className="p-5 md:p-6 rounded-3xl border-2 border-fuchsia-500/50 bg-gradient-to-br from-fuchsia-950/40 via-card to-violet-950/25 shadow-lg shadow-fuchsia-950/25 space-y-4">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-fuchsia-500/25 text-fuchsia-300 border border-fuchsia-500/40 inline-flex items-center gap-1">
+                        <Sparkles className="size-3" /> One-Click Batch Control
+                      </span>
+                      <span className="text-xs text-muted-foreground font-medium">Applies to all {agents.length} resellers</span>
+                    </div>
+                    <h4 className="text-base md:text-lg font-bold text-foreground flex items-center gap-2">
+                      <Rocket className="size-5 text-fuchsia-400" />
+                      Set Social Boost Profit Margin % for ALL Agents
+                    </h4>
+                    <p className="text-xs text-muted-foreground leading-relaxed max-w-2xl">
+                      Type your desired profit margin percentage and click <strong>Apply to All Agents</strong>. This instantly updates every reseller storefront in real-time and becomes the default for future signups.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 shrink-0">
+                    <div className="relative w-full sm:w-32">
+                      <Input
+                        type="number"
+                        min="0"
+                        max="500"
+                        step="1"
+                        value={globalBoostMarkupInput}
+                        onChange={(e) => setGlobalBoostMarkupInput(e.target.value)}
+                        placeholder="25"
+                        className="h-12 pr-8 font-mono text-lg font-black text-center border-fuchsia-500/50 focus:border-fuchsia-400 bg-background/80"
+                      />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 font-mono font-black text-fuchsia-400 text-sm pointer-events-none">
+                        %
+                      </span>
+                    </div>
+
+                    <Button
+                      type="button"
+                      onClick={handleApplyBoostMarginToAll}
+                      disabled={applyingGlobalBoost || !globalBoostMarkupInput}
+                      className="h-12 px-6 rounded-xl font-bold bg-gradient-to-r from-fuchsia-600 via-pink-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500 text-white shadow-lg shadow-fuchsia-600/30 gap-2 shrink-0"
+                    >
+                      {applyingGlobalBoost ? (
+                        <>
+                          <Loader2 className="size-4 animate-spin" />
+                          <span>Applying to All Resellers...</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="size-4" />
+                          <span>Apply to All ({agents.length}) Agents ⚡</span>
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Quick Preset Pills */}
+                <div className="flex items-center gap-2 pt-3 border-t border-border/40 flex-wrap text-xs">
+                  <span className="text-muted-foreground font-semibold text-[11px]">Quick Presets:</span>
+                  {[10, 15, 20, 25, 30, 35, 40, 50].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setGlobalBoostMarkupInput(String(preset))}
+                      className={`px-3 py-1 rounded-xl text-xs font-mono font-bold border transition-all ${
+                        Number(globalBoostMarkupInput) === preset
+                          ? "bg-fuchsia-500 text-white border-fuchsia-400 shadow-sm shadow-fuchsia-500/40 scale-105"
+                          : "bg-muted/40 hover:bg-muted text-muted-foreground border-border hover:text-foreground"
+                      }`}
+                    >
+                      +{preset}%
+                    </button>
+                  ))}
                 </div>
               </Card>
 

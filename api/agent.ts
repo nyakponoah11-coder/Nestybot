@@ -2159,6 +2159,7 @@ export default async function handler(req: any, res: any) {
     "testWithdrawalAlert",
     "testAgentRegistrationAlert",
     "adminUpdateAgentCredentials",
+    "setAllAgentsBoostMarkup",
   ]);
 
   if (ADMIN_ONLY_ACTIONS.has(String(action || ""))) {
@@ -2928,6 +2929,79 @@ Glad to have you!`;
       } catch (_) { }
 
       return res.status(200).json({ ok: true, message: "Your custom pricing has been saved!", custom_prices: expandedPrices });
+    }
+
+    // -------------------------------------------------------------
+    // 6b. APPLY BOOST PROFIT MARGIN TO ALL AGENTS (ONE PLACE TO SET FOR ALL)
+    // -------------------------------------------------------------
+    if (action === "setAllAgentsBoostMarkup") {
+      const auth = await verifyAdminUser(req, supabase);
+      if (!auth.authorized) {
+        return res.status(401).json({ ok: false, error: auth.error || "Unauthorized: Administrator privileges required." });
+      }
+
+      const rawPct = Number(body?.boost_markup_percent);
+      if (isNaN(rawPct) || rawPct < 0 || rawPct > 500) {
+        return res.status(400).json({ ok: false, error: "Please enter a valid percentage between 0% and 500%." });
+      }
+      const pct = Math.round(rawPct * 10) / 10;
+
+      // 1. Save master default in settings table for new signups and global fallback
+      try {
+        await supabase.from("settings").upsert([
+          { key: "default_agent_boost_markup_percent", value: String(pct) },
+          { key: "agent_boost_default_markup_percent", value: String(pct) },
+        ], { onConflict: "key" });
+      } catch (err: any) {
+        console.warn("Failed saving default_agent_boost_markup_percent in settings:", err?.message);
+      }
+
+      // 2. Load all agents and update custom_prices.boost_markup_percent on each agent
+      let agents = await loadAgents(supabase, true);
+      let updatedCount = 0;
+
+      const recordsToUpsert: Array<{ key: string; value: string }> = [];
+
+      for (const ag of agents) {
+        if (!ag || !ag.id) continue;
+        const currentCustom = ag.custom_prices && typeof ag.custom_prices === "object" ? ag.custom_prices : {};
+        ag.custom_prices = {
+          ...currentCustom,
+          boost_markup_percent: pct,
+        };
+        updatedCount++;
+
+        recordsToUpsert.push({
+          key: `agent_pricing_${ag.id}`,
+          value: JSON.stringify(ag.custom_prices),
+        });
+        if (ag.store_slug) {
+          recordsToUpsert.push({
+            key: `agent_pricing_${String(ag.store_slug).toLowerCase().trim()}`,
+            value: JSON.stringify(ag.custom_prices),
+          });
+        }
+      }
+
+      // Batch save agents
+      await saveAgents(supabase, agents);
+
+      // Batch save dedicated settings keys
+      if (recordsToUpsert.length > 0) {
+        try {
+          await supabase.from("settings").upsert(recordsToUpsert, { onConflict: "key" });
+        } catch (_) {}
+      }
+
+      // Invalidate in-memory cache
+      memoryAgentsLoadedAt = 0;
+
+      return res.status(200).json({
+        ok: true,
+        message: `Successfully updated Social Boost profit margin to +${pct}% across all ${updatedCount} agents!`,
+        boost_markup_percent: pct,
+        updated_count: updatedCount,
+      });
     }
 
     // -------------------------------------------------------------

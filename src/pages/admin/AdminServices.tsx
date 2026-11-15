@@ -89,6 +89,8 @@ const AdminServices = () => {
   const [afaPrice, setAfaPrice] = useState("20");
   const [mashupPrice, setMashupPrice] = useState("25");
   const [boostMarkupPercent, setBoostMarkupPercent] = useState("20");
+  const [agentBoostDefaultPercent, setAgentBoostDefaultPercent] = useState("25");
+  const [applyingBoostToAll, setApplyingBoostToAll] = useState(false);
   const [boostUpApiKey, setBoostUpApiKey] = useState("");
   const [boostUpBalance, setBoostUpBalance] = useState<string | null>(null);
   const [loadingBoostBalance, setLoadingBoostBalance] = useState(false);
@@ -198,6 +200,7 @@ const AdminServices = () => {
         if (data?.afa_price) { curAfa = String(data.afa_price); setAfaPrice(curAfa); }
         if (data?.mashup_price) { curMashup = String(data.mashup_price); setMashupPrice(curMashup); }
         if (data?.boost_markup_percent) { setBoostMarkupPercent(String(data.boost_markup_percent)); }
+        if (data?.default_agent_boost_markup_percent !== undefined) { setAgentBoostDefaultPercent(String(data.default_agent_boost_markup_percent)); }
         if (data?.boostupgh_api_key) { setBoostUpApiKey(String(data.boostupgh_api_key)); }
         if (data?.boost_balance) { setBoostUpBalance(`${data.boost_balance} GHS`); }
         setCache("admin_services_cache", { orders: freshOrders, netflixPrice: curNf, afaPrice: curAfa, mashupPrice: curMashup }, 60 * 1000);
@@ -488,6 +491,7 @@ const AdminServices = () => {
         body: {
           action: "saveBoostSettings",
           boost_markup_percent: Number(boostMarkupPercent) || 20,
+          default_agent_boost_markup_percent: Number(agentBoostDefaultPercent) || 25,
           boostupgh_api_key: boostUpApiKey.trim() || undefined,
         },
       });
@@ -503,6 +507,35 @@ const AdminServices = () => {
       toast.error(e?.message || "Failed to save settings");
     } finally {
       setSavingBoostSettings(false);
+    }
+  };
+
+  const handleApplyBoostToAllAgentsNow = async () => {
+    const num = Number(agentBoostDefaultPercent);
+    if (isNaN(num) || num < 0 || num > 500) {
+      toast.error("Please enter a valid percentage (0-500%)");
+      return;
+    }
+    if (!confirm(`Are you sure you want to set +${num}% Social Boost margin on ALL reseller stores?`)) {
+      return;
+    }
+    setApplyingBoostToAll(true);
+    try {
+      const res = await invokeApiFunction("agent", {
+        body: {
+          action: "setAllAgentsBoostMarkup",
+          boost_markup_percent: num,
+        },
+      });
+      if (res?.data?.ok) {
+        toast.success(`🎉 Applied +${num}% Social Boost margin to all ${res?.data?.updated_count || ""} resellers!`);
+      } else {
+        toast.error(res?.data?.error || "Failed to update all agents.");
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to apply margin.");
+    } finally {
+      setApplyingBoostToAll(false);
     }
   };
 
@@ -2024,7 +2057,7 @@ Call this to verify if Netflix is currently in stock for your API key.
                 </div>
 
                 <div>
-                  <Label htmlFor="bmarkup">Profit Markup Percentage (%)</Label>
+                  <Label htmlFor="bmarkup">Admin Wholesale Markup Percentage (%)</Label>
                   <div className="mt-1">
                     <Input
                       id="bmarkup"
@@ -2040,6 +2073,51 @@ Call this to verify if Netflix is currently in stock for your API key.
                   <p className="text-[11px] text-muted-foreground mt-1">
                     Markup added on top of wholesale provider prices (e.g. 20% markup on a GH₵ 10 service charges customer GH₵ 12).
                   </p>
+                </div>
+
+                <div className="pt-4 border-t border-border/50 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label htmlFor="agent-boost-markup" className="font-bold flex items-center gap-1.5 text-fuchsia-400">
+                        <Rocket className="size-4" /> Default Agent Profit Margin % (Reseller Stores)
+                      </Label>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        Set the profit margin percentage for all agent storefronts in one place.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                    <div className="relative w-full sm:w-36">
+                      <Input
+                        id="agent-boost-markup"
+                        type="number"
+                        min="0"
+                        max="500"
+                        placeholder="25"
+                        value={agentBoostDefaultPercent}
+                        onChange={(e) => setAgentBoostDefaultPercent(e.target.value)}
+                        className="font-mono text-base font-bold pr-8 text-center border-fuchsia-500/40"
+                      />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 font-mono font-bold text-fuchsia-400 text-sm pointer-events-none">
+                        %
+                      </span>
+                    </div>
+
+                    <Button
+                      type="button"
+                      onClick={handleApplyBoostToAllAgentsNow}
+                      disabled={applyingBoostToAll}
+                      className="bg-gradient-to-r from-fuchsia-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500 text-white font-bold text-xs h-10 px-4 shadow-md shadow-fuchsia-600/30 gap-2 shrink-0"
+                    >
+                      {applyingBoostToAll ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <CheckCircle2 className="size-3.5" />
+                      )}
+                      <span>Apply to ALL Agents Now ⚡</span>
+                    </Button>
+                  </div>
                 </div>
               </div>
 
