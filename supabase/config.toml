@@ -1,0 +1,19 @@
+project_id = "zdlxcsmekhezpfqvqryu"
+
+[functions.shop-data]
+verify_jwt = false
+
+[functions.chat]
+verify_jwt = false
+
+[functions.checker-products]
+verify_jwt = false
+
+[functions.checker-init]
+verify_jwt = false
+
+[functions.checker-verify]
+verify_jwt = false
+
+[functions.delivery-tracker]
+verify_jwt = false
