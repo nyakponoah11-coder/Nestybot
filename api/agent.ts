@@ -1274,7 +1274,21 @@ export function resolveOrderBasePrice(ord: any, basePrices: Record<string, numbe
   const pkg = String(ord.package_size || ord.bundle || ord.capacity || "").toLowerCase();
   const serviceKey = String(ord.service || "").toLowerCase();
 
-  // 1b. Check if order is a Service (Netflix, AFA, Mashup) or Result Checker
+  // 1b. Check if order is a Service (Netflix, AFA, Mashup), Boost, or Result Checker
+  if (ref.startsWith("SB") || netRaw === "BOOST" || pkg.includes("boost") || serviceKey === "boost") {
+    const taggedBase = parseNoteTag(ord.notes, "base_price");
+    if (taggedBase && Number(taggedBase) > 0) {
+      return Number(taggedBase);
+    }
+    const taggedProfit = parseNoteTag(ord.notes, "agent_profit");
+    if (taggedProfit && Number(taggedProfit) >= 0) {
+      const amt = Number(ord.amount || ord.selling_price || 0);
+      return Math.max(0, Number((amt - Number(taggedProfit)).toFixed(2)));
+    }
+    // Default fallback: assume 20% margin if untagged
+    const amt = Number(ord.amount || ord.selling_price || 0);
+    return Math.max(0.5, Number((amt * 0.8).toFixed(2)));
+  }
   if (ref.startsWith("NF") || netRaw === "NETFLIX" || pkg.includes("netflix") || serviceKey === "netflix") {
     return Number(basePrices["service-netflix"] ?? 25.00);
   }
@@ -1633,7 +1647,9 @@ export async function loadAgentOrders(supabase: any, agentId?: string, providedB
               ? "AFA Registration"
               : sOrd.service === "mashup"
                 ? (sOrd.notes?.replace(/\[agent:[^\]]+\]\s*/, "") || "MTN Mashup")
-                : `${sOrd.service || "Service"}`;
+                : sOrd.service === "boost"
+                  ? (parseNoteTag(sOrd.notes, "boost_service_name") || "Social Media Boost")
+                  : `${sOrd.service || "Service"}`;
 
         const codeMatch = sOrd.notes?.match(/\[netflix_code:([^\]]+)\]/) || sOrd.notes?.match(/\[code:([^\]]+)\]/);
         const codeAtMatch = sOrd.notes?.match(/\[netflix_code_at:([^\]]+)\]/);
@@ -1643,7 +1659,7 @@ export async function loadAgentOrders(supabase: any, agentId?: string, providedB
           id: sOrd.id,
           agent_id: foundAgentId,
           reference: sOrd.reference || sOrd.id,
-          network: sOrd.service === "netflix" ? "NETFLIX" : "SERVICE",
+          network: sOrd.service === "netflix" ? "NETFLIX" : sOrd.service === "boost" ? "BOOST" : "SERVICE",
           package_size: serviceName,
           phone: sOrd.customer_phone || "",
           amount: sellingPrice,
@@ -2820,6 +2836,12 @@ Glad to have you!`;
 
       for (const [rawKey, rawVal] of Object.entries(customPrices)) {
         const numVal = Number(rawVal);
+        if (rawKey === "boost_markup_percent") {
+          if (!isNaN(numVal) && numVal >= 0) {
+            expandedPrices["boost_markup_percent"] = Math.round(numVal * 10) / 10;
+          }
+          continue;
+        }
         if (isNaN(numVal) || numVal <= 0) continue;
         const val = Number(numVal.toFixed(2));
         expandedPrices[rawKey] = val;

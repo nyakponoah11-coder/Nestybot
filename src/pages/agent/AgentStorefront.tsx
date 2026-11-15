@@ -56,10 +56,13 @@ import {
   Users,
   Headphones,
   MessageSquare,
+  Rocket,
 } from "lucide-react";
 import { formatGHS, NETWORK_LABEL, networkClass, type ProductItem } from "@/lib/networks";
 import { formatWhatsAppBotUrl } from "@/lib/whatsapp";
 import { toast } from "sonner";
+import { SocialBoostDialog } from "@/components/SocialBoostDialog";
+import { SocialPlatformIcon } from "@/components/SocialPlatformIcon";
 
 export interface StorefrontThemeConfig {
   containerBg: string;
@@ -303,7 +306,9 @@ export const AgentStorefront: React.FC = () => {
   };
 
   const [products, setProducts] = useState<ProductItem[]>([]);
-  const [mainCategory, setMainCategory] = useState<"data" | "services" | "checkers">("data");
+  const [mainCategory, setMainCategory] = useState<"data" | "boost" | "services" | "checkers">("data");
+  const [boostDialogOpen, setBoostDialogOpen] = useState(false);
+  const [selectedBoostPlatform, setSelectedBoostPlatform] = useState("tiktok");
   const [selectedNetwork, setSelectedNetwork] = useState<string>("MTN");
   const [selectedProduct, setSelectedProduct] = useState<ProductItem | null>(null);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
@@ -336,25 +341,25 @@ export const AgentStorefront: React.FC = () => {
     try {
       const local = localStorage.getItem("data1gh_flash_sale_enabled");
       if (local !== null) return local === "true";
-    } catch (_) {}
+    } catch (_) { }
     return false;
   });
   const [flashSaleEndTime, setFlashSaleEndTime] = useState(() => {
     try {
       return localStorage.getItem("data1gh_flash_sale_end_time") || "";
-    } catch (_) {}
+    } catch (_) { }
     return "";
   });
   const [flashSaleTitle, setFlashSaleTitle] = useState(() => {
     try {
       return localStorage.getItem("data1gh_flash_sale_title") || "⚡ LIMITED TIME MTN FLASH SALE ⚡";
-    } catch (_) {}
+    } catch (_) { }
     return "⚡ LIMITED TIME MTN FLASH SALE ⚡";
   });
   const [flashSaleNotice, setFlashSaleNotice] = useState(() => {
     try {
       return localStorage.getItem("data1gh_flash_sale_notice") || "Exclusive discounted MTN bundles! Grab yours before time runs out.";
-    } catch (_) {}
+    } catch (_) { }
     return "Exclusive discounted MTN bundles! Grab yours before time runs out.";
   });
   const [flashSaleProducts, setFlashSaleProducts] = useState<any[]>(() => {
@@ -364,7 +369,7 @@ export const AgentStorefront: React.FC = () => {
         const parsed = JSON.parse(local);
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
-    } catch (_) {}
+    } catch (_) { }
     return [
       { id: "fs-1", capacity: 1, price: 4.5, original_price: 5.5, in_stock: true, mb: 1000 },
       { id: "fs-2", capacity: 2, price: 8.5, original_price: 10.0, in_stock: true, mb: 2000 },
@@ -625,7 +630,7 @@ export const AgentStorefront: React.FC = () => {
         try {
           const cleanPath = window.location.pathname;
           window.history.replaceState({}, document.title, cleanPath);
-        } catch (_) {}
+        } catch (_) { }
       }
     };
 
@@ -647,7 +652,7 @@ export const AgentStorefront: React.FC = () => {
       try {
         localStorage.removeItem(cacheKey);
         localStorage.removeItem(`cache_${cacheKey}`);
-      } catch (_) {}
+      } catch (_) { }
     }
 
     try {
@@ -706,7 +711,7 @@ export const AgentStorefront: React.FC = () => {
           if (iconLink) iconLink.setAttribute("href", s.logo_url || "/store-banner.jpg");
           const appleIcon = document.querySelector('link[rel="apple-touch-icon"]');
           if (appleIcon) appleIcon.setAttribute("href", s.logo_url || "/store-banner.jpg");
-        } catch (_) {}
+        } catch (_) { }
       } else {
         if (forceRefresh) {
           toast.error(res?.data?.error || "Could not refresh store.");
@@ -764,7 +769,7 @@ export const AgentStorefront: React.FC = () => {
           }, 600);
           return () => clearTimeout(timer);
         }
-      } catch (_) {}
+      } catch (_) { }
     }
   }, [
     store?.id,
@@ -802,10 +807,10 @@ export const AgentStorefront: React.FC = () => {
           try {
             const parsed = JSON.parse(settings.flash_sale_products);
             if (Array.isArray(parsed) && parsed.length > 0) setFlashSaleProducts(parsed);
-          } catch (_) {}
+          } catch (_) { }
         }
       })
-      .catch(() => {});
+      .catch(() => { });
 
     const handleInvalidate = () => {
       try {
@@ -817,7 +822,7 @@ export const AgentStorefront: React.FC = () => {
         if (local !== null) setFlashSaleEnabled(local === "true");
         const end = localStorage.getItem("data1gh_flash_sale_end_time");
         if (end) setFlashSaleEndTime(end);
-      } catch (_) {}
+      } catch (_) { }
       fetchStorefront(true);
     };
     window.addEventListener("shop-cache-invalidated", handleInvalidate);
@@ -904,8 +909,8 @@ export const AgentStorefront: React.FC = () => {
     : cleanSupportNumber;
   const customerSupportWaUrl = formattedSupportNumber
     ? `https://wa.me/${formattedSupportNumber}?text=${encodeURIComponent(
-        `Hello ${store.store_name}, I am a customer on your store and I need some assistance.`
-      )}`
+      `Hello ${store.store_name}, I am a customer on your store and I need some assistance.`
+    )}`
     : null;
 
   const channelGroupUrl =
@@ -976,16 +981,16 @@ export const AgentStorefront: React.FC = () => {
           {/* Announcement Pop-Up Trigger Button */}
           {((store.announcement_popup_enabled && (store.announcement_popup_title || store.announcement_popup_message)) ||
             (store.announcement_enabled && store.announcement)) && (
-            <button
-              type="button"
-              onClick={() => setAnnouncementPopupOpen(true)}
-              className="h-9 px-3 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/40 text-purple-300 text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs"
-              title="View Store Announcement"
-            >
-              <Megaphone className="size-3.5 animate-bounce" />
-              <span className="hidden sm:inline">Notice</span>
-            </button>
-          )}
+              <button
+                type="button"
+                onClick={() => setAnnouncementPopupOpen(true)}
+                className="h-9 px-3 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/40 text-purple-300 text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs"
+                title="View Store Announcement"
+              >
+                <Megaphone className="size-3.5 animate-bounce" />
+                <span className="hidden sm:inline">Notice</span>
+              </button>
+            )}
 
           {/* Channel Button */}
           <a
@@ -1042,12 +1047,14 @@ export const AgentStorefront: React.FC = () => {
 
         <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
           {mainCategory === "data" && "Buy Instant Data Bundles"}
+          {mainCategory === "boost" && "Social Media Growth & Boost 🚀"}
           {mainCategory === "services" && "Other Digital Services"}
           {mainCategory === "checkers" && "Official Result Checkers"}
         </h1>
 
         <p className="text-xs sm:text-sm text-zinc-400 max-w-lg mx-auto">
           {mainCategory === "data" && (store.description || "Choose your network, select your bundle size, and receive automated delivery in seconds.")}
+          {mainCategory === "boost" && "Boost TikTok, Instagram, YouTube, Facebook, X & Telegram with genuine high-retention engagement and instant start."}
           {mainCategory === "services" && "Get 1-month Netflix TV sign-in codes, MTN Pulse Mashup bundles, and AFA registrations delivered instantly."}
           {mainCategory === "checkers" && "Buy WAEC and BECE result checkers online. Your official Serial Number and PIN show up immediately after payment."}
         </p>
@@ -1100,42 +1107,50 @@ export const AgentStorefront: React.FC = () => {
         </div>
 
         {/* Main Category Selector Tabs */}
-        <div className="flex items-center justify-center gap-1.5 p-1 rounded-2xl bg-white/[0.06] border border-white/10 max-w-md mx-auto">
+        <div className="flex items-center justify-center gap-1.5 p-1 rounded-2xl bg-white/[0.06] border border-white/10 max-w-xl mx-auto flex-wrap sm:flex-nowrap">
           <button
             type="button"
             onClick={() => setMainCategory("data")}
-            className={`flex-1 py-2 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${
-              mainCategory === "data"
+            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${mainCategory === "data"
                 ? `${theme.badgeContainer} font-black shadow-sm`
                 : "text-zinc-400 hover:text-white"
-            }`}
+              }`}
           >
             <Package className="size-3.5" />
             <span>Data Bundles</span>
           </button>
           <button
             type="button"
+            onClick={() => setMainCategory("boost")}
+            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${mainCategory === "boost"
+                ? "bg-gradient-to-r from-fuchsia-600 to-pink-600 text-white font-black shadow-lg shadow-fuchsia-600/30"
+                : "text-zinc-400 hover:text-white"
+              }`}
+          >
+            <Rocket className="size-3.5 text-fuchsia-300" />
+            <span>Social Boost 🚀</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setMainCategory("services")}
-            className={`flex-1 py-2 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${
-              mainCategory === "services"
+            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${mainCategory === "services"
                 ? `${theme.badgeContainer} font-black shadow-sm`
                 : "text-zinc-400 hover:text-white"
-            }`}
+              }`}
           >
             <Play className="size-3.5 fill-current" />
-            <span>Other Services</span>
+            <span>Services</span>
           </button>
           <button
             type="button"
             onClick={() => setMainCategory("checkers")}
-            className={`flex-1 py-2 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${
-              mainCategory === "checkers"
+            className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${mainCategory === "checkers"
                 ? `${theme.badgeContainer} font-black shadow-sm`
                 : "text-zinc-400 hover:text-white"
-            }`}
+              }`}
           >
             <GraduationCap className="size-3.5" />
-            <span>Result Checkers</span>
+            <span>Checkers</span>
           </button>
         </div>
 
@@ -1147,11 +1162,10 @@ export const AgentStorefront: React.FC = () => {
                 key={net}
                 type="button"
                 onClick={() => setSelectedNetwork(net)}
-                className={`py-2.5 rounded-xl font-black text-xs uppercase tracking-wider transition-all ${
-                  selectedNetwork === net
+                className={`py-2.5 rounded-xl font-black text-xs uppercase tracking-wider transition-all ${selectedNetwork === net
                     ? theme.networkTabActive[net as keyof typeof theme.networkTabActive] || "bg-white text-black"
                     : "text-zinc-400 hover:text-white"
-                }`}
+                  }`}
               >
                 {NETWORK_LABEL[net] || net}
               </button>
@@ -1369,6 +1383,154 @@ export const AgentStorefront: React.FC = () => {
                 </div>
               </Card>
             ))}
+          </div>
+        )}
+
+        {/* SOCIAL MEDIA BOOST CATEGORY */}
+        {mainCategory === "boost" && (
+          <div className="space-y-6 animate-in fade-in duration-300">
+            {/* Boost Showcase Banner */}
+            <div className="p-5 md:p-6 rounded-3xl border border-fuchsia-500/30 bg-gradient-to-br from-fuchsia-950/40 via-zinc-950 to-black text-white relative overflow-hidden shadow-xl">
+              <div className="absolute top-0 right-0 -mr-16 -mt-16 size-48 rounded-full bg-fuchsia-500/20 blur-3xl pointer-events-none" />
+              <div className="relative z-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                <div className="space-y-1.5 max-w-xl">
+                  <div className="inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30 text-xs font-black uppercase">
+                    <Rocket className="size-3.5 text-fuchsia-300" /> Instant Growth Network
+                  </div>
+                  <h3 className="text-xl md:text-2xl font-black text-white tracking-tight">
+                    Grow Your Social Reach &amp; Authority
+                  </h3>
+                  <p className="text-xs md:text-sm text-zinc-300 leading-relaxed">
+                    Select a platform below to order high-retention followers, likes, reel views, subscribers, or comments.
+                    Fulfillment starts automatically within 2–5 minutes. 100% safe — no password or account login required!
+                  </p>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2 shrink-0">
+                  <Button
+                    type="button"
+                    onClick={() => {
+                      setSelectedBoostPlatform("tiktok");
+                      setBoostDialogOpen(true);
+                    }}
+                    className="h-10 px-5 rounded-2xl bg-gradient-to-r from-fuchsia-500 to-pink-500 hover:opacity-95 text-white font-black text-xs uppercase tracking-wider shadow-lg shadow-fuchsia-500/30"
+                  >
+                    <Rocket className="size-3.5 mr-1.5" /> Start Order Now
+                  </Button>
+                </div>
+              </div>
+
+              {/* Quality & Safety Badges */}
+              <div className="mt-5 pt-4 border-t border-white/10 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs text-zinc-300">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="size-4 text-emerald-400 shrink-0" />
+                  <span>100% Safe (Only Link/Username Needed)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Zap className="size-4 text-amber-400 shrink-0" />
+                  <span>Instant Start &amp; Live Tracking</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="size-4 text-cyan-400 shrink-0" />
+                  <span>0% Drop Permanent Packages Available</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Platform Selection Cards Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {[
+                {
+                  id: "tiktok",
+                  name: "TikTok",
+                  badge: "Popular 🔥",
+                  tagline: "Followers, Likes, Views, Shares & Saves",
+                  description: "Skyrocket your viral reach, get on the For You page, and build creator authority.",
+                  borderGlow: "border-cyan-500/30 hover:border-cyan-400 hover:shadow-[0_0_25px_rgba(6,182,212,0.25)]",
+                  bgGradient: "from-zinc-900 via-zinc-950 to-black",
+                },
+                {
+                  id: "instagram",
+                  name: "Instagram",
+                  badge: "Trending ⚡",
+                  tagline: "Followers, Likes, Reel Views, Comments",
+                  description: "Boost your personal brand, explore page presence, and profile social proof.",
+                  borderGlow: "border-pink-500/30 hover:border-pink-400 hover:shadow-[0_0_25px_rgba(236,72,153,0.25)]",
+                  bgGradient: "from-pink-950/30 via-zinc-950 to-black",
+                },
+                {
+                  id: "facebook",
+                  name: "Facebook",
+                  badge: "High Retention 👥",
+                  tagline: "Page Followers, Likes, Reel Views",
+                  description: "Grow your business page followers and build an active engaged community.",
+                  borderGlow: "border-blue-500/30 hover:border-blue-400 hover:shadow-[0_0_25px_rgba(59,130,246,0.25)]",
+                  bgGradient: "from-blue-950/30 via-zinc-950 to-black",
+                },
+                {
+                  id: "youtube",
+                  name: "YouTube",
+                  badge: "Monetizable 🎬",
+                  tagline: "Subscribers, Watch-Time Views, Likes",
+                  description: "Hit partner monetization goals faster with high-retention views and organic subscribers.",
+                  borderGlow: "border-red-500/30 hover:border-red-400 hover:shadow-[0_0_25px_rgba(239,68,68,0.25)]",
+                  bgGradient: "from-red-950/30 via-zinc-950 to-black",
+                },
+                {
+                  id: "twitter",
+                  name: "Twitter (X)",
+                  badge: "Fast ⚡",
+                  tagline: "Followers, Retweets, Likes, Quotes",
+                  description: "Establish strong thought leadership and spark trending viral discussions on X.",
+                  borderGlow: "border-zinc-500/30 hover:border-zinc-400 hover:shadow-[0_0_25px_rgba(255,255,255,0.2)]",
+                  bgGradient: "from-zinc-900 via-zinc-950 to-black",
+                },
+                {
+                  id: "telegram",
+                  name: "Telegram",
+                  badge: "Non-Drop 🛡️",
+                  tagline: "Channel Members, Group Members, Post Views",
+                  description: "Expand public and private channel subscriber counts with permanent active retention.",
+                  borderGlow: "border-sky-500/30 hover:border-sky-400 hover:shadow-[0_0_25px_rgba(14,165,233,0.25)]",
+                  bgGradient: "from-sky-950/30 via-zinc-950 to-black",
+                },
+              ].map((platform) => (
+                <Card
+                  key={platform.id}
+                  onClick={() => {
+                    setSelectedBoostPlatform(platform.id);
+                    setBoostDialogOpen(true);
+                  }}
+                  className={`cursor-pointer p-5 rounded-3xl bg-gradient-to-br ${platform.bgGradient} border ${platform.borderGlow} transition-all duration-300 hover:-translate-y-1 relative group overflow-hidden shadow-lg flex flex-col justify-between`}
+                >
+                  <div className="space-y-3">
+                    <div className="flex items-start justify-between">
+                      <SocialPlatformIcon platform={platform.id} className="size-11 shrink-0 drop-shadow-md group-hover:scale-105 transition-transform" />
+                      <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-white/10 text-zinc-200 border border-white/10">
+                        {platform.badge}
+                      </span>
+                    </div>
+
+                    <div>
+                      <h4 className="text-lg font-black text-white group-hover:text-fuchsia-300 transition-colors">
+                        {platform.name}
+                      </h4>
+                      <p className="text-xs font-semibold text-zinc-300 mt-0.5 line-clamp-1">
+                        {platform.tagline}
+                      </p>
+                      <p className="text-[11px] text-zinc-400 mt-2 leading-relaxed">
+                        {platform.description}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 pt-3 border-t border-white/10 flex items-center justify-between text-xs font-black text-fuchsia-400 group-hover:text-fuchsia-300">
+                    <span>Order {platform.name} Boost</span>
+                    <ArrowRight className="size-4 group-hover:translate-x-1 transition-transform" />
+                  </div>
+                </Card>
+              ))}
+            </div>
           </div>
         )}
 
@@ -1808,18 +1970,18 @@ export const AgentStorefront: React.FC = () => {
               const StatusIcon = paymentFailed || deliveryFailed
                 ? XCircle
                 : delivered
-                ? CheckCircle2
-                : waiting || processing
-                ? Clock
-                : CheckCircle2;
+                  ? CheckCircle2
+                  : waiting || processing
+                    ? Clock
+                    : CheckCircle2;
 
               const tone = paymentFailed || deliveryFailed
                 ? "text-rose-400 border-rose-500/30 bg-rose-500/10"
                 : delivered
-                ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
-                : waiting || processing
-                ? "text-cyan-400 border-cyan-500/30 bg-cyan-500/10"
-                : "text-amber-400 border-amber-500/30 bg-amber-500/10";
+                  ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
+                  : waiting || processing
+                    ? "text-cyan-400 border-cyan-500/30 bg-cyan-500/10"
+                    : "text-amber-400 border-amber-500/30 bg-amber-500/10";
 
               let title = "Awaiting Payment";
               let subtitle = "Complete payment to have your order delivered.";
@@ -1904,22 +2066,20 @@ export const AgentStorefront: React.FC = () => {
                           <span className="text-[9px] text-zinc-400">Received</span>
                         </div>
                         <div className="flex flex-col items-center">
-                          <div className={`size-6 rounded-full flex items-center justify-center mb-1 text-[11px] font-black ${
-                            delivered
+                          <div className={`size-6 rounded-full flex items-center justify-center mb-1 text-[11px] font-black ${delivered
                               ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
                               : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
-                          }`}>
+                            }`}>
                             {delivered ? "✓" : "⚡"}
                           </div>
                           <span className={`text-[10px] font-bold ${delivered ? "text-emerald-400" : "text-cyan-300"}`}>Order</span>
                           <span className="text-[9px] text-zinc-400">In Processing</span>
                         </div>
                         <div className="flex flex-col items-center">
-                          <div className={`size-6 rounded-full flex items-center justify-center mb-1 text-[11px] font-black ${
-                            delivered
+                          <div className={`size-6 rounded-full flex items-center justify-center mb-1 text-[11px] font-black ${delivered
                               ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
                               : "bg-white/5 text-zinc-500 border border-white/10"
-                          }`}>
+                            }`}>
                             {delivered ? "✓" : "•"}
                           </div>
                           <span className={`text-[10px] font-bold ${delivered ? "text-emerald-400" : "text-zinc-500"}`}>Delivery</span>
@@ -1979,15 +2139,14 @@ export const AgentStorefront: React.FC = () => {
 
                     <div className="flex items-center justify-between pt-1">
                       <span className="text-zinc-400 font-medium">Delivery Status</span>
-                      <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
-                        delivered
+                      <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${delivered
                           ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
                           : processing
-                          ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
-                          : deliveryFailed
-                          ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
-                          : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                      }`}>
+                            ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
+                            : deliveryFailed
+                              ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                              : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                        }`}>
                         {ord.delivery_status || ord.status || "Pending"}
                       </span>
                     </div>
@@ -2054,15 +2213,14 @@ export const AgentStorefront: React.FC = () => {
                           <span>{ord.reference || ord.id}</span>
                           <ArrowRight className="size-3 text-cyan-400 group-hover:translate-x-0.5 transition-transform" />
                         </span>
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                          isDelivered
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${isDelivered
                             ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
                             : isProcessing
-                            ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
-                            : isFailed
-                            ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
-                            : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                        }`}>
+                              ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 animate-pulse"
+                              : isFailed
+                                ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                                : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                          }`}>
                           {ord.delivery_status || ord.status || "Pending"}
                         </span>
                       </div>
@@ -2159,8 +2317,8 @@ export const AgentStorefront: React.FC = () => {
               {verifyingOrder
                 ? "Confirming Order..."
                 : placedOrder?.payment_status === "failed"
-                ? "Payment Incomplete / Failed"
-                : "Order Placed Successfully! 🎉"}
+                  ? "Payment Incomplete / Failed"
+                  : "Order Placed Successfully! 🎉"}
             </DialogTitle>
             <p className="text-xs text-zinc-400">
               {store?.store_name} &bull; {placedOrder?.payment_status === "failed" ? "Mobile Money Payment Issue" : "Instant Automated Delivery"}
@@ -2176,12 +2334,12 @@ export const AgentStorefront: React.FC = () => {
                   {placedOrder?.payment_status === "failed"
                     ? "Payment Incomplete (Low Balance / Declined)"
                     : String(placedOrder?.reference || incomingRef || "").startsWith("NF")
-                    ? "Netflix Order Confirmed"
-                    : String(placedOrder?.reference || incomingRef || "").startsWith("CK")
-                    ? "Result Checker Delivered"
-                    : placedOrder?.delivery_status === "delivered" || placedOrder?.delivery_status === "completed"
-                    ? "Delivered Successfully"
-                    : "Sent to Delivery Gateway"}
+                      ? "Netflix Order Confirmed"
+                      : String(placedOrder?.reference || incomingRef || "").startsWith("CK")
+                        ? "Result Checker Delivered"
+                        : placedOrder?.delivery_status === "delivered" || placedOrder?.delivery_status === "completed"
+                          ? "Delivered Successfully"
+                          : "Sent to Delivery Gateway"}
                 </span>
               </div>
               <span className={`text-[10px] font-mono px-2 py-0.5 rounded-md font-bold uppercase ${placedOrder?.payment_status === "failed" ? "bg-amber-500/20 text-amber-300 border border-amber-500/40" : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"}`}>
@@ -2200,94 +2358,94 @@ export const AgentStorefront: React.FC = () => {
             {(String(placedOrder?.reference || incomingRef || "").startsWith("NF") ||
               placedOrder?.service === "netflix" ||
               storeNetflixCode) && (
-              <div className="p-4 rounded-2xl bg-gradient-to-br from-red-950/40 via-zinc-900 to-black border border-red-500/40 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] uppercase font-black tracking-wider text-red-400 flex items-center gap-1">
-                    <Play className="size-3 fill-red-400" /> Netflix Sign-In Code
-                  </span>
-                  {storeNetflixCodeAt && (
-                    <span className="text-[10px] font-mono text-zinc-500">
-                      {new Date(storeNetflixCodeAt).toLocaleTimeString("en-GB")}
+                <div className="p-4 rounded-2xl bg-gradient-to-br from-red-950/40 via-zinc-900 to-black border border-red-500/40 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] uppercase font-black tracking-wider text-red-400 flex items-center gap-1">
+                      <Play className="size-3 fill-red-400" /> Netflix Sign-In Code
                     </span>
-                  )}
-                </div>
-
-                {/* Account Email */}
-                <div className="p-2.5 rounded-xl bg-black/60 border border-white/10 flex items-center justify-between">
-                  <div>
-                    <span className="text-[10px] text-zinc-500 uppercase block font-semibold">Account Email</span>
-                    <span className="text-xs font-mono font-bold text-white break-all">{storeNetflixEmail}</span>
+                    {storeNetflixCodeAt && (
+                      <span className="text-[10px] font-mono text-zinc-500">
+                        {new Date(storeNetflixCodeAt).toLocaleTimeString("en-GB")}
+                      </span>
+                    )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(storeNetflixEmail);
-                      toast.success("Netflix email copied!");
-                    }}
-                    className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white"
-                  >
-                    <Copy className="size-3.5" />
-                  </button>
-                </div>
 
-                {/* Big Code Box */}
-                <div className="p-3.5 rounded-xl bg-black/80 border border-red-500/30 text-center">
-                  <span className="text-[10px] uppercase font-bold text-zinc-400 block mb-1">
-                    Temporary 8-Digit TV Code
-                  </span>
-                  {(storeNetflixCode || placedOrder?.netflix_last_code) ? (
-                    <div className="flex items-center justify-center gap-3">
-                      <div className="text-3xl font-mono font-black tracking-widest text-white">
-                        {storeNetflixCode || placedOrder?.netflix_last_code}
+                  {/* Account Email */}
+                  <div className="p-2.5 rounded-xl bg-black/60 border border-white/10 flex items-center justify-between">
+                    <div>
+                      <span className="text-[10px] text-zinc-500 uppercase block font-semibold">Account Email</span>
+                      <span className="text-xs font-mono font-bold text-white break-all">{storeNetflixEmail}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(storeNetflixEmail);
+                        toast.success("Netflix email copied!");
+                      }}
+                      className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white"
+                    >
+                      <Copy className="size-3.5" />
+                    </button>
+                  </div>
+
+                  {/* Big Code Box */}
+                  <div className="p-3.5 rounded-xl bg-black/80 border border-red-500/30 text-center">
+                    <span className="text-[10px] uppercase font-bold text-zinc-400 block mb-1">
+                      Temporary 8-Digit TV Code
+                    </span>
+                    {(storeNetflixCode || placedOrder?.netflix_last_code) ? (
+                      <div className="flex items-center justify-center gap-3">
+                        <div className="text-3xl font-mono font-black tracking-widest text-white">
+                          {storeNetflixCode || placedOrder?.netflix_last_code}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const c = storeNetflixCode || placedOrder?.netflix_last_code;
+                            if (c) navigator.clipboard.writeText(c);
+                            setCopiedNetflixCode(true);
+                            setTimeout(() => setCopiedNetflixCode(false), 2000);
+                            toast.success("Netflix code copied!");
+                          }}
+                          className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white"
+                        >
+                          {copiedNetflixCode ? <Check className="size-4 text-emerald-400" /> : <Copy className="size-4" />}
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const c = storeNetflixCode || placedOrder?.netflix_last_code;
-                          if (c) navigator.clipboard.writeText(c);
-                          setCopiedNetflixCode(true);
-                          setTimeout(() => setCopiedNetflixCode(false), 2000);
-                          toast.success("Netflix code copied!");
-                        }}
-                        className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white"
-                      >
-                        {copiedNetflixCode ? <Check className="size-4 text-emerald-400" /> : <Copy className="size-4" />}
-                      </button>
-                    </div>
-                  ) : fetchingStoreNetflix ? (
-                    <div className="py-2 flex items-center justify-center gap-2 text-xs text-zinc-400">
-                      <Loader2 className="size-4 animate-spin text-red-500" />
-                      <span>Retrieving code from Gmail...</span>
-                    </div>
-                  ) : (
-                    <div className="py-1 text-xs text-zinc-400">
-                      Code not generated yet. Request it on your TV, then click Fetch below.
+                    ) : fetchingStoreNetflix ? (
+                      <div className="py-2 flex items-center justify-center gap-2 text-xs text-zinc-400">
+                        <Loader2 className="size-4 animate-spin text-red-500" />
+                        <span>Retrieving code from Gmail...</span>
+                      </div>
+                    ) : (
+                      <div className="py-1 text-xs text-zinc-400">
+                        Code not generated yet. Request it on your TV, then click Fetch below.
+                      </div>
+                    )}
+                  </div>
+
+                  {storeNetflixError && (
+                    <div className="text-[11px] text-red-400 bg-red-500/10 p-2 rounded-lg border border-red-500/20">
+                      {storeNetflixError}
                     </div>
                   )}
+
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => fetchStoreNetflixCode(placedOrder?.reference || incomingRef || "", true)}
+                    disabled={fetchingStoreNetflix}
+                    className="w-full h-9 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:opacity-95 text-white font-black text-xs gap-1.5 shadow-md shadow-red-600/20"
+                  >
+                    {fetchingStoreNetflix ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+                    <span>{fetchingStoreNetflix ? "Checking Gmail..." : "Fetch Latest Code Live"}</span>
+                  </Button>
+
+                  <p className="text-[11px] text-zinc-400 leading-snug">
+                    Go to <strong className="text-red-400">netflix.com/tv8</strong> on your browser and enter this code to link your TV screen.
+                  </p>
                 </div>
-
-                {storeNetflixError && (
-                  <div className="text-[11px] text-red-400 bg-red-500/10 p-2 rounded-lg border border-red-500/20">
-                    {storeNetflixError}
-                  </div>
-                )}
-
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={() => fetchStoreNetflixCode(placedOrder?.reference || incomingRef || "", true)}
-                  disabled={fetchingStoreNetflix}
-                  className="w-full h-9 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:opacity-95 text-white font-black text-xs gap-1.5 shadow-md shadow-red-600/20"
-                >
-                  {fetchingStoreNetflix ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-                  <span>{fetchingStoreNetflix ? "Checking Gmail..." : "Fetch Latest Code Live"}</span>
-                </Button>
-
-                <p className="text-[11px] text-zinc-400 leading-snug">
-                  Go to <strong className="text-red-400">netflix.com/tv8</strong> on your browser and enter this code to link your TV screen.
-                </p>
-              </div>
-            )}
+              )}
 
             {/* CHECKER SERIAL & PIN (IF CHECKER ORDER) */}
             {(String(placedOrder?.reference || incomingRef || "").startsWith("CK") || checkerResult) && (
@@ -2515,7 +2673,7 @@ export const AgentStorefront: React.FC = () => {
             if (!open && store?.id) {
               try {
                 sessionStorage.setItem(`data1_agent_popup_dismissed_${store.id}`, "true");
-              } catch (_) {}
+              } catch (_) { }
             }
           }}
           title={
@@ -2534,6 +2692,14 @@ export const AgentStorefront: React.FC = () => {
           themeId={store.store_theme}
         />
       )}
+
+      {/* Social Media Boost Order Dialog */}
+      <SocialBoostDialog
+        open={boostDialogOpen}
+        onOpenChange={setBoostDialogOpen}
+        agentId={store?.id}
+        agentSlug={store?.store_slug}
+      />
     </div>
   );
 };

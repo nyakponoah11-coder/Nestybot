@@ -1247,8 +1247,26 @@ export default async function handler(req: any, res: any) {
         if (customer_name) {
           orderNotes = `[name:${customer_name}] ${orderNotes || ""}`.trim();
         }
-        if (agent_id) {
-          orderNotes = `[agent:${agent_id}] ${orderNotes || ""}`.trim();
+        if (agent_id || agent_slug) {
+          const effectiveAgent = agent_id || agent_slug;
+          orderNotes = setNoteTag(orderNotes, "agent", effectiveAgent);
+          if (sKey === "boost") {
+            let markup = 25;
+            try {
+              const { data: ag } = await supabase
+                .from("agents")
+                .select("custom_prices")
+                .or(`id.eq.${effectiveAgent},store_slug.eq.${effectiveAgent}`)
+                .maybeSingle();
+              if (ag?.custom_prices && Number.isFinite(Number(ag.custom_prices.boost_markup_percent))) {
+                markup = Number(ag.custom_prices.boost_markup_percent);
+              }
+            } catch (_) {}
+            const basePrice = Math.max(0.5, Math.round((amount / (1 + (markup / 100))) * 100) / 100);
+            const profit = Math.max(0, Number((amount - basePrice).toFixed(2)));
+            orderNotes = setNoteTag(orderNotes, "base_price", String(basePrice));
+            orderNotes = setNoteTag(orderNotes, "agent_profit", String(profit));
+          }
         }
 
         const { error: sErr } = await supabase.from("service_orders").insert({
@@ -1691,6 +1709,43 @@ export default async function handler(req: any, res: any) {
       try {
         const force = req.query?.refresh === "true" || body?.refresh === true;
         const result = await fetchBoostServices(supabase, force);
+        const agentSlug = String(req.query?.agent_slug || body?.agent_slug || "").trim();
+        const agentId = String(req.query?.agent_id || body?.agent_id || "").trim();
+
+        if (agentSlug || agentId) {
+          let agentMarkup = 25; // Default 25% agent profit
+          try {
+            let q = supabase.from("agents").select("id, store_slug, custom_prices");
+            if (agentId) {
+              q = q.eq("id", agentId);
+            } else {
+              q = q.eq("store_slug", agentSlug);
+            }
+            const { data: ag } = await q.maybeSingle();
+            if (ag?.custom_prices && Number.isFinite(Number(ag.custom_prices.boost_markup_percent))) {
+              agentMarkup = Number(ag.custom_prices.boost_markup_percent);
+            }
+          } catch (_) {}
+
+          const multiplier = 1 + (agentMarkup / 100);
+          const agentServices = (result.services || []).map((s: any) => {
+            const adminBaseRate = s.rate;
+            const customerRate = Math.max(0.5, Math.round(adminBaseRate * multiplier * 100) / 100);
+            return {
+              ...s,
+              admin_base_rate: adminBaseRate,
+              rate: customerRate,
+            };
+          });
+
+          return res.status(200).json({
+            ...result,
+            services: agentServices,
+            agent_markup_percent: agentMarkup,
+            is_agent_store: true,
+          });
+        }
+
         return res.status(200).json(result);
       } catch (err: any) {
         console.error("boost-services error:", err);

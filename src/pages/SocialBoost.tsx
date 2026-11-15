@@ -535,11 +535,7 @@ export const SocialBoost = () => {
                   className={`cursor-pointer p-5 rounded-2xl bg-gradient-to-br ${platform.bgGradient} border ${platform.borderGlow} transition-all duration-300 hover:-translate-y-1 relative group overflow-hidden shadow-lg`}
                 >
                   <div className="flex items-start justify-between">
-                    <div
-                      className={`size-12 rounded-xl bg-gradient-to-br ${platform.iconColor} p-2.5 grid place-items-center shadow-md group-hover:scale-110 transition-transform`}
-                    >
-                      <SocialPlatformIcon platform={platform.id} className="size-6 text-white" />
-                    </div>
+                    <SocialPlatformIcon platform={platform.id} className="size-12 shrink-0 drop-shadow-lg group-hover:scale-110 transition-transform" />
                     <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-white/10 text-zinc-200 border border-white/10">
                       {platform.badge}
                     </span>
@@ -732,7 +728,7 @@ export const SocialBoost = () => {
                           {quality.isNonDrop ? (
                             <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-semibold bg-emerald-500/10 px-2.5 py-1.5 rounded-lg border border-emerald-500/20">
                               <ShieldCheck className="size-3.5 shrink-0 text-emerald-400" />
-                              <span>Provider Fixed Package: <b>{service.min.toLocaleString()}</b> units (0% Drop Guaranteed)</span>
+                              <span>100% Guaranteed Package: <b>{service.min.toLocaleString()}</b> units (0% Drop Retention)</span>
                             </div>
                           ) : (
                             <div className="flex items-center gap-1.5 text-xs text-amber-300 font-medium bg-amber-500/10 px-2.5 py-1.5 rounded-lg border border-amber-500/20">
@@ -873,7 +869,7 @@ export const SocialBoost = () => {
                 <div className="p-4 rounded-xl bg-zinc-800/60 border border-zinc-700/80 flex items-center justify-between gap-4">
                   <div>
                     <Label className="text-xs font-bold text-zinc-300">
-                      Package Quantity (Fixed by Provider)
+                      Package Quantity (Fixed Guaranteed Package)
                     </Label>
                     <div className="text-2xl font-black text-white mt-1">
                       {selectedService.min.toLocaleString()} units

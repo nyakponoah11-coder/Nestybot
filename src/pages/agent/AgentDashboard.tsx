@@ -70,9 +70,11 @@ import {
   Megaphone,
   Bell,
   Volume2,
+  Rocket,
 } from "lucide-react";
 import { toast } from "sonner";
 import { formatGHS, NETWORK_LABEL, networkClass } from "@/lib/networks";
+import { SocialPlatformIcon } from "@/components/SocialPlatformIcon";
 import { DeliveryTracker } from "@/components/DeliveryTracker";
 
 export interface StoreThemeOption {
@@ -296,7 +298,7 @@ export const AgentDashboard: React.FC = () => {
     }
   };
 
-  
+
   // Customer Referrals State
   const [customerReferrals, setCustomerReferrals] = useState<any[]>([]);
   const [referralStats, setReferralStats] = useState<{ total_promoters: number; total_referred_orders: number; total_completed_rewards: number }>({
@@ -373,12 +375,12 @@ export const AgentDashboard: React.FC = () => {
           prev.map((item) =>
             item.reference === ref || item.id === ref
               ? {
-                  ...item,
-                  delivery_status: updated.delivery_status || item.delivery_status,
-                  payment_status: updated.payment_status || item.payment_status,
-                  status: updated.delivery_status || item.status,
-                  error_message: updated.error_message !== undefined ? updated.error_message : item.error_message,
-                }
+                ...item,
+                delivery_status: updated.delivery_status || item.delivery_status,
+                payment_status: updated.payment_status || item.payment_status,
+                status: updated.delivery_status || item.status,
+                error_message: updated.error_message !== undefined ? updated.error_message : item.error_message,
+              }
               : item
           )
         );
@@ -478,8 +480,28 @@ export const AgentDashboard: React.FC = () => {
   const [customPrices, setCustomPrices] = useState<Record<string, number>>({});
   const [savingPrices, setSavingPrices] = useState(false);
   const [selectedNetwork, setSelectedNetwork] = useState<string>("ALL");
-  const [pricingCategory, setPricingCategory] = useState<"data" | "services">("data");
+  const [pricingCategory, setPricingCategory] = useState<"data" | "services" | "boost">("data");
   const [servicesPricing, setServicesPricing] = useState<any[]>([]);
+  const [boostMarkupPercent, setBoostMarkupPercent] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem("data1_agent_profile");
+      if (saved) {
+        const ag = JSON.parse(saved);
+        const raw = ag?.custom_prices?.boost_markup_percent;
+        if (Number.isFinite(Number(raw))) return Number(raw);
+      }
+    } catch (_) { }
+    return 25;
+  });
+
+  const handleBoostMarkupChange = (newVal: number) => {
+    const val = Math.max(0, Math.min(500, Number(newVal) || 0));
+    setBoostMarkupPercent(val);
+    setCustomPrices((prev) => ({
+      ...prev,
+      boost_markup_percent: val,
+    }));
+  };
 
   // Payment Failure Reason Modal State
   const [failureModalOpen, setFailureModalOpen] = useState(false);
@@ -615,7 +637,7 @@ export const AgentDashboard: React.FC = () => {
             toast.success("All metrics reset to GH₵ 0.00 successfully!");
             window.history.replaceState({}, document.title, window.location.pathname);
           })
-          .catch(() => {});
+          .catch(() => { });
       }
     } catch {
       navigate("/agent/login", { replace: true });
@@ -637,6 +659,9 @@ export const AgentDashboard: React.FC = () => {
         setAgent(enriched);
         localStorage.setItem("data1_agent_profile", JSON.stringify(enriched));
         setCustomPrices(ag.custom_prices || {});
+        if (ag.custom_prices && Number.isFinite(Number(ag.custom_prices.boost_markup_percent))) {
+          setBoostMarkupPercent(Number(ag.custom_prices.boost_markup_percent));
+        }
         if (finalLogo) {
           setLogoUrl(finalLogo);
           localStorage.setItem(`data1_agent_logo_${agentId}`, finalLogo);
@@ -743,6 +768,9 @@ export const AgentDashboard: React.FC = () => {
           }
           if (res.data.custom_prices) {
             Object.assign(map, res.data.custom_prices);
+            if (Number.isFinite(Number(res.data.custom_prices.boost_markup_percent))) {
+              setBoostMarkupPercent(Number(res.data.custom_prices.boost_markup_percent));
+            }
           }
           setCustomPrices(map);
         }
@@ -876,7 +904,7 @@ export const AgentDashboard: React.FC = () => {
             localStorage.removeItem(`agent_public_store_${agent.id.toLowerCase()}`);
             localStorage.removeItem(`cache_agent_public_store_${agent.store_slug.toLowerCase()}`);
             localStorage.removeItem(`cache_agent_public_store_${agent.id.toLowerCase()}`);
-          } catch (_) {}
+          } catch (_) { }
         }
         clearCachePrefix("agent_public_store");
         const updatedAgent = {
@@ -1255,17 +1283,15 @@ export const AgentDashboard: React.FC = () => {
 
       {/* 2. Mobile Right-Side Drawer Overlay & Menu */}
       <div
-        className={`fixed inset-0 bg-black/80 backdrop-blur-xs z-50 transition-opacity duration-300 md:hidden ${
-          mobileMenuOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
-        }`}
+        className={`fixed inset-0 bg-black/80 backdrop-blur-xs z-50 transition-opacity duration-300 md:hidden ${mobileMenuOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+          }`}
         onClick={() => setMobileMenuOpen(false)}
         aria-hidden="true"
       />
 
       <aside
-        className={`fixed inset-y-0 right-0 w-72 max-w-[85vw] bg-zinc-900 border-l border-white/10 text-white z-50 flex flex-col shadow-2xl transition-transform duration-300 ease-out md:hidden ${
-          mobileMenuOpen ? "translate-x-0" : "translate-x-full"
-        }`}
+        className={`fixed inset-y-0 right-0 w-72 max-w-[85vw] bg-zinc-900 border-l border-white/10 text-white z-50 flex flex-col shadow-2xl transition-transform duration-300 ease-out md:hidden ${mobileMenuOpen ? "translate-x-0" : "translate-x-full"
+          }`}
       >
         {/* Drawer Header */}
         <div className="p-4 border-b border-white/10 flex items-center justify-between shrink-0 bg-black/30">
@@ -1304,11 +1330,10 @@ export const AgentDashboard: React.FC = () => {
                 setActiveTab(item.id as any);
                 setMobileMenuOpen(false);
               }}
-              className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
-                activeTab === item.id
+              className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-semibold transition-all ${activeTab === item.id
                   ? "bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-500/40 shadow-xs"
                   : "hover:bg-white/5 text-zinc-300"
-              }`}
+                }`}
             >
               <div className="flex items-center gap-3">
                 <item.icon className={`size-4 shrink-0 ${activeTab === item.id ? "text-cyan-400" : "text-zinc-400"}`} />
@@ -1394,11 +1419,10 @@ export const AgentDashboard: React.FC = () => {
               key={item.id}
               type="button"
               onClick={() => setActiveTab(item.id as any)}
-              className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
-                activeTab === item.id
+              className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-semibold transition-all ${activeTab === item.id
                   ? "bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-500/40 shadow-xs"
                   : "hover:bg-white/5 text-zinc-400 hover:text-white"
-              }`}
+                }`}
             >
               <div className="flex items-center gap-3">
                 <item.icon className={`size-4 shrink-0 ${activeTab === item.id ? "text-cyan-400" : "text-zinc-400"}`} />
@@ -1744,11 +1768,10 @@ export const AgentDashboard: React.FC = () => {
                       setDateFilter("");
                       fetchOrders("");
                     }}
-                    className={`h-7 rounded-xl text-[11px] font-bold transition-all ${
-                      !dateFilter
+                    className={`h-7 rounded-xl text-[11px] font-bold transition-all ${!dateFilter
                         ? "bg-cyan-500 text-black hover:bg-cyan-400 font-black shadow-sm"
                         : "border border-white/15 bg-white/5 text-zinc-300 hover:bg-white/10"
-                    }`}
+                      }`}
                   >
                     All Orders ({orderStats.total_orders_count ?? orders.length})
                   </Button>
@@ -1761,11 +1784,10 @@ export const AgentDashboard: React.FC = () => {
                       setDateFilter(todayStr);
                       fetchOrders(todayStr);
                     }}
-                    className={`h-7 rounded-xl text-[11px] font-bold transition-all ${
-                      dateFilter
+                    className={`h-7 rounded-xl text-[11px] font-bold transition-all ${dateFilter
                         ? "bg-emerald-500 text-black hover:bg-emerald-400 font-black shadow-sm"
                         : "border border-white/15 bg-white/5 text-zinc-300 hover:bg-white/10"
-                    }`}
+                      }`}
                   >
                     Today ({orderStats.today_orders_count ?? 0})
                   </Button>
@@ -1804,8 +1826,8 @@ export const AgentDashboard: React.FC = () => {
                   {searchQuery || networkFilter !== "all" || paymentFilter !== "all" || deliveryFilter !== "all"
                     ? "No orders match your filter criteria"
                     : dateFilter
-                    ? `No orders found for ${dateFilter}`
-                    : "No customer orders placed yet"}
+                      ? `No orders found for ${dateFilter}`
+                      : "No customer orders placed yet"}
                 </div>
                 {searchQuery || networkFilter !== "all" || deliveryFilter !== "all" ? (
                   <Button
@@ -1877,11 +1899,11 @@ export const AgentDashboard: React.FC = () => {
                       {filteredOrders.map((o) => {
                         const dateFormatted = o.created_at
                           ? new Date(o.created_at).toLocaleString("en-GB", {
-                              day: "2-digit",
-                              month: "short",
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })
+                            day: "2-digit",
+                            month: "short",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })
                           : "N/A";
 
                         const isNetflix =
@@ -1899,8 +1921,8 @@ export const AgentDashboard: React.FC = () => {
                         const rawPhone = String(o.phone || o.recipient_phone || "").replace(/\D/g, "");
                         const waCustomerHref = rawPhone
                           ? `https://wa.me/${rawPhone.startsWith("0") ? "233" + rawPhone.slice(1) : rawPhone}?text=${encodeURIComponent(
-                              `Hello! Thank you for ordering ${o.network || ""} ${o.package_size || ""} from ${storeName}. Your order reference is ${refCode}.`
-                            )}`
+                            `Hello! Thank you for ordering ${o.network || ""} ${o.package_size || ""} from ${storeName}. Your order reference is ${refCode}.`
+                          )}`
                           : "";
 
                         return (
@@ -1993,13 +2015,12 @@ export const AgentDashboard: React.FC = () => {
 
                                 return (
                                   <div className="flex flex-col gap-1 items-start">
-                                    <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
-                                      isPaid
+                                    <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${isPaid
                                         ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30 font-black"
                                         : isPayFailed
-                                        ? "bg-rose-500/20 text-rose-300 border-rose-500/30"
-                                        : "bg-amber-500/20 text-amber-300 border-amber-500/30"
-                                    }`}>
+                                          ? "bg-rose-500/20 text-rose-300 border-rose-500/30"
+                                          : "bg-amber-500/20 text-amber-300 border-amber-500/30"
+                                      }`}>
                                       {isPaid ? "Paid ✓" : isPayFailed ? "Failed ✕" : "Pending ⏳"}
                                     </span>
 
@@ -2028,17 +2049,16 @@ export const AgentDashboard: React.FC = () => {
 
                             {/* Delivery Status */}
                             <td className="p-3.5 whitespace-nowrap">
-                              <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
-                                isDelivered
+                              <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${isDelivered
                                   ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
                                   : isProcessing
-                                  ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/30 animate-pulse"
-                                  : isPending
-                                  ? "bg-amber-500/20 text-amber-300 border-amber-500/30"
-                                  : isFailed
-                                  ? "bg-rose-500/20 text-rose-300 border-rose-500/30"
-                                  : "bg-zinc-700/40 text-zinc-300 border-zinc-600/30"
-                              }`}>
+                                    ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/30 animate-pulse"
+                                    : isPending
+                                      ? "bg-amber-500/20 text-amber-300 border-amber-500/30"
+                                      : isFailed
+                                        ? "bg-rose-500/20 text-rose-300 border-rose-500/30"
+                                        : "bg-zinc-700/40 text-zinc-300 border-zinc-600/30"
+                                }`}>
                                 {o.delivery_status || o.status || "processing"}
                               </span>
                             </td>
@@ -2201,11 +2221,10 @@ export const AgentDashboard: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setBotSubTab("orders")}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
-                      botSubTab === "orders"
+                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${botSubTab === "orders"
                         ? "bg-emerald-500 text-black shadow font-black"
                         : "text-zinc-400 hover:text-white"
-                    }`}
+                      }`}
                   >
                     <MessageCircle className="size-3.5" />
                     <span>Orders from Bot ({botOrders.length})</span>
@@ -2213,11 +2232,10 @@ export const AgentDashboard: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setBotSubTab("profit_history")}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
-                      botSubTab === "profit_history"
+                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${botSubTab === "profit_history"
                         ? "bg-emerald-500 text-black shadow font-black"
                         : "text-zinc-400 hover:text-white"
-                    }`}
+                      }`}
                   >
                     <TrendingUp className="size-3.5" />
                     <span>Profit Transaction History ({botOrders.length})</span>
@@ -2355,11 +2373,11 @@ export const AgentDashboard: React.FC = () => {
                           {filteredBotOrders.map((o) => {
                             const dateFormatted = o.created_at
                               ? new Date(o.created_at).toLocaleString("en-GB", {
-                                  day: "2-digit",
-                                  month: "short",
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                })
+                                day: "2-digit",
+                                month: "short",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })
                               : "N/A";
 
                             const refCode = o.reference || o.id || "";
@@ -2373,8 +2391,8 @@ export const AgentDashboard: React.FC = () => {
                             const cleanPhone = String(customerPhone).replace(/\D/g, "");
                             const waChatUrl = cleanPhone
                               ? `https://wa.me/${cleanPhone.startsWith("0") ? "233" + cleanPhone.slice(1) : cleanPhone}?text=${encodeURIComponent(
-                                  `Hello! Thank you for ordering ${o.network || ""} ${o.package_size || o.capacity || ""} from ${agent.store_name} via our WhatsApp Bot. Your order reference is ${refCode}.`
-                                )}`
+                                `Hello! Thank you for ordering ${o.network || ""} ${o.package_size || o.capacity || ""} from ${agent.store_name} via our WhatsApp Bot. Your order reference is ${refCode}.`
+                              )}`
                               : "";
 
                             return (
@@ -2457,17 +2475,16 @@ export const AgentDashboard: React.FC = () => {
                                 {/* Delivery Status */}
                                 <td className="p-3.5 whitespace-nowrap">
                                   <span
-                                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                                      isDelivered
+                                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${isDelivered
                                         ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
                                         : isProcessing
-                                        ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30"
-                                        : isPending
-                                        ? "bg-amber-500/15 text-amber-300 border border-amber-500/30"
-                                        : isFailed
-                                        ? "bg-rose-500/15 text-rose-300 border border-rose-500/30"
-                                        : "bg-white/10 text-zinc-300 border border-white/15"
-                                    }`}
+                                          ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30"
+                                          : isPending
+                                            ? "bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                                            : isFailed
+                                              ? "bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                                              : "bg-white/10 text-zinc-300 border border-white/15"
+                                      }`}
                                   >
                                     {isDelivered && <CheckCircle2 className="size-3" />}
                                     {isProcessing && <Radio className="size-3 animate-pulse" />}
@@ -2558,12 +2575,12 @@ export const AgentDashboard: React.FC = () => {
                             {filteredBotOrders.map((o) => {
                               const dateFormatted = o.created_at
                                 ? new Date(o.created_at).toLocaleString("en-GB", {
-                                    day: "2-digit",
-                                    month: "short",
-                                    year: "numeric",
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                  })
+                                  day: "2-digit",
+                                  month: "short",
+                                  year: "numeric",
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })
                                 : "N/A";
 
                               const refCode = o.reference || o.id || "";
@@ -2702,11 +2719,10 @@ export const AgentDashboard: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setPricingCategory("data")}
-                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
-                      pricingCategory === "data"
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${pricingCategory === "data"
                         ? "bg-cyan-500 text-black shadow-sm"
                         : "text-zinc-400 hover:text-white"
-                    }`}
+                      }`}
                   >
                     <Package className="size-3" />
                     <span>Data Bundles</span>
@@ -2714,14 +2730,24 @@ export const AgentDashboard: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setPricingCategory("services")}
-                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
-                      pricingCategory === "services"
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${pricingCategory === "services"
                         ? "bg-cyan-500 text-black shadow-sm"
                         : "text-zinc-400 hover:text-white"
-                    }`}
+                      }`}
                   >
                     <Zap className="size-3" />
                     <span>Other Services &amp; Checkers</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPricingCategory("boost")}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${pricingCategory === "boost"
+                        ? "bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-sm font-black"
+                        : "text-zinc-400 hover:text-white"
+                      }`}
+                  >
+                    <Rocket className="size-3 text-fuchsia-300" />
+                    <span>Social Media Boost 🚀</span>
                   </button>
                 </div>
 
@@ -2732,11 +2758,10 @@ export const AgentDashboard: React.FC = () => {
                         key={net}
                         type="button"
                         onClick={() => setSelectedNetwork(net)}
-                        className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all ${
-                          selectedNetwork === net
+                        className={`px-2.5 py-1 rounded-xl text-xs font-bold transition-all ${selectedNetwork === net
                             ? "bg-white/20 text-white shadow-sm"
                             : "bg-white/5 text-zinc-400 hover:text-white"
-                        }`}
+                          }`}
                       >
                         {net}
                       </button>
@@ -2821,7 +2846,7 @@ export const AgentDashboard: React.FC = () => {
                   );
                 })}
               </div>
-            ) : (
+            ) : pricingCategory === "services" ? (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
                 {(servicesPricing.length > 0 ? servicesPricing : [
                   { id: "service-netflix", name: "Netflix 1-Month Sign-In", category: "services", base_price: 25, selling_price: 30 },
@@ -2913,6 +2938,171 @@ export const AgentDashboard: React.FC = () => {
                     </Card>
                   );
                 })}
+              </div>
+            ) : (
+              /* SOCIAL MEDIA BOOST PROFIT MARGINS */
+              <div className="space-y-6">
+                <Card className="p-5 md:p-6 rounded-3xl border border-fuchsia-500/30 bg-gradient-to-br from-fuchsia-950/40 via-zinc-900 to-black space-y-5 shadow-xl shadow-fuchsia-950/20">
+                  <div className="flex items-start justify-between flex-wrap gap-4">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className="px-3 py-0.5 rounded-full text-[11px] font-black uppercase bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30 flex items-center gap-1.5 shadow-xs">
+                          <Rocket className="size-3 text-fuchsia-300" /> Reseller Profit Percentage
+                        </span>
+                        <span className="text-xs text-zinc-400 font-medium">Automatic Wholesale Markup</span>
+                      </div>
+                      <h3 className="text-lg md:text-xl font-black text-white tracking-tight">
+                        Social Media Boost Reseller Profit Margin
+                      </h3>
+                      <p className="text-xs md:text-sm text-zinc-300 max-w-2xl leading-relaxed">
+                        Set your percentage profit margin for all social media growth services (TikTok, Instagram, Facebook, YouTube, Twitter/X, Telegram).
+                        Your storefront customers will see your marked-up retail prices, and your profit is automatically credited to your wallet whenever an order completes.
+                      </p>
+                    </div>
+
+                    <div className="p-4 rounded-2xl bg-black/60 border border-fuchsia-500/30 text-center min-w-[150px] shadow-inner">
+                      <span className="text-[10px] text-zinc-400 uppercase tracking-wider block font-bold">Your Profit Margin</span>
+                      <span className="text-3xl font-black text-fuchsia-400 font-mono">
+                        +{boostMarkupPercent}%
+                      </span>
+                      <span className="text-[10px] text-emerald-400 font-semibold block mt-0.5">
+                        +{boostMarkupPercent}% Above Wholesale
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Preset Margin Buttons & Custom Input */}
+                  <div className="pt-4 border-t border-white/10 space-y-3">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <Label className="text-xs font-bold text-zinc-200">
+                        Choose or Customize Your Profit Percentage:
+                      </Label>
+                      <span className="text-[11px] text-zinc-400">
+                        Higher percentage = more profit per order. Lower percentage = cheaper customer prices.
+                      </span>
+                    </div>
+
+                    <div className="flex items-center flex-wrap gap-2">
+                      {[10, 15, 20, 25, 30, 40, 50, 75, 100].map((pct) => (
+                        <button
+                          key={pct}
+                          type="button"
+                          onClick={() => handleBoostMarkupChange(pct)}
+                          className={`px-3.5 py-2 rounded-xl text-xs font-black transition-all ${boostMarkupPercent === pct
+                              ? "bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-lg shadow-fuchsia-500/30 scale-105"
+                              : "bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border border-zinc-700/80"
+                            }`}
+                        >
+                          +{pct}%
+                        </button>
+                      ))}
+
+                      <div className="flex items-center gap-1.5 bg-black/70 border border-fuchsia-500/30 px-3 py-1.5 rounded-xl ml-auto">
+                        <span className="text-xs text-zinc-300 font-bold">Custom %:</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="500"
+                          value={boostMarkupPercent}
+                          onChange={(e) => handleBoostMarkupChange(Number(e.target.value) || 0)}
+                          className="w-16 bg-transparent text-right font-mono font-black text-xs text-fuchsia-300 focus:outline-none"
+                        />
+                        <span className="text-xs text-zinc-300 font-bold">%</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Live Profit Calculation Preview Banner */}
+                  <div className="p-4 rounded-2xl bg-black/50 border border-white/10 grid grid-cols-1 sm:grid-cols-3 gap-3 text-center">
+                    <div className="space-y-1">
+                      <span className="text-[11px] text-zinc-400 font-medium block">Wholesale Base Cost (Admin)</span>
+                      <span className="text-base font-bold text-zinc-200 font-mono">GH₵ 10.00</span>
+                      <span className="text-[10px] text-zinc-500 block">Cost to you</span>
+                    </div>
+                    <div className="space-y-1 border-t sm:border-t-0 sm:border-x border-white/10 pt-2 sm:pt-0">
+                      <span className="text-[11px] text-zinc-400 font-medium block">Customer Pays On Your Store</span>
+                      <span className="text-base font-black text-white font-mono">
+                        GH₵ {(10 * (1 + boostMarkupPercent / 100)).toFixed(2)}
+                      </span>
+                      <span className="text-[10px] text-zinc-400 block">Wholesale + {boostMarkupPercent}%</span>
+                    </div>
+                    <div className="space-y-1 border-t sm:border-t-0 border-white/10 pt-2 sm:pt-0">
+                      <span className="text-[11px] text-emerald-400 font-bold block">Your Instant Wallet Profit</span>
+                      <span className="text-base font-black text-emerald-400 font-mono">
+                        +GH₵ {(10 * (boostMarkupPercent / 100)).toFixed(2)}
+                      </span>
+                      <span className="text-[10px] text-emerald-400/80 block">Credited per order</span>
+                    </div>
+                  </div>
+                </Card>
+
+                {/* Live Sample Catalog Preview Across Platforms */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="text-sm font-bold text-white flex items-center gap-1.5">
+                        <Sparkles className="size-4 text-fuchsia-400" />
+                        Sample Live Pricing On Your Storefront (+{boostMarkupPercent}% Applied)
+                      </h4>
+                      <p className="text-xs text-zinc-400">
+                        Here is what customers will see and what you will earn on popular packages.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                    {[
+                      { platform: "tiktok", name: "TikTok Followers (1,000)", base: 8.50, badge: "Popular 🔥" },
+                      { platform: "tiktok", name: "TikTok High-Retention Views (1,000)", base: 1.20, badge: "Instant ⚡" },
+                      { platform: "instagram", name: "Instagram Real Likes (1,000)", base: 4.00, badge: "Trending 🚀" },
+                      { platform: "instagram", name: "Instagram Non-Drop Followers (1,000)", base: 9.50, badge: "Non-Drop 🛡️" },
+                      { platform: "youtube", name: "YouTube Monetizable Views (1,000)", base: 12.00, badge: "Monetizable 🎬" },
+                      { platform: "facebook", name: "Facebook Page Followers (1,000)", base: 10.00, badge: "High Retention 👥" },
+                      { platform: "twitter", name: "Twitter (X) Retweets & Likes (1,000)", base: 6.50, badge: "Fast ⚡" },
+                      { platform: "telegram", name: "Telegram Channel Members (1,000)", base: 8.00, badge: "Non-Drop 🛡️" },
+                      { platform: "whatsapp", name: "WhatsApp Channel Followers (1,000)", base: 11.00, badge: "Active 📱" },
+                    ].map((item, idx) => {
+                      const customerPrice = Math.max(1, Number((item.base * (1 + boostMarkupPercent / 100)).toFixed(2)));
+                      const profit = Math.max(0, Number((customerPrice - item.base).toFixed(2)));
+
+                      return (
+                        <Card
+                          key={idx}
+                          className="p-4 rounded-2xl border border-white/10 bg-zinc-900/60 hover:border-fuchsia-500/30 transition-all space-y-3"
+                        >
+                          <div className="flex items-start justify-between">
+                            <div className="flex items-center gap-2.5">
+                              <SocialPlatformIcon platform={item.platform} className="size-8 shrink-0 drop-shadow" />
+                              <div>
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-white/10 text-zinc-300">
+                                  {item.badge}
+                                </span>
+                                <h5 className="font-bold text-xs text-white mt-1 leading-snug">
+                                  {item.name}
+                                </h5>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="pt-2 border-t border-white/5 flex items-center justify-between text-xs">
+                            <div>
+                              <span className="text-[10px] text-zinc-500 block">Base Cost</span>
+                              <span className="font-mono text-zinc-300 font-semibold">GH₵ {item.base.toFixed(2)}</span>
+                            </div>
+                            <div className="text-center">
+                              <span className="text-[10px] text-zinc-400 block">Storefront Price</span>
+                              <span className="font-mono text-white font-bold">GH₵ {customerPrice.toFixed(2)}</span>
+                            </div>
+                            <div className="text-right">
+                              <span className="text-[10px] text-emerald-400 block font-semibold">Your Profit</span>
+                              <span className="font-mono text-emerald-400 font-bold">+GH₵ {profit.toFixed(2)}</span>
+                            </div>
+                          </div>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -3020,8 +3210,8 @@ export const AgentDashboard: React.FC = () => {
                       {sendingWithdrawalCode
                         ? "Sending..."
                         : codeCountdown > 0
-                        ? `Resend in ${codeCountdown}s`
-                        : "Send Code to Email & SMS"}
+                          ? `Resend in ${codeCountdown}s`
+                          : "Send Code to Email & SMS"}
                     </button>
                   </div>
                   <Input
@@ -3101,13 +3291,12 @@ export const AgentDashboard: React.FC = () => {
                             {formatGHS(w.amount)}
                           </td>
                           <td className="p-3.5">
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                              w.status === "completed" || w.status === "approved"
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${w.status === "completed" || w.status === "approved"
                                 ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
                                 : w.status === "rejected"
-                                ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
-                                : "bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse"
-                            }`}>
+                                  ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                                  : "bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse"
+                              }`}>
                               {w.status || "pending"}
                             </span>
                           </td>
@@ -3825,33 +4014,30 @@ export const AgentDashboard: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setCustomDomain("https://gooddata1.vercel.app")}
-                    className={`py-2 px-3 rounded-xl text-xs font-mono border transition-all text-left ${
-                      customDomain === "https://gooddata1.vercel.app"
+                    className={`py-2 px-3 rounded-xl text-xs font-mono border transition-all text-left ${customDomain === "https://gooddata1.vercel.app"
                         ? "border-cyan-400 bg-cyan-500/20 text-cyan-300 font-bold"
                         : "border-white/10 bg-black/40 text-zinc-400 hover:text-white"
-                    }`}
+                      }`}
                   >
                     https://gooddata1.vercel.app
                   </button>
                   <button
                     type="button"
                     onClick={() => setCustomDomain("https://gooddata.shop")}
-                    className={`py-2 px-3 rounded-xl text-xs font-mono border transition-all text-left ${
-                      customDomain === "https://gooddata.shop"
+                    className={`py-2 px-3 rounded-xl text-xs font-mono border transition-all text-left ${customDomain === "https://gooddata.shop"
                         ? "border-cyan-400 bg-cyan-500/20 text-cyan-300 font-bold"
                         : "border-white/10 bg-black/40 text-zinc-400 hover:text-white"
-                    }`}
+                      }`}
                   >
                     https://gooddata.shop
                   </button>
                   <button
                     type="button"
                     onClick={() => setCustomDomain("https://gooddatagh.com")}
-                    className={`py-2 px-3 rounded-xl text-xs font-mono border transition-all text-left ${
-                      customDomain === "https://gooddatagh.com"
+                    className={`py-2 px-3 rounded-xl text-xs font-mono border transition-all text-left ${customDomain === "https://gooddatagh.com"
                         ? "border-cyan-400 bg-cyan-500/20 text-cyan-300 font-bold"
                         : "border-white/10 bg-black/40 text-zinc-400 hover:text-white"
-                    }`}
+                      }`}
                   >
                     https://gooddatagh.com
                   </button>
@@ -4026,11 +4212,10 @@ export const AgentDashboard: React.FC = () => {
                       <div
                         key={th.id}
                         onClick={() => setStoreTheme(th.id)}
-                        className={`relative rounded-2xl p-4 cursor-pointer transition-all border text-left flex flex-col justify-between overflow-hidden group ${
-                          isSelected
+                        className={`relative rounded-2xl p-4 cursor-pointer transition-all border text-left flex flex-col justify-between overflow-hidden group ${isSelected
                             ? `${th.cardBorder} ring-2 ring-offset-2 ring-offset-zinc-950 ring-cyan-400 bg-zinc-900/90 shadow-xl`
                             : "border-white/10 bg-black/40 hover:border-white/25 hover:bg-zinc-900/40"
-                        }`}
+                          }`}
                       >
                         {/* Background aura snippet */}
                         <div
@@ -4053,11 +4238,10 @@ export const AgentDashboard: React.FC = () => {
                             </span>
 
                             <div
-                              className={`size-5 rounded-full flex items-center justify-center border transition-all ${
-                                isSelected
+                              className={`size-5 rounded-full flex items-center justify-center border transition-all ${isSelected
                                   ? "border-cyan-400 bg-cyan-400 text-black shadow-[0_0_10px_rgba(6,182,212,0.6)]"
                                   : "border-white/20 bg-black/60 group-hover:border-white/40"
-                              }`}
+                                }`}
                             >
                               {isSelected && <Check className="size-3 stroke-[3]" />}
                             </div>
@@ -4111,9 +4295,8 @@ export const AgentDashboard: React.FC = () => {
                             </span>
                           </div>
                           <div
-                            className={`mt-1.5 w-full py-1 text-center rounded-lg text-[10px] font-black uppercase tracking-wider bg-gradient-to-r ${th.btnGradient} ${
-                              th.id === "frost" || th.id === "sunset" ? "text-white" : "text-black"
-                            }`}
+                            className={`mt-1.5 w-full py-1 text-center rounded-lg text-[10px] font-black uppercase tracking-wider bg-gradient-to-r ${th.btnGradient} ${th.id === "frost" || th.id === "sunset" ? "text-white" : "text-black"
+                              }`}
                           >
                             Buy Bundle
                           </div>

@@ -112,3 +112,37 @@ export function detectDropQuality(
   };
 }
 
+
+/**
+ * Calculates customer selling price for a boost service given:
+ * - baseRate: Admin wholesale rate to agent (in GHS per 1,000 or flat package)
+ * - agentMarkupPercent: Agent's profit margin percentage (e.g. 25%)
+ * - quantity: Order units
+ * - isPackage: Whether service is flat package
+ */
+export function calculateBoostPrice(
+  baseRate: number,
+  agentMarkupPercent: number = 0,
+  quantity?: number,
+  isPackage: boolean = false
+): { sellingRate: number; totalPrice: number; agentProfit: number; baseCost: number } {
+  const markupMultiplier = 1 + Math.max(0, agentMarkupPercent) / 100;
+  const sellingRate = Number((baseRate * markupMultiplier).toFixed(2));
+
+  if (isPackage) {
+    const totalPrice = Math.max(1, sellingRate);
+    const baseCost = Math.max(0.5, Number(baseRate.toFixed(2)));
+    const agentProfit = Math.max(0, Number((totalPrice - baseCost).toFixed(2)));
+    return { sellingRate, totalPrice, agentProfit, baseCost };
+  }
+
+  const q = Number(quantity) || 1000;
+  const rawTotal = (q * sellingRate) / 1000;
+  const totalPrice = Math.max(1, Math.round(rawTotal * 100) / 100);
+
+  const rawBase = (q * baseRate) / 1000;
+  const baseCost = Math.max(0.5, Math.round(rawBase * 100) / 100);
+  const agentProfit = Math.max(0, Number((totalPrice - baseCost).toFixed(2)));
+
+  return { sellingRate, totalPrice, agentProfit, baseCost };
+}

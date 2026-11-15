@@ -475,7 +475,7 @@ const PaymentCallback = () => {
                         {kind === "boost"
                           ? isDelivered
                             ? `Your social media boost order has completed successfully!`
-                            : `Payment of GH₵ ${Number(order.amount).toFixed(2)} received. Your boost order has been submitted to the provider network and is actively processing.`
+                            : `Payment of GH₵ ${Number(order.amount).toFixed(2)} received. Your boost order has been submitted to the fulfillment network and is actively processing.`
                           : isDelivered
                           ? `Your ${order.capacity}GB bundle has been credited to ${order.recipient_phone}!`
                           : isRefunded

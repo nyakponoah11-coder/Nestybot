@@ -163,7 +163,16 @@ export const SocialBoostDialog = ({
     const fetchServices = async () => {
       setLoadingServices(true);
       try {
-        const { data, error } = await invokeApiFunction("boost-services");
+        const { data, error } = await invokeApiFunction("boost-services", {
+          queryParams: {
+            agent_slug: agentSlug || undefined,
+            agent_id: agentId || undefined,
+          },
+          body: {
+            agent_slug: agentSlug || undefined,
+            agent_id: agentId || undefined,
+          },
+        });
         if (!error && Array.isArray(data?.services) && isMounted) {
           setServices(data.services);
         }
@@ -497,9 +506,7 @@ export const SocialBoostDialog = ({
                     className={`cursor-pointer p-4 rounded-xl bg-gradient-to-br ${platform.bgGradient} border ${platform.borderGlow} hover:-translate-y-0.5 transition-all flex items-center justify-between group shadow`}
                   >
                     <div className="flex items-center gap-3">
-                      <div className={`size-10 rounded-lg bg-gradient-to-br ${platform.iconColor} p-2 grid place-items-center shadow`}>
-                        <SocialPlatformIcon platform={platform.id} className="size-5 text-white" />
-                      </div>
+                      <SocialPlatformIcon platform={platform.id} className="size-10 shrink-0 drop-shadow-md group-hover:scale-105 transition-transform" />
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="font-bold text-sm text-white group-hover:text-fuchsia-300 transition-colors">
@@ -720,7 +727,7 @@ export const SocialBoostDialog = ({
                 <div className="p-3 rounded-lg bg-zinc-800/60 border border-zinc-700/80 flex items-center justify-between">
                   <div>
                     <Label className="text-xs font-bold text-zinc-300">
-                      Package Quantity (Fixed by Provider)
+                      Package Quantity (Fixed Guaranteed Package)
                     </Label>
                     <div className="text-lg font-black text-white mt-0.5">
                       {selectedService.min.toLocaleString()} units
