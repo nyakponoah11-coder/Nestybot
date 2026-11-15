@@ -44,7 +44,9 @@ import {
   Eye,
   EyeOff,
   Copy,
-  Lock
+  Lock,
+  Rocket,
+  Edit2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { formatGHS, NETWORK_LABEL, networkClass, DEFAULT_PRODUCTS } from "@/lib/networks";
@@ -97,8 +99,50 @@ export const AdminAgents: React.FC = () => {
   const [loadingPrices, setLoadingPrices] = useState(false);
   const [savingPrices, setSavingPrices] = useState(false);
   const [selectedNetwork, setSelectedNetwork] = useState<string>("ALL");
-  const [pricingCategory, setPricingCategory] = useState<"data" | "services">("data");
+  const [pricingCategory, setPricingCategory] = useState<"data" | "services" | "boost">("data");
   const [preserveAgentProfit, setPreserveAgentProfit] = useState<boolean>(true);
+
+  // Social Media Boost Margin Management Modal State
+  const [boostModalOpen, setBoostModalOpen] = useState(false);
+  const [selectedAgentForBoost, setSelectedAgentForBoost] = useState<any>(null);
+  const [boostMarkupInput, setBoostMarkupInput] = useState<number>(25);
+  const [savingAgentBoost, setSavingAgentBoost] = useState(false);
+
+  const handleOpenBoostMarginModal = (agent: any) => {
+    setSelectedAgentForBoost(agent);
+    const current = Number(agent?.custom_prices?.boost_markup_percent);
+    setBoostMarkupInput(Number.isFinite(current) ? current : 25);
+    setBoostModalOpen(true);
+  };
+
+  const handleSaveAgentBoostMargin = async () => {
+    if (!selectedAgentForBoost?.id) return;
+    setSavingAgentBoost(true);
+    try {
+      const updatedCustomPrices = {
+        ...(selectedAgentForBoost.custom_prices || {}),
+        boost_markup_percent: Math.max(0, Math.min(500, Number(boostMarkupInput) || 0)),
+      };
+      const res = await invokeApiFunction("agent", {
+        body: {
+          action: "updateProducts",
+          agent_id: selectedAgentForBoost.id,
+          custom_prices: updatedCustomPrices,
+        },
+      });
+      if (res?.data?.ok) {
+        toast.success(`Updated ${selectedAgentForBoost.name}'s Social Boost margin to +${boostMarkupInput}%!`);
+        setBoostModalOpen(false);
+        loadAgents(true);
+      } else {
+        toast.error(res?.data?.error || "Failed to update agent margin.");
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to save margin.");
+    } finally {
+      setSavingAgentBoost(false);
+    }
+  };
 
   // Withdrawals
   const [withdrawals, setWithdrawals] = useState<any[]>([]);
@@ -763,6 +807,7 @@ export const AdminAgents: React.FC = () => {
                       <th className="p-3.5 font-bold">Agent Name</th>
                       <th className="p-3.5 font-bold">Storefront &amp; Link</th>
                       <th className="p-3.5 font-bold">Phone / MoMo</th>
+                      <th className="p-3.5 font-bold text-fuchsia-400">Boost Margin %</th>
                       <th className="p-3.5 font-bold text-emerald-400">Today&apos;s Profit</th>
                       <th className="p-3.5 font-bold text-amber-400">Wallet Balance</th>
                       <th className="p-3.5 font-bold">Total Earned</th>
@@ -792,6 +837,18 @@ export const AdminAgents: React.FC = () => {
                         <td className="p-3.5 font-mono text-foreground">
                           <div>{a.phone}</div>
                           <div className="text-[10px] text-muted-foreground">{a.momo_network} &bull; {a.momo_number}</div>
+                        </td>
+                        <td className="p-3.5 whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenBoostMarginModal(a)}
+                            className="px-2.5 py-1 rounded-full text-xs font-mono font-black bg-fuchsia-500/15 text-fuchsia-400 border border-fuchsia-500/30 hover:bg-fuchsia-500/25 transition-all flex items-center gap-1.5 group cursor-pointer"
+                            title="Click to view or edit this agent's boost percentage"
+                          >
+                            <Rocket className="size-3 text-fuchsia-400 group-hover:rotate-12 transition-transform" />
+                            <span>+{a.custom_prices?.boost_markup_percent ?? 25}%</span>
+                            <Edit2 className="size-2.5 opacity-60 group-hover:opacity-100" />
+                          </button>
                         </td>
                         <td className="p-3.5 font-bold text-emerald-400 font-mono whitespace-nowrap">
                           {formatGHS(a.today_profit ?? a.todayProfit ?? 0)}
@@ -1140,6 +1197,18 @@ export const AdminAgents: React.FC = () => {
                 >
                   Other Services &amp; Checkers
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setPricingCategory("boost")}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    pricingCategory === "boost"
+                      ? "bg-gradient-to-r from-fuchsia-500 to-pink-500 text-white shadow-sm font-black"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Rocket className="size-3 text-fuchsia-300" />
+                  <span>Social Boost Margins 🚀</span>
+                </button>
               </div>
 
               {pricingCategory === "data" && (
@@ -1303,6 +1372,130 @@ export const AdminAgents: React.FC = () => {
                   </Card>
                 );
               })}
+            </div>
+          ) : pricingCategory === "boost" ? (
+            /* ALL AGENTS SOCIAL MEDIA BOOST MARGIN OVERVIEW & OVERRIDE */
+            <div className="space-y-4">
+              <Card className="p-5 md:p-6 rounded-3xl border border-fuchsia-500/30 bg-gradient-to-br from-fuchsia-950/30 via-card to-background space-y-4 shadow-sm">
+                <div className="flex items-start justify-between flex-wrap gap-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30 flex items-center gap-1">
+                        <Rocket className="size-3" /> Reseller Profit Percentage Controls
+                      </span>
+                    </div>
+                    <h3 className="text-base font-black text-foreground">
+                      All Agents Social Media Boost Profit Margins
+                    </h3>
+                    <p className="text-xs text-muted-foreground max-w-2xl leading-relaxed">
+                      Every agent can customize their own percentage profit margin on their dashboard. You can view each agent&apos;s active percentage here, or click to adjust/override it at any time.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 rounded-2xl bg-muted/40 border border-border text-center min-w-[140px]">
+                    <span className="text-[10px] text-muted-foreground uppercase tracking-wider block font-bold">Total Resellers</span>
+                    <span className="text-2xl font-black text-fuchsia-400 font-mono">
+                      {agents.length}
+                    </span>
+                  </div>
+                </div>
+              </Card>
+
+              {/* Table of all agents and their boost markup */}
+              <div className="rounded-3xl border border-border/60 bg-card overflow-hidden shadow-sm">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-muted/50 border-b border-border/60 text-muted-foreground uppercase tracking-wider text-[10px]">
+                      <tr>
+                        <th className="p-3.5 font-bold">Agent Name</th>
+                        <th className="p-3.5 font-bold">Store Link</th>
+                        <th className="p-3.5 font-bold text-fuchsia-400">Boost Margin %</th>
+                        <th className="p-3.5 font-bold">Quick Presets</th>
+                        <th className="p-3.5 font-bold text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/40">
+                      {agents.map((ag) => {
+                        const currentMargin = Number(ag.custom_prices?.boost_markup_percent ?? 25);
+                        return (
+                          <tr key={ag.id} className="hover:bg-muted/30 transition-colors">
+                            <td className="p-3.5">
+                              <div className="font-bold text-foreground">{ag.name}</div>
+                              <div className="text-[11px] text-muted-foreground">{ag.email}</div>
+                            </td>
+                            <td className="p-3.5">
+                              <a
+                                href={`/s/${ag.store_slug}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-cyan-400 hover:underline font-mono text-[11px] inline-flex items-center gap-1"
+                              >
+                                <span>/s/{ag.store_slug}</span>
+                                <ExternalLink className="size-3" />
+                              </a>
+                            </td>
+                            <td className="p-3.5 whitespace-nowrap">
+                              <span className="px-3 py-1 rounded-full text-xs font-mono font-black bg-fuchsia-500/15 text-fuchsia-400 border border-fuchsia-500/30 inline-flex items-center gap-1.5">
+                                <Rocket className="size-3" />
+                                +{currentMargin}%
+                              </span>
+                            </td>
+                            <td className="p-3.5">
+                              <div className="flex items-center gap-1 flex-wrap">
+                                {[15, 20, 25, 30, 40, 50].map((pct) => (
+                                  <button
+                                    key={pct}
+                                    type="button"
+                                    onClick={async () => {
+                                      try {
+                                        const res = await invokeApiFunction("agent", {
+                                          body: {
+                                            action: "updateProducts",
+                                            agent_id: ag.id,
+                                            custom_prices: {
+                                              ...(ag.custom_prices || {}),
+                                              boost_markup_percent: pct,
+                                            },
+                                          },
+                                        });
+                                        if (res?.data?.ok) {
+                                          toast.success(`Set ${ag.name}'s margin to +${pct}%!`);
+                                          loadAgents(true);
+                                        }
+                                      } catch (err: any) {
+                                        toast.error(err?.message || "Failed to update margin.");
+                                      }
+                                    }}
+                                    className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold transition-all ${
+                                      currentMargin === pct
+                                        ? "bg-fuchsia-500 text-white shadow-xs font-black"
+                                        : "bg-muted hover:bg-muted/80 text-muted-foreground"
+                                    }`}
+                                  >
+                                    +{pct}%
+                                  </button>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="p-3.5 text-right">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleOpenBoostMarginModal(ag)}
+                                className="h-7 px-2.5 rounded-lg border-fuchsia-500/30 bg-fuchsia-500/10 hover:bg-fuchsia-500/20 text-fuchsia-300 text-xs font-bold gap-1 shadow-xs"
+                              >
+                                <Edit2 className="size-3" />
+                                <span>Edit %</span>
+                              </Button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
@@ -2096,6 +2289,96 @@ export const AdminAgents: React.FC = () => {
                 </Button>
               </DialogFooter>
             </form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog: Edit Agent Social Boost Profit Margin % */}
+      <Dialog open={boostModalOpen} onOpenChange={setBoostModalOpen}>
+        <DialogContent className="max-w-md bg-card border-border text-foreground p-6 rounded-3xl">
+          <DialogHeader>
+            <DialogTitle className="text-base font-black flex items-center gap-2 text-fuchsia-400">
+              <Rocket className="size-5" />
+              <span>Edit Agent Social Boost Margin %</span>
+            </DialogTitle>
+          </DialogHeader>
+
+          {selectedAgentForBoost && (
+            <div className="space-y-4 mt-2">
+              <div className="p-3.5 rounded-2xl bg-muted/40 border border-border/60 text-xs space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Agent</span>
+                  <span className="font-bold text-foreground">{selectedAgentForBoost.name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Store Link</span>
+                  <span className="font-mono text-cyan-400">/s/{selectedAgentForBoost.store_slug}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Current Margin</span>
+                  <span className="font-mono font-bold text-fuchsia-400">
+                    +{selectedAgentForBoost.custom_prices?.boost_markup_percent ?? 25}%
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="agent-boost-input" className="text-xs font-semibold">
+                  Profit Percentage Margin (%):
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="agent-boost-input"
+                    type="number"
+                    min="0"
+                    max="500"
+                    value={boostMarkupInput}
+                    onChange={(e) => setBoostMarkupInput(Number(e.target.value) || 0)}
+                    className="font-mono font-bold text-sm text-fuchsia-400 rounded-xl"
+                  />
+                  <span className="text-sm font-bold text-muted-foreground">%</span>
+                </div>
+                <div className="flex items-center flex-wrap gap-1.5 pt-1">
+                  {[15, 20, 25, 30, 40, 50, 75, 100].map((pct) => (
+                    <button
+                      key={pct}
+                      type="button"
+                      onClick={() => setBoostMarkupInput(pct)}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
+                        boostMarkupInput === pct
+                          ? "bg-fuchsia-500 text-white font-black"
+                          : "bg-muted hover:bg-muted/80 text-muted-foreground"
+                      }`}
+                    >
+                      +{pct}%
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-muted-foreground pt-1">
+                  When a customer orders on <strong>{selectedAgentForBoost.store_name}</strong>, they are charged the Wholesale Base Price + <strong>{boostMarkupInput}%</strong>. The <strong>{boostMarkupInput}%</strong> profit goes directly into {selectedAgentForBoost.name}&apos;s wallet balance.
+                </p>
+              </div>
+
+              <DialogFooter className="gap-2 sm:gap-0 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setBoostModalOpen(false)}
+                  className="rounded-xl text-xs"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  disabled={savingAgentBoost}
+                  onClick={handleSaveAgentBoostMargin}
+                  className="rounded-xl bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:opacity-95 text-white font-black text-xs gap-1.5 shadow-md shadow-fuchsia-600/30"
+                >
+                  {savingAgentBoost ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+                  <span>Save Margin (+{boostMarkupInput}%)</span>
+                </Button>
+              </DialogFooter>
+            </div>
           )}
         </DialogContent>
       </Dialog>
