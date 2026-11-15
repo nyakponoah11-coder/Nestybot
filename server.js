@@ -10704,7 +10704,6 @@ async function notifyAgentNewOrder(order) {
     const { data: ag } = await supabase
       .from("agents")
       .select("id, name, phone, whatsapp_number, momo_number, store_name, store_slug")
-      .eq("id", resolvedAgentId)
       .maybeSingle();
 
     if (ag) {
