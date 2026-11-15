@@ -1229,6 +1229,14 @@ export default async function handler(req: any, res: any) {
             ? (userNotes || `Social Media Boost Order`)
             : (userNotes || null);
 
+        if (sKey === "boost") {
+          if (body?.boost_service_id) orderNotes = setNoteTag(orderNotes, "boost_service_id", body.boost_service_id);
+          if (body?.boost_service_name) orderNotes = setNoteTag(orderNotes, "boost_service_name", body.boost_service_name);
+          if (body?.boost_platform) orderNotes = setNoteTag(orderNotes, "boost_platform", body.boost_platform);
+          if (body?.boost_link) orderNotes = setNoteTag(orderNotes, "boost_link", body.boost_link);
+          if (body?.boost_quantity) orderNotes = setNoteTag(orderNotes, "boost_quantity", body.boost_quantity);
+        }
+
         if (customer_name) {
           orderNotes = `[name:${customer_name}] ${orderNotes || ""}`.trim();
         }

@@ -107,6 +107,7 @@ import AgentStorefront from "./pages/agent/AgentStorefront";
 import AgentDomainGate from "./pages/agent/AgentDomainGate";
 import AdminAgents from "./pages/admin/AdminAgents";
 import AdminDatabaseStudio from "./pages/admin/AdminDatabaseStudio";
+import SocialBoost from "./pages/SocialBoost";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -166,6 +167,8 @@ function AppRoutes() {
       location.pathname.startsWith("/payment") ||
       location.pathname.startsWith("/callback") ||
       location.pathname.startsWith("/track") ||
+      location.pathname.startsWith("/boost") ||
+      location.pathname.startsWith("/social-boost") ||
       location.pathname.startsWith("/agent") ||
       location.pathname.startsWith("/arcade") ||
       location.pathname.startsWith("/games") ||
@@ -212,6 +215,9 @@ function AppRoutes() {
       <Route path="/apk" element={<DownloadApp />} />
       <Route path="/network/:network" element={<NetworkBundles />} />
       <Route path="/services" element={<Services />} />
+      <Route path="/boost" element={<SocialBoost />} />
+      <Route path="/boost/:platform" element={<SocialBoost />} />
+      <Route path="/social-boost" element={<SocialBoost />} />
       <Route path="/track" element={<Track />} />
       <Route path="/game" element={<Game />} />
       <Route path="/race" element={<Race />} />

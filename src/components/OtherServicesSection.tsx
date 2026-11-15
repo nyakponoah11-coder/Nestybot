@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Card } from "@/components/ui/card";
 import { Play, IdCard, Sparkles, Zap, Rocket } from "lucide-react";
 import { ServiceCheckoutDialog } from "./ServiceCheckoutDialog";
@@ -13,6 +14,7 @@ export const OtherServicesSection = ({
   afaPrice?: number;
   mashupPrice?: number;
 }) => {
+  const navigate = useNavigate();
   const [open, setOpen] = useState<"netflix" | "afa" | "mashup" | null>(null);
   const [boostOpen, setBoostOpen] = useState(false);
 
@@ -112,7 +114,7 @@ export const OtherServicesSection = ({
 
         {/* Social Media Boost - Live */}
         <Card
-          onClick={() => setBoostOpen(true)}
+          onClick={() => navigate("/boost")}
           className="cursor-pointer p-5 border-0 text-white bg-gradient-to-br from-violet-600 via-fuchsia-600 to-pink-600 shadow-[0_20px_50px_-15px_rgba(192,38,211,0.6)] hover:-translate-y-0.5 transition-all relative overflow-hidden group"
         >
           <div className="absolute top-3 right-3 text-[10px] font-bold uppercase tracking-wider bg-white/20 backdrop-blur px-2.5 py-0.5 rounded-full flex items-center gap-1">
