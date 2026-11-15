@@ -827,40 +827,6 @@ export const SocialBoost = () => {
               </div>
             </Card>
 
-            {/* Drop Quality Assurance Notice */}
-            {selectedQualityInfo && (
-              <div
-                className={`p-4 rounded-2xl border flex items-start gap-3 shadow-md ${
-                  selectedQualityInfo.isNonDrop
-                    ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-200"
-                    : "bg-amber-950/30 border-amber-500/40 text-amber-200"
-                }`}
-              >
-                {selectedQualityInfo.isNonDrop ? (
-                  <ShieldCheck className="size-5 text-emerald-400 shrink-0 mt-0.5" />
-                ) : (
-                  <Zap className="size-5 text-amber-400 shrink-0 mt-0.5" />
-                )}
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-black text-sm text-white">
-                      {selectedQualityInfo.isNonDrop
-                        ? "100% Non-Drop Permanent Package Guaranteed"
-                        : "Standard Range Engagement Service"}
-                    </span>
-                    <Badge className={`${selectedQualityInfo.badgeColor} text-[10px] font-bold`}>
-                      {selectedQualityInfo.badgeLabel}
-                    </Badge>
-                  </div>
-                  <p className="text-xs opacity-90 leading-relaxed">
-                    {selectedQualityInfo.isNonDrop
-                      ? `Provider fixed package with 0% drop guarantee and permanent retention. Delivered in a single complete batch of ${selectedService.min.toLocaleString()} units.`
-                      : `Variable quantity range (Min ${selectedService.min.toLocaleString()} - Max ${selectedService.max.toLocaleString()} units). Standard delivery speed; engagement may naturally fluctuate or drop over time.`}
-                  </p>
-                </div>
-              </div>
-            )}
-
             {/* Order Form */}
             <Card className="p-5 md:p-6 rounded-2xl bg-zinc-900/90 border border-zinc-800 space-y-6 shadow-xl">
               {/* Target Link Input */}

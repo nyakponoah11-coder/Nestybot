@@ -688,36 +688,6 @@ export const SocialBoostDialog = ({
                 </div>
               </div>
 
-              {/* Quality indicator banner in Step 3 */}
-              {selectedQualityInfo && (
-                <div
-                  className={`p-3 rounded-xl border flex items-start gap-2.5 text-xs ${
-                    selectedQualityInfo.isNonDrop
-                      ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-200"
-                      : "bg-amber-950/30 border-amber-500/40 text-amber-200"
-                  }`}
-                >
-                  {selectedQualityInfo.isNonDrop ? (
-                    <ShieldCheck className="size-4 text-emerald-400 shrink-0 mt-0.5" />
-                  ) : (
-                    <Zap className="size-4 text-amber-400 shrink-0 mt-0.5" />
-                  )}
-                  <div>
-                    <div className="font-bold text-white flex items-center gap-1.5 flex-wrap">
-                      <span>{selectedQualityInfo.isNonDrop ? "100% Non-Drop Guaranteed" : "Standard Speed (May Drop)"}</span>
-                      <Badge className={`${selectedQualityInfo.badgeColor} text-[9px] py-0`}>
-                        {selectedQualityInfo.badgeLabel}
-                      </Badge>
-                    </div>
-                    <p className="opacity-80 mt-0.5 text-[11px]">
-                      {selectedQualityInfo.isNonDrop
-                        ? `Fixed package of ${selectedService.min.toLocaleString()} units with permanent retention and 0% drop.`
-                        : `Customizable quantity between ${selectedService.min.toLocaleString()} and ${selectedService.max.toLocaleString()} units.`}
-                    </p>
-                  </div>
-                </div>
-              )}
-
               {/* Target Link */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">

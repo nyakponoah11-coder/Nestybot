@@ -111,3 +111,4 @@ export function detectDropQuality(
     badgeVariant: "amber",
   };
 }
+
