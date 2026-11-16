@@ -1107,40 +1107,42 @@ const agentPricesCache = new Map();
 const lastDeliveryCheckCache = new Map();
 
 function formatFailedItemsReply(cached) {
-  if (!cached || !cached.failedItems || cached.failedItems.length === 0) {
+  if (!cached) {
+    return `ℹ️ No delivery check has been run yet. Send your Portal Order IDs (e.g. *542552 542725 544880*) to audit them first!`;
+  }
+
+  const failedPortals = cached.failedPortalIds || [];
+  const failedItems = cached.failedItems || [];
+
+  if (failedPortals.length === 0 && failedItems.length === 0) {
     const orderRef = cached?.uniqueIds ? ` (${cached.uniqueIds.join(", ")})` : "";
-    return `💡 *No Failed Orders on Record!*\n\nThe last carrier delivery check${orderRef} had *0 failed orders*! Every audited number was successfully confirmed delivered to MTN.`;
+    return `💡 *No Failed Orders on Record!*\n\nThe last carrier delivery check${orderRef} had *0 failed orders*! All numbers across all batches were 100% delivered to MTN.`;
   }
 
-  const failed = cached.failedItems;
-  const isBulk = cached.type === "bulk" || (cached.uniqueIds && cached.uniqueIds.length > 1);
-  const title = isBulk
-    ? `🚨 *FAILED ORDERS FROM BULK DELIVERY CHECK (${failed.length}):*`
-    : `🚨 *FAILED ORDERS FROM BATCH #${cached.batchNumber || "N/A"} (${failed.length}):*`;
+  // Extract distinct Portal IDs with failures
+  const portalIdList = failedPortals.length > 0
+    ? failedPortals.map(p => p.portalId)
+    : [...new Set(failedItems.map(f => f.batchId).filter(Boolean))];
 
-  let list = `${title}\n\n`;
+  const copyablePortalIds = portalIdList.join("\n");
 
-  failed.forEach((f, i) => {
-    const num = i + 1;
-    const p = f.phone || "N/A";
-    const id = f.dbOrderId ? `\`${f.dbOrderId}\`` : "N/A";
-    const sz = f.dataSize ? `(${f.dataSize})` : "";
-    const st = f.status || "Failed";
-    const batchPart = f.batchId ? ` [Batch: #${f.batchId}]` : "";
-    list += `${num}. 📱 *${p}* ${sz}${batchPart}\n   🆔 Order ID: ${id}\n   ⚠️ Carrier Status: *${st}*\n\n`;
-  });
+  let out = `🚨 *FAILED PORTAL ORDER IDs (${portalIdList.length}):*\n\n` +
+    `\`\`\`\n` +
+    `${copyablePortalIds}\n` +
+    `\`\`\`\n\n`;
 
-  const copyablePhones = [...new Set(failed.map(f => f.phone).filter(Boolean))].join("\n");
-  const copyableIds = [...new Set(failed.map(f => f.dbOrderId).filter(Boolean))].join("\n");
-
-  let out = list;
-  if (copyablePhones) {
-    out += `📱 *Copyable Failed Numbers:*\n\`\`\`\n${copyablePhones}\n\`\`\`\n\n`;
+  if (failedPortals.length > 0) {
+    out += `📋 *Portal Batch Breakdown:*\n`;
+    failedPortals.forEach(p => {
+      out += `• *Portal ID ${p.portalId}* ➔ ${p.failedCount} Failed (${p.totalItems} total lines)\n`;
+      if (p.failedPhones && p.failedPhones.length > 0) {
+        out += `  ❌ Numbers: ${p.failedPhones.slice(0, 5).join(", ")}${p.failedPhones.length > 5 ? ` (+${p.failedPhones.length - 5} more)` : ""}\n`;
+      }
+    });
+    out += `\n`;
   }
-  if (copyableIds) {
-    out += `🆔 *Copyable DataMart Order IDs (for Refund/Retry):*\n\`\`\`\n${copyableIds}\n\`\`\`\n\n`;
-  }
-  out += `💡 You can copy the DataMart Order IDs above to re-dispatch or refund them directly in DataMart!`;
+
+  out += `💡 You can copy the Portal IDs above to paste, re-check, or refund directly on DataMart!`;
   return out;
 }
 
@@ -5349,12 +5351,21 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         return s !== "sent" && s !== "delivered";
       });
 
+      const failedPortalSummaries = failedItems.length > 0 ? [{
+        portalId: String(uniqueIds[0]),
+        batchNumber: resObj.batchNumber,
+        failedCount: failedItems.length,
+        totalItems,
+        failedPhones: failedItems.map(it => it.phone)
+      }] : [];
+
       if (callerPhone) {
         const norm = normalizeBotPhone(callerPhone);
         lastDeliveryCheckCache.set(norm, {
           type: "single",
           uniqueIds,
           batchNumber: resObj.batchNumber,
+          failedPortalIds: failedPortalSummaries,
           failedItems: failedItems.map(it => ({
             batchId: uniqueIds[0],
             batchNumber: resObj.batchNumber,
@@ -5420,6 +5431,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
   let totalAutoCompleted = 0;
   let batchSummaries = "";
   const allFailedNumbers = [];
+  const failedPortalSummaries = [];
 
   results.forEach((r, idx) => {
     const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx] || `•`;
@@ -5444,6 +5456,16 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         const s = String(it.status || "").toLowerCase();
         return s !== "sent" && s !== "delivered";
       });
+
+      if (bFailed > 0 || failedInBatch.length > 0) {
+        failedPortalSummaries.push({
+          portalId: String(r.id),
+          batchNumber: b.batchNumber,
+          failedCount: bFailed || failedInBatch.length,
+          totalItems: bTotal,
+          failedPhones: failedInBatch.map(it => it.phone)
+        });
+      }
 
       let failedListForBatch = "";
       if (failedInBatch.length > 0) {
@@ -5490,6 +5512,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
     lastDeliveryCheckCache.set(norm, {
       type: "bulk",
       uniqueIds,
+      failedPortalIds: failedPortalSummaries,
       failedItems: allFailedNumbers,
       totalNumbers,
       totalSent,
@@ -5498,13 +5521,12 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
   }
 
   let globalFailedSummary = "";
-  if (allFailedNumbers.length > 0) {
-    globalFailedSummary = `🚨 *ALL FAILED ORDERS ACROSS BATCHES:*\n` +
-      allFailedNumbers.map(f => {
-        const idPart = f.dbOrderId ? ` | ID: \`${f.dbOrderId}\`` : "";
-        const sizePart = f.dataSize ? ` | ${f.dataSize}` : "";
-        return `• \`${f.phone}\`${sizePart}${idPart} (Batch: #${f.batchId} - ${f.status})`;
-      }).join("\n") + "\n\n";
+  if (failedPortalSummaries.length > 0) {
+    const copyablePortalList = failedPortalSummaries.map(p => p.portalId).join("\n");
+    globalFailedSummary = `🚨 *FAILED PORTAL ORDER IDs (${failedPortalSummaries.length}):*\n` +
+      `\`\`\`\n` +
+      `${copyablePortalList}\n` +
+      `\`\`\`\n\n`;
   }
 
   let finalActionMessage = "";
