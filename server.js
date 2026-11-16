@@ -4960,6 +4960,39 @@ async function fetchDatamartSupportTickets(params = {}) {
   }
 }
 
+async function fetchDatamartSupportEndpoint(endpoint, options = {}) {
+  let token = await getDatamartAuthToken();
+  if (!token) return null;
+  const url = endpoint.startsWith("http") ? endpoint : `https://api.datamartgh.shop${endpoint}`;
+  try {
+    const headers = {
+      "Authorization": `Bearer ${token}`,
+      "x-auth-token": token,
+      ...(options.headers || {})
+    };
+    let body = options.body;
+    if (body && typeof body === "object") {
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify(body);
+    }
+    let res = await fetch(url, { ...options, headers, body });
+    if (res.status === 401) {
+      cachedDatamartWorkerToken = null;
+      token = await getDatamartAuthToken();
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+        headers["x-auth-token"] = token;
+        res = await fetch(url, { ...options, headers, body });
+      }
+    }
+    const data = await res.json();
+    return data;
+  } catch (err) {
+    console.warn(`fetchDatamartSupportEndpoint (${endpoint}) error:`, err.message);
+    return null;
+  }
+}
+
 function getTimeAgoGhana(dateStr) {
   if (!dateStr) return "recently";
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -8316,6 +8349,190 @@ app.post("/webhook", async (req, res) => {
             `• 📊 Status: *${(tk.status || "pending").toUpperCase()}*\n\n`;
         });
         out += `💡 Reply: *view ticket [ReportID]* to open any ticket above!`;
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: DataMart Support Dashboard
+      const dmDashboardMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?(?:dashboard|overview|stats)$/i);
+      if (dmDashboardMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/dashboard');
+        const d = resp?.data;
+        if (!d) {
+          return sendWhatsApp(from, `⚠️ Could not fetch DataMart Agent Support dashboard. Please retry in a moment.`);
+        }
+
+        const today = d.today || {};
+        const tickets = d.tickets || {};
+        const bdMap = {};
+        (tickets.breakdown || []).forEach(b => { bdMap[b._id] = b.count; });
+
+        let netIssuesText = "Normal (All systems green)";
+        if (Array.isArray(d.networkIssues) && d.networkIssues.length > 0) {
+          netIssuesText = d.networkIssues.map(n => `⚠️ ${n.network}: ${n.message || n.issue}`).join("\n• ");
+        }
+
+        return sendWhatsApp(from,
+          `📊 *DATAMART AGENT SUPPORT DASHBOARD*\n\n` +
+          `📦 *Today's Volume:*\n` +
+          `• 🛒 *Total Orders:* ${(today.totalOrders || 0).toLocaleString()}\n` +
+          `• ❌ *Failed Orders:* ${today.failedOrders || 0}\n` +
+          `• 💸 *Refunds Processed:* ${today.refundsProcessed || 0}\n\n` +
+          `🎫 *Support Queue:*\n` +
+          `• ⏳ *Pending Tickets:* ${(tickets.pending || 0).toLocaleString()}\n` +
+          `• 🔍 *Under Review:* ${bdMap["under_review"] || 0}\n` +
+          `• 🛠️ *Investigating:* ${bdMap["investigating"] || 0}\n` +
+          `• ✅ *Resolved:* ${(bdMap["resolved"] || 0).toLocaleString()}\n\n` +
+          `📶 *Network Health:* ${netIssuesText}\n\n` +
+          `💡 *Agent Support Tools on WhatsApp:*\n` +
+          `• *dm tickets* ➔ View active support tickets\n` +
+          `• *dm failed orders* ➔ View failed orders & retry\n` +
+          `• *dm withdrawals* ➔ View agent cashout requests\n` +
+          `• *dm deposits* ➔ View agent deposits\n` +
+          `• *dm search [phone]* ➔ Search any agent/customer`
+        );
+      }
+
+      // Direct Action Command: DataMart Failed Orders
+      const dmFailedOrdersMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?failed(?:\s*orders)?$/i);
+      if (dmFailedOrdersMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/failed-orders?limit=5');
+        const orders = resp?.data?.orders || [];
+        if (orders.length === 0) {
+          return sendWhatsApp(from, `🎉 *DATAMART FAILED ORDERS:* Zero failed orders in the queue right now! All telecom dispatches are running smoothly.`);
+        }
+
+        let out = `⚠️ *DATAMART FAILED ORDERS (${orders.length} shown):*\n\n`;
+        orders.forEach((ord, idx) => {
+          const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+          const custName = ord.userId?.name || "Customer";
+          const phone = ord.phoneNumber || "N/A";
+          const net = ord.network || "MTN";
+          const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+          const reason = (ord.failureReason || ord.status || "Failed dispatch").replace(/\s+/g, " ").trim().slice(0, 80);
+
+          out += `${num} *[${ord._id}]* ${net} ${cap}\n` +
+            `• 📱 *Recipient:* ${phone} (${custName})\n` +
+            `• ❌ *Reason:* ${reason}\n` +
+            `• ⚡ *Actions:* *dm retry ${ord._id}* | *dm refund ${ord._id}*\n\n`;
+        });
+        out += `💡 To re-attempt an order, reply: *dm retry [OrderID]*\n` +
+          `💡 To refund to wallet, reply: *dm refund [OrderID]*`;
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: Retry DataMart Order
+      const dmRetryOrderMatch = cmdText.match(/^(?:datamart|dm)\s*retry(?:\s*order)?\s+([a-f0-9]{24})/i);
+      if (dmRetryOrderMatch) {
+        const orderId = dmRetryOrderMatch[1].trim();
+        const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/retry`, {
+          method: "POST",
+          body: { reason: "Support retry requested via WhatsApp" }
+        });
+        if (resp?.status === "success" || resp?.success) {
+          return sendWhatsApp(from, `✅ *DATAMART ORDER RETRIED!* Order *${orderId}* has been re-queued for carrier dispatch.`);
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not retry order: ${resp?.message || resp?.error || "Unknown response"}`);
+        }
+      }
+
+      // Direct Action Command: Refund DataMart Order
+      const dmRefundOrderMatch = cmdText.match(/^(?:datamart|dm)\s*refund(?:\s*order)?\s+([a-f0-9]{24})(?:\s+(.+))?/i);
+      if (dmRefundOrderMatch) {
+        const orderId = dmRefundOrderMatch[1].trim();
+        const reason = (dmRefundOrderMatch[2] || "Support agent refund requested via WhatsApp").trim();
+        const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/refund`, {
+          method: "POST",
+          body: { reason, notifyCustomer: true }
+        });
+        if (resp?.status === "success" || resp?.success) {
+          return sendWhatsApp(from, `💸 *DATAMART ORDER REFUNDED!* Order *${orderId}* has been refunded to the agent's wallet balance.`);
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not refund order: ${resp?.message || resp?.error || "Unknown response"}`);
+        }
+      }
+
+      // Direct Action Command: DataMart Withdrawals
+      const dmWithdrawalsMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?withdrawals?$/i);
+      if (dmWithdrawalsMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/withdrawals?limit=5');
+        const list = resp?.data?.withdrawals || [];
+        if (list.length === 0) {
+          return sendWhatsApp(from, `💰 *DATAMART AGENT WITHDRAWALS:* No pending withdrawal requests found.`);
+        }
+
+        let out = `💰 *DATAMART AGENT WITHDRAWALS (${list.length} shown):*\n\n`;
+        list.forEach((w, idx) => {
+          const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+          const agentName = w.agentId?.name || "Agent";
+          const storeName = w.storeId?.storeName || "Store";
+          const amt = w.requestedAmount != null ? Number(w.requestedAmount).toFixed(2) : "0.00";
+          const status = (w.status || "pending").toUpperCase();
+          const wId = w.withdrawalId || w._id;
+
+          out += `${num} *[${wId}]* GH₵ ${amt} (${status})\n` +
+            `• 👤 *Agent:* ${agentName} (${w.agentId?.phoneNumber || "N/A"})\n` +
+            `• 🏪 *Store:* ${storeName}\n` +
+            `• 💳 *Method:* ${w.method || "wallet"}\n\n`;
+        });
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: DataMart Deposits
+      const dmDepositsMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?deposits?$/i);
+      if (dmDepositsMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/deposits?limit=5');
+        const list = resp?.data?.deposits || [];
+        if (list.length === 0) {
+          return sendWhatsApp(from, `💳 *DATAMART AGENT DEPOSITS:* No recent deposits found.`);
+        }
+
+        let out = `💳 *DATAMART RECENT DEPOSITS:*\n\n`;
+        list.forEach((dep, idx) => {
+          const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+          const userName = dep.userId?.name || "Agent";
+          const userPhone = dep.userId?.phoneNumber || "N/A";
+          const amt = dep.amount != null ? Number(dep.amount).toFixed(2) : "0.00";
+          const type = (dep.type || "deposit").toUpperCase();
+          const time = getTimeAgoGhana(dep.createdAt);
+
+          out += `${num} *GH₵ ${amt}* (${type}) - ${time}\n` +
+            `• 👤 *User:* ${userName} (${userPhone})\n` +
+            `• 💰 *Wallet After:* GH₵ ${Number(dep.balanceAfter || 0).toFixed(2)}\n\n`;
+        });
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: Universal Customer / Agent Investigation
+      const dmInvestigateMatch = cmdText.match(/^(?:datamart|dm)\s*(?:investigate|customer|agent|lookup)\s+(.+)$/i);
+      if (dmInvestigateMatch) {
+        const query = dmInvestigateMatch[1].trim();
+        const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(query)}`);
+        const results = resp?.data?.results || [];
+        if (results.length === 0) {
+          return sendWhatsApp(from, `🔍 No DataMart customer, agent, or order found matching "*${query}*".`);
+        }
+
+        let out = `🔍 *DATAMART LOOKUP RESULTS FOR "${query}":*\n\n`;
+        results.slice(0, 3).forEach((item, idx) => {
+          const num = ["1️⃣", "2️⃣", "3️⃣"][idx] || `•`;
+          if (item.type === "customer" || item.user) {
+            const u = item.user || item;
+            out += `${num} 👤 *CUSTOMER / AGENT:*\n` +
+              `• *Name:* ${u.name || "N/A"}\n` +
+              `• *Phone:* ${u.phoneNumber || "N/A"}\n` +
+              `• *Email:* ${u.email || "N/A"}\n` +
+              `• *Role:* ${(u.role || "user").toUpperCase()}\n` +
+              `• *Wallet Balance:* GH₵ ${Number(u.walletBalance || 0).toFixed(2)}\n\n`;
+          } else if (item.type === "order" || item.order) {
+            const ord = item.order || item;
+            out += `${num} 📦 *ORDER:* ${ord.network} ${ord.capacity || ""}GB\n` +
+              `• *Recipient:* ${ord.phoneNumber}\n` +
+              `• *Status:* ${(ord.status || "N/A").toUpperCase()}\n` +
+              `• *ID:* ${ord._id}\n\n`;
+          } else {
+            out += `${num} 📋 ${JSON.stringify(item).slice(0, 100)}...\n\n`;
+          }
+        });
         return sendWhatsApp(from, out);
       }
 
