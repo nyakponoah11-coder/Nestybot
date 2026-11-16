@@ -5533,13 +5533,19 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
 
 async function executeDatamartSearch(rawQuery, callerPhone = null) {
   let q = String(rawQuery || "").trim();
-  // Strip command prefixes
-  q = q.replace(/^(?:datamart|dm)\s+/i, "");
-  q = q.replace(/^(?:search|lookup|find|investigate|check(?:\s*out)?)\s+/i, "");
-  q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number)\s+/i, "");
-  q = q.replace(/^(?:is\s+|about\s+|info\s+on\s+)/i, "");
-  q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number)\s+/i, "");
-  q = q.replace(/^(?:customer|user|agent|order)\s+/i, "").trim();
+  // If an email address is present anywhere in the text, extract it directly!
+  const emailMatch = q.match(/[\w.-]+@[\w.-]+\.\w+/);
+  if (emailMatch) {
+    q = emailMatch[0];
+  } else {
+    // Strip command prefixes
+    q = q.replace(/^(?:datamart|dm)\s+/i, "");
+    q = q.replace(/^(?:search|lookup|find|investigate|check(?:\s*out)?)\s+/i, "");
+    q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number|email)\s+/i, "");
+    q = q.replace(/^(?:is\s+|about\s+|info\s+on\s+)/i, "");
+    q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number|email)\s+/i, "");
+    q = q.replace(/^(?:customer|user|agent|order|email)\s+/i, "").trim();
+  }
 
   if (!q) return "🔍 Please provide a customer name, phone number, email, or order reference to search.";
 
