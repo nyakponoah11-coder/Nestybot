@@ -5234,11 +5234,14 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
     const jobId = startRes?.data?.jobId || startRes?.jobId;
     if (!jobId) return { id: targetId, error: startRes?.message || "Failed to initiate audit" };
 
-    for (let i = 0; i < 7; i++) {
-      await new Promise(r => setTimeout(r, 1100));
+    for (let i = 0; i < 12; i++) {
+      await new Promise(r => setTimeout(r, 1000));
       const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
       if (jobRes?.data?.jobStatus === 'done' || jobRes?.data?.jobStatus === 'completed') {
         return { id: targetId, result: jobRes.data.result };
+      }
+      if (jobRes?.data?.jobStatus === 'failed') {
+        return { id: targetId, error: jobRes.data.error || "Carrier job failed" };
       }
     }
     return { id: targetId, timeout: true };
@@ -5309,7 +5312,8 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         `${sampleLines}\n\n` +
         `${conclusionMsg}`;
     } else {
-      return `⚠️ Carrier audit for ID *${uniqueIds[0]}* timed out or could not be verified on DataMart.`;
+      const errDetail = single?.error ? ` (${single.error})` : single?.timeout ? " (Carrier check timed out on DataMart)" : "";
+      return `⚠️ Carrier audit for ID *${uniqueIds[0]}* could not be completed${errDetail}. Please try again shortly.`;
     }
   }
 
@@ -7145,9 +7149,25 @@ app.post("/webhook", async (req, res) => {
     }
 
     // 5. Active DataMart Console Mode Execution
-    if (getUserMode(from) === "datamart") {
+    const userSession = await getCustomerSession(from);
+    const activeUserMode = getUserMode(from, userSession);
+    const userDmAccount = await getUserDatamartAccount(from);
+    const hasDatamartAccess = isOwner || Boolean(userDmAccount);
+
+    if (activeUserMode === "datamart") {
       const dmHandled = await processDatamartConsoleCommand(from, cleanCmd, isOwner);
       if (dmHandled) return dmHandled;
+    } else if (hasDatamartAccess) {
+      // Direct DataMart delivery check trigger even outside console mode
+      const hasDeliveryCheckWord = /\b(?:delivery\s*check|check\s*delivery|carrier\s*check|audit)\b/i.test(cleanCmd);
+      const isRawPortalIds = /^[0-9,\s\n\r]+$/.test(cleanCmd) && /\b\d{5,9}\b/.test(cleanCmd);
+      if (hasDeliveryCheckWord || isRawPortalIds) {
+        const idMatches = cleanCmd.match(/\b\d{5,9}\b/g);
+        if (idMatches && idMatches.length > 0) {
+          const report = await executeDatamartDeliveryCheck(idMatches, from);
+          if (report) return sendWhatsApp(from, report);
+        }
+      }
     }
 
     /* =====================================================
