@@ -5234,7 +5234,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
     const jobId = startRes?.data?.jobId || startRes?.jobId;
     if (!jobId) return { id: targetId, error: startRes?.message || "Failed to initiate audit" };
 
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 25; i++) {
       await new Promise(r => setTimeout(r, 1000));
       const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
       if (jobRes?.data?.jobStatus === 'done' || jobRes?.data?.jobStatus === 'completed') {
