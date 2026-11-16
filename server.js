@@ -1106,7 +1106,13 @@ const botSessions = new Map();
 const agentPricesCache = new Map();
 
 function normalizeBotPhone(p) {
-  return String(p || "").replace(/\D/g, "");
+  if (!p) return "";
+  const s = String(p).trim();
+  // Preserve WhatsApp Username IDs (e.g. GH.1765821157838205 or alphanumeric handles)
+  if (/[a-zA-Z]/.test(s)) {
+    return s.replace(/@.+$/, "").trim();
+  }
+  return s.replace(/\D/g, "");
 }
 
 async function getFreshAgentPricing(agentId, slug, fallbackPrices = {}) {
@@ -1379,14 +1385,20 @@ async function sendWhatsApp(to, text) {
       return;
     }
 
-    let formattedTo = String(to).trim();
-    const digitsOnly = formattedTo.replace(/\D/g, "");
-    if (digitsOnly.length >= 9) {
-      formattedTo = digitsOnly.startsWith("0") && digitsOnly.length === 10
-        ? "233" + digitsOnly.slice(1)
-        : digitsOnly;
+    const rawTo = String(to).trim();
+    let formattedTo = "";
+
+    // 1. WhatsApp Username account (e.g. "GH.1765821157838205" or alphanumeric JID)
+    if (/[a-zA-Z]/.test(rawTo)) {
+      formattedTo = rawTo.replace(/@.+$/, "").trim();
     } else {
-      formattedTo = formattedTo.replace(/@.+$/, "").trim();
+      // 2. Standard numeric phone number (e.g. "0547100951", "233547100951")
+      const digitsOnly = rawTo.replace(/\D/g, "");
+      if (digitsOnly.startsWith("0") && digitsOnly.length === 10) {
+        formattedTo = "233" + digitsOnly.slice(1);
+      } else {
+        formattedTo = digitsOnly;
+      }
     }
 
     if (!formattedTo) {
@@ -1394,11 +1406,15 @@ async function sendWhatsApp(to, text) {
       return;
     }
 
+    console.log(`📤 [sendWhatsApp] Sending to [${formattedTo}]: "${text.slice(0, 35).replace(/\n/g, ' ')}..."`);
+
     await axios.post(
       `https://graph.facebook.com/v20.0/${phoneId}/messages`,
       {
         messaging_product: "whatsapp",
+        recipient_type: "individual",
         to: formattedTo,
+        type: "text",
         text: { body: text }
       },
       {
@@ -1410,7 +1426,7 @@ async function sendWhatsApp(to, text) {
       }
     );
   } catch (e) {
-    console.error("WA ERROR:", e.response?.data || e.message);
+    console.error(`WA ERROR sending to [${to}]:`, e.response?.data || e.message);
   }
 }
 
@@ -6914,8 +6930,8 @@ app.post("/webhook", async (req, res) => {
       });
     } catch (_) { }
 
-    const normFrom = String(from || "").replace(/\D/g, "");
-    const isOwner = adminPhones.some(p => p && (normFrom === p || normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))));
+    const normFrom = normalizeBotPhone(from);
+    const isOwner = !/[a-zA-Z]/.test(String(from)) && adminPhones.some(p => p && (normFrom === p || (p.length >= 9 && normFrom.length >= 9 && (normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))))));
 
     // Check if sender is a Registered Agent / Reseller
     let matchedAgent = null;
