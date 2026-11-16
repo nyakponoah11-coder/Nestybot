@@ -1698,36 +1698,148 @@ async function transcribeWhatsAppVoiceNote(mediaId, mimeType = "audio/ogg", defa
 
   // 5. Fallback: Gemini Flash (native audio comprehension)
   if (geminiKey) {
+    const audioModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest"];
+    for (const m of audioModels) {
+      try {
+        const cleanMime = (mimeType || "audio/ogg").split(";")[0].trim();
+        const base64Audio = audioBuffer.toString("base64");
+        const geminiRes = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(geminiKey)}`,
+          {
+            contents: [{
+              parts: [
+                { text: "You are a speech-to-text transcriber for a Ghanaian WhatsApp store. Transcribe this spoken audio message accurately. Correctly write down phone numbers, names, data sizes (e.g. 1GB, 5GB, 10GB), networks (MTN, Telecel, AT), and references. Return ONLY the transcribed text, nothing else." },
+                {
+                  inline_data: {
+                    mime_type: cleanMime,
+                    data: base64Audio
+                  }
+                }
+              ]
+            }]
+          },
+          { headers: { "Content-Type": "application/json" }, timeout: 15000 }
+        );
+        const textOut = geminiRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (textOut && textOut.trim()) {
+          return textOut.trim();
+        }
+      } catch (gmErr) {
+        console.warn(`Gemini audio model ${m} fallback:`, gmErr.response?.data?.error?.message || gmErr.message);
+      }
+    }
+  }
+
+  throw new Error("No speech-to-text service available or speech could not be deciphered");
+}
+
+/* =========================================================
+WHATSAPP IMAGE & SCREENSHOT OCR / VISION ANALYSIS (GEMINI VISION)
+========================================================= */
+async function analyzeWhatsAppImage(mediaId, mimeType = "image/jpeg", userCaption = "", defaultToken = null) {
+  let token = defaultToken || ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
+  if (supabase) {
     try {
-      const cleanMime = (mimeType || "audio/ogg").split(";")[0].trim();
-      const base64Audio = audioBuffer.toString("base64");
-      const geminiRes = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(geminiKey)}`,
+      const { data: sRows } = await supabase
+        .from("settings")
+        .select("key,value")
+        .in("key", ["whatsapp_access_token", "ACCESS_TOKEN", "meta_whatsapp_token", "whatsapp_token"]);
+      if (sRows && sRows.length > 0) {
+        const smap = Object.fromEntries(sRows.map((s) => [s.key, s.value]));
+        const dbToken = smap.whatsapp_access_token || smap.ACCESS_TOKEN || smap.meta_whatsapp_token || smap.whatsapp_token;
+        if (dbToken) token = dbToken;
+      }
+    } catch (_) {}
+  }
+
+  if (!token) throw new Error("WhatsApp API token is missing, cannot download image");
+
+  // 1. Get download URL from Meta Graph API
+  const metaUrl = `https://graph.facebook.com/v21.0/${mediaId}`;
+  const metaRes = await axios.get(metaUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+    timeout: 15000
+  });
+
+  const downloadUrl = metaRes.data?.url;
+  if (!downloadUrl) throw new Error("Meta returned no download URL for image media ID: " + mediaId);
+
+  // 2. Download binary image from Meta
+  const imgRes = await axios.get(downloadUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "curl/7.68.0"
+    },
+    responseType: "arraybuffer",
+    timeout: 25000
+  });
+
+  const imgBuffer = Buffer.from(imgRes.data);
+  if (!imgBuffer || imgBuffer.length === 0) throw new Error("Downloaded image file is empty");
+
+  // 3. Resolve Gemini Key
+  let geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (supabase) {
+    try {
+      const { data: sRows } = await supabase
+        .from("settings")
+        .select("key,value")
+        .in("key", ["gemini_api_key", "google_api_key"]);
+      (sRows || []).forEach(r => {
+        if ((r.key === "gemini_api_key" || r.key === "google_api_key") && r.value) geminiKey = r.value;
+      });
+    } catch (_) {}
+  }
+
+  if (!geminiKey) throw new Error("Gemini AI API key not found for image vision analysis");
+
+  const cleanMime = (mimeType || "image/jpeg").split(";")[0].trim();
+  const base64Img = imgBuffer.toString("base64");
+
+  const promptText = 
+    `You are Stony, the intelligent and friendly AI Store Co-Pilot for DATA 1 GH (an automated Ghanaian mobile data, airtime, result checker, and digital services company).\n` +
+    `The store owner or customer just sent this screenshot/image via WhatsApp.\n` +
+    (userCaption ? `User's question or caption: "${userCaption}"\n\n` : `\n`) +
+    `Carefully examine everything in this image and provide a thorough, structured, and helpful response:\n` +
+    `1. 📱 If it is a MoMo / Telecel Cash / AT Money payment SMS or receipt:\n` +
+    `   - Clearly extract: Transaction ID, Amount (GH₵), Sender / Recipient Phone, Network, Date & Time, and Status.\n` +
+    `   - State clearly whether the payment appears successful and completed.\n` +
+    `2. 🚚 If it is a DataMart or carrier delivery portal screenshot:\n` +
+    `   - Extract: Order IDs, Batch Numbers, numbers sent vs failed, carrier delivery logs, or failure reasons.\n` +
+    `3. ⚠️ If it is an error screen, website bug, or system failure:\n` +
+    `   - Diagnose the root cause of the error and give clear step-by-step instructions on how to fix or resolve it.\n` +
+    `4. 💬 If it is a customer chat or inquiry:\n` +
+    `   - Summarize the customer's request and draft the best response to send them.\n` +
+    `5. Tone: Respectful, intelligent, Ghanaian business warmth (use 'bossu' when addressing the store owner). Use clean WhatsApp formatting (*bold*, bullet points, emojis). Keep it easy to read on mobile.`;
+
+  const modelsToTry = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest"];
+  for (const m of modelsToTry) {
+    try {
+      const res = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(geminiKey)}`,
         {
           contents: [{
             parts: [
-              { text: "You are a speech-to-text transcriber for a Ghanaian WhatsApp store. Transcribe this spoken audio message accurately. Correctly write down phone numbers, names, data sizes (e.g. 1GB, 5GB, 10GB), networks (MTN, Telecel, AT), and references. Return ONLY the transcribed text, nothing else." },
+              { text: promptText },
               {
                 inline_data: {
                   mime_type: cleanMime,
-                  data: base64Audio
+                  data: base64Img
                 }
               }
             ]
           }]
         },
-        { headers: { "Content-Type": "application/json" }, timeout: 15000 }
+        { headers: { "Content-Type": "application/json" }, timeout: 25000 }
       );
-      const textOut = geminiRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (textOut && textOut.trim()) {
-        return textOut.trim();
-      }
-    } catch (gmErr) {
-      console.warn("Gemini audio transcription fallback:", gmErr.message);
+      const answer = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (answer && answer.trim()) return answer.trim();
+    } catch (err) {
+      console.warn(`Vision model ${m} attempt:`, err.response?.data?.error?.message || err.message);
     }
   }
 
-  throw new Error("No speech-to-text service available or speech could not be deciphered");
+  throw new Error("Unable to analyze image with vision AI right now. Please try again.");
 }
 
 const recentAdminAlertSignatures = new Map();
@@ -7448,6 +7560,9 @@ app.post("/webhook", async (req, res) => {
       msg.text?.body ||
       msg.body ||
       msg.caption ||
+      msg.image?.caption ||
+      msg.video?.caption ||
+      msg.document?.caption ||
       msg.message?.conversation ||
       msg.message?.extendedTextMessage?.text ||
       msg.interactive?.button_reply?.title ||
@@ -7488,6 +7603,27 @@ app.post("/webhook", async (req, res) => {
         } catch (err) {
           console.error("❌ [VOICE NOTE ERROR]:", err.message);
           return sendWhatsApp(from, `🎙️ I received your voice note, bossu! But had an issue downloading or transcribing the audio (${err.message}). Could you please send it again or type it for me?`);
+        }
+      }
+    }
+
+    // Image & Screenshot Vision Handling:
+    const isImageMsg = msg.type === "image" || Boolean(msg.image);
+    if (isImageMsg) {
+      const imgMediaId = msg.image?.id || msg.media?.id || (msg.type === "image" ? msg.id : null);
+      const imgMime = msg.image?.mime_type || "image/jpeg";
+      if (imgMediaId) {
+        console.log(`🖼️ [IMAGE RECEIVED] from [${from}] (Media ID: ${imgMediaId}, Caption: "${text}")`);
+        try {
+          const visionToken = ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
+          const analysis = await analyzeWhatsAppImage(imgMediaId, imgMime, text, visionToken);
+          if (analysis) {
+            console.log(`🖼️ [IMAGE ANALYZED] for [${from}]`);
+            return sendWhatsApp(from, `🖼️ *IMAGE ANALYSIS / OCR*\n\n${analysis}`);
+          }
+        } catch (imgErr) {
+          console.error("❌ [IMAGE ANALYSIS ERROR]:", imgErr.message);
+          return sendWhatsApp(from, `🖼️ I received your image, bossu! But had an issue analyzing it (${imgErr.message}). Could you please resend it or describe what's on it?`);
         }
       }
     }
