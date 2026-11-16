@@ -1106,25 +1106,79 @@ const botSessions = new Map();
 const agentPricesCache = new Map();
 const lastDeliveryCheckCache = new Map();
 
-function formatFailedItemsReply(cached) {
+async function getLiveFailedOrdersReport(callerPhone = null, limit = 10) {
+  try {
+    const resp = await fetchDatamartSupportEndpoint(`/api/support/failed-orders?limit=${limit}`, {}, callerPhone);
+    const orders = resp?.data?.orders || [];
+    if (orders.length === 0) {
+      return `🎉 *[DATAMART]* Zero failed orders in queue! All carrier dispatches are green and healthy.`;
+    }
+    let out = `⚠️ *DATAMART FAILED ORDERS (${orders.length} in queue):*\n\n`;
+    orders.forEach((ord, idx) => {
+      const num = idx + 1;
+      const phone = ord.phoneNumber || ord.recipientPhone || "N/A";
+      const net = ord.network || "MTN";
+      const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+      const portalId = ord.apiOrderId || ord.exportTracking?.portalId;
+      const portalStr = portalId ? ` | Portal ID: *${portalId}*` : "";
+      const reason = ord.exportTracking?.deliveryInfo || ord.apiResponse?.error || ord.failureReason || ord.status || "Failed";
+      const time = typeof getTimeAgoGhana === "function" ? getTimeAgoGhana(ord.createdAt) : "recently";
+      out += `${num}. 📱 *${phone}* (${net} ${cap})${portalStr}\n` +
+        `   ❌ *Reason:* ${reason}\n` +
+        `   🕒 *Time:* ${time}\n` +
+        `   🆔 *DB ID:* \`${ord._id}\`\n\n`;
+    });
+    const uniquePhones = [...new Set(orders.map(o => o.phoneNumber || o.recipientPhone).filter(Boolean))];
+    if (uniquePhones.length > 0) {
+      out += `📋 *Failed Phone Numbers:*\n\`\`\`\n${uniquePhones.join("\n")}\n\`\`\`\n\n`;
+    }
+    out += `💡 *Actions:*\n` +
+      `• Retry order: *dm retry [DB ID]*\n` +
+      `• Refund to agent: *dm refund [DB ID]*`;
+    return out.trim();
+  } catch (err) {
+    console.warn("getLiveFailedOrdersReport error:", err.message);
+    return `⚠️ Could not fetch live failed orders from DataMart. Please check connection.`;
+  }
+}
+
+async function formatFailedItemsReply(cached, callerPhone = null) {
   if (!cached) {
-    return `No recent delivery check found.`;
+    const liveReport = await getLiveFailedOrdersReport(callerPhone);
+    return `ℹ️ *No recent delivery check audit in memory.* Here is the live failed orders queue from DataMart:\n\n${liveReport}`;
   }
 
-  const failedPortals = cached.failedPortalIds || [];
   const failedItems = cached.failedItems || [];
+  const failedPortals = cached.failedPortalIds || [];
 
-  // Extract distinct Portal IDs with failures
-  const portalIdList = failedPortals.length > 0
-    ? failedPortals.map(p => p.portalId)
-    : [...new Set(failedItems.map(f => f.batchId).filter(Boolean))];
-
-  if (portalIdList.length === 0) {
-    return `0 failed`;
+  if (failedItems.length === 0 && failedPortals.length === 0) {
+    return `✅ *All numbers in your last delivery check were 100% delivered to the carrier!* Zero failed numbers.`;
   }
 
-  // Return ONLY the plain IDs, one per line, nothing else
-  return portalIdList.join("\n");
+  let out = `🚨 *FAILED ORDERS FROM LAST DELIVERY CHECK:*\n\n`;
+  failedItems.forEach((f, i) => {
+    const num = i + 1;
+    const p = f.phone || f.recipient || "N/A";
+    const net = f.network || "";
+    const sz = f.dataSize ? `(${f.dataSize})` : "";
+    const portal = f.batchId || f.portalOrderId || f.orderId || "";
+    const portalStr = portal ? ` [Portal ID: *${portal}*]` : "";
+    const reason = f.reason || f.error || f.status || "Failed";
+    out += `${num}. 📱 *${p}* ${net} ${sz}${portalStr}\n   ❌ *Reason:* ${reason}\n\n`;
+  });
+
+  const uniquePhones = [...new Set(failedItems.map(f => f.phone || f.recipient).filter(Boolean))];
+  const uniquePortals = failedPortals.length > 0
+    ? failedPortals.map(p => p.portalId)
+    : [...new Set(failedItems.map(f => f.batchId || f.portalOrderId || f.orderId).filter(Boolean))];
+
+  if (uniquePhones.length > 0) {
+    out += `📋 *Failed Phone Numbers (${uniquePhones.length}):*\n\`\`\`\n${uniquePhones.join("\n")}\n\`\`\`\n\n`;
+  }
+  if (uniquePortals.length > 0) {
+    out += `📋 *Failed Portal IDs:*\n\`\`\`\n${uniquePortals.join("\n")}\n\`\`\`\n`;
+  }
+  return out.trim();
 }
 
 function normalizeBotPhone(p) {
@@ -6937,12 +6991,22 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     }
   }
 
-  // 1b. Query Failed IDs / Numbers from last Delivery Check (Single or Bulk)
-  if (/\b(?:give\s*me\s*(?:the\s*)?)?(?:ids?|numbers?|phones?|orders?|list)?\s*(?:of\s*(?:the\s*)?)?failed(?:\s*(?:once|ones|ids?|numbers?|orders?|list))?\b/i.test(cleanInput) ||
-      /\b(?:which\s*(?:ones?|orders?|numbers?)\s*failed|failed\s*(?:ids?|numbers?|orders?|once|ones))\b/i.test(cleanInput)) {
+  // 1b. Live DataMart Failed Orders (e.g. "Do we have failed order", "failed orders", "any failed order", "failed")
+  const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cleanInput) ||
+    /^(?:failed|failed\s*orders?|failed\s*queue|open\s*failed)$/i.test(cleanInput);
+  if (isLiveFailedQuery) {
+    const report = await getLiveFailedOrdersReport(from);
+    if (report) return sendWhatsApp(from, report);
+  }
+
+  // 1c. Query Failed IDs / Numbers from last Delivery Check (e.g. "give me the failed orders only data", "which ones failed")
+  const isAuditFailedQuery = /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cleanInput) ||
+    /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cleanInput);
+  if (isAuditFailedQuery) {
     const norm = normalizeBotPhone(from);
     const cached = lastDeliveryCheckCache.get(norm);
-    return sendWhatsApp(from, formatFailedItemsReply(cached));
+    const reply = await formatFailedItemsReply(cached, from);
+    return sendWhatsApp(from, reply);
   }
 
   // 2. Email, Phone, Customer Search, or Order Reference
@@ -7391,12 +7455,22 @@ app.post("/webhook", async (req, res) => {
       const dmHandled = await processDatamartConsoleCommand(from, cleanCmd, isOwner);
       if (dmHandled) return dmHandled;
     } else if (hasDatamartAccess) {
-      // Query failed orders from last delivery check
-      if (/\b(?:give\s*me\s*(?:the\s*)?)?(?:ids?|numbers?|phones?|orders?|list)?\s*(?:of\s*(?:the\s*)?)?failed(?:\s*(?:once|ones|ids?|numbers?|orders?|list))?\b/i.test(cleanCmd) ||
-          /\b(?:which\s*(?:ones?|orders?|numbers?)\s*failed|failed\s*(?:ids?|numbers?|orders?|once|ones))\b/i.test(cleanCmd)) {
+      // 1. Live DataMart Failed Orders (e.g. "Do we have failed order", "failed orders", "any failed order", "check failed orders")
+      const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cleanCmd) ||
+        /^(?:failed|failed\s*orders?|failed\s*queue|open\s*failed)$/i.test(cleanCmd);
+      if (isLiveFailedQuery) {
+        const report = await getLiveFailedOrdersReport(from);
+        if (report) return sendWhatsApp(from, report);
+      }
+
+      // 2. Query failed items from last delivery check audit (e.g. "give me the failed orders only data", "which ones failed")
+      const isAuditFailedQuery = /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cleanCmd) ||
+        /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cleanCmd);
+      if (isAuditFailedQuery) {
         const norm = normalizeBotPhone(from);
         const cached = lastDeliveryCheckCache.get(norm);
-        return sendWhatsApp(from, formatFailedItemsReply(cached));
+        const reply = await formatFailedItemsReply(cached, from);
+        return sendWhatsApp(from, reply);
       }
 
       // Direct DataMart delivery check trigger even outside console mode
@@ -9705,12 +9779,21 @@ app.post("/webhook", async (req, res) => {
         if (report) return sendWhatsApp(from, report);
       }
 
-      // Direct Action Command: Query Failed Orders from Last Delivery Check
-      if (/\b(?:give\s*me\s*(?:the\s*)?)?(?:ids?|numbers?|phones?|orders?|list)?\s*(?:of\s*(?:the\s*)?)?failed(?:\s*(?:once|ones|ids?|numbers?|orders?|list))?\b/i.test(cmdText) ||
-          /\b(?:which\s*(?:ones?|orders?|numbers?)\s*failed|failed\s*(?:ids?|numbers?|orders?|once|ones))\b/i.test(cmdText)) {
+      // Direct Action Command: Live Failed Orders or Delivery Check Failed Query
+      const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cmdText) ||
+        /^(?:failed|failed\s*orders?|failed\s*queue|open\s*failed)$/i.test(cmdText);
+      if (isLiveFailedQuery) {
+        const report = await getLiveFailedOrdersReport(from);
+        if (report) return sendWhatsApp(from, report);
+      }
+
+      const isAuditFailedQuery = /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cmdText) ||
+        /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cmdText);
+      if (isAuditFailedQuery) {
         const norm = normalizeBotPhone(from);
         const cached = lastDeliveryCheckCache.get(norm);
-        return sendWhatsApp(from, formatFailedItemsReply(cached));
+        const reply = await formatFailedItemsReply(cached, from);
+        return sendWhatsApp(from, reply);
       }
 
       // Direct Action Command: DataMart Delivery Check (Single or Bulk)
