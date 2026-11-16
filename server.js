@@ -1406,17 +1406,24 @@ async function sendWhatsApp(to, text) {
       return;
     }
 
-    console.log(`📤 [sendWhatsApp] Sending to [${formattedTo}]: "${text.slice(0, 35).replace(/\n/g, ' ')}..."`);
+    const isBsuid = /^[a-zA-Z]{2}\./.test(formattedTo) || /[a-zA-Z]/.test(formattedTo);
+    console.log(`📤 [sendWhatsApp] Sending to [${formattedTo}] (${isBsuid ? "BSUID" : "Phone"}): "${text.slice(0, 35).replace(/\n/g, ' ')}..."`);
+
+    const msgPayload = {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      type: "text",
+      text: { body: text }
+    };
+    if (isBsuid) {
+      msgPayload.recipient = formattedTo;
+    } else {
+      msgPayload.to = formattedTo;
+    }
 
     await axios.post(
       `https://graph.facebook.com/v20.0/${phoneId}/messages`,
-      {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to: formattedTo,
-        type: "text",
-        text: { body: text }
-      },
+      msgPayload,
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -6873,7 +6880,13 @@ app.post("/webhook", async (req, res) => {
   try {
     const changeVal = req.body.entry?.[0]?.changes?.[0]?.value || req.body?.value || req.body;
     const msg = changeVal?.messages?.[0] || req.body?.messages?.[0] || req.body?.data;
-    if (!msg) return;
+    if (!msg) {
+      const statusObj = changeVal?.statuses?.[0] || req.body?.statuses?.[0];
+      if (statusObj && (statusObj.errors || statusObj.status === "failed")) {
+        console.warn("⚠️ [WA STATUS ALERT]", JSON.stringify(statusObj));
+      }
+      return;
+    }
 
     let from =
       msg.from ||
@@ -6882,9 +6895,10 @@ app.post("/webhook", async (req, res) => {
       msg.wa_id ||
       msg.chatId ||
       msg.key?.remoteJid ||
-      changeVal?.contacts?.[0]?.wa_id ||
       changeVal?.contacts?.[0]?.user_id ||
+      changeVal?.contacts?.[0]?.wa_id ||
       changeVal?.contacts?.[0]?.id ||
+      req.body?.contacts?.[0]?.user_id ||
       req.body?.contacts?.[0]?.wa_id ||
       req.body?.from ||
       req.body?.sender ||
