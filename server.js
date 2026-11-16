@@ -1104,6 +1104,45 @@ with 100% strict storefront isolation & zero wholesale leakage.
 ========================================================= */
 const botSessions = new Map();
 const agentPricesCache = new Map();
+const lastDeliveryCheckCache = new Map();
+
+function formatFailedItemsReply(cached) {
+  if (!cached || !cached.failedItems || cached.failedItems.length === 0) {
+    const orderRef = cached?.uniqueIds ? ` (${cached.uniqueIds.join(", ")})` : "";
+    return `💡 *No Failed Orders on Record!*\n\nThe last carrier delivery check${orderRef} had *0 failed orders*! Every audited number was successfully confirmed delivered to MTN.`;
+  }
+
+  const failed = cached.failedItems;
+  const isBulk = cached.type === "bulk" || (cached.uniqueIds && cached.uniqueIds.length > 1);
+  const title = isBulk
+    ? `🚨 *FAILED ORDERS FROM BULK DELIVERY CHECK (${failed.length}):*`
+    : `🚨 *FAILED ORDERS FROM BATCH #${cached.batchNumber || "N/A"} (${failed.length}):*`;
+
+  let list = `${title}\n\n`;
+
+  failed.forEach((f, i) => {
+    const num = i + 1;
+    const p = f.phone || "N/A";
+    const id = f.dbOrderId ? `\`${f.dbOrderId}\`` : "N/A";
+    const sz = f.dataSize ? `(${f.dataSize})` : "";
+    const st = f.status || "Failed";
+    const batchPart = f.batchId ? ` [Batch: #${f.batchId}]` : "";
+    list += `${num}. 📱 *${p}* ${sz}${batchPart}\n   🆔 Order ID: ${id}\n   ⚠️ Carrier Status: *${st}*\n\n`;
+  });
+
+  const copyablePhones = [...new Set(failed.map(f => f.phone).filter(Boolean))].join("\n");
+  const copyableIds = [...new Set(failed.map(f => f.dbOrderId).filter(Boolean))].join("\n");
+
+  let out = list;
+  if (copyablePhones) {
+    out += `📱 *Copyable Failed Numbers:*\n\`\`\`\n${copyablePhones}\n\`\`\`\n\n`;
+  }
+  if (copyableIds) {
+    out += `🆔 *Copyable DataMart Order IDs (for Refund/Retry):*\n\`\`\`\n${copyableIds}\n\`\`\`\n\n`;
+  }
+  out += `💡 You can copy the DataMart Order IDs above to re-dispatch or refund them directly in DataMart!`;
+  return out;
+}
 
 function normalizeBotPhone(p) {
   if (!p) return "";
@@ -5310,10 +5349,34 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         return s !== "sent" && s !== "delivered";
       });
 
+      if (callerPhone) {
+        const norm = normalizeBotPhone(callerPhone);
+        lastDeliveryCheckCache.set(norm, {
+          type: "single",
+          uniqueIds,
+          batchNumber: resObj.batchNumber,
+          failedItems: failedItems.map(it => ({
+            batchId: uniqueIds[0],
+            batchNumber: resObj.batchNumber,
+            phone: it.phone,
+            dbOrderId: it.dbOrderId || null,
+            dataSize: it.dataSize || null,
+            status: it.status || "Failed"
+          })),
+          totalNumbers: totalItems,
+          totalSent: sent,
+          totalFailed: failed
+        });
+      }
+
       let failedSection = "";
       if (failedItems.length > 0) {
         failedSection = `\n❌ *FAILED / UNDELIVERED NUMBERS (${failedItems.length}):*\n` +
-          failedItems.map(it => `• \`${it.phone}\` ➔ ${it.status || "Failed"}`).join("\n") + "\n";
+          failedItems.map(it => {
+            const idPart = it.dbOrderId ? ` (ID: \`${it.dbOrderId}\`)` : "";
+            const sizePart = it.dataSize ? ` [${it.dataSize}]` : "";
+            return `• \`${it.phone}\`${sizePart}${idPart} ➔ *${it.status || "Failed"}*`;
+          }).join("\n") + "\n";
       }
 
       let sampleLines = "";
@@ -5385,10 +5448,21 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       let failedListForBatch = "";
       if (failedInBatch.length > 0) {
         failedInBatch.forEach(it => {
-          allFailedNumbers.push({ batchId: r.id, phone: it.phone, status: it.status || "Failed" });
+          allFailedNumbers.push({
+            batchId: r.id,
+            batchNumber: b.batchNumber,
+            phone: it.phone,
+            dbOrderId: it.dbOrderId || null,
+            dataSize: it.dataSize || null,
+            status: it.status || "Failed"
+          });
         });
         failedListForBatch = `  ❌ *Failed Numbers in Batch (${failedInBatch.length}):*\n` +
-          failedInBatch.map(it => `  • \`${it.phone}\` (${it.status || "Failed"})`).join("\n") + "\n";
+          failedInBatch.map(it => {
+            const idPart = it.dbOrderId ? ` [ID: \`${it.dbOrderId}\`]` : "";
+            const sizePart = it.dataSize ? ` (${it.dataSize})` : "";
+            return `  • \`${it.phone}\`${sizePart}${idPart} (${it.status || "Failed"})`;
+          }).join("\n") + "\n";
       }
 
       let batchStatusLine = "";
@@ -5411,15 +5485,31 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
     }
   });
 
+  if (callerPhone) {
+    const norm = normalizeBotPhone(callerPhone);
+    lastDeliveryCheckCache.set(norm, {
+      type: "bulk",
+      uniqueIds,
+      failedItems: allFailedNumbers,
+      totalNumbers,
+      totalSent,
+      totalFailed
+    });
+  }
+
   let globalFailedSummary = "";
   if (allFailedNumbers.length > 0) {
-    globalFailedSummary = `🚨 *ALL FAILED NUMBERS TO RE-CHECK / REFUND:*\n` +
-      allFailedNumbers.map(f => `• \`${f.phone}\` (Order: ${f.batchId} - ${f.status})`).join("\n") + "\n\n";
+    globalFailedSummary = `🚨 *ALL FAILED ORDERS ACROSS BATCHES:*\n` +
+      allFailedNumbers.map(f => {
+        const idPart = f.dbOrderId ? ` | ID: \`${f.dbOrderId}\`` : "";
+        const sizePart = f.dataSize ? ` | ${f.dataSize}` : "";
+        return `• \`${f.phone}\`${sizePart}${idPart} (Batch: #${f.batchId} - ${f.status})`;
+      }).join("\n") + "\n\n";
   }
 
   let finalActionMessage = "";
   if (totalFailed > 0) {
-    finalActionMessage = `⚠️ *Action Required:* ${totalFailed} number(s) failed or were partially delivered across the batches. The failed phone numbers are clearly listed above so you can easily copy and re-process or refund them!`;
+    finalActionMessage = `⚠️ *Action Required:* ${totalFailed} number(s) failed or were partially delivered across the batches. The failed phone numbers and DataMart Order IDs are clearly listed above so you can easily copy and re-process or refund them!`;
   } else if (totalQueued > 0 && totalNumbers === 0) {
     finalActionMessage = `⏳ *Notice:* The audited batch(es) are currently queued at the vendor and have not finished processing on the carrier network yet. Please re-run check shortly!`;
   } else {
@@ -6713,6 +6803,14 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     }
   }
 
+  // 1b. Query Failed IDs / Numbers from last Delivery Check (Single or Bulk)
+  if (/\b(?:give\s*me\s*(?:the\s*)?)?(?:ids?|numbers?|phones?|orders?|list)?\s*(?:of\s*(?:the\s*)?)?failed(?:\s*(?:once|ones|ids?|numbers?|orders?|list))?\b/i.test(cleanInput) ||
+      /\b(?:which\s*(?:ones?|orders?|numbers?)\s*failed|failed\s*(?:ids?|numbers?|orders?|once|ones))\b/i.test(cleanInput)) {
+    const norm = normalizeBotPhone(from);
+    const cached = lastDeliveryCheckCache.get(norm);
+    return sendWhatsApp(from, formatFailedItemsReply(cached));
+  }
+
   // 2. Email or Phone or Customer Search
   const emailMatch = cleanInput.match(/[\w.-]+@[\w.-]+\.\w+/);
   const phoneMatch = cleanInput.match(/\b(0[2357]\d{8}|\+?233[2357]\d{8})\b/);
@@ -7190,6 +7288,14 @@ app.post("/webhook", async (req, res) => {
       const dmHandled = await processDatamartConsoleCommand(from, cleanCmd, isOwner);
       if (dmHandled) return dmHandled;
     } else if (hasDatamartAccess) {
+      // Query failed orders from last delivery check
+      if (/\b(?:give\s*me\s*(?:the\s*)?)?(?:ids?|numbers?|phones?|orders?|list)?\s*(?:of\s*(?:the\s*)?)?failed(?:\s*(?:once|ones|ids?|numbers?|orders?|list))?\b/i.test(cleanCmd) ||
+          /\b(?:which\s*(?:ones?|orders?|numbers?)\s*failed|failed\s*(?:ids?|numbers?|orders?|once|ones))\b/i.test(cleanCmd)) {
+        const norm = normalizeBotPhone(from);
+        const cached = lastDeliveryCheckCache.get(norm);
+        return sendWhatsApp(from, formatFailedItemsReply(cached));
+      }
+
       // Direct DataMart delivery check trigger even outside console mode
       const hasDeliveryCheckWord = /\b(?:delivery\s*check|check\s*delivery|carrier\s*check|audit)\b/i.test(cleanCmd);
       const isRawPortalIds = /^[0-9,\s\n\r]+$/.test(cleanCmd) && /\b\d{5,9}\b/.test(cleanCmd);
@@ -9515,6 +9621,14 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, out);
       }
 
+      // Direct Action Command: Query Failed Orders from Last Delivery Check
+      if (/\b(?:give\s*me\s*(?:the\s*)?)?(?:ids?|numbers?|phones?|orders?|list)?\s*(?:of\s*(?:the\s*)?)?failed(?:\s*(?:once|ones|ids?|numbers?|orders?|list))?\b/i.test(cmdText) ||
+          /\b(?:which\s*(?:ones?|orders?|numbers?)\s*failed|failed\s*(?:ids?|numbers?|orders?|once|ones))\b/i.test(cmdText)) {
+        const norm = normalizeBotPhone(from);
+        const cached = lastDeliveryCheckCache.get(norm);
+        return sendWhatsApp(from, formatFailedItemsReply(cached));
+      }
+
       // Direct Action Command: DataMart Delivery Check (Single or Bulk)
       const dmDeliveryCheckMatch =
         cmdText.match(/^(?:datamart|dm)\s*(?:delivery\s*check|delivery\s*audit)(?:\s+([\d,\s\n]+|[A-Za-z0-9_-]+))?$/i) ||
@@ -9526,7 +9640,7 @@ app.post("/webhook", async (req, res) => {
         const rawIds = dmDeliveryCheckMatch[1] || "";
         const idMatches = rawIds.match(/\b\d{4,9}\b/g);
         if (idMatches && idMatches.length > 0) {
-          const report = await executeDatamartDeliveryCheck(idMatches);
+          const report = await executeDatamartDeliveryCheck(idMatches, from);
           if (report) return sendWhatsApp(from, report);
         }
 
