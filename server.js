@@ -1181,6 +1181,68 @@ async function formatFailedItemsReply(cached, callerPhone = null) {
   return out.trim();
 }
 
+async function getData1FailedOrdersReport() {
+  if (!supabase) return "⚠️ Database connection unavailable.";
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const { data: todayFailed } = await supabase
+      .from("orders")
+      .select("id,ref,reference,phone_number,recipient_phone,network,capacity,amount,status,payment_status,delivery_status,error_message,created_at")
+      .or("status.eq.failed,delivery_status.eq.failed,payment_status.eq.failed")
+      .gte("created_at", today)
+      .order("created_at", { ascending: false });
+
+    const { count: todayTotal } = await supabase
+      .from("orders")
+      .select("*", { count: "exact", head: true })
+      .gte("created_at", today);
+
+    if (!todayFailed || todayFailed.length === 0) {
+      const { data: recentFailed } = await supabase
+        .from("orders")
+        .select("id,ref,reference,phone_number,recipient_phone,network,capacity,amount,status,error_message,created_at")
+        .or("status.eq.failed,delivery_status.eq.failed,payment_status.eq.failed")
+        .order("created_at", { ascending: false })
+        .limit(3);
+
+      return `🎉 *DATA 1 GH — ZERO FAILED ORDERS TODAY!*\n\n` +
+        `• 📊 *Today's Total Orders:* ${todayTotal || 0}\n` +
+        `• ✅ *Status:* All orders today are paid, processing, or successfully delivered!\n\n` +
+        (recentFailed && recentFailed.length > 0
+          ? `🕒 *Last failed order was on ${new Date(recentFailed[0].created_at).toLocaleDateString("en-GB")}:*\n• Ref: *${recentFailed[0].reference || recentFailed[0].ref}* (${recentFailed[0].network} ${recentFailed[0].capacity}GB) - ${recentFailed[0].error_message || "Payment cancelled"}`
+          : "");
+    }
+
+    let out = `👑 *DATA 1 GH — FAILED ORDERS REPORT*\n\n` +
+      `📦 *Failed Orders Today (${todayFailed.length}/${todayTotal || todayFailed.length}):*\n\n`;
+
+    todayFailed.forEach((o, i) => {
+      const num = i + 1;
+      const ref = o.reference || o.ref || "N/A";
+      const phone = o.recipient_phone || o.phone_number || "N/A";
+      const net = o.network || "MTN";
+      const cap = o.capacity ? `${o.capacity}GB` : "";
+      const amt = o.amount ? `GH₵ ${Number(o.amount).toFixed(2)}` : "";
+      const reason = o.error_message || (o.payment_status === "failed" ? "Payment not completed on MoMo" : "Delivery issue");
+      const time = o.created_at ? new Date(o.created_at).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "today";
+      out += `${num}. 📱 *${phone}* (${net} ${cap}) — *${amt}*\n` +
+        `   • 🆔 *Ref:* \`${ref}\`\n` +
+        `   • ❌ *Reason:* ${reason}\n` +
+        `   • 🕒 *Time:* ${time}\n\n`;
+    });
+
+    const copyablePhones = [...new Set(todayFailed.map(o => o.recipient_phone || o.phone_number).filter(Boolean))];
+    if (copyablePhones.length > 0) {
+      out += `📋 *Copyable Failed Numbers:*\n\`\`\`\n${copyablePhones.join("\n")}\n\`\`\`\n\n`;
+    }
+    out += `💡 All other ${Math.max(0, (todayTotal || 0) - todayFailed.length)} orders today are successful or currently processing!`;
+    return out.trim();
+  } catch (err) {
+    console.warn("getData1FailedOrdersReport error:", err.message);
+    return `⚠️ Could not query Data 1 orders: ${err.message}`;
+  }
+}
+
 function normalizeBotPhone(p) {
   if (!p) return "";
   const s = String(p).trim();
@@ -7454,6 +7516,28 @@ app.post("/webhook", async (req, res) => {
     if (activeUserMode === "datamart") {
       const dmHandled = await processDatamartConsoleCommand(from, cleanCmd, isOwner);
       if (dmHandled) return dmHandled;
+    } else if (activeUserMode === "ai") {
+      // 👑 OWNER IS IN STONY MODE (DATA 1 GH STORE CO-PILOT)
+      const hasExplicitDmPrefix = /^(?:datamart|dm)\s+/i.test(cleanCmd);
+
+      // If owner is asking about failed orders on Data 1 GH
+      const isData1FailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cleanCmd) ||
+        /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cleanCmd) ||
+        /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cleanCmd) ||
+        /^(?:failed|failed\s*orders?)$/i.test(cleanCmd);
+
+      if (isData1FailedQuery && !hasExplicitDmPrefix) {
+        const report = await getData1FailedOrdersReport();
+        if (report) return sendWhatsApp(from, report);
+      }
+
+      // If owner explicitly said "dm ..." or "datamart ...", allow DataMart console command
+      if (hasExplicitDmPrefix) {
+        const cleanDmCmd = cleanCmd.replace(/^(?:datamart|dm)\s+/i, "").trim();
+        const dmHandled = await processDatamartConsoleCommand(from, cleanDmCmd, isOwner);
+        if (dmHandled) return dmHandled;
+      }
+      // Otherwise, message proceeds straight down to Stony Owner AI without getting intercepted by DataMart!
     } else if (hasDatamartAccess) {
       // 1. Live DataMart Failed Orders (e.g. "Do we have failed order", "failed orders", "any failed order", "check failed orders")
       const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cleanCmd) ||
