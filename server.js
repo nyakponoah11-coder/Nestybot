@@ -4433,7 +4433,12 @@ async function executeOwnerDirectAction(type, payload = {}) {
           `• 📊 *Status:* ${u.isDisabled ? "Disabled" : "Active"}\n`;
       }
       if (orders.length > 0) {
-        out += `• 📦 *Recent Orders:* ${orders.length} found. Latest: ${orders[0].network} ${orders[0].capacity}GB to ${orders[0].phoneNumber} (${orders[0].status})\n`;
+        out += `• 📦 *Recent Orders:* ${orders.length} found.\n`;
+        orders.slice(0, 3).forEach(o => {
+          const pid = o.apiOrderId || o.exportTracking?.portalId || "N/A";
+          const batchNo = o.exportTracking?.batchNumber ? ` (Batch #${o.exportTracking.batchNumber})` : "";
+          out += `  - 🆔 *Portal ID:* *${pid}*${batchNo} | ${o.network} ${o.capacity}GB to ${o.phoneNumber} (${(o.status || "N/A").toUpperCase()})\n`;
+        });
       }
       return out;
     }
@@ -5243,15 +5248,16 @@ async function fetchDatamartSupportEndpoint(endpoint, options = {}, callerPhone 
 async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) {
   const ids = Array.isArray(portalOrderIds)
     ? portalOrderIds.map(x => String(x).trim()).filter(Boolean)
-    : String(portalOrderIds || "").match(/\b\d{4,9}\b/g) || [];
+    : String(portalOrderIds || "").match(/\b\d{4,9}[a-zA-Z]?\b/g) || [];
 
   const uniqueIds = [...new Set(ids)].slice(0, 10);
   if (uniqueIds.length === 0) return null;
 
   async function checkSingle(targetId) {
+    const pId = isNaN(Number(targetId)) ? String(targetId).trim() : Number(targetId);
     const startRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/start', {
       method: 'POST',
-      body: { portalOrderId: Number(targetId) }
+      body: { portalOrderId: pId }
     }, callerPhone);
     const jobId = startRes?.data?.jobId || startRes?.jobId;
     if (!jobId) return { id: targetId, error: startRes?.message || "Failed to initiate audit" };
@@ -5268,7 +5274,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
             try {
               const applyRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/apply', {
                 method: 'POST',
-                body: { portalOrderId: Number(targetId), items: result.items }
+                body: { portalOrderId: pId, items: result.items }
               }, callerPhone);
               syncResult = applyRes?.data || applyRes;
             } catch (err) {
@@ -6796,9 +6802,9 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   }
 
   // 1. Delivery Check (Single or Bulk IDs)
-  const allNums = cleanInput.match(/\b\d{4,9}\b/g);
+  const allNums = cleanInput.match(/\b\d{4,9}[a-zA-Z]?\b/g);
   const isDeliveryCheckIntent = /\b(?:delivery\s*check|check\s*delivery|audit)\b/i.test(cleanInput);
-  if (isDeliveryCheckIntent || (allNums && allNums.length > 0 && /^[0-9,\s\n\r]+$/.test(cleanInput))) {
+  if (isDeliveryCheckIntent || (allNums && allNums.length > 0 && /^[0-9a-zA-Z,\s\n\r]+$/.test(cleanInput))) {
     const targetIds = allNums || [];
     if (targetIds.length > 0) {
       const report = await executeDatamartDeliveryCheck(targetIds, from);
@@ -6847,14 +6853,17 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
 
       if (orders.length > 0) {
         out += `📦 *Recent Orders (${orders.length} found):*\n`;
-        orders.slice(0, 3).forEach((ord) => {
+        orders.slice(0, 5).forEach((ord) => {
           const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+          const portalId = ord.apiOrderId || ord.exportTracking?.portalId || ord.geonetReference || ord._id;
+          const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
           out += `• *${ord.network} ${cap}* to *${ord.phoneNumber}* (${(ord.status || "N/A").toUpperCase()})\n` +
-            `  ID: \`${ord._id}\` | Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
+            `  🆔 *Portal ID:* *${portalId}*${batchNo}\n` +
+            `  Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
         });
         out += "\n";
       }
-      out += `💡 Reply: *[ID]* to run delivery check, or *exit* to leave DataMart Mode.`;
+      out += `💡 Reply: *[Portal ID]* to run delivery check, or *exit* to leave DataMart Mode.`;
       return sendWhatsApp(from, out);
     }
   }
@@ -7301,9 +7310,9 @@ app.post("/webhook", async (req, res) => {
 
       // Direct DataMart delivery check trigger even outside console mode
       const hasDeliveryCheckWord = /\b(?:delivery\s*check|check\s*delivery|carrier\s*check|audit)\b/i.test(cleanCmd);
-      const isRawPortalIds = /^[0-9,\s\n\r]+$/.test(cleanCmd) && /\b\d{5,9}\b/.test(cleanCmd);
+      const isRawPortalIds = /^[0-9a-zA-Z,\s\n\r]+$/.test(cleanCmd) && /\b\d{4,9}[a-zA-Z]?\b/.test(cleanCmd);
       if (hasDeliveryCheckWord || isRawPortalIds) {
-        const idMatches = cleanCmd.match(/\b\d{5,9}\b/g);
+        const idMatches = cleanCmd.match(/\b\d{4,9}[a-zA-Z]?\b/g);
         if (idMatches && idMatches.length > 0) {
           const report = await executeDatamartDeliveryCheck(idMatches, from);
           if (report) return sendWhatsApp(from, report);
@@ -9581,8 +9590,9 @@ app.post("/webhook", async (req, res) => {
 
       // Direct Action Command: Universal Customer / Agent Investigation
       const dmInvestigateMatch =
-        cmdText.match(/^(?:datamart|dm)\s*(?:investigate|customer|agent|lookup)\s+(.+)$/i) ||
-        cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:this\s+)?(?:customer|user|agent)\s+(?:on\s+datamart\s+)?(?:for\s+me\s+)?([^\s]+@[^\s]+|0[2357]\d{8}|\+?233[2357]\d{8})/i) ||
+        cmdText.match(/^(?:datamart|dm)\s*(?:investigate|customer|agent|lookup|search|check)\s+(.+)$/i) ||
+        cmdText.match(/^(?:datamart|dm)\s+(0[2357]\d{8}|\+?233[2357]\d{8})$/i) ||
+        cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:this\s+)?(?:customer|user|agent|number|phone)?\s*(?:on\s+datamart\s+)?(?:for\s+me\s+)?([^\s]+@[^\s]+|0[2357]\d{8}|\+?233[2357]\d{8})/i) ||
         cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:on\s+datamart\s+)?([^\s]+@[^\s]+)/i);
       if (dmInvestigateMatch) {
         const query = dmInvestigateMatch[1].trim();
@@ -9612,15 +9622,18 @@ app.post("/webhook", async (req, res) => {
 
         if (orders.length > 0) {
           out += `📦 *Recent Orders (${orders.length} found):*\n`;
-          orders.slice(0, 3).forEach((ord) => {
+          orders.slice(0, 5).forEach((ord) => {
             const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+            const portalId = ord.apiOrderId || ord.exportTracking?.portalId || ord.geonetReference || ord._id;
+            const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
             out += `• *${ord.network} ${cap}* to *${ord.phoneNumber}* (${(ord.status || "N/A").toUpperCase()})\n` +
-              `  ID: \`${ord._id}\` | Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
+              `  🆔 *Portal ID:* *${portalId}*${batchNo}\n` +
+              `  Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
           });
           out += "\n";
         }
 
-        out += `💡 *Actions:* Reply *dm delivery check [id]* or *dm tickets*`;
+        out += `💡 *Actions:* Reply *dm delivery check [Portal ID]* or *dm tickets*`;
         return sendWhatsApp(from, out);
       }
 
@@ -9641,7 +9654,7 @@ app.post("/webhook", async (req, res) => {
         cmdText.match(/([\d,\s\n]{4,}).+?delivery\s*check/i);
       if (dmDeliveryCheckMatch) {
         const rawIds = dmDeliveryCheckMatch[1] || "";
-        const idMatches = rawIds.match(/\b\d{4,9}\b/g);
+        const idMatches = rawIds.match(/\b\d{4,9}[a-zA-Z]?\b/g);
         if (idMatches && idMatches.length > 0) {
           const report = await executeDatamartDeliveryCheck(idMatches, from);
           if (report) return sendWhatsApp(from, report);
@@ -9767,16 +9780,20 @@ app.post("/webhook", async (req, res) => {
         const status = (ord.status || "processing").toUpperCase();
         const amt = ord.amount != null ? `GH₵ ${Number(ord.amount).toFixed(2)}` : "N/A";
         const time = ord.createdAt ? new Date(ord.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "N/A";
+        const portalId = ord.apiOrderId || ord.exportTracking?.portalId || ord.geonetReference || ord._id;
+        const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
 
         return sendWhatsApp(from,
           `✅ *DATAMART ORDER VERIFICATION*\n\n` +
-          `🆔 *Order ID:* *${ord._id}*\n` +
+          `🆔 *Portal ID:* *${portalId}*${batchNo}\n` +
           `📶 *Network & Size:* ${net} ${cap}\n` +
           `📱 *Recipient:* *${phone}*\n` +
           `💵 *Amount:* ${amt}\n` +
           `📊 *Carrier Status:* *${status}*\n` +
-          `🕒 *Submitted:* ${time}\n\n` +
+          `🕒 *Submitted:* ${time}\n` +
+          `DB ID: \`${ord._id}\`\n\n` +
           `💡 *Actions:*\n` +
+          `• Delivery check: *dm delivery check ${portalId}*\n` +
           `• Re-dispatch order: *dm retry ${ord._id}*\n` +
           `• Refund to wallet: *dm refund ${ord._id}*`
         );
