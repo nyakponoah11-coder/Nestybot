@@ -12995,6 +12995,10 @@ setTimeout(runDatamartSupportWatcher, 20000);
 START SERVER
 ========================================================= */
 
+app.get("/", (req, res) => {
+  res.status(200).send("OK - Stony Bot is Running!");
+});
+
 app.get("/health", (req, res) => {
   res.status(200).send("Bot is alive!");
 });
