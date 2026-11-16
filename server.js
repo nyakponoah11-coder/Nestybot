@@ -7851,8 +7851,10 @@ app.post("/webhook", async (req, res) => {
       }
 
       // Direct Action Command 0a_dm: Credit DataMart Wallet via MoMo prompt
-      const creditDatamartMatch = cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:to\s+)?(?:datamart|data\s*mart|telecom\s*wallet|dm\s*wallet|my\s+wallet)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i) ||
-        cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)\s+(?:to\s+)?(?:datamart|data\s*mart|telecom\s*wallet|dm\s*wallet|my\s+wallet)/i);
+      const creditDatamartMatch =
+        cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:(?:to\s+)?(?:datamart|data\s*mart|telecom\s*wallet|dm\s*wallet|my\s+wallet|wallet)\s+)?(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)\s*(?:gh[c₵]?|₵)?/i) ||
+        cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)\s*(?:gh[c₵]?|₵)?/i);
+
       if (creditDatamartMatch) {
         const amt = parseFloat(creditDatamartMatch[1]);
         if (!isNaN(amt) && amt > 0) {
@@ -7876,8 +7878,9 @@ app.post("/webhook", async (req, res) => {
             } catch (_) {}
           }
 
-          // Check if an explicit phone was provided in the command (e.g. "top up datamart 50 on 0551234567")
-          const explicitPhoneMatch = cmdText.match(/(?:on|with|to|for|momo|number|num|phone)\s*(?:0|\+?233)?([2357][0-9]{8})\b/i) ||
+          // Check if an explicit phone was provided in the command (e.g. "top up 50gh with this number 0547100951")
+          const explicitPhoneMatch =
+            cmdText.match(/(?:on|with|to|for|momo|number|num|phone)\s*(?:(?:this|my)\s+(?:number|phone)\s+)?(?:0|\+?233)?([2357][0-9]{8})\b/i) ||
             cmdText.match(/\b(0[2357][0-9]{8})\b/i) ||
             cmdText.match(/\b(233[2357][0-9]{8})\b/i);
 
@@ -7894,18 +7897,48 @@ app.post("/webhook", async (req, res) => {
           }
           const formattedPhone = chosenPhone.length === 12 && chosenPhone.startsWith("233") ? "0" + chosenPhone.slice(3) : chosenPhone;
 
+          let momoNet = "MTN";
+          const pfx = formattedPhone.slice(0, 3);
+          if (["020", "050"].includes(pfx)) momoNet = "TELECEL";
+          else if (["026", "056", "027", "057"].includes(pfx)) momoNet = "AIRTELTIGO";
+
           if (token) {
             try {
-              const bRes = await axios.post("https://api.datamartgh.shop/api/bridge/collect", {
-                phoneNumber: formattedPhone,
-                amount: amt,
-                network: "MTN"
-              }, {
-                headers: { "Content-Type": "application/json", "x-auth-token": token },
-                timeout: 15000
-              });
+              let bRes = null;
+              try {
+                bRes = await axios.post("https://api.datamartgh.shop/api/bridge/collect", {
+                  phoneNumber: formattedPhone,
+                  amount: amt,
+                  network: momoNet
+                }, {
+                  headers: { "Content-Type": "application/json", "x-auth-token": token },
+                  timeout: 15000
+                });
+              } catch (bridgeErr) {
+                if (bridgeErr.response && bridgeErr.response.status === 401 && sMap["datamart_login_email"] && sMap["datamart_login_password"]) {
+                  // Re-authenticate and retry
+                  const reloginRes = await axios.post("https://api.datamartgh.shop/api/v1/login", {
+                    email: sMap["datamart_login_email"],
+                    password: sMap["datamart_login_password"]
+                  }, { timeout: 10000 });
+                  if (reloginRes.data?.token) {
+                    token = reloginRes.data.token;
+                    await supabase.from("settings").upsert({ key: "datamart_auth_token", value: token }, { onConflict: "key" });
+                    bRes = await axios.post("https://api.datamartgh.shop/api/bridge/collect", {
+                      phoneNumber: formattedPhone,
+                      amount: amt,
+                      network: momoNet
+                    }, {
+                      headers: { "Content-Type": "application/json", "x-auth-token": token },
+                      timeout: 15000
+                    });
+                  }
+                } else {
+                  throw bridgeErr;
+                }
+              }
 
-              if (bRes.data?.status === "success" || bRes.data?.success) {
+              if (bRes?.data?.status === "success" || bRes?.data?.success) {
                 const trxId = bRes.data.data?.transactionId || bRes.data.transactionId;
                 if (trxId) {
                   let attempts = 0;
@@ -7938,15 +7971,19 @@ app.post("/webhook", async (req, res) => {
 
                 return sendWhatsApp(from,
                   `📲 *MOMO TOP-UP PROMPT DISPATCHED BOSS!*\n\n` +
-                  `I have sent a Mobile Money payment prompt of *GH₵ ${amt.toFixed(2)}* to *${formattedPhone}*.\n\n` +
-                  `🔑 *Next Step:* Enter your MoMo PIN on *${formattedPhone}* to approve the deposit.\n\n` +
-                  `💡 *Tip:* To send to a different MoMo number next time, you can write:\n` +
-                  `• *top up datamart ${amt} on [phone]*\n` +
-                  `• Or set default: *set momo [phone]*`
+                  `I have sent a Mobile Money payment prompt of *GH₵ ${amt.toFixed(2)}* to *${formattedPhone}* (${momoNet}).\n\n` +
+                  `🔑 *Next Step:* Enter your MoMo PIN on *${formattedPhone}* to approve the cashout.\n\n` +
+                  `⚡ The moment you enter your PIN, your DataMart developer wallet will be credited automatically!`
                 );
               }
             } catch (err) {
-              console.error("Bridge deposit error:", err?.response?.data || err?.message);
+              const errMsg = err?.response?.data?.message || err?.response?.data?.error || err?.message;
+              return sendWhatsApp(from,
+                `⚠️ *DATAMART TOP-UP NOTICE*\n\n` +
+                `Could not dispatch MoMo prompt to *${formattedPhone}*: ${errMsg}\n\n` +
+                `Please ensure your MoMo line allows cashout and write:\n` +
+                `• *top up 50 on ${formattedPhone}*`
+              );
             }
           }
 
@@ -7960,7 +7997,7 @@ app.post("/webhook", async (req, res) => {
             `• *Network:* MTN\n\n` +
             `After sending, reply here with:\n` +
             `*claim datamart [Transaction_ID]*\n\n` +
-            `💡 Or log into your DataMart dashboard settings to enable automatic 1-click MoMo prompts!`
+            `💡 Or text: *set datamart login [email] [password]* to enable automatic 1-click MoMo prompts!`
           );
         }
       }
