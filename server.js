@@ -1374,10 +1374,25 @@ async function sendWhatsApp(to, text) {
       return;
     }
 
-    const cleanTo = String(to || "").replace(/\D/g, "");
-    const formattedTo = cleanTo.startsWith("0") && cleanTo.length === 10
-      ? "233" + cleanTo.slice(1)
-      : cleanTo;
+    if (!to) {
+      console.warn("⚠️ [sendWhatsApp] Aborting: 'to' recipient is empty or undefined!");
+      return;
+    }
+
+    let formattedTo = String(to).trim();
+    const digitsOnly = formattedTo.replace(/\D/g, "");
+    if (digitsOnly.length >= 9) {
+      formattedTo = digitsOnly.startsWith("0") && digitsOnly.length === 10
+        ? "233" + digitsOnly.slice(1)
+        : digitsOnly;
+    } else {
+      formattedTo = formattedTo.replace(/@.+$/, "").trim();
+    }
+
+    if (!formattedTo) {
+      console.warn("⚠️ [sendWhatsApp] Aborting: formattedTo is empty after cleaning for recipient:", to);
+      return;
+    }
 
     await axios.post(
       `https://graph.facebook.com/v20.0/${phoneId}/messages`,
@@ -6840,11 +6855,47 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
-    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const changeVal = req.body.entry?.[0]?.changes?.[0]?.value || req.body?.value || req.body;
+    const msg = changeVal?.messages?.[0] || req.body?.messages?.[0] || req.body?.data;
     if (!msg) return;
 
-    const from = msg.from;
-    const text = (msg.text?.body || "").trim();
+    let from =
+      msg.from ||
+      msg.sender ||
+      msg.author ||
+      msg.wa_id ||
+      msg.chatId ||
+      msg.key?.remoteJid ||
+      changeVal?.contacts?.[0]?.wa_id ||
+      changeVal?.contacts?.[0]?.user_id ||
+      changeVal?.contacts?.[0]?.id ||
+      req.body?.contacts?.[0]?.wa_id ||
+      req.body?.from ||
+      req.body?.sender ||
+      null;
+
+    if (typeof from === "string") {
+      from = from.replace(/@.+$/, "").trim();
+    }
+
+    if (!from) {
+      console.warn("⚠️ [WA WEBHOOK] SENDER 'from' IS UNDEFINED! Full payload:", JSON.stringify(req.body));
+      return;
+    }
+
+    const text = (
+      msg.text?.body ||
+      msg.body ||
+      msg.caption ||
+      msg.message?.conversation ||
+      msg.message?.extendedTextMessage?.text ||
+      msg.interactive?.button_reply?.title ||
+      msg.interactive?.button_reply?.id ||
+      msg.interactive?.list_reply?.title ||
+      msg.interactive?.list_reply?.id ||
+      msg.button?.text ||
+      ""
+    ).trim();
 
     console.log("📩", from, text);
 
