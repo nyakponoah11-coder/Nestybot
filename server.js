@@ -6667,6 +6667,214 @@ app.post("/webhook", async (req, res) => {
 
       const cleanInput = text.trim();
 
+      // ── SWITCH TO DATAMART AGENT SUPPORT MODE ──
+      if (/^(?:datamart\s*mode|dm\s*mode|agent\s*support\s*mode|switch\s*to\s*datamart|datamart)$/i.test(cleanInput)) {
+        setUserMode(from, "datamart");
+        await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "datamart" }, { onConflict: "key" });
+        return sendWhatsApp(from,
+          `🏢 *SWITCHED TO DATAMART AGENT SUPPORT MODE!* 🚀\n\n` +
+          `You are now connected directly to your DataMart Worker Console. Every command or query you send will execute live on DataMart!\n\n` +
+          `🛠️ *What you can send in this mode:*\n` +
+          `• *Any Batch/Order ID* (e.g. *2313443*) ➔ Runs Live Carrier Delivery Check\n` +
+          `• *Any Email or Phone* (e.g. *nyakponoah11@gmail.com*) ➔ Customer/Agent Profile & Wallet\n` +
+          `• *tickets* or *urgent* ➔ View active support tickets\n` +
+          `• *failed* ➔ View failed orders & retry\n` +
+          `• *withdrawals* ➔ View agent cashouts\n` +
+          `• *deposits* ➔ View MoMo & Paystack deposits\n` +
+          `• *stats* or *dashboard* ➔ View today's total volume\n` +
+          `• *recovery* ➔ Check skipped/failed recovery pipelines\n` +
+          `• *not received* ➔ Customer complaints\n\n` +
+          `💡 To switch back to normal store co-pilot mode anytime, just text: *exit* or *normal mode* or *stony*.`
+        );
+      }
+
+      // ── DEDICATED DATAMART WORKER CONSOLE MODE HANDLER ──
+      if (getUserMode(from) === "datamart") {
+        if (/^(?:exit|normal\s*mode|stony|stony\s*mode|back|quit|menu|main|stop)$/i.test(cleanInput)) {
+          setUserMode(from, "ai");
+          await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "ai" }, { onConflict: "key" });
+          return sendWhatsApp(from, `👑 Switched back to *Stony Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
+        }
+
+        // 1. Delivery Check (e.g. "2313443", "delivery check 2313443", "check 2313443")
+        const dmNumMatch = cleanInput.match(/\b(\d{4,9})\b/);
+        const isDeliveryCheckIntent = /\b(?:delivery\s*check|check\s*delivery|audit)\b/i.test(cleanInput);
+        if (isDeliveryCheckIntent || (dmNumMatch && /^\d{4,9}$/.test(cleanInput))) {
+          const targetId = dmNumMatch ? dmNumMatch[1] : cleanInput.replace(/\D/g, "");
+          if (targetId) {
+            const startRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/start', {
+              method: 'POST',
+              body: { portalOrderId: Number(targetId) }
+            });
+            const jobId = startRes?.data?.jobId || startRes?.jobId;
+            if (jobId) {
+              let finalJob = null;
+              for (let i = 0; i < 4; i++) {
+                await new Promise(r => setTimeout(r, 1500));
+                const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`);
+                if (jobRes?.data?.jobStatus === 'done' || jobRes?.data?.jobStatus === 'completed') {
+                  finalJob = jobRes.data;
+                  break;
+                }
+              }
+              const resObj = finalJob?.result;
+              if (resObj) {
+                const batchNum = resObj.batchNumber || "N/A";
+                const totalItems = resObj.totalItems || 0;
+                const sent = resObj.sent || 0;
+                const failed = resObj.failed || 0;
+                const allDelivered = resObj.allDelivered ? "✅ ALL 100% DELIVERED" : "⚠️ PARTIAL / PENDING";
+                const dateStr = resObj.items?.[0]?.processedDate || "N/A";
+                const checkedBy = resObj.checkedBy || "Stony";
+
+                let sampleLines = "";
+                if (Array.isArray(resObj.items) && resObj.items.length > 0) {
+                  sampleLines = "\n📋 *Carrier Lines Audited:*\n" +
+                    resObj.items.slice(0, 5).map(it => `• *${it.phone}*: ${it.status === "Sent" ? "✅ Sent" : it.status} (${it.processedDate || "Delivered"})`).join("\n") +
+                    (resObj.items.length > 5 ? `\n• _...and ${resObj.items.length - 5} more lines_` : "");
+                }
+
+                return sendWhatsApp(from,
+                  `🚚 *[DATAMART MODE] CARRIER DELIVERY CHECK*\n\n` +
+                  `🆔 *Portal Order ID:* *${targetId}*\n` +
+                  `📦 *Batch Number:* #${batchNum}\n` +
+                  `📊 *Carrier Result:* *${allDelivered}*\n` +
+                  `• 🔢 *Total Lines in Batch:* ${totalItems}\n` +
+                  `• ✅ *Carrier Sent:* ${sent}\n` +
+                  `• ❌ *Failed:* ${failed}\n` +
+                  `🕒 *Processed on Yello/Carrier:* ${dateStr}\n` +
+                  `👤 *Audited By:* ${checkedBy}\n` +
+                  `${sampleLines}\n\n` +
+                  `💡 All ${totalItems} numbers in this batch were successfully delivered to MTN!`
+                );
+              }
+            }
+          }
+        }
+
+        // 2. Email or Phone or Customer Search
+        const emailMatch = cleanInput.match(/[\w.-]+@[\w.-]+\.\w+/);
+        const phoneMatch = cleanInput.match(/\b(0[2357]\d{8}|\+?233[2357]\d{8})\b/);
+        const isSearchIntent = /\b(?:search|lookup|find|customer|agent|check)\b/i.test(cleanInput);
+        if (emailMatch || phoneMatch || isSearchIntent) {
+          const query = emailMatch ? emailMatch[0] : (phoneMatch ? phoneMatch[0] : cleanInput.replace(/^(?:search|lookup|find|customer|agent|check(?:\s*out)?)\s+/i, "").trim());
+          if (query) {
+            const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(query)}`);
+            const d = resp?.data;
+            const users = d?.results?.users || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "customer" || x.email) : []);
+            const orders = d?.results?.orders || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "order" || x.network) : []);
+
+            if (users.length === 0 && orders.length === 0) {
+              return sendWhatsApp(from, `🔍 *[DATAMART MODE]* No customer, agent, or order found matching "*${query}*".`);
+            }
+
+            let out = `🔍 *[DATAMART MODE] LOOKUP RESULTS FOR "${query}":*\n\n`;
+            if (users.length > 0) {
+              users.slice(0, 3).forEach((u, i) => {
+                const num = ["1️⃣", "2️⃣", "3️⃣"][i] || "•";
+                out += `${num} 👤 *USER / AGENT PROFILE:*\n` +
+                  `• *Name:* *${u.name || "N/A"}*\n` +
+                  `• *Email:* ${u.email || "N/A"}\n` +
+                  `• *Phone:* *${u.phoneNumber || "N/A"}*\n` +
+                  `• *Role:* *${(u.role || "user").toUpperCase()}*\n` +
+                  `• *Wallet Balance:* *GH₵ ${Number(u.walletBalance || 0).toFixed(2)}*\n` +
+                  `• *Status:* ${u.isDisabled ? "🚫 Disabled" : "✅ Active"}\n` +
+                  `• *Joined:* ${u.createdAt ? new Date(u.createdAt).toLocaleDateString("en-GB") : "N/A"}\n\n`;
+              });
+            }
+
+            if (orders.length > 0) {
+              out += `📦 *Recent Orders (${orders.length} found):*\n`;
+              orders.slice(0, 3).forEach((ord) => {
+                const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+                out += `• *${ord.network} ${cap}* to *${ord.phoneNumber}* (${(ord.status || "N/A").toUpperCase()})\n` +
+                  `  ID: \`${ord._id}\` | Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
+              });
+              out += "\n";
+            }
+            out += `💡 Reply: *[ID]* to run delivery check, or *exit* to leave DataMart Mode.`;
+            return sendWhatsApp(from, out);
+          }
+        }
+
+        // 3. Tickets
+        if (/^(?:tickets?|urgent|pending)$/i.test(cleanInput)) {
+          const data = await fetchDatamartSupportTickets({ status: cleanInput.toLowerCase() === "urgent" ? "pending" : "pending", priority: cleanInput.toLowerCase() === "urgent" ? "urgent" : undefined, limit: 5 });
+          if (!data || !data.tickets) return sendWhatsApp(from, `⚠️ Could not fetch DataMart tickets.`);
+          let out = `🎫 *[DATAMART MODE] SUPPORT QUEUE (${data.pagination?.total || data.tickets.length} total):*\n\n`;
+          data.tickets.forEach((tk, idx) => {
+            const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+            const prio = (tk.priority || "normal").toUpperCase();
+            out += `${numEmoji} *[${tk.reportId || "ID"}]* *${tk.reportReason || "Support"}* (*${prio}*)\n` +
+              `• 👤 ${tk.userId?.name || "Customer"} (${tk.phoneNumber || tk.userId?.phoneNumber || "N/A"})\n` +
+              `• 📝 ${(tk.description || "").slice(0, 85)}...\n\n`;
+          });
+          out += `💡 Reply with any *ReportID* (e.g. *RPT005135*) to view details!`;
+          return sendWhatsApp(from, out);
+        }
+
+        // 4. Failed orders
+        if (/^(?:failed|failed\s*orders)$/i.test(cleanInput)) {
+          const resp = await fetchDatamartSupportEndpoint('/api/support/failed-orders?limit=5');
+          const orders = resp?.data?.orders || [];
+          if (orders.length === 0) return sendWhatsApp(from, `🎉 *[DATAMART MODE]* Zero failed orders in queue! All carrier dispatches green.`);
+          let out = `⚠️ *[DATAMART MODE] FAILED ORDERS:*\n\n`;
+          orders.forEach((ord, idx) => {
+            const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+            out += `${num} *[${ord._id}]* ${ord.network} ${ord.capacity || ""}GB ➔ ${ord.phoneNumber}\n` +
+              `• Reason: ${ord.failureReason || ord.status || "Failed"}\n` +
+              `• Actions: *retry ${ord._id}* | *refund ${ord._id}*\n\n`;
+          });
+          return sendWhatsApp(from, out);
+        }
+
+        // 5. Withdrawals
+        if (/^(?:withdrawals?|cashouts?)$/i.test(cleanInput)) {
+          const resp = await fetchDatamartSupportEndpoint('/api/support/withdrawals?limit=5');
+          const list = resp?.data?.withdrawals || [];
+          if (list.length === 0) return sendWhatsApp(from, `💰 *[DATAMART MODE]* No pending withdrawal requests.`);
+          let out = `💰 *[DATAMART MODE] WITHDRAWALS:*\n\n`;
+          list.forEach((w, idx) => {
+            const num = ["1️⃣", "2️⃣", "3️⃣"][idx] || `•`;
+            out += `${num} *[${w.withdrawalId || w._id}]* GH₵ ${Number(w.requestedAmount || 0).toFixed(2)} (${(w.status || "pending").toUpperCase()})\n` +
+              `• Agent: ${w.agentId?.name || "N/A"} (${w.storeId?.storeName || "Store"})\n\n`;
+          });
+          return sendWhatsApp(from, out);
+        }
+
+        // 6. Deposits
+        if (/^(?:deposits?|momo)$/i.test(cleanInput)) {
+          const resp = await fetchDatamartSupportEndpoint('/api/support/deposits?limit=5');
+          const list = resp?.data?.deposits || [];
+          if (list.length === 0) return sendWhatsApp(from, `💳 *[DATAMART MODE]* No recent deposits found.`);
+          let out = `💳 *[DATAMART MODE] RECENT DEPOSITS:*\n\n`;
+          list.forEach((dep, idx) => {
+            const num = ["1️⃣", "2️⃣", "3️⃣"][idx] || `•`;
+            out += `${num} *GH₵ ${Number(dep.amount || 0).toFixed(2)}* (${(dep.type || "deposit").toUpperCase()})\n` +
+              `• User: ${dep.userId?.name || "User"} (${dep.userId?.phoneNumber || "N/A"})\n` +
+              `• Wallet After: GH₵ ${Number(dep.balanceAfter || 0).toFixed(2)}\n\n`;
+          });
+          return sendWhatsApp(from, out);
+        }
+
+        // 7. Dashboard / Stats
+        if (/^(?:stats|dashboard|overview|volume)$/i.test(cleanInput)) {
+          const resp = await fetchDatamartSupportEndpoint('/api/support/dashboard');
+          const d = resp?.data;
+          if (!d) return sendWhatsApp(from, `⚠️ Could not fetch DataMart dashboard.`);
+          const today = d.today || {};
+          const tickets = d.tickets || {};
+          return sendWhatsApp(from,
+            `📊 *[DATAMART MODE] DASHBOARD*\n\n` +
+            `• 🛒 *Orders Today:* ${(today.totalOrders || 0).toLocaleString()}\n` +
+            `• ❌ *Failed Orders:* ${today.failedOrders || 0}\n` +
+            `• 💸 *Refunds Processed:* ${today.refundsProcessed || 0}\n` +
+            `• ⏳ *Pending Tickets:* ${(tickets.pending || 0).toLocaleString()}\n\n` +
+            `💡 Type *exit* to return to Stony co-pilot mode.`
+          );
+        }
+      }
+
       // ── 0. OWNER AI TRAINING & CORRECTION HANDLER (WHATSAPP → PERMANENT MEMORY) ──
       const isDirectTraining =
         /\b(?:don'?t\s+do\s+(?:this|that)\s+again|never\s+do\s+(?:this|that)\s+again|don'?t\s+say\s+(?:this|that)\s+again|never\s+say\s+(?:this|that)\s+again|save\s+(?:this\s+rule|this\s+instruction|this\s+correction|rule|instruction)|remember\s+(?:this|that)|from\s+now\s+on|train\s*:|correction\s*:)\b/i.test(cleanInput);
@@ -8503,43 +8711,57 @@ app.post("/webhook", async (req, res) => {
       }
 
       // Direct Action Command: Universal Customer / Agent Investigation
-      const dmInvestigateMatch = cmdText.match(/^(?:datamart|dm)\s*(?:investigate|customer|agent|lookup)\s+(.+)$/i);
+      const dmInvestigateMatch =
+        cmdText.match(/^(?:datamart|dm)\s*(?:investigate|customer|agent|lookup)\s+(.+)$/i) ||
+        cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:this\s+)?(?:customer|user|agent)\s+(?:on\s+datamart\s+)?(?:for\s+me\s+)?([^\s]+@[^\s]+|0[2357]\d{8}|\+?233[2357]\d{8})/i) ||
+        cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:on\s+datamart\s+)?([^\s]+@[^\s]+)/i);
       if (dmInvestigateMatch) {
         const query = dmInvestigateMatch[1].trim();
         const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(query)}`);
-        const results = resp?.data?.results || [];
-        if (results.length === 0) {
+        const d = resp?.data;
+        const users = d?.results?.users || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "customer" || x.email) : []);
+        const orders = d?.results?.orders || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "order" || x.network) : []);
+
+        if (users.length === 0 && orders.length === 0) {
           return sendWhatsApp(from, `🔍 No DataMart customer, agent, or order found matching "*${query}*".`);
         }
 
         let out = `🔍 *DATAMART LOOKUP RESULTS FOR "${query}":*\n\n`;
-        results.slice(0, 3).forEach((item, idx) => {
-          const num = ["1️⃣", "2️⃣", "3️⃣"][idx] || `•`;
-          if (item.type === "customer" || item.user) {
-            const u = item.user || item;
-            out += `${num} 👤 *CUSTOMER / AGENT:*\n` +
-              `• *Name:* ${u.name || "N/A"}\n` +
-              `• *Phone:* ${u.phoneNumber || "N/A"}\n` +
+        if (users.length > 0) {
+          users.slice(0, 3).forEach((u, i) => {
+            const num = ["1️⃣", "2️⃣", "3️⃣"][i] || "•";
+            out += `${num} 👤 *USER / AGENT PROFILE:*\n` +
+              `• *Name:* *${u.name || "N/A"}*\n` +
               `• *Email:* ${u.email || "N/A"}\n` +
-              `• *Role:* ${(u.role || "user").toUpperCase()}\n` +
-              `• *Wallet Balance:* GH₵ ${Number(u.walletBalance || 0).toFixed(2)}\n\n`;
-          } else if (item.type === "order" || item.order) {
-            const ord = item.order || item;
-            out += `${num} 📦 *ORDER:* ${ord.network} ${ord.capacity || ""}GB\n` +
-              `• *Recipient:* ${ord.phoneNumber}\n` +
-              `• *Status:* ${(ord.status || "N/A").toUpperCase()}\n` +
-              `• *ID:* ${ord._id}\n\n`;
-          } else {
-            out += `${num} 📋 ${JSON.stringify(item).slice(0, 100)}...\n\n`;
-          }
-        });
+              `• *Phone:* *${u.phoneNumber || "N/A"}*\n` +
+              `• *Role:* *${(u.role || "user").toUpperCase()}*\n` +
+              `• *Wallet Balance:* *GH₵ ${Number(u.walletBalance || 0).toFixed(2)}*\n` +
+              `• *Status:* ${u.isDisabled ? "🚫 Disabled" : "✅ Active"}\n` +
+              `• *Joined:* ${u.createdAt ? new Date(u.createdAt).toLocaleDateString("en-GB") : "N/A"}\n\n`;
+          });
+        }
+
+        if (orders.length > 0) {
+          out += `📦 *Recent Orders (${orders.length} found):*\n`;
+          orders.slice(0, 3).forEach((ord) => {
+            const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+            out += `• *${ord.network} ${cap}* to *${ord.phoneNumber}* (${(ord.status || "N/A").toUpperCase()})\n` +
+              `  ID: \`${ord._id}\` | Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
+          });
+          out += "\n";
+        }
+
+        out += `💡 *Actions:* Reply *dm delivery check [id]* or *dm tickets*`;
         return sendWhatsApp(from, out);
       }
 
       // Direct Action Command: DataMart Delivery Check
-      const dmDeliveryCheckMatch = cmdText.match(/^(?:datamart|dm)\s*(?:delivery\s*check|delivery\s*audit)(?:\s+(\d+|[A-Za-z0-9_-]+))?$/i) ||
+      const dmDeliveryCheckMatch =
+        cmdText.match(/^(?:datamart|dm)\s*(?:delivery\s*check|delivery\s*audit)(?:\s+(\d+|[A-Za-z0-9_-]+))?$/i) ||
         cmdText.match(/^(?:delivery\s*check|delivery\s*audit)\s+(?:for\s+)?(?:this\s+id\s+)?(\d+|[A-Za-z0-9_-]+)$/i) ||
-        cmdText.match(/^(\d{4,})\s+(?:do\s+)?(?:delivery\s*check|check\s+delivery)(?:\s+for\s+this\s+id)?/i);
+        cmdText.match(/^(\d{4,})\s+(?:do\s+)?(?:delivery\s*check|check\s+delivery)(?:\s+for\s+this\s+id)?/i) ||
+        cmdText.match(/(?:do\s+)?delivery\s*check.+?(\d{4,})/i) ||
+        cmdText.match(/(\d{4,}).+?delivery\s*check/i);
       if (dmDeliveryCheckMatch) {
         const portalOrderId = (dmDeliveryCheckMatch[1] || "").trim();
         if (portalOrderId) {
