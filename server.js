@@ -1429,31 +1429,64 @@ async function sendWhatsApp(to, text) {
     }
 
     const isBsuid = /^[a-zA-Z]{2}\./.test(formattedTo) || /[a-zA-Z]/.test(formattedTo);
-    console.log(`📤 [sendWhatsApp] Sending to [${formattedTo}] (${isBsuid ? "BSUID" : "Phone"}): "${text.slice(0, 35).replace(/\n/g, ' ')}..."`);
+    const safeText = String(text || "").trim();
+    if (!safeText) return;
 
-    const msgPayload = {
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      type: "text",
-      text: { body: text }
-    };
-    if (isBsuid) {
-      msgPayload.recipient = formattedTo;
+    // 🛡️ WhatsApp Meta API enforces a strict 4096-character limit on text.body.
+    // If text exceeds 4000 chars, split cleanly into parts and send sequentially!
+    const MAX_CHUNK = 4000;
+    const chunks = [];
+    if (safeText.length <= MAX_CHUNK) {
+      chunks.push(safeText);
     } else {
-      msgPayload.to = formattedTo;
+      let remaining = safeText;
+      while (remaining.length > 0) {
+        if (remaining.length <= MAX_CHUNK) {
+          chunks.push(remaining);
+          break;
+        }
+        let splitIdx = remaining.lastIndexOf("\n\n", MAX_CHUNK);
+        if (splitIdx === -1 || splitIdx < 1500) {
+          splitIdx = remaining.lastIndexOf("\n", MAX_CHUNK);
+        }
+        if (splitIdx === -1 || splitIdx < 1500) {
+          splitIdx = MAX_CHUNK;
+        }
+        chunks.push(remaining.slice(0, splitIdx).trim());
+        remaining = remaining.slice(splitIdx).trim();
+      }
     }
 
-    await axios.post(
-      `https://graph.facebook.com/v20.0/${phoneId}/messages`,
-      msgPayload,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 10000
+    for (const chunk of chunks) {
+      if (!chunk) continue;
+      console.log(`📤 [sendWhatsApp] Sending to [${formattedTo}] (${isBsuid ? "BSUID" : "Phone"}): "${chunk.slice(0, 35).replace(/\n/g, ' ')}..." (${chunk.length} chars)`);
+      const msgPayload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        type: "text",
+        text: { body: chunk }
+      };
+      if (isBsuid) {
+        msgPayload.recipient = formattedTo;
+      } else {
+        msgPayload.to = formattedTo;
       }
-    );
+
+      await axios.post(
+        `https://graph.facebook.com/v20.0/${phoneId}/messages`,
+        msgPayload,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          },
+          timeout: 10000
+        }
+      );
+      if (chunks.length > 1) {
+        await new Promise(r => setTimeout(r, 600));
+      }
+    }
   } catch (e) {
     console.error(`WA ERROR sending to [${to}]:`, e.response?.data || e.message);
   }
@@ -5262,7 +5295,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
     const jobId = startRes?.data?.jobId || startRes?.jobId;
     if (!jobId) return { id: targetId, error: startRes?.message || "Failed to initiate audit" };
 
-    for (let i = 0; i < 25; i++) {
+    for (let i = 0; i < 35; i++) {
       await new Promise(r => setTimeout(r, 1000));
       const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
       if (jobRes?.data?.jobStatus === 'done' || jobRes?.data?.jobStatus === 'completed') {
@@ -5327,7 +5360,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         conclusionMsg = `💡 All ${totalItems} number(s) in this batch were successfully delivered to MTN!`;
       } else if (failed > 0) {
         carrierResult = `⚠️ PARTIAL / FAILED (${failed} Failed)`;
-        conclusionMsg = `⚠️ *Action Needed:* ${failed} number(s) failed delivery. You can copy the phone numbers above to re-dispatch or refund!`;
+        conclusionMsg = `⚠️ *Action Needed:* ${failed} number(s) failed delivery. Failed numbers are shown above for re-dispatch or refund!`;
       } else {
         carrierResult = "⏳ IN PROGRESS / PROCESSING";
         conclusionMsg = `⏳ Processing: ${sent}/${totalItems} lines sent so far (${pending} pending). Check back shortly for final delivery status.`;
@@ -5367,36 +5400,28 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         });
       }
 
+      // ONLY show failed numbers! Delivered numbers are ignored completely.
       let failedSection = "";
       if (failedItems.length > 0) {
-        failedSection = `\n❌ *FAILED / UNDELIVERED NUMBERS (${failedItems.length}):*\n` +
+        failedSection = `\n❌ *FAILED NUMBERS (${failedItems.length}):*\n` +
           failedItems.map(it => {
-            const idPart = it.dbOrderId ? ` (ID: \`${it.dbOrderId}\`)` : "";
-            const sizePart = it.dataSize ? ` [${it.dataSize}]` : "";
-            return `• \`${it.phone}\`${sizePart}${idPart} ➔ *${it.status || "Failed"}*`;
+            const sizePart = it.dataSize ? ` (${it.dataSize})` : "";
+            return `• \`${it.phone}\`${sizePart} ➔ *${it.status || "Failed"}*`;
           }).join("\n") + "\n";
-      }
-
-      let sampleLines = "";
-      if (Array.isArray(resObj.items) && resObj.items.length > 0) {
-        sampleLines = "\n📋 *Carrier Lines Audited:*\n" +
-          resObj.items.slice(0, 5).map(it => `• *${it.phone}*: ${it.status === "Sent" ? "✅ Sent" : it.status} (${it.processedDate || "Delivered"})`).join("\n") +
-          (resObj.items.length > 5 ? `\n• _...and ${resObj.items.length - 5} more lines_` : "");
       }
 
       return `🚚 *DATAMART CARRIER DELIVERY CHECK*\n\n` +
         `🆔 *Portal Order ID:* *${uniqueIds[0]}*\n` +
         `📦 *Batch Number:* #${batchNum}\n` +
-        `📊 *Carrier Result:* *${carrierResult}*\n` +
-        `• 🔢 *Total Lines in Batch:* ${totalItems}\n` +
+        `📊 *Status:* *${carrierResult}*\n` +
+        `• 🔢 *Total Lines:* ${totalItems}\n` +
         `• ✅ *Carrier Sent:* ${sent}\n` +
         (pending > 0 || isQueued ? `• ⏳ *Pending:* ${pending}\n` : "") +
         `• ❌ *Failed:* ${failed}\n` +
         (syncLine ? `${syncLine}` : "") +
-        `🕒 *Processed on Yello/Carrier:* ${dateStr}\n` +
+        `🕒 *Processed:* ${dateStr}\n` +
         `👤 *Audited By:* ${checkedBy}\n` +
-        `${failedSection}` +
-        `${sampleLines}\n\n` +
+        `${failedSection}\n` +
         `${conclusionMsg}`;
     } else {
       const errDetail = single?.error ? ` (${single.error})` : single?.timeout ? " (Carrier check timed out on DataMart)" : "";
@@ -5404,12 +5429,8 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
     }
   }
 
-  // Bulk IDs:
-  const results = [];
-  for (const id of uniqueIds) {
-    const res = await checkSingle(id);
-    results.push(res);
-  }
+  // Bulk IDs: Poll concurrently in parallel
+  const results = await Promise.all(uniqueIds.map(id => checkSingle(id)));
 
   let totalNumbers = 0;
   let totalSent = 0;
@@ -5437,7 +5458,6 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       totalNumbers += bTotal;
       totalSent += bSent;
       totalFailed += bFailed;
-      const timeStr = b.items?.[0]?.processedDate || "Recent";
 
       const failedInBatch = (b.items || []).filter(it => {
         const s = String(it.status || "").toLowerCase();
@@ -5454,6 +5474,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         });
       }
 
+      // ONLY show failed numbers! Delivered numbers are ignored completely.
       let failedListForBatch = "";
       if (failedInBatch.length > 0) {
         failedInBatch.forEach(it => {
@@ -5466,17 +5487,16 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
             status: it.status || "Failed"
           });
         });
-        failedListForBatch = `  ❌ *Failed Numbers in Batch (${failedInBatch.length}):*\n` +
+        failedListForBatch = `  ❌ *Failed Numbers (${failedInBatch.length}):*\n` +
           failedInBatch.map(it => {
-            const idPart = it.dbOrderId ? ` [ID: \`${it.dbOrderId}\`]` : "";
             const sizePart = it.dataSize ? ` (${it.dataSize})` : "";
-            return `  • \`${it.phone}\`${sizePart}${idPart} (${it.status || "Failed"})`;
+            return `  • \`${it.phone}\`${sizePart} ➔ *${it.status || "Failed"}*`;
           }).join("\n") + "\n";
       }
 
       let batchStatusLine = "";
       if (isQueued) {
-        batchStatusLine = `⏳ *QUEUED AT VENDOR* (In Queue - Check back shortly)`;
+        batchStatusLine = `⏳ *QUEUED AT VENDOR*`;
       } else if (b.allDelivered && bTotal > 0) {
         batchStatusLine = `✅ *ALL ${bSent}/${bTotal} DELIVERED*` + (autoCount > 0 ? ` (Auto-Completed ${autoCount})` : "");
       } else if (bFailed > 0) {
@@ -5487,10 +5507,9 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
 
       batchSummaries += `${numEmoji} *ID: ${r.id}* (Batch #${b.batchNumber || "N/A"})\n` +
         `• Status: ${batchStatusLine}\n` +
-        (failedListForBatch ? `${failedListForBatch}` : "") +
-        `• Processed: ${timeStr}\n\n`;
+        (failedListForBatch ? `${failedListForBatch}` : "");
     } else {
-      batchSummaries += `${numEmoji} *ID: ${r.id}* ➔ ⚠️ Audit timed out or invalid ID.\n\n`;
+      batchSummaries += `${numEmoji} *ID: ${r.id}* ➔ ⚠️ Audit timed out or invalid ID.\n`;
     }
   });
 
@@ -5511,18 +5530,16 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
   if (failedPortalSummaries.length > 0) {
     const copyablePortalList = failedPortalSummaries.map(p => p.portalId).join("\n");
     globalFailedSummary = `🚨 *FAILED PORTAL ORDER IDs (${failedPortalSummaries.length}):*\n` +
-      `\`\`\`\n` +
-      `${copyablePortalList}\n` +
-      `\`\`\`\n\n`;
+      `${copyablePortalList}\n\n`;
   }
 
   let finalActionMessage = "";
   if (totalFailed > 0) {
-    finalActionMessage = `⚠️ *Action Required:* ${totalFailed} number(s) failed or were partially delivered across the batches. The failed phone numbers and DataMart Order IDs are clearly listed above so you can easily copy and re-process or refund them!`;
+    finalActionMessage = `⚠️ *Action Required:* ${totalFailed} failed number(s) detected. The failed phone numbers are listed above for easy copy/retry!`;
   } else if (totalQueued > 0 && totalNumbers === 0) {
-    finalActionMessage = `⏳ *Notice:* The audited batch(es) are currently queued at the vendor and have not finished processing on the carrier network yet. Please re-run check shortly!`;
+    finalActionMessage = `⏳ *Notice:* Batch(es) are queued at vendor. Please re-run check shortly!`;
   } else {
-    finalActionMessage = `💡 All ${totalNumbers} numbers across all batches were 100% delivered to MTN!`;
+    finalActionMessage = `💡 All ${totalNumbers} lines were 100% delivered to MTN!`;
   }
 
   return `🚚 *DATAMART BULK DELIVERY CHECK AUDIT*\n\n` +
@@ -5534,7 +5551,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
     `❌ *Carrier Failed / Discrepancies:* ${totalFailed}\n\n` +
     `${globalFailedSummary}` +
     `📋 *Batch Breakdown:*\n` +
-    `${batchSummaries}` +
+    `${batchSummaries}\n` +
     finalActionMessage;
 }
 
