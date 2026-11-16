@@ -4449,31 +4449,7 @@ async function executeOwnerDirectAction(type, payload = {}) {
     if (cleanType === "datamart_search_customer" || cleanType === "datamart_search" || cleanType === "datamart_investigate") {
       const q = payload.query || payload.phone || payload.email || payload.name;
       if (!q) return "⚠️ Missing search query.";
-      const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(q)}`);
-      const d = resp?.data;
-      const users = d?.results?.users || [];
-      const orders = d?.results?.orders || [];
-      if (users.length === 0 && orders.length === 0) {
-        return `🔍 No DataMart customer, agent, or order found matching "${q}".`;
-      }
-      let out = `🔍 *DATAMART LOOKUP RESULTS FOR "${q}":*\n`;
-      if (users.length > 0) {
-        const u = users[0];
-        out += `• 👤 *Customer/Agent:* ${u.name} (${u.email || "N/A"})\n` +
-          `• 📱 *Phone:* ${u.phoneNumber}\n` +
-          `• 🏷️ *Role:* ${(u.role || "user").toUpperCase()}\n` +
-          `• 💰 *Wallet Balance:* GH₵ ${Number(u.walletBalance || 0).toFixed(2)}\n` +
-          `• 📊 *Status:* ${u.isDisabled ? "Disabled" : "Active"}\n`;
-      }
-      if (orders.length > 0) {
-        out += `• 📦 *Recent Orders:* ${orders.length} found.\n`;
-        orders.slice(0, 3).forEach(o => {
-          const pid = o.apiOrderId || o.exportTracking?.portalId || "N/A";
-          const batchNo = o.exportTracking?.batchNumber ? ` (Batch #${o.exportTracking.batchNumber})` : "";
-          out += `  - 🆔 *Portal ID:* *${pid}*${batchNo} | ${o.network} ${o.capacity}GB to ${o.phoneNumber} (${(o.status || "N/A").toUpperCase()})\n`;
-        });
-      }
-      return out;
+      return await executeDatamartSearch(q);
     }
 
     // 30. DataMart Retry Order
@@ -5553,6 +5529,70 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
     `📋 *Batch Breakdown:*\n` +
     `${batchSummaries}\n` +
     finalActionMessage;
+}
+
+async function executeDatamartSearch(rawQuery, callerPhone = null) {
+  let q = String(rawQuery || "").trim();
+  // Strip command prefixes
+  q = q.replace(/^(?:datamart|dm)\s+/i, "");
+  q = q.replace(/^(?:search|lookup|find|investigate|check(?:\s*out)?)\s+/i, "");
+  q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number)\s+/i, "");
+  q = q.replace(/^(?:is\s+|about\s+|info\s+on\s+)/i, "");
+  q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number)\s+/i, "");
+  q = q.replace(/^(?:customer|user|agent|order)\s+/i, "").trim();
+
+  if (!q) return "🔍 Please provide a customer name, phone number, email, or order reference to search.";
+
+  const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(q)}`, {}, callerPhone);
+  const d = resp?.data;
+  const users = d?.results?.users || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "customer" || x.email) : []);
+  const orders = d?.results?.orders || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "order" || x.network) : []);
+
+  if (users.length === 0 && orders.length === 0) {
+    return `🔍 No DataMart customer, agent, or order found matching "*${q}*".`;
+  }
+
+  let out = `🔍 *DATAMART LOOKUP RESULTS FOR "${q}":*\n\n`;
+
+  if (users.length > 0) {
+    users.slice(0, 3).forEach((u, i) => {
+      const num = ["1️⃣", "2️⃣", "3️⃣"][i] || "•";
+      out += `${num} 👤 *USER / AGENT PROFILE:*\n` +
+        `• *Name:* *${u.name || "N/A"}*\n` +
+        `• *Email:* ${u.email || "N/A"}\n` +
+        `• *Phone:* *${u.phoneNumber || "N/A"}*\n` +
+        `• *Role:* *${(u.role || "user").toUpperCase()}*\n` +
+        `• *Wallet Balance:* *GH₵ ${Number(u.walletBalance || 0).toFixed(2)}*\n` +
+        `• *Status:* ${u.isDisabled ? "🚫 Disabled" : "✅ Active"}\n` +
+        `• *Joined:* ${u.createdAt ? new Date(u.createdAt).toLocaleDateString("en-GB") : "N/A"}\n\n`;
+    });
+  } else if (orders.length > 0) {
+    // When searching by recipient phone, results.users is empty on DataMart, but customer details are in the order!
+    const ord0 = orders[0];
+    const custName = ord0.agentStoreDetails?.customerDetails?.name || ord0.purchaserInfo?.name || ord0.userId?.name || "Customer";
+    const custPhone = ord0.phoneNumber || ord0.recipientPhone || ord0.agentStoreDetails?.customerDetails?.phone || "N/A";
+    const agentStore = ord0.agentStoreDetails?.storeName || ord0.purchaserInfo?.name || ord0.userId?.name || "N/A";
+    out += `👤 *CUSTOMER / RECIPIENT INFO:*\n` +
+      `• *Name:* *${custName}*\n` +
+      `• *Phone:* *${custPhone}*\n` +
+      `• *Agent Store:* ${agentStore}\n\n`;
+  }
+
+  if (orders.length > 0) {
+    out += `📦 *Recent Orders (${orders.length} found):*\n`;
+    orders.slice(0, 5).forEach((ord) => {
+      const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+      const portalId = ord.apiOrderId || ord.exportTracking?.portalId || ord.geonetReference || ord._id;
+      const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
+      out += `• *${ord.network} ${cap}* to *${ord.phoneNumber}* (${(ord.status || "N/A").toUpperCase()})\n` +
+        `  🆔 *Portal ID:* *${portalId}*${batchNo}\n` +
+        `  Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
+    });
+    out += "\n";
+  }
+
+  out += `💡 Reply: *[Portal ID]* to run delivery check, or *exit* to leave DataMart Mode.`;
+  return out;
 }
 
 function getTimeAgoGhana(dateStr) {
@@ -6840,49 +6880,12 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   // 2. Email or Phone or Customer Search
   const emailMatch = cleanInput.match(/[\w.-]+@[\w.-]+\.\w+/);
   const phoneMatch = cleanInput.match(/\b(0[2357]\d{8}|\+?233[2357]\d{8})\b/);
-  const isSearchIntent = /\b(?:search|lookup|find|customer|agent|check)\b/i.test(cleanInput);
-  if (emailMatch || phoneMatch || isSearchIntent) {
-    const query = emailMatch ? emailMatch[0] : (phoneMatch ? phoneMatch[0] : cleanInput.replace(/^(?:search|lookup|find|customer|agent|check(?:\s*out)?)\s+/i, "").trim());
-    if (query) {
-      const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(query)}`, {}, from);
-      const d = resp?.data;
-      const users = d?.results?.users || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "customer" || x.email) : []);
-      const orders = d?.results?.orders || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "order" || x.network) : []);
+  const isSearchIntent = /\b(?:search|lookup|find|customer|agent|check|who|investigate)\b/i.test(cleanInput);
+  const isNameOrWord = /^[a-zA-Z\s]{3,35}$/.test(cleanInput) && !/^(?:exit|tickets?|urgent|pending|withdrawals?|deposits?|claims?|recovery|stats|my\s*datamart)$/i.test(cleanInput);
 
-      if (users.length === 0 && orders.length === 0) {
-        return sendWhatsApp(from, `🔍 *[DATAMART MODE]* No customer, agent, or order found matching "*${query}*".`);
-      }
-
-      let out = `🔍 *[DATAMART MODE] LOOKUP RESULTS FOR "${query}":*\n\n`;
-      if (users.length > 0) {
-        users.slice(0, 3).forEach((u, i) => {
-          const num = ["1️⃣", "2️⃣", "3️⃣"][i] || "•";
-          out += `${num} 👤 *USER / AGENT PROFILE:*\n` +
-            `• *Name:* *${u.name || "N/A"}*\n` +
-            `• *Email:* ${u.email || "N/A"}\n` +
-            `• *Phone:* *${u.phoneNumber || "N/A"}*\n` +
-            `• *Role:* *${(u.role || "user").toUpperCase()}*\n` +
-            `• *Wallet Balance:* *GH₵ ${Number(u.walletBalance || 0).toFixed(2)}*\n` +
-            `• *Status:* ${u.isDisabled ? "🚫 Disabled" : "✅ Active"}\n` +
-            `• *Joined:* ${u.createdAt ? new Date(u.createdAt).toLocaleDateString("en-GB") : "N/A"}\n\n`;
-        });
-      }
-
-      if (orders.length > 0) {
-        out += `📦 *Recent Orders (${orders.length} found):*\n`;
-        orders.slice(0, 5).forEach((ord) => {
-          const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
-          const portalId = ord.apiOrderId || ord.exportTracking?.portalId || ord.geonetReference || ord._id;
-          const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
-          out += `• *${ord.network} ${cap}* to *${ord.phoneNumber}* (${(ord.status || "N/A").toUpperCase()})\n` +
-            `  🆔 *Portal ID:* *${portalId}*${batchNo}\n` +
-            `  Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
-        });
-        out += "\n";
-      }
-      out += `💡 Reply: *[Portal ID]* to run delivery check, or *exit* to leave DataMart Mode.`;
-      return sendWhatsApp(from, out);
-    }
+  if (emailMatch || phoneMatch || isSearchIntent || isNameOrWord) {
+    const report = await executeDatamartSearch(cleanInput, from);
+    if (report) return sendWhatsApp(from, report);
   }
 
   // 3. Tickets
@@ -7332,6 +7335,17 @@ app.post("/webhook", async (req, res) => {
         const idMatches = cleanCmd.match(/\b\d{4,9}[a-zA-Z]?\b/g);
         if (idMatches && idMatches.length > 0) {
           const report = await executeDatamartDeliveryCheck(idMatches, from);
+          if (report) return sendWhatsApp(from, report);
+        }
+      }
+
+      // Direct DataMart customer / agent search even outside console mode
+      const isSearchIntent = /\b(?:search|lookup|find|investigate|check|customer|agent)\b/i.test(cleanCmd);
+      const isPhoneOrEmail = /[\w.-]+@[\w.-]+\.\w+/.test(cleanCmd) || /\b(0[2357]\d{8}|\+?233[2357]\d{8})\b/.test(cleanCmd);
+      const isDmPrefixed = /^(?:datamart|dm)\s+/i.test(cleanCmd);
+      if ((isSearchIntent && (isPhoneOrEmail || cleanCmd.split(/\s+/).length >= 2)) || isDmPrefixed) {
+        if (!hasDeliveryCheckWord && !isRawPortalIds && !/\b(?:tickets?|withdrawals?|deposits?|claims?)\b/i.test(cleanCmd)) {
+          const report = await executeDatamartSearch(cleanCmd, from);
           if (report) return sendWhatsApp(from, report);
         }
       }
@@ -9613,45 +9627,8 @@ app.post("/webhook", async (req, res) => {
         cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:on\s+datamart\s+)?([^\s]+@[^\s]+)/i);
       if (dmInvestigateMatch) {
         const query = dmInvestigateMatch[1].trim();
-        const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(query)}`);
-        const d = resp?.data;
-        const users = d?.results?.users || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "customer" || x.email) : []);
-        const orders = d?.results?.orders || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "order" || x.network) : []);
-
-        if (users.length === 0 && orders.length === 0) {
-          return sendWhatsApp(from, `🔍 No DataMart customer, agent, or order found matching "*${query}*".`);
-        }
-
-        let out = `🔍 *DATAMART LOOKUP RESULTS FOR "${query}":*\n\n`;
-        if (users.length > 0) {
-          users.slice(0, 3).forEach((u, i) => {
-            const num = ["1️⃣", "2️⃣", "3️⃣"][i] || "•";
-            out += `${num} 👤 *USER / AGENT PROFILE:*\n` +
-              `• *Name:* *${u.name || "N/A"}*\n` +
-              `• *Email:* ${u.email || "N/A"}\n` +
-              `• *Phone:* *${u.phoneNumber || "N/A"}*\n` +
-              `• *Role:* *${(u.role || "user").toUpperCase()}*\n` +
-              `• *Wallet Balance:* *GH₵ ${Number(u.walletBalance || 0).toFixed(2)}*\n` +
-              `• *Status:* ${u.isDisabled ? "🚫 Disabled" : "✅ Active"}\n` +
-              `• *Joined:* ${u.createdAt ? new Date(u.createdAt).toLocaleDateString("en-GB") : "N/A"}\n\n`;
-          });
-        }
-
-        if (orders.length > 0) {
-          out += `📦 *Recent Orders (${orders.length} found):*\n`;
-          orders.slice(0, 5).forEach((ord) => {
-            const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
-            const portalId = ord.apiOrderId || ord.exportTracking?.portalId || ord.geonetReference || ord._id;
-            const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
-            out += `• *${ord.network} ${cap}* to *${ord.phoneNumber}* (${(ord.status || "N/A").toUpperCase()})\n` +
-              `  🆔 *Portal ID:* *${portalId}*${batchNo}\n` +
-              `  Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
-          });
-          out += "\n";
-        }
-
-        out += `💡 *Actions:* Reply *dm delivery check [Portal ID]* or *dm tickets*`;
-        return sendWhatsApp(from, out);
+        const report = await executeDatamartSearch(query, from);
+        if (report) return sendWhatsApp(from, report);
       }
 
       // Direct Action Command: Query Failed Orders from Last Delivery Check
