@@ -3082,12 +3082,13 @@ USER MODE STATE (BOT MODE vs STONY AI MODE)
 - 'bot': Displays MENU, follows step-by-step numbers 1-8
 - 'ai':  Chat with Stony AI (Gemini / OpenAI / Site Knowledge)
 ========================================================= */
-const userModes = new Map(); // normPhone -> 'bot' | 'ai'
+const userModes = new Map(); // normPhone -> 'bot' | 'ai' | 'datamart'
 
 function getUserMode(phone, session) {
   const norm = String(phone || "").replace(/\D/g, "");
   if (userModes.has(norm)) return userModes.get(norm);
   if (userModes.has(String(phone))) return userModes.get(String(phone));
+  if (session?.step === 98) return "datamart";
   if (session?.step === 99) return "ai";
   return "bot";
 }
@@ -4341,6 +4342,91 @@ async function executeOwnerDirectAction(type, payload = {}) {
     if (cleanType === "query_boost_orders" || cleanType === "list_boost_orders") {
       const limit = Math.min(30, Math.max(1, parseInt(payload.limit || "8", 10)));
       return await queryBoostOrdersSummary(limit);
+    }
+
+    // 28. DataMart Delivery Check
+    if (cleanType === "datamart_delivery_check" || cleanType === "delivery_check") {
+      const targetId = payload.portalOrderId || payload.id || payload.orderId || payload.batchId || payload.reference;
+      if (!targetId) return "⚠️ Missing portalOrderId for delivery check.";
+      const startRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/start', {
+        method: 'POST',
+        body: { portalOrderId: isNaN(Number(targetId)) ? targetId : Number(targetId) }
+      });
+      const jobId = startRes?.data?.jobId || startRes?.jobId;
+      if (jobId) {
+        let finalJob = null;
+        for (let i = 0; i < 4; i++) {
+          await new Promise(r => setTimeout(r, 1500));
+          const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`);
+          if (jobRes?.data?.jobStatus === 'done' || jobRes?.data?.jobStatus === 'completed') {
+            finalJob = jobRes.data;
+            break;
+          }
+        }
+        const resObj = finalJob?.result;
+        if (resObj) {
+          const batchNum = resObj.batchNumber || "N/A";
+          const totalItems = resObj.totalItems || 0;
+          const sent = resObj.sent || 0;
+          const failed = resObj.failed || 0;
+          const allDelivered = resObj.allDelivered ? "✅ ALL 100% DELIVERED" : "⚠️ PARTIAL";
+          return `🚚 *DATAMART CARRIER DELIVERY AUDIT:*\n` +
+            `• ID: *${targetId}* (Batch #${batchNum})\n` +
+            `• Carrier Result: *${allDelivered}*\n` +
+            `• Lines Audited: ${totalItems} (Sent: ${sent}, Failed: ${failed})\n` +
+            `• Carrier Processed Time: ${resObj.items?.[0]?.processedDate || "Recent"}\n` +
+            `All ${totalItems} numbers in this batch were successfully delivered to MTN!`;
+        }
+      }
+      return `Delivery check triggered for ID ${targetId}.`;
+    }
+
+    // 29. DataMart Customer / Agent Search
+    if (cleanType === "datamart_search_customer" || cleanType === "datamart_search" || cleanType === "datamart_investigate") {
+      const q = payload.query || payload.phone || payload.email || payload.name;
+      if (!q) return "⚠️ Missing search query.";
+      const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(q)}`);
+      const d = resp?.data;
+      const users = d?.results?.users || [];
+      const orders = d?.results?.orders || [];
+      if (users.length === 0 && orders.length === 0) {
+        return `🔍 No DataMart customer, agent, or order found matching "${q}".`;
+      }
+      let out = `🔍 *DATAMART LOOKUP RESULTS FOR "${q}":*\n`;
+      if (users.length > 0) {
+        const u = users[0];
+        out += `• 👤 *Customer/Agent:* ${u.name} (${u.email || "N/A"})\n` +
+          `• 📱 *Phone:* ${u.phoneNumber}\n` +
+          `• 🏷️ *Role:* ${(u.role || "user").toUpperCase()}\n` +
+          `• 💰 *Wallet Balance:* GH₵ ${Number(u.walletBalance || 0).toFixed(2)}\n` +
+          `• 📊 *Status:* ${u.isDisabled ? "Disabled" : "Active"}\n`;
+      }
+      if (orders.length > 0) {
+        out += `• 📦 *Recent Orders:* ${orders.length} found. Latest: ${orders[0].network} ${orders[0].capacity}GB to ${orders[0].phoneNumber} (${orders[0].status})\n`;
+      }
+      return out;
+    }
+
+    // 30. DataMart Retry Order
+    if (cleanType === "datamart_retry_order") {
+      const orderId = payload.orderId || payload.id;
+      if (!orderId) return "⚠️ Missing orderId to retry.";
+      const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/retry`, {
+        method: "POST",
+        body: { reason: payload.reason || "Support retry via WhatsApp" }
+      });
+      return resp?.status === "success" || resp?.success ? `✅ Order ${orderId} has been re-queued for dispatch!` : `⚠️ Retry failed: ${resp?.message || "Unknown error"}`;
+    }
+
+    // 31. DataMart Refund Order
+    if (cleanType === "datamart_refund_order") {
+      const orderId = payload.orderId || payload.id;
+      if (!orderId) return "⚠️ Missing orderId to refund.";
+      const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/refund`, {
+        method: "POST",
+        body: { reason: payload.reason || "Support refund via WhatsApp", notifyCustomer: true }
+      });
+      return resp?.status === "success" || resp?.success ? `💸 Order ${orderId} has been refunded to agent wallet!` : `⚠️ Refund failed: ${resp?.message || "Unknown error"}`;
     }
   } catch (e) {
     console.warn("executeOwnerDirectAction error:", e.message);
@@ -6670,6 +6756,7 @@ app.post("/webhook", async (req, res) => {
       // ── SWITCH TO DATAMART AGENT SUPPORT MODE ──
       if (/^(?:datamart\s*mode|dm\s*mode|agent\s*support\s*mode|switch\s*to\s*datamart|datamart)$/i.test(cleanInput)) {
         setUserMode(from, "datamart");
+        await saveCustomerSession(from, { step: 98 });
         await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "datamart" }, { onConflict: "key" });
         return sendWhatsApp(from,
           `🏢 *SWITCHED TO DATAMART AGENT SUPPORT MODE!* 🚀\n\n` +
@@ -6692,6 +6779,7 @@ app.post("/webhook", async (req, res) => {
       if (getUserMode(from) === "datamart") {
         if (/^(?:exit|normal\s*mode|stony|stony\s*mode|back|quit|menu|main|stop)$/i.test(cleanInput)) {
           setUserMode(from, "ai");
+          await saveCustomerSession(from, { step: 99 });
           await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "ai" }, { onConflict: "key" });
           return sendWhatsApp(from, `👑 Switched back to *Stony Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
         }
@@ -7996,7 +8084,11 @@ app.post("/webhook", async (req, res) => {
         "      - Query recent Social Media Boost orders: {\"type\": \"query_boost_orders\", \"limit\": 8}\n" +
         "      - Two-Tier Rule: Reseller profit margin must ALWAYS be >= provider wholesale markup (M_agent >= M_admin).\n" +
         "  20. DataMart Agent Support & Ticket Operations: Direct live access to DataMart Agent Support queue ('dm tickets', 'view ticket [ReportID]', 'dm search [query]'). You have 100% visibility into agent escalations, complaints, and worker tickets.\n" +
-        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\", ...}] at the end of your reply.\n" +
+        "      - When the owner asks to do a delivery check for any batch or order on DataMart (e.g. 'Do delivery check for 2313443' or 'check batch 2313443'), output [EXECUTE_ACTION: {\"type\": \"datamart_delivery_check\", \"portalOrderId\": \"2313443\"}].\n" +
+        "      - When the owner asks to look up a customer on DataMart (e.g. 'check out this customer on DataMart nyakponoah11@gmail.com'), output [EXECUTE_ACTION: {\"type\": \"datamart_search_customer\", \"query\": \"nyakponoah11@gmail.com\"}].\n" +
+        "      - When the owner asks to retry a failed DataMart order, output [EXECUTE_ACTION: {\"type\": \"datamart_retry_order\", \"orderId\": \"...\"}].\n" +
+        "      - When the owner asks to refund a DataMart order, output [EXECUTE_ACTION: {\"type\": \"datamart_refund_order\", \"orderId\": \"...\"}].\n" +
+        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\"|\"datamart_delivery_check\"|\"datamart_search_customer\"|\"datamart_retry_order\"|\"datamart_refund_order\", ...}] at the end of your reply.\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
         "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
