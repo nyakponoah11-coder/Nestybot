@@ -4883,6 +4883,97 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
 }
 
 /* =========================================================
+DATAMART AGENT SUPPORT HELPER & QUEUE ENGINE
+========================================================= */
+
+let cachedDatamartWorkerToken = null;
+
+async function getDatamartAuthToken() {
+  if (cachedDatamartWorkerToken) return cachedDatamartWorkerToken;
+  try {
+    const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
+      "datamart_auth_token", "datamart_login_email", "datamart_login_password"
+    ]);
+    const sMap = {};
+    (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+    let token = sMap["datamart_auth_token"] || process.env.DATAMART_AUTH_TOKEN;
+    const email = sMap["datamart_login_email"] || "nyakponoah11@gmail.com";
+    const pass = sMap["datamart_login_password"] || "Stillmoving11";
+
+    if (!token && email && pass) {
+      const res = await fetch("https://api.datamartgh.shop/api/v1/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password: pass })
+      });
+      const data = await res.json();
+      if (data?.token) {
+        token = data.token;
+        await supabase.from("settings").upsert({ key: "datamart_auth_token", value: token }, { onConflict: "key" });
+      }
+    }
+    cachedDatamartWorkerToken = token;
+    return token;
+  } catch (err) {
+    console.warn("getDatamartAuthToken error:", err.message);
+    return null;
+  }
+}
+
+async function fetchDatamartSupportTickets(params = {}) {
+  let token = await getDatamartAuthToken();
+  if (!token) return null;
+  const q = new URLSearchParams(params).toString();
+  try {
+    let res = await fetch(`https://api.datamartgh.shop/api/support/tickets?${q}`, {
+      headers: { "Authorization": `Bearer ${token}` }
+    });
+    if (res.status === 401) {
+      cachedDatamartWorkerToken = null;
+      const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
+        "datamart_login_email", "datamart_login_password"
+      ]);
+      const sMap = {};
+      (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+      const email = sMap["datamart_login_email"] || "nyakponoah11@gmail.com";
+      const pass = sMap["datamart_login_password"] || "Stillmoving11";
+      const lRes = await fetch("https://api.datamartgh.shop/api/v1/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password: pass })
+      });
+      const lData = await lRes.json();
+      if (lData?.token) {
+        token = lData.token;
+        cachedDatamartWorkerToken = token;
+        await supabase.from("settings").upsert({ key: "datamart_auth_token", value: token }, { onConflict: "key" });
+        res = await fetch(`https://api.datamartgh.shop/api/support/tickets?${q}`, {
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+      }
+    }
+    const data = await res.json();
+    return data?.data || null;
+  } catch (err) {
+    console.warn("fetchDatamartSupportTickets error:", err.message);
+    return null;
+  }
+}
+
+function getTimeAgoGhana(dateStr) {
+  if (!dateStr) return "recently";
+  const diff = Date.now() - new Date(dateStr).getTime();
+  if (isNaN(diff)) return "recently";
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+/* =========================================================
 SEND ADMIN SMS (ARKESEL)
 ========================================================= */
 
@@ -7582,6 +7673,21 @@ app.post("/webhook", async (req, res) => {
         boostLiveContext = `- Social Media Boost Services (BoostUpGH SMM): Wholesale Markup from Provider: +${admInc}% | Universal Reseller Margin: +${agInc}% (Rule: Reseller margin >= Provider markup)\n`;
       } catch (_) {}
 
+      let dmSupportLiveContext = "";
+      try {
+        const dmSup = await fetchDatamartSupportTickets({ status: "pending", limit: 3 });
+        if (dmSup && dmSup.tickets) {
+          const bdMap = {};
+          (dmSup.statusBreakdown || []).forEach(b => { bdMap[b._id] = b.count; });
+          const pendingCount = bdMap["pending"] ?? 0;
+          const reviewCount = bdMap["under_review"] ?? 0;
+          const investCount = bdMap["investigating"] ?? 0;
+          const topIssues = dmSup.tickets.map(t => `[${t.reportId || "ID"}] ${t.userId?.name || "Customer"} (${t.priority || "normal"}): "${(t.description || "").slice(0, 75)}..."`).join(" | ");
+          dmSupportLiveContext = `- DataMart Agent Support Queue: ${pendingCount.toLocaleString()} pending tickets (${reviewCount} under review, ${investCount} investigating). Latest: ${topIssues}\n` +
+            `  (Commands: 'dm tickets' to view queue, 'view ticket [ID]' for full details, 'dm search [query]')\n`;
+        }
+      } catch (_) {}
+
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
       let ownerSystemPrompt =
         "You are Stony, the owner's personal AI Senior Full-Stack Engineer, System Architect, and Commercial Co-Pilot at DATA 1 GH.\n" +
@@ -7648,6 +7754,7 @@ app.post("/webhook", async (req, res) => {
         "      - Set universal reseller boost profit margin % for all agents: {\"type\": \"set_all_agents_boost_markup\", \"percent\": 20}\n" +
         "      - Query recent Social Media Boost orders: {\"type\": \"query_boost_orders\", \"limit\": 8}\n" +
         "      - Two-Tier Rule: Reseller profit margin must ALWAYS be >= provider wholesale markup (M_agent >= M_admin).\n" +
+        "  20. DataMart Agent Support & Ticket Operations: Direct live access to DataMart Agent Support queue ('dm tickets', 'view ticket [ReportID]', 'dm search [query]'). You have 100% visibility into agent escalations, complaints, and worker tickets.\n" +
         "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\", ...}] at the end of your reply.\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
@@ -7674,6 +7781,7 @@ app.post("/webhook", async (req, res) => {
         (systemData ? `\n${systemData}\n` : "") +
         (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
         (specificOrderCtx ? `\n${specificOrderCtx}` : "") +
+        (dmSupportLiveContext ? `\n${dmSupportLiveContext}` : "") +
         (recentRuntimeLogSummary ? `\n${recentRuntimeLogSummary}\n` : "") +
         (boostLiveContext ? `\n${boostLiveContext}` : "") +
         (liveCornerDiagnosticsCtx ? `\n${liveCornerDiagnosticsCtx}\n` : "");
@@ -8055,6 +8163,160 @@ app.post("/webhook", async (req, res) => {
             return sendWhatsApp(from, `⚠️ Could not claim deposit: ${err?.response?.data?.message || err?.message}`);
           }
         }
+      }
+
+      // Direct Action Command: DataMart Support Queue & Tickets
+      const dmTicketsMatch = cmdText.match(/^(?:datamart|dm|agent)\s*(?:support\s*)?tickets?(?:\s+(pending|urgent|under[_\s-]?review|investigating|resolved|rejected|all))?$/i) ||
+        cmdText.match(/^(?:show|get|view|list|check)\s+(?:datamart|dm|agent\s+)?(?:support\s*)?tickets?(?:\s+(pending|urgent|under[_\s-]?review|investigating|resolved|rejected|all))?$/i) ||
+        cmdText.match(/^(?:agent\s+support|datamart\s+support|dm\s+support)$/i);
+      if (dmTicketsMatch) {
+        let filterStatus = (dmTicketsMatch[1] || "").toLowerCase().trim().replace(/[\s-]/g, "_");
+        let queryParams = { limit: 5 };
+        let filterLabel = "Pending & Urgent";
+        
+        if (filterStatus === "urgent") {
+          queryParams.status = "pending";
+          queryParams.priority = "urgent";
+          filterLabel = "Urgent";
+        } else if (filterStatus && filterStatus !== "all") {
+          queryParams.status = filterStatus;
+          filterLabel = filterStatus.replace("_", " ").toUpperCase();
+        } else {
+          queryParams.status = "pending";
+        }
+
+        const data = await fetchDatamartSupportTickets(queryParams);
+        if (!data || !data.tickets) {
+          return sendWhatsApp(from, `⚠️ Could not reach DataMart Agent Support API. Please verify worker login or try again in a moment.`);
+        }
+
+        const bdMap = {};
+        (data.statusBreakdown || []).forEach(b => { bdMap[b._id] = b.count; });
+        const pendingCount = bdMap["pending"] ?? 0;
+        const reviewCount = bdMap["under_review"] ?? 0;
+        const investCount = bdMap["investigating"] ?? 0;
+        const resolvedCount = bdMap["resolved"] ?? 0;
+        const totalMatches = data.pagination?.total ?? data.tickets.length;
+
+        let ticketListText = "";
+        if (data.tickets.length === 0) {
+          ticketListText = `_No tickets currently found in this queue!_ 🎉\n\n`;
+        } else {
+          data.tickets.forEach((tk, idx) => {
+            const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+            const prio = (tk.priority || "normal").toUpperCase();
+            const prioEmoji = prio === "URGENT" ? "🚨" : prio === "HIGH" ? "⚠️" : "📌";
+            const custName = tk.userId?.name || "Customer";
+            const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
+            const reason = tk.reportReason || "Support Issue";
+            const desc = (tk.description || "").replace(/\s+/g, " ").trim().slice(0, 110);
+            const timeAgo = getTimeAgoGhana(tk.createdAt);
+
+            ticketListText += `${numEmoji} *[${tk.reportId || "ID"}]* ${prioEmoji} *${reason}* (*${prio}*)\n` +
+              `• 👤 *Customer:* ${custName} (${custPhone})\n` +
+              `• 📝 *Issue:* ${desc}${desc.length >= 110 ? "..." : ""}\n` +
+              `• 🕒 *Time:* ${timeAgo}\n\n`;
+          });
+        }
+
+        return sendWhatsApp(from,
+          `🎫 *DATAMART AGENT SUPPORT QUEUE*\n\n` +
+          `📊 *Live Ticket Breakdown:*\n` +
+          `• ⏳ *Pending:* ${pendingCount.toLocaleString()}\n` +
+          `• 🔍 *Under Review:* ${reviewCount}\n` +
+          `• 🛠️ *Investigating:* ${investCount}\n` +
+          `• ✅ *Resolved:* ${resolvedCount.toLocaleString()}\n\n` +
+          `📋 *${filterLabel} Tickets (${totalMatches} total):*\n\n` +
+          `${ticketListText}` +
+          `💡 *Quick Actions:*\n` +
+          `• Reply: *view ticket [ReportID]* for full details & customer link\n` +
+          `• Reply: *search ticket [phone or ref]*\n` +
+          `• Reply: *dm tickets urgent* or *dm tickets under review*`
+        );
+      }
+
+      // Direct Action Command: View Specific DataMart Ticket
+      const viewDmTicketMatch = cmdText.match(/^(?:view\s+ticket|dm\s+ticket|ticket|check\s+ticket)\s+(RPT\d+|[a-f0-9]{24})/i);
+      if (viewDmTicketMatch) {
+        const queryId = viewDmTicketMatch[1].trim();
+        const data = await fetchDatamartSupportTickets({ search: queryId, limit: 1 });
+        const tk = data?.tickets?.[0];
+        if (!tk) {
+          return sendWhatsApp(from, `⚠️ Could not find DataMart ticket *${queryId}*. Please verify the ID.`);
+        }
+
+        const prio = (tk.priority || "normal").toUpperCase();
+        const prioEmoji = prio === "URGENT" ? "🚨" : prio === "HIGH" ? "⚠️" : "📌";
+        const custName = tk.userId?.name || "Customer";
+        const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
+        const custEmail = tk.userId?.email || "N/A";
+        const reason = tk.reportReason || "General Support";
+        const status = (tk.status || "pending").toUpperCase();
+        const dateStr = tk.createdAt ? new Date(tk.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "N/A";
+
+        let notesText = "";
+        if (Array.isArray(tk.adminNotes) && tk.adminNotes.length > 0) {
+          notesText = `\n📋 *Admin / AI Notes:*\n` + tk.adminNotes.map(n => `• ${n.note || n}`).join("\n");
+        }
+
+        let cleanPhone = custPhone.replace(/\D/g, "");
+        if (cleanPhone.startsWith("0")) cleanPhone = cleanPhone.slice(1);
+        const waLink = cleanPhone ? `https://wa.me/233${cleanPhone}` : "N/A";
+
+        const orderRefMatch = (tk.description || "").match(/(?:AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|[0-9]{10,})/i);
+        let orderRefHelp = "";
+        if (orderRefMatch) {
+          orderRefHelp = `\n\n🔍 *Detected Order Ref:* *${orderRefMatch[0]}*\n` +
+            `• Check live status: *track ${orderRefMatch[0]}*`;
+        }
+
+        return sendWhatsApp(from,
+          `🎫 *DATAMART TICKET DETAILS*\n\n` +
+          `🆔 *Report ID:* *${tk.reportId || tk._id}*\n` +
+          `⚡ *Priority:* ${prioEmoji} *${prio}*\n` +
+          `📊 *Status:* *${status}*\n` +
+          `🏷️ *Reason:* *${reason}*\n` +
+          `🕒 *Created:* ${dateStr}\n\n` +
+          `👤 *Customer / Agent Details:*\n` +
+          `• *Name:* ${custName}\n` +
+          `• *Phone:* *${custPhone}*\n` +
+          `• *Email:* ${custEmail}\n\n` +
+          `📝 *Full Issue Description:*\n` +
+          `${tk.description || "No description provided."}\n` +
+          `${notesText}\n\n` +
+          `📲 *Direct Customer Contact:*\n` +
+          `• *WhatsApp:* ${waLink}${orderRefHelp}\n\n` +
+          `💡 *Resolution Actions:*\n` +
+          `• To retry/dispatch bundle: *dispatch ${custPhone} [amount]GB*\n` +
+          `• Reply: *dm tickets* to return to queue`
+        );
+      }
+
+      // Direct Action Command: Search DataMart Tickets
+      const searchDmTicketMatch = cmdText.match(/^(?:search\s+tickets?|dm\s+search(?:\s+ticket)?|find\s+tickets?)\s+(.+)$/i);
+      if (searchDmTicketMatch) {
+        const q = searchDmTicketMatch[1].trim();
+        const data = await fetchDatamartSupportTickets({ search: q, limit: 5 });
+        if (!data || !data.tickets || data.tickets.length === 0) {
+          return sendWhatsApp(from, `🔍 No DataMart support tickets found matching "*${q}*".`);
+        }
+
+        let out = `🔍 *DATAMART TICKETS MATCHING "${q}":*\n\n`;
+        data.tickets.forEach((tk, idx) => {
+          const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+          const custName = tk.userId?.name || "Customer";
+          const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
+          const prio = (tk.priority || "normal").toUpperCase();
+          const prioEmoji = prio === "URGENT" ? "🚨" : "📌";
+          const desc = (tk.description || "").replace(/\s+/g, " ").trim().slice(0, 90);
+
+          out += `${numEmoji} *[${tk.reportId || "ID"}]* ${prioEmoji} *${tk.reportReason || "Support"}* (*${prio}*)\n` +
+            `• 👤 *Customer:* ${custName} (${custPhone})\n` +
+            `• 📝 ${desc}...\n` +
+            `• 📊 Status: *${(tk.status || "pending").toUpperCase()}*\n\n`;
+        });
+        out += `💡 Reply: *view ticket [ReportID]* to open any ticket above!`;
+        return sendWhatsApp(from, out);
       }
 
       // Direct Action Command 0a: Credit Agent Wallet
@@ -11384,6 +11646,56 @@ async function runPendingPaymentWatcher() {
 // Check every 60 seconds (minimal egress) for orders that were paid on Paystack so they dispatch & alert automatically
 setInterval(runPendingPaymentWatcher, 60000);
 setTimeout(runPendingPaymentWatcher, 12000);
+
+/* =========================================================
+24/7 DATAMART AGENT SUPPORT URGENT TICKET WATCHER
+========================================================= */
+
+let lastAlertedDatamartReportId = null;
+let isSupportWatcherInitialized = false;
+
+async function runDatamartSupportWatcher() {
+  try {
+    const data = await fetchDatamartSupportTickets({ status: "pending", priority: "urgent", limit: 1 });
+    const latest = data?.tickets?.[0];
+    if (!latest || !latest.reportId) return;
+
+    if (!isSupportWatcherInitialized) {
+      lastAlertedDatamartReportId = latest.reportId;
+      isSupportWatcherInitialized = true;
+      return;
+    }
+
+    if (latest.reportId !== lastAlertedDatamartReportId) {
+      lastAlertedDatamartReportId = latest.reportId;
+      const { data: sRows } = await supabase.from("settings").select("key,value").in("key", ["admin_whatsapp_number", "admin_alert_phone"]);
+      const sMap = {};
+      (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+      const targetPhone = sMap["admin_whatsapp_number"] || sMap["admin_alert_phone"] || process.env.ADMIN_PHONE;
+      if (targetPhone) {
+        const custName = latest.userId?.name || "Customer";
+        const custPhone = latest.phoneNumber || latest.userId?.phoneNumber || "N/A";
+        const reason = latest.reportReason || "AI Escalation";
+        const desc = (latest.description || "").replace(/\s+/g, " ").trim().slice(0, 160);
+
+        await sendWhatsApp(targetPhone,
+          `🚨 *NEW URGENT TICKET ON DATAMART AGENT SUPPORT!*\n\n` +
+          `🆔 *Ticket ID:* *${latest.reportId}*\n` +
+          `👤 *Customer:* ${custName} (${custPhone})\n` +
+          `🏷️ *Reason:* *${reason}*\n` +
+          `📝 *Issue:* ${desc}${desc.length >= 160 ? "..." : ""}\n\n` +
+          `💡 Reply: *view ticket ${latest.reportId}* to view full ticket & contact customer!`
+        ).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.warn("runDatamartSupportWatcher error:", err.message);
+  }
+}
+
+// Check every 3 minutes for new urgent customer/agent escalations on DataMart
+setInterval(runDatamartSupportWatcher, 180000);
+setTimeout(runDatamartSupportWatcher, 20000);
 
 /* =========================================================
 START SERVER
