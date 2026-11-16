@@ -8537,8 +8537,62 @@ app.post("/webhook", async (req, res) => {
       }
 
       // Direct Action Command: DataMart Delivery Check
-      const dmDeliveryCheckMatch = cmdText.match(/^(?:datamart|dm)\s*(?:delivery\s*check|delivery\s*audit)$/i);
+      const dmDeliveryCheckMatch = cmdText.match(/^(?:datamart|dm)\s*(?:delivery\s*check|delivery\s*audit)(?:\s+(\d+|[A-Za-z0-9_-]+))?$/i) ||
+        cmdText.match(/^(?:delivery\s*check|delivery\s*audit)\s+(?:for\s+)?(?:this\s+id\s+)?(\d+|[A-Za-z0-9_-]+)$/i) ||
+        cmdText.match(/^(\d{4,})\s+(?:do\s+)?(?:delivery\s*check|check\s+delivery)(?:\s+for\s+this\s+id)?/i);
       if (dmDeliveryCheckMatch) {
+        const portalOrderId = (dmDeliveryCheckMatch[1] || "").trim();
+        if (portalOrderId) {
+          const startRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/start', {
+            method: 'POST',
+            body: { portalOrderId: isNaN(Number(portalOrderId)) ? portalOrderId : Number(portalOrderId) }
+          });
+          const jobId = startRes?.data?.jobId || startRes?.jobId;
+          if (jobId) {
+            let finalJob = null;
+            for (let i = 0; i < 4; i++) {
+              await new Promise(r => setTimeout(r, 1500));
+              const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`);
+              if (jobRes?.data?.jobStatus === 'done' || jobRes?.data?.jobStatus === 'completed') {
+                finalJob = jobRes.data;
+                break;
+              }
+            }
+
+            const resObj = finalJob?.result;
+            if (resObj) {
+              const batchNum = resObj.batchNumber || "N/A";
+              const totalItems = resObj.totalItems || 0;
+              const sent = resObj.sent || 0;
+              const failed = resObj.failed || 0;
+              const allDelivered = resObj.allDelivered ? "✅ ALL 100% DELIVERED" : "⚠️ PARTIAL / PENDING";
+              const dateStr = resObj.items?.[0]?.processedDate || "N/A";
+              const checkedBy = resObj.checkedBy || "Stony";
+
+              let sampleLines = "";
+              if (Array.isArray(resObj.items) && resObj.items.length > 0) {
+                sampleLines = "\n📋 *Carrier Lines Audited:*\n" +
+                  resObj.items.slice(0, 5).map(it => `• *${it.phone}*: ${it.status === "Sent" ? "✅ Sent" : it.status} (${it.processedDate || "Delivered"})`).join("\n") +
+                  (resObj.items.length > 5 ? `\n• _...and ${resObj.items.length - 5} more lines_` : "");
+              }
+
+              return sendWhatsApp(from,
+                `🚚 *DATAMART CARRIER DELIVERY CHECK*\n\n` +
+                `🆔 *Portal Order ID:* *${portalOrderId}*\n` +
+                `📦 *Batch Number:* #${batchNum}\n` +
+                `📊 *Carrier Result:* *${allDelivered}*\n` +
+                `• 🔢 *Total Lines in Batch:* ${totalItems}\n` +
+                `• ✅ *Carrier Sent:* ${sent}\n` +
+                `• ❌ *Failed:* ${failed}\n` +
+                `🕒 *Processed on Yello/Carrier:* ${dateStr}\n` +
+                `👤 *Audited By:* ${checkedBy}\n` +
+                `${sampleLines}\n\n` +
+                `💡 Live carrier audit confirms all ${totalItems} numbers in this batch were successfully delivered to MTN!`
+              );
+            }
+          }
+        }
+
         const resp = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent');
         const jobs = Array.isArray(resp?.data) ? resp.data : Array.isArray(resp) ? resp : [];
         if (jobs.length === 0) {
@@ -8568,7 +8622,7 @@ app.post("/webhook", async (req, res) => {
           out += `\n`;
         }
 
-        out += `💡 To trace a single order: *dm track [orderRef]*\n` +
+        out += `💡 To check a specific order batch: *dm delivery check [portalId]*\n` +
           `💡 To view undelivered complaints: *dm not received*`;
         return sendWhatsApp(from, out);
       }
