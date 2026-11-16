@@ -4940,12 +4940,60 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
 }
 
 /* =========================================================
-DATAMART AGENT SUPPORT HELPER & QUEUE ENGINE
+DATAMART MULTI-USER AGENT SUPPORT HELPER & QUEUE ENGINE
 ========================================================= */
 
 let cachedDatamartWorkerToken = null;
+const userDatamartTokenCache = new Map(); // normPhone -> token
 
-async function getDatamartAuthToken() {
+async function getDatamartAuthToken(callerPhone = null) {
+  const normCaller = callerPhone ? String(callerPhone).replace(/\D/g, "") : null;
+
+  // 1. If a specific caller phone is provided, check for user-bound account
+  if (normCaller) {
+    if (userDatamartTokenCache.has(normCaller)) {
+      return userDatamartTokenCache.get(normCaller);
+    }
+    try {
+      const { data: row } = await supabase
+        .from("settings")
+        .select("value")
+        .eq("key", `datamart_account_${normCaller}`)
+        .maybeSingle();
+
+      if (row?.value) {
+        let acc = null;
+        try { acc = JSON.parse(row.value); } catch (_) {}
+        if (acc) {
+          let userToken = acc.token;
+          if (!userToken && acc.email && acc.password) {
+            const res = await fetch("https://api.datamartgh.shop/api/v1/login", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ email: acc.email, password: acc.password })
+            });
+            const data = await res.json();
+            if (data?.token) {
+              userToken = data.token;
+              acc.token = userToken;
+              await supabase.from("settings").upsert({
+                key: `datamart_account_${normCaller}`,
+                value: JSON.stringify(acc)
+              }, { onConflict: "key" });
+            }
+          }
+          if (userToken) {
+            userDatamartTokenCache.set(normCaller, userToken);
+            return userToken;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("getDatamartAuthToken caller check error:", e.message);
+    }
+  }
+
+  // 2. Default to Master Owner Token
   if (cachedDatamartWorkerToken) return cachedDatamartWorkerToken;
   try {
     const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
@@ -4972,13 +5020,102 @@ async function getDatamartAuthToken() {
     cachedDatamartWorkerToken = token;
     return token;
   } catch (err) {
-    console.warn("getDatamartAuthToken error:", err.message);
+    console.warn("getDatamartAuthToken master error:", err.message);
     return null;
   }
 }
 
-async function fetchDatamartSupportTickets(params = {}) {
-  let token = await getDatamartAuthToken();
+async function connectUserDatamartAccount(phone, email, password) {
+  const norm = String(phone).replace(/\D/g, "");
+  try {
+    const res = await fetch("https://api.datamartgh.shop/api/v1/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: String(email).trim(), password: String(password).trim() })
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.token) {
+      return { success: false, error: data?.message || "Invalid DataMart email or password." };
+    }
+    const token = data.token;
+    const user = data.user || {};
+
+    // 🛡️ CRITICAL VERIFICATION: ONLY ACCOUNTS WITH LIVE AGENT SUPPORT ACCESS ARE ALLOWED
+    const roleLower = String(user.role || "").toLowerCase();
+    const isSupportRole = roleLower === "worker" || roleLower === "admin" || roleLower === "support" || roleLower === "agent_support";
+
+    let hasLiveSupportAccess = false;
+    try {
+      const checkRes = await fetch("https://api.datamartgh.shop/api/support/dashboard", {
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "x-auth-token": token
+        }
+      });
+      if (checkRes.status === 200) {
+        hasLiveSupportAccess = true;
+      }
+    } catch (_) {}
+
+    if (!isSupportRole && !hasLiveSupportAccess) {
+      return {
+        success: false,
+        error: `🚫 *ACCESS DENIED: AGENT SUPPORT REQUIRED*\n\nThe DataMart account for *${user.email || email}* does not have Agent Support worker permissions.\n\nOnly official DataMart Support workers and staff accounts can connect to this console.`
+      };
+    }
+
+    const payload = {
+      email: String(email).trim(),
+      password: String(password).trim(),
+      token,
+      name: user.name || "Support Worker",
+      role: user.role || "worker",
+      walletBalance: user.walletBalance || 0,
+      id: user._id || null,
+      hasAgentSupport: true,
+      connectedAt: new Date().toISOString()
+    };
+    userDatamartTokenCache.set(norm, token);
+    await supabase.from("settings").upsert({
+      key: `datamart_account_${norm}`,
+      value: JSON.stringify(payload)
+    }, { onConflict: "key" });
+    return { success: true, user: payload };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function getUserDatamartAccount(phone) {
+  const norm = String(phone).replace(/\D/g, "");
+  try {
+    const { data: row } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", `datamart_account_${norm}`)
+      .maybeSingle();
+    if (row?.value) {
+      return JSON.parse(row.value);
+    }
+  } catch (_) {}
+  return null;
+}
+
+async function disconnectUserDatamartAccount(phone) {
+  const norm = String(phone).replace(/\D/g, "");
+  userDatamartTokenCache.delete(norm);
+  userModes.delete(norm);
+  try {
+    await supabase.from("settings").delete().eq("key", `datamart_account_${norm}`);
+    await saveCustomerSession(phone, { step: 1 });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function fetchDatamartSupportTickets(params = {}, callerPhone = null) {
+  let token = await getDatamartAuthToken(callerPhone);
   if (!token) return null;
   const q = new URLSearchParams(params).toString();
   try {
@@ -4986,24 +5123,13 @@ async function fetchDatamartSupportTickets(params = {}) {
       headers: { "Authorization": `Bearer ${token}` }
     });
     if (res.status === 401) {
-      cachedDatamartWorkerToken = null;
-      const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
-        "datamart_login_email", "datamart_login_password"
-      ]);
-      const sMap = {};
-      (sRows || []).forEach(r => { sMap[r.key] = r.value; });
-      const email = sMap["datamart_login_email"] || "nyakponoah11@gmail.com";
-      const pass = sMap["datamart_login_password"] || "Stillmoving11";
-      const lRes = await fetch("https://api.datamartgh.shop/api/v1/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password: pass })
-      });
-      const lData = await lRes.json();
-      if (lData?.token) {
-        token = lData.token;
-        cachedDatamartWorkerToken = token;
-        await supabase.from("settings").upsert({ key: "datamart_auth_token", value: token }, { onConflict: "key" });
+      if (callerPhone) {
+        userDatamartTokenCache.delete(String(callerPhone).replace(/\D/g, ""));
+      } else {
+        cachedDatamartWorkerToken = null;
+      }
+      token = await getDatamartAuthToken(callerPhone);
+      if (token) {
         res = await fetch(`https://api.datamartgh.shop/api/support/tickets?${q}`, {
           headers: { "Authorization": `Bearer ${token}` }
         });
@@ -5017,8 +5143,8 @@ async function fetchDatamartSupportTickets(params = {}) {
   }
 }
 
-async function fetchDatamartSupportEndpoint(endpoint, options = {}) {
-  let token = await getDatamartAuthToken();
+async function fetchDatamartSupportEndpoint(endpoint, options = {}, callerPhone = null) {
+  let token = await getDatamartAuthToken(callerPhone);
   if (!token) return null;
   const url = endpoint.startsWith("http") ? endpoint : `https://api.datamartgh.shop${endpoint}`;
   try {
@@ -5034,8 +5160,12 @@ async function fetchDatamartSupportEndpoint(endpoint, options = {}) {
     }
     let res = await fetch(url, { ...options, headers, body });
     if (res.status === 401) {
-      cachedDatamartWorkerToken = null;
-      token = await getDatamartAuthToken();
+      if (callerPhone) {
+        userDatamartTokenCache.delete(String(callerPhone).replace(/\D/g, ""));
+      } else {
+        cachedDatamartWorkerToken = null;
+      }
+      token = await getDatamartAuthToken(callerPhone);
       if (token) {
         headers["Authorization"] = `Bearer ${token}`;
         headers["x-auth-token"] = token;
@@ -5050,7 +5180,7 @@ async function fetchDatamartSupportEndpoint(endpoint, options = {}) {
   }
 }
 
-async function executeDatamartDeliveryCheck(portalOrderIds) {
+async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) {
   const ids = Array.isArray(portalOrderIds)
     ? portalOrderIds.map(x => String(x).trim()).filter(Boolean)
     : String(portalOrderIds || "").match(/\b\d{4,9}\b/g) || [];
@@ -5062,13 +5192,13 @@ async function executeDatamartDeliveryCheck(portalOrderIds) {
     const startRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/start', {
       method: 'POST',
       body: { portalOrderId: Number(targetId) }
-    });
+    }, callerPhone);
     const jobId = startRes?.data?.jobId || startRes?.jobId;
     if (!jobId) return { id: targetId, error: startRes?.message || "Failed to initiate audit" };
 
     for (let i = 0; i < 7; i++) {
       await new Promise(r => setTimeout(r, 1100));
-      const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`);
+      const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
       if (jobRes?.data?.jobStatus === 'done' || jobRes?.data?.jobStatus === 'completed') {
         return { id: targetId, result: jobRes.data.result };
       }
