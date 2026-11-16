@@ -1608,6 +1608,128 @@ async function sendWhatsApp(to, text) {
   }
 }
 
+/* =========================================================
+WHATSAPP VOICE NOTE TRANSCRIPTION (SPEECH-TO-TEXT ENGINE)
+Automatically downloads audio messages from Meta Graph API
+and transcribes them with Groq Whisper Large v3 (ultra-fast)
+or Gemini 2.0 Flash as multimodal fallback!
+========================================================= */
+
+async function transcribeWhatsAppVoiceNote(mediaId, mimeType = "audio/ogg", defaultToken = null) {
+  let token = defaultToken || ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
+  if (supabase) {
+    try {
+      const { data: sRows } = await supabase
+        .from("settings")
+        .select("key,value")
+        .in("key", ["whatsapp_access_token", "ACCESS_TOKEN", "meta_whatsapp_token", "whatsapp_token"]);
+      if (sRows && sRows.length > 0) {
+        const smap = Object.fromEntries(sRows.map((s) => [s.key, s.value]));
+        const dbToken = smap.whatsapp_access_token || smap.ACCESS_TOKEN || smap.meta_whatsapp_token || smap.whatsapp_token;
+        if (dbToken) token = dbToken;
+      }
+    } catch (_) {}
+  }
+
+  if (!token) throw new Error("WhatsApp API token is missing, cannot download voice media");
+
+  // 1. Get download URL from Meta Graph API
+  const metaUrl = `https://graph.facebook.com/v21.0/${mediaId}`;
+  const metaRes = await axios.get(metaUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+    timeout: 15000
+  });
+
+  const downloadUrl = metaRes.data?.url;
+  if (!downloadUrl) throw new Error("Meta returned no download URL for voice note media ID: " + mediaId);
+
+  // 2. Download binary audio stream from Meta
+  const audioRes = await axios.get(downloadUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "curl/7.68.0"
+    },
+    responseType: "arraybuffer",
+    timeout: 25000
+  });
+
+  const audioBuffer = Buffer.from(audioRes.data);
+  if (!audioBuffer || audioBuffer.length === 0) throw new Error("Downloaded audio file is empty");
+
+  // 3. Resolve transcription AI keys
+  let groqKey = process.env.GROQ_API_KEY;
+  let geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (supabase) {
+    try {
+      const { data: sRows } = await supabase
+        .from("settings")
+        .select("key,value")
+        .in("key", ["groq_api_key", "gemini_api_key", "google_api_key"]);
+      (sRows || []).forEach(r => {
+        if (r.key === "groq_api_key" && r.value) groqKey = r.value;
+        if ((r.key === "gemini_api_key" || r.key === "google_api_key") && r.value) geminiKey = r.value;
+      });
+    } catch (_) {}
+  }
+
+  // 4. Primary: Groq Whisper Large v3 Turbo (~200ms ultra-fast transcription)
+  if (groqKey) {
+    try {
+      const cleanMime = (mimeType || "audio/ogg").split(";")[0].trim();
+      const ext = cleanMime.includes("mp4") || cleanMime.includes("m4a") ? "m4a" : (cleanMime.includes("wav") ? "wav" : "ogg");
+      const form = new FormData();
+      form.append("file", new Blob([audioBuffer], { type: cleanMime }), `voice.${ext}`);
+      form.append("model", "whisper-large-v3-turbo");
+      form.append("prompt", "WhatsApp voice message about Ghana mobile data bundles, orders, MTN, Telecel, AT, AirtelTigo, Paystack, failed orders, prices, 054, 024, 055, 059, 020, 027.");
+
+      const groqRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${groqKey}` },
+        body: form
+      });
+      const groqData = await groqRes.json();
+      if (groqData?.text && groqData.text.trim()) {
+        return groqData.text.trim();
+      }
+    } catch (gErr) {
+      console.warn("Groq Whisper transcription fallback:", gErr.message);
+    }
+  }
+
+  // 5. Fallback: Gemini Flash (native audio comprehension)
+  if (geminiKey) {
+    try {
+      const cleanMime = (mimeType || "audio/ogg").split(";")[0].trim();
+      const base64Audio = audioBuffer.toString("base64");
+      const geminiRes = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(geminiKey)}`,
+        {
+          contents: [{
+            parts: [
+              { text: "You are a speech-to-text transcriber for a Ghanaian WhatsApp store. Transcribe this spoken audio message accurately. Correctly write down phone numbers, names, data sizes (e.g. 1GB, 5GB, 10GB), networks (MTN, Telecel, AT), and references. Return ONLY the transcribed text, nothing else." },
+              {
+                inline_data: {
+                  mime_type: cleanMime,
+                  data: base64Audio
+                }
+              }
+            ]
+          }]
+        },
+        { headers: { "Content-Type": "application/json" }, timeout: 15000 }
+      );
+      const textOut = geminiRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (textOut && textOut.trim()) {
+        return textOut.trim();
+      }
+    } catch (gmErr) {
+      console.warn("Gemini audio transcription fallback:", gmErr.message);
+    }
+  }
+
+  throw new Error("No speech-to-text service available or speech could not be deciphered");
+}
+
 const recentAdminAlertSignatures = new Map();
 
 async function sendAdminWhatsApp(text) {
@@ -7319,7 +7441,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    const text = (
+    let text = (
       msg.text?.body ||
       msg.body ||
       msg.caption ||
@@ -7333,7 +7455,40 @@ app.post("/webhook", async (req, res) => {
       ""
     ).trim();
 
-    console.log("📩", from, text);
+    let isVoiceNote = false;
+    const isAudioMsg = msg.type === "audio" || msg.type === "voice" || Boolean(msg.audio);
+
+    if (!text && isAudioMsg && (msg.audio?.id || msg.id)) {
+      const audioMediaId = msg.audio?.id || msg.id;
+      const audioMime = msg.audio?.mime_type || "audio/ogg";
+      isVoiceNote = true;
+      try {
+        console.log(`🎙️ [VOICE NOTE RECEIVED] from [${from}] (Media ID: ${audioMediaId}, MIME: ${audioMime}). Downloading & Transcribing...`);
+        const token = ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
+        const transcribed = await transcribeWhatsAppVoiceNote(audioMediaId, audioMime, token);
+        if (transcribed && transcribed.trim()) {
+          text = transcribed.trim();
+          console.log(`🎙️ [VOICE NOTE TRANSCRIBED] from [${from}]: "${text}"`);
+        } else {
+          console.warn(`⚠️ [VOICE NOTE TRANSCRIBED EMPTY] from [${from}]`);
+          return sendWhatsApp(from, "🎙️ I received your voice note, bossu! But I couldn't hear any speech clearly. Could you please send it again or type it for me?");
+        }
+      } catch (err) {
+        console.error("❌ [VOICE NOTE ERROR]:", err.message);
+        return sendWhatsApp(from, `🎙️ I received your voice note, bossu! But had an issue downloading or transcribing the audio (${err.message}). Could you please send it again or type it for me?`);
+      }
+    }
+
+    const _sendWhatsAppDirect = sendWhatsApp;
+    const sendWhatsApp = async (to, body) => {
+      let finalBody = body;
+      if (isVoiceNote && text && typeof finalBody === "string" && !finalBody.startsWith("🎙️")) {
+        finalBody = `🎙️ _"${text}"_\n\n${finalBody}`;
+      }
+      return _sendWhatsAppDirect(to, finalBody);
+    };
+
+    console.log("📩", from, isVoiceNote ? `[VOICE NOTE]: "${text}"` : text);
 
     /* =====================================================
     DYNAMIC OWNER & ADMIN PHONE DETECTION
