@@ -5238,7 +5238,23 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       await new Promise(r => setTimeout(r, 1000));
       const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
       if (jobRes?.data?.jobStatus === 'done' || jobRes?.data?.jobStatus === 'completed') {
-        return { id: targetId, result: jobRes.data.result };
+        const result = jobRes.data.result;
+        let syncResult = null;
+        if (result && Array.isArray(result.items) && result.items.length > 0) {
+          const needsSync = result.needsUpdate > 0 || result.items.some(it => it.needsUpdate);
+          if (needsSync) {
+            try {
+              const applyRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/apply', {
+                method: 'POST',
+                body: { portalOrderId: Number(targetId), items: result.items }
+              }, callerPhone);
+              syncResult = applyRes?.data || applyRes;
+            } catch (err) {
+              console.warn("Delivery check auto-apply error:", err.message);
+            }
+          }
+        }
+        return { id: targetId, result, syncResult };
       }
       if (jobRes?.data?.jobStatus === 'failed') {
         return { id: targetId, error: jobRes.data.error || "Carrier job failed" };
@@ -5260,6 +5276,15 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       const dateStr = resObj.items?.[0]?.processedDate || "N/A";
       const checkedBy = resObj.checkedBy || "Stony";
       const isQueued = resObj.notProcessedYet || totalItems === 0 || (sent === 0 && failed === 0 && totalItems === 0);
+
+      const syncObj = single?.syncResult;
+      let syncLine = "";
+      if (syncObj?.ordersCompleted > 0 || syncObj?.data?.ordersCompleted > 0) {
+        const count = syncObj?.ordersCompleted || syncObj?.data?.ordersCompleted;
+        syncLine = `⚡ *Auto-Completed:* ✅ Auto-marked *${count} orders* as Completed in DataMart!\n`;
+      } else if (resObj.needsUpdate === 0 && totalItems > 0 && resObj.allDelivered) {
+        syncLine = `⚡ *Auto-Completed:* ✅ DataMart orders already 100% in sync & Completed!\n`;
+      }
 
       let carrierResult = "";
       let conclusionMsg = "";
@@ -5306,6 +5331,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         `• ✅ *Carrier Sent:* ${sent}\n` +
         (pending > 0 || isQueued ? `• ⏳ *Pending:* ${pending}\n` : "") +
         `• ❌ *Failed:* ${failed}\n` +
+        (syncLine ? `${syncLine}` : "") +
         `🕒 *Processed on Yello/Carrier:* ${dateStr}\n` +
         `👤 *Audited By:* ${checkedBy}\n` +
         `${failedSection}` +
@@ -5328,6 +5354,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
   let totalSent = 0;
   let totalFailed = 0;
   let totalQueued = 0;
+  let totalAutoCompleted = 0;
   let batchSummaries = "";
   const allFailedNumbers = [];
 
@@ -5339,6 +5366,10 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       const bSent = b.sent || 0;
       const bFailed = b.failed || 0;
       const isQueued = b.notProcessedYet || bTotal === 0 || (bSent === 0 && bFailed === 0 && bTotal === 0);
+
+      const syncObj = r.syncResult;
+      const autoCount = syncObj?.ordersCompleted || syncObj?.data?.ordersCompleted || 0;
+      if (autoCount > 0) totalAutoCompleted += autoCount;
 
       if (isQueued) totalQueued++;
       totalNumbers += bTotal;
@@ -5364,7 +5395,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       if (isQueued) {
         batchStatusLine = `⏳ *QUEUED AT VENDOR* (In Queue - Check back shortly)`;
       } else if (b.allDelivered && bTotal > 0) {
-        batchStatusLine = `✅ *ALL ${bSent}/${bTotal} DELIVERED*`;
+        batchStatusLine = `✅ *ALL ${bSent}/${bTotal} DELIVERED*` + (autoCount > 0 ? ` (Auto-Completed ${autoCount})` : "");
       } else if (bFailed > 0) {
         batchStatusLine = `⚠️ *PARTIAL (${bSent}/${bTotal} Sent, ${bFailed} Failed)*`;
       } else {
@@ -5399,6 +5430,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
     `📦 *Batches Audited:* ${uniqueIds.length}\n` +
     `🔢 *Total Carrier Lines Checked:* ${totalNumbers}\n` +
     `✅ *Successfully Sent:* ${totalSent}\n` +
+    (totalAutoCompleted > 0 ? `⚡ *Auto-Completed in DataMart:* ✅ ${totalAutoCompleted} order(s)\n` : "") +
     (totalQueued > 0 ? `⏳ *Batches in Queue:* ${totalQueued}\n` : "") +
     `❌ *Carrier Failed / Discrepancies:* ${totalFailed}\n\n` +
     `${globalFailedSummary}` +
