@@ -5252,10 +5252,30 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       const batchNum = resObj.batchNumber || "N/A";
       const totalItems = resObj.totalItems || 0;
       const sent = resObj.sent || 0;
+      const pending = resObj.pending || 0;
       const failed = resObj.failed || 0;
-      const allDelivered = resObj.allDelivered ? "✅ ALL 100% DELIVERED" : "⚠️ PARTIAL / PENDING";
       const dateStr = resObj.items?.[0]?.processedDate || "N/A";
       const checkedBy = resObj.checkedBy || "Stony";
+      const isQueued = resObj.notProcessedYet || totalItems === 0 || (sent === 0 && failed === 0 && totalItems === 0);
+
+      let carrierResult = "";
+      let conclusionMsg = "";
+
+      if (isQueued) {
+        carrierResult = "⏳ QUEUED AT VENDOR (In Processing Queue)";
+        conclusionMsg = resObj.portalMessage
+          ? `⏳ *Carrier Notice:* ${resObj.portalMessage}\nYour order is currently waiting in the vendor queue for carrier dispatch. Check again in a few minutes!`
+          : `⏳ *Carrier Notice:* Your order is in the vendor dispatch queue. Please check again shortly!`;
+      } else if (resObj.allDelivered && totalItems > 0) {
+        carrierResult = "✅ ALL 100% DELIVERED";
+        conclusionMsg = `💡 All ${totalItems} number(s) in this batch were successfully delivered to MTN!`;
+      } else if (failed > 0) {
+        carrierResult = `⚠️ PARTIAL / FAILED (${failed} Failed)`;
+        conclusionMsg = `⚠️ *Action Needed:* ${failed} number(s) failed delivery. You can copy the phone numbers above to re-dispatch or refund!`;
+      } else {
+        carrierResult = "⏳ IN PROGRESS / PROCESSING";
+        conclusionMsg = `⏳ Processing: ${sent}/${totalItems} lines sent so far (${pending} pending). Check back shortly for final delivery status.`;
+      }
 
       const failedItems = (resObj.items || []).filter(it => {
         const s = String(it.status || "").toLowerCase();
@@ -5278,17 +5298,16 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       return `🚚 *DATAMART CARRIER DELIVERY CHECK*\n\n` +
         `🆔 *Portal Order ID:* *${uniqueIds[0]}*\n` +
         `📦 *Batch Number:* #${batchNum}\n` +
-        `📊 *Carrier Result:* *${allDelivered}*\n` +
+        `📊 *Carrier Result:* *${carrierResult}*\n` +
         `• 🔢 *Total Lines in Batch:* ${totalItems}\n` +
         `• ✅ *Carrier Sent:* ${sent}\n` +
+        (pending > 0 || isQueued ? `• ⏳ *Pending:* ${pending}\n` : "") +
         `• ❌ *Failed:* ${failed}\n` +
         `🕒 *Processed on Yello/Carrier:* ${dateStr}\n` +
         `👤 *Audited By:* ${checkedBy}\n` +
         `${failedSection}` +
         `${sampleLines}\n\n` +
-        (failed > 0
-          ? `⚠️ *Action Needed:* ${failed} number(s) failed delivery. You can copy the phone numbers above to re-dispatch or refund!`
-          : `💡 All ${totalItems} numbers in this batch were successfully delivered to MTN!`);
+        `${conclusionMsg}`;
     } else {
       return `⚠️ Carrier audit for ID *${uniqueIds[0]}* timed out or could not be verified on DataMart.`;
     }
@@ -5304,6 +5323,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
   let totalNumbers = 0;
   let totalSent = 0;
   let totalFailed = 0;
+  let totalQueued = 0;
   let batchSummaries = "";
   const allFailedNumbers = [];
 
@@ -5311,10 +5331,15 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
     const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx] || `•`;
     if (r.result) {
       const b = r.result;
-      const isOk = b.allDelivered;
-      totalNumbers += (b.totalItems || 0);
-      totalSent += (b.sent || 0);
-      totalFailed += (b.failed || 0);
+      const bTotal = b.totalItems || 0;
+      const bSent = b.sent || 0;
+      const bFailed = b.failed || 0;
+      const isQueued = b.notProcessedYet || bTotal === 0 || (bSent === 0 && bFailed === 0 && bTotal === 0);
+
+      if (isQueued) totalQueued++;
+      totalNumbers += bTotal;
+      totalSent += bSent;
+      totalFailed += bFailed;
       const timeStr = b.items?.[0]?.processedDate || "Recent";
 
       const failedInBatch = (b.items || []).filter(it => {
@@ -5331,9 +5356,19 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
           failedInBatch.map(it => `  • \`${it.phone}\` (${it.status || "Failed"})`).join("\n") + "\n";
       }
 
+      let batchStatusLine = "";
+      if (isQueued) {
+        batchStatusLine = `⏳ *QUEUED AT VENDOR* (In Queue - Check back shortly)`;
+      } else if (b.allDelivered && bTotal > 0) {
+        batchStatusLine = `✅ *ALL ${bSent}/${bTotal} DELIVERED*`;
+      } else if (bFailed > 0) {
+        batchStatusLine = `⚠️ *PARTIAL (${bSent}/${bTotal} Sent, ${bFailed} Failed)*`;
+      } else {
+        batchStatusLine = `⏳ *IN PROGRESS (${bSent}/${bTotal} Sent)*`;
+      }
+
       batchSummaries += `${numEmoji} *ID: ${r.id}* (Batch #${b.batchNumber || "N/A"})\n` +
-        `• Status: ${isOk ? "✅ ALL" : "⚠️ PARTIAL"} *${b.sent}/${b.totalItems} DELIVERED*` +
-        (b.failed > 0 ? ` (${b.failed} Failed)` : "") + `\n` +
+        `• Status: ${batchStatusLine}\n` +
         (failedListForBatch ? `${failedListForBatch}` : "") +
         `• Processed: ${timeStr}\n\n`;
     } else {
@@ -5347,17 +5382,25 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       allFailedNumbers.map(f => `• \`${f.phone}\` (Order: ${f.batchId} - ${f.status})`).join("\n") + "\n\n";
   }
 
+  let finalActionMessage = "";
+  if (totalFailed > 0) {
+    finalActionMessage = `⚠️ *Action Required:* ${totalFailed} number(s) failed or were partially delivered across the batches. The failed phone numbers are clearly listed above so you can easily copy and re-process or refund them!`;
+  } else if (totalQueued > 0 && totalNumbers === 0) {
+    finalActionMessage = `⏳ *Notice:* The audited batch(es) are currently queued at the vendor and have not finished processing on the carrier network yet. Please re-run check shortly!`;
+  } else {
+    finalActionMessage = `💡 All ${totalNumbers} numbers across all batches were 100% delivered to MTN!`;
+  }
+
   return `🚚 *DATAMART BULK DELIVERY CHECK AUDIT*\n\n` +
     `📦 *Batches Audited:* ${uniqueIds.length}\n` +
     `🔢 *Total Carrier Lines Checked:* ${totalNumbers}\n` +
     `✅ *Successfully Sent:* ${totalSent}\n` +
+    (totalQueued > 0 ? `⏳ *Batches in Queue:* ${totalQueued}\n` : "") +
     `❌ *Carrier Failed / Discrepancies:* ${totalFailed}\n\n` +
     `${globalFailedSummary}` +
     `📋 *Batch Breakdown:*\n` +
     `${batchSummaries}` +
-    (totalFailed > 0
-      ? `⚠️ *Action Required:* ${totalFailed} number(s) failed or were partially delivered across the batches. The failed phone numbers are clearly listed above so you can easily copy and re-process or refund them!`
-      : `💡 All ${totalNumbers} numbers across all batches were 100% delivered to MTN!`);
+    finalActionMessage;
 }
 
 function getTimeAgoGhana(dateStr) {
