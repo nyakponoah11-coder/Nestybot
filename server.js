@@ -5089,6 +5089,17 @@ async function executeDatamartDeliveryCheck(portalOrderIds) {
       const dateStr = resObj.items?.[0]?.processedDate || "N/A";
       const checkedBy = resObj.checkedBy || "Stony";
 
+      const failedItems = (resObj.items || []).filter(it => {
+        const s = String(it.status || "").toLowerCase();
+        return s !== "sent" && s !== "delivered";
+      });
+
+      let failedSection = "";
+      if (failedItems.length > 0) {
+        failedSection = `\n❌ *FAILED / UNDELIVERED NUMBERS (${failedItems.length}):*\n` +
+          failedItems.map(it => `• \`${it.phone}\` ➔ ${it.status || "Failed"}`).join("\n") + "\n";
+      }
+
       let sampleLines = "";
       if (Array.isArray(resObj.items) && resObj.items.length > 0) {
         sampleLines = "\n📋 *Carrier Lines Audited:*\n" +
@@ -5105,8 +5116,11 @@ async function executeDatamartDeliveryCheck(portalOrderIds) {
         `• ❌ *Failed:* ${failed}\n` +
         `🕒 *Processed on Yello/Carrier:* ${dateStr}\n` +
         `👤 *Audited By:* ${checkedBy}\n` +
+        `${failedSection}` +
         `${sampleLines}\n\n` +
-        `💡 All ${totalItems} numbers in this batch were successfully delivered to MTN!`;
+        (failed > 0
+          ? `⚠️ *Action Needed:* ${failed} number(s) failed delivery. You can copy the phone numbers above to re-dispatch or refund!`
+          : `💡 All ${totalItems} numbers in this batch were successfully delivered to MTN!`);
     } else {
       return `⚠️ Carrier audit for ID *${uniqueIds[0]}* timed out or could not be verified on DataMart.`;
     }
@@ -5123,6 +5137,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds) {
   let totalSent = 0;
   let totalFailed = 0;
   let batchSummaries = "";
+  const allFailedNumbers = [];
 
   results.forEach((r, idx) => {
     const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx] || `•`;
@@ -5133,22 +5148,48 @@ async function executeDatamartDeliveryCheck(portalOrderIds) {
       totalSent += (b.sent || 0);
       totalFailed += (b.failed || 0);
       const timeStr = b.items?.[0]?.processedDate || "Recent";
+
+      const failedInBatch = (b.items || []).filter(it => {
+        const s = String(it.status || "").toLowerCase();
+        return s !== "sent" && s !== "delivered";
+      });
+
+      let failedListForBatch = "";
+      if (failedInBatch.length > 0) {
+        failedInBatch.forEach(it => {
+          allFailedNumbers.push({ batchId: r.id, phone: it.phone, status: it.status || "Failed" });
+        });
+        failedListForBatch = `  ❌ *Failed Numbers in Batch (${failedInBatch.length}):*\n` +
+          failedInBatch.map(it => `  • \`${it.phone}\` (${it.status || "Failed"})`).join("\n") + "\n";
+      }
+
       batchSummaries += `${numEmoji} *ID: ${r.id}* (Batch #${b.batchNumber || "N/A"})\n` +
-        `• Status: ${isOk ? "✅ ALL" : "⚠️"} *${b.sent}/${b.totalItems} DELIVERED*\n` +
+        `• Status: ${isOk ? "✅ ALL" : "⚠️ PARTIAL"} *${b.sent}/${b.totalItems} DELIVERED*` +
+        (b.failed > 0 ? ` (${b.failed} Failed)` : "") + `\n` +
+        (failedListForBatch ? `${failedListForBatch}` : "") +
         `• Processed: ${timeStr}\n\n`;
     } else {
       batchSummaries += `${numEmoji} *ID: ${r.id}* ➔ ⚠️ Audit timed out or invalid ID.\n\n`;
     }
   });
 
+  let globalFailedSummary = "";
+  if (allFailedNumbers.length > 0) {
+    globalFailedSummary = `🚨 *ALL FAILED NUMBERS TO RE-CHECK / REFUND:*\n` +
+      allFailedNumbers.map(f => `• \`${f.phone}\` (Order: ${f.batchId} - ${f.status})`).join("\n") + "\n\n";
+  }
+
   return `🚚 *DATAMART BULK DELIVERY CHECK AUDIT*\n\n` +
     `📦 *Batches Audited:* ${uniqueIds.length}\n` +
     `🔢 *Total Carrier Lines Checked:* ${totalNumbers}\n` +
     `✅ *Successfully Sent:* ${totalSent}\n` +
     `❌ *Carrier Failed / Discrepancies:* ${totalFailed}\n\n` +
-    `📋 *Batch Details:*\n` +
+    `${globalFailedSummary}` +
+    `📋 *Batch Breakdown:*\n` +
     `${batchSummaries}` +
-    `💡 All audited batches have been verified against MTN carrier servers!`;
+    (totalFailed > 0
+      ? `⚠️ *Action Required:* ${totalFailed} number(s) failed or were partially delivered across the batches. The failed phone numbers are clearly listed above so you can easily copy and re-process or refund them!`
+      : `💡 All ${totalNumbers} numbers across all batches were 100% delivered to MTN!`);
 }
 
 function getTimeAgoGhana(dateStr) {
