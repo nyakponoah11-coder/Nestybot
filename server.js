@@ -7402,10 +7402,13 @@ app.get("/webhook", (req, res) => {
 WHATSAPP WEBHOOK (RECEIVE MESSAGES)
 ========================================================= */
 
+const sendDirectWhatsApp = sendWhatsApp;
+
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
+    let sendWhatsApp = sendDirectWhatsApp;
     const changeVal = req.body.entry?.[0]?.changes?.[0]?.value || req.body?.value || req.body;
     const msg = changeVal?.messages?.[0] || req.body?.messages?.[0] || req.body?.data;
     if (!msg) {
@@ -7458,35 +7461,36 @@ app.post("/webhook", async (req, res) => {
     let isVoiceNote = false;
     const isAudioMsg = msg.type === "audio" || msg.type === "voice" || Boolean(msg.audio);
 
-    if (!text && isAudioMsg && (msg.audio?.id || msg.id)) {
-      const audioMediaId = msg.audio?.id || msg.id;
+    if (!text && isAudioMsg) {
+      const audioMediaId = msg.audio?.id || msg.voice?.id || msg.media?.id || (msg.type === "audio" ? msg.id : null);
       const audioMime = msg.audio?.mime_type || "audio/ogg";
-      isVoiceNote = true;
-      try {
-        console.log(`🎙️ [VOICE NOTE RECEIVED] from [${from}] (Media ID: ${audioMediaId}, MIME: ${audioMime}). Downloading & Transcribing...`);
-        const token = ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
-        const transcribed = await transcribeWhatsAppVoiceNote(audioMediaId, audioMime, token);
-        if (transcribed && transcribed.trim()) {
-          text = transcribed.trim();
-          console.log(`🎙️ [VOICE NOTE TRANSCRIBED] from [${from}]: "${text}"`);
-        } else {
-          console.warn(`⚠️ [VOICE NOTE TRANSCRIBED EMPTY] from [${from}]`);
-          return sendWhatsApp(from, "🎙️ I received your voice note, bossu! But I couldn't hear any speech clearly. Could you please send it again or type it for me?");
+      if (audioMediaId) {
+        isVoiceNote = true;
+        try {
+          console.log(`🎙️ [VOICE NOTE RECEIVED] from [${from}] (Media ID: ${audioMediaId}, MIME: ${audioMime}). Downloading & Transcribing...`);
+          const token = ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
+          const transcribed = await transcribeWhatsAppVoiceNote(audioMediaId, audioMime, token);
+          if (transcribed && transcribed.trim()) {
+            text = transcribed.trim();
+            console.log(`🎙️ [VOICE NOTE TRANSCRIBED] from [${from}]: "${text}"`);
+            const voicePrefix = `🎙️ _"${text}"_\n\n`;
+            sendWhatsApp = async (to, body) => {
+              let finalBody = body;
+              if (typeof finalBody === "string" && !finalBody.startsWith("🎙️")) {
+                finalBody = `${voicePrefix}${finalBody}`;
+              }
+              return sendDirectWhatsApp(to, finalBody);
+            };
+          } else {
+            console.warn(`⚠️ [VOICE NOTE TRANSCRIBED EMPTY] from [${from}]`);
+            return sendWhatsApp(from, "🎙️ I received your voice note, bossu! But I couldn't hear any speech clearly. Could you please send it again or type it for me?");
+          }
+        } catch (err) {
+          console.error("❌ [VOICE NOTE ERROR]:", err.message);
+          return sendWhatsApp(from, `🎙️ I received your voice note, bossu! But had an issue downloading or transcribing the audio (${err.message}). Could you please send it again or type it for me?`);
         }
-      } catch (err) {
-        console.error("❌ [VOICE NOTE ERROR]:", err.message);
-        return sendWhatsApp(from, `🎙️ I received your voice note, bossu! But had an issue downloading or transcribing the audio (${err.message}). Could you please send it again or type it for me?`);
       }
     }
-
-    const _sendWhatsAppDirect = sendWhatsApp;
-    const sendWhatsApp = async (to, body) => {
-      let finalBody = body;
-      if (isVoiceNote && text && typeof finalBody === "string" && !finalBody.startsWith("🎙️")) {
-        finalBody = `🎙️ _"${text}"_\n\n${finalBody}`;
-      }
-      return _sendWhatsAppDirect(to, finalBody);
-    };
 
     console.log("📩", from, isVoiceNote ? `[VOICE NOTE]: "${text}"` : text);
 
