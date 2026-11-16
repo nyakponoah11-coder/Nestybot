@@ -5579,18 +5579,25 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
 
 async function executeDatamartSearch(rawQuery, callerPhone = null) {
   let q = String(rawQuery || "").trim();
-  // If an email address is present anywhere in the text, extract it directly!
+  // 1. If an email address is present anywhere in the text, extract it directly!
   const emailMatch = q.match(/[\w.-]+@[\w.-]+\.\w+/);
   if (emailMatch) {
     q = emailMatch[0];
   } else {
-    // Strip command prefixes
-    q = q.replace(/^(?:datamart|dm)\s+/i, "");
-    q = q.replace(/^(?:search|lookup|find|investigate|check(?:\s*out)?)\s+/i, "");
-    q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number|email)\s+/i, "");
-    q = q.replace(/^(?:is\s+|about\s+|info\s+on\s+)/i, "");
-    q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number|email)\s+/i, "");
-    q = q.replace(/^(?:customer|user|agent|order|email)\s+/i, "").trim();
+    // 2. If an order reference pattern is present anywhere, extract the reference code!
+    const refMatch = q.match(/\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i);
+    if (refMatch) {
+      q = refMatch[0];
+    } else {
+      // 3. Strip command prefixes cleanly
+      q = q.replace(/^(?:datamart|dm)\s+/i, "");
+      q = q.replace(/^(?:search|lookup|find|investigate|check(?:\s*out)?|track|verify)\s+/i, "");
+      q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number|email|ref|reference|transaction)\s+/i, "");
+      q = q.replace(/^(?:ref|reference|trx|trxref|order\s*ref|order\s*reference)(?:\s*[:#=])?\s+/i, "");
+      q = q.replace(/^(?:is\s+|about\s+|info\s+on\s+)/i, "");
+      q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number|email|ref|reference)\s+/i, "");
+      q = q.replace(/^(?:customer|user|agent|order|email|ref|reference)\s+/i, "").trim();
+    }
   }
 
   if (!q) return "🔍 Please provide a customer name, phone number, email, or order reference to search.";
@@ -5619,7 +5626,7 @@ async function executeDatamartSearch(rawQuery, callerPhone = null) {
         `• *Joined:* ${u.createdAt ? new Date(u.createdAt).toLocaleDateString("en-GB") : "N/A"}\n\n`;
     });
   } else if (orders.length > 0) {
-    // When searching by recipient phone, results.users is empty on DataMart, but customer details are in the order!
+    // When searching by recipient phone or reference, results.users is empty on DataMart, but customer details are in the order!
     const ord0 = orders[0];
     const custName = ord0.agentStoreDetails?.customerDetails?.name || ord0.purchaserInfo?.name || ord0.userId?.name || "Customer";
     const custPhone = ord0.phoneNumber || ord0.recipientPhone || ord0.agentStoreDetails?.customerDetails?.phone || "N/A";
@@ -5630,20 +5637,29 @@ async function executeDatamartSearch(rawQuery, callerPhone = null) {
       `• *Agent Store:* ${agentStore}\n\n`;
   }
 
+  let singlePortalId = null;
   if (orders.length > 0) {
     out += `📦 *Recent Orders (${orders.length} found):*\n`;
     orders.slice(0, 5).forEach((ord) => {
       const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
-      const portalId = ord.apiOrderId || ord.exportTracking?.portalId || ord.geonetReference || ord._id;
+      // Ensure Portal ID is the 6-digit carrier portal ID (apiOrderId or exportTracking.portalId), NEVER internal DB mongo ID
+      const portalId = ord.apiOrderId || ord.exportTracking?.portalId || (ord.portalOrderId && ord.portalOrderId !== ord._id ? ord.portalOrderId : null);
+      if (orders.length === 1 && portalId) singlePortalId = portalId;
       const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
-      out += `• *${ord.network} ${cap}* to *${ord.phoneNumber}* (${(ord.status || "N/A").toUpperCase()})\n` +
-        `  🆔 *Portal ID:* *${portalId}*${batchNo}\n` +
+      const status = (ord.status || "N/A").toUpperCase();
+      const statusEmoji = status === "COMPLETED" ? "✅" : status === "FAILED" ? "❌" : "⏳";
+      out += `• ${statusEmoji} *${ord.network} ${cap}* to *${ord.phoneNumber}* (*${status}*)\n` +
+        `  🆔 *Portal ID:* *${portalId || "Pending Export"}*${batchNo}\n` +
         `  Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
     });
     out += "\n";
   }
 
-  out += `💡 Reply: *[Portal ID]* to run delivery check, or *exit* to leave DataMart Mode.`;
+  if (singlePortalId) {
+    out += `💡 Reply: *${singlePortalId}* to run carrier delivery check!`;
+  } else {
+    out += `💡 Reply: *[Portal ID]* to run delivery check, or *exit* to leave DataMart Mode.`;
+  }
   return out;
 }
 
@@ -6929,13 +6945,16 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     return sendWhatsApp(from, formatFailedItemsReply(cached));
   }
 
-  // 2. Email or Phone or Customer Search
+  // 2. Email, Phone, Customer Search, or Order Reference
   const emailMatch = cleanInput.match(/[\w.-]+@[\w.-]+\.\w+/);
   const phoneMatch = cleanInput.match(/\b(0[2357]\d{8}|\+?233[2357]\d{8})\b/);
-  const isSearchIntent = /\b(?:search|lookup|find|customer|agent|check|who|investigate)\b/i.test(cleanInput);
+  const isSearchIntent = /\b(?:search|lookup|find|customer|agent|check|who|investigate|ref|reference|trx|order|track)\b/i.test(cleanInput);
+  const isRefPattern = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(cleanInput) ||
+    /^(?:(?:dm|datamart)\s+)?(?:ref|reference|trx|trxref|order\s*ref|order\s*reference)(?:\s*[:#=])?\s*[A-Za-z0-9_-]+/i.test(cleanInput) ||
+    /^(?:track|verify|check)\s+(?:order\s+)?(?:ref\s+|reference\s+)?([A-Za-z0-9_-]{5,45})$/i.test(cleanInput);
   const isNameOrWord = /^[a-zA-Z\s]{3,35}$/.test(cleanInput) && !/^(?:exit|tickets?|urgent|pending|withdrawals?|deposits?|claims?|recovery|stats|my\s*datamart)$/i.test(cleanInput);
 
-  if (emailMatch || phoneMatch || isSearchIntent || isNameOrWord) {
+  if (emailMatch || phoneMatch || isSearchIntent || isNameOrWord || isRefPattern) {
     const report = await executeDatamartSearch(cleanInput, from);
     if (report) return sendWhatsApp(from, report);
   }
@@ -7391,11 +7410,14 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // Direct DataMart customer / agent search even outside console mode
-      const isSearchIntent = /\b(?:search|lookup|find|investigate|check|customer|agent)\b/i.test(cleanCmd);
+      // Direct DataMart customer / agent / order reference search even outside console mode
+      const isSearchIntent = /\b(?:search|lookup|find|investigate|check|customer|agent|ref|reference|track)\b/i.test(cleanCmd);
       const isPhoneOrEmail = /[\w.-]+@[\w.-]+\.\w+/.test(cleanCmd) || /\b(0[2357]\d{8}|\+?233[2357]\d{8})\b/.test(cleanCmd);
+      const isRefPattern = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(cleanCmd) ||
+        /^(?:(?:dm|datamart)\s+)?(?:ref|reference|trx|trxref|order\s*ref|order\s*reference)(?:\s*[:#=])?\s*[A-Za-z0-9_-]+/i.test(cleanCmd) ||
+        /^(?:track|verify|check)\s+(?:order\s+)?(?:ref\s+|reference\s+)?([A-Za-z0-9_-]{5,45})$/i.test(cleanCmd);
       const isDmPrefixed = /^(?:datamart|dm)\s+/i.test(cleanCmd);
-      if ((isSearchIntent && (isPhoneOrEmail || cleanCmd.split(/\s+/).length >= 2)) || isDmPrefixed) {
+      if ((isSearchIntent && (isPhoneOrEmail || cleanCmd.split(/\s+/).length >= 2)) || isDmPrefixed || isRefPattern) {
         if (!hasDeliveryCheckWord && !isRawPortalIds && !/\b(?:tickets?|withdrawals?|deposits?|claims?)\b/i.test(cleanCmd)) {
           const report = await executeDatamartSearch(cleanCmd, from);
           if (report) return sendWhatsApp(from, report);
@@ -11299,10 +11321,16 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 6) {
       const trackingPhone = normalizePhone(text);
-      if (trackingPhone.length !== 10 || !trackingPhone.startsWith("0")) {
-        return sendWhatsApp(from, `❌ Invalid phone number.\n\nPlease enter a valid Ghana phone number.\n\nExample:\n0241234567`);
+      if (trackingPhone.length === 10 && trackingPhone.startsWith("0")) {
+        return trackOrders(from, trackingPhone);
       }
-      return trackOrders(from, trackingPhone);
+      const isRefOrId = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(text) ||
+        /^[A-Za-z0-9_-]{5,35}$/.test(text.trim());
+      if (isRefOrId) {
+        const report = await executeDatamartSearch(text.trim(), from);
+        if (report) return sendWhatsApp(from, report);
+      }
+      return sendWhatsApp(from, `❌ Invalid input.\n\nPlease enter a valid Ghana phone number (e.g. 0241234567) or order reference (e.g. AGT-MTN-...).`);
     }
 
     /* =====================================================
