@@ -1108,42 +1108,23 @@ const lastDeliveryCheckCache = new Map();
 
 function formatFailedItemsReply(cached) {
   if (!cached) {
-    return `ℹ️ No delivery check has been run yet. Send your Portal Order IDs (e.g. *542552 542725 544880*) to audit them first!`;
+    return `No recent delivery check found.`;
   }
 
   const failedPortals = cached.failedPortalIds || [];
   const failedItems = cached.failedItems || [];
-
-  if (failedPortals.length === 0 && failedItems.length === 0) {
-    const orderRef = cached?.uniqueIds ? ` (${cached.uniqueIds.join(", ")})` : "";
-    return `💡 *No Failed Orders on Record!*\n\nThe last carrier delivery check${orderRef} had *0 failed orders*! All numbers across all batches were 100% delivered to MTN.`;
-  }
 
   // Extract distinct Portal IDs with failures
   const portalIdList = failedPortals.length > 0
     ? failedPortals.map(p => p.portalId)
     : [...new Set(failedItems.map(f => f.batchId).filter(Boolean))];
 
-  const copyablePortalIds = portalIdList.join("\n");
-
-  let out = `🚨 *FAILED PORTAL ORDER IDs (${portalIdList.length}):*\n\n` +
-    `\`\`\`\n` +
-    `${copyablePortalIds}\n` +
-    `\`\`\`\n\n`;
-
-  if (failedPortals.length > 0) {
-    out += `📋 *Portal Batch Breakdown:*\n`;
-    failedPortals.forEach(p => {
-      out += `• *Portal ID ${p.portalId}* ➔ ${p.failedCount} Failed (${p.totalItems} total lines)\n`;
-      if (p.failedPhones && p.failedPhones.length > 0) {
-        out += `  ❌ Numbers: ${p.failedPhones.slice(0, 5).join(", ")}${p.failedPhones.length > 5 ? ` (+${p.failedPhones.length - 5} more)` : ""}\n`;
-      }
-    });
-    out += `\n`;
+  if (portalIdList.length === 0) {
+    return `0 failed`;
   }
 
-  out += `💡 You can copy the Portal IDs above to paste, re-check, or refund directly on DataMart!`;
-  return out;
+  // Return ONLY the plain IDs, one per line, nothing else
+  return portalIdList.join("\n");
 }
 
 function normalizeBotPhone(p) {
