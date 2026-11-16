@@ -8536,6 +8536,144 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, out);
       }
 
+      // Direct Action Command: DataMart Delivery Check
+      const dmDeliveryCheckMatch = cmdText.match(/^(?:datamart|dm)\s*(?:delivery\s*check|delivery\s*audit)$/i);
+      if (dmDeliveryCheckMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent');
+        const jobs = Array.isArray(resp?.data) ? resp.data : Array.isArray(resp) ? resp : [];
+        if (jobs.length === 0) {
+          return sendWhatsApp(from, `🚚 *DATAMART DELIVERY CHECK:* No recent automated delivery audits on record.`);
+        }
+
+        const latest = jobs[0];
+        const dateStr = latest.createdAt ? new Date(latest.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "Recent";
+        const total = latest.totalOrders || latest.count || 0;
+        const delivered = latest.deliveredCount || latest.delivered || 0;
+        const failed = latest.failedCount || latest.failed || 0;
+        const status = (latest.status || "completed").toUpperCase();
+
+        let out = `🚚 *DATAMART DELIVERY CHECK AUDIT*\n\n` +
+          `📊 *Latest Audit:* *${status}*\n` +
+          `🕒 *Run Time:* ${dateStr}\n` +
+          `• 📦 *Orders Audited:* ${total.toLocaleString()}\n` +
+          `• ✅ *Carrier Confirmed:* ${delivered.toLocaleString()}\n` +
+          `• ❌ *Carrier Failed:* ${failed}\n\n`;
+
+        if (jobs.length > 1) {
+          out += `📋 *Recent Check History:*\n`;
+          jobs.slice(1, 4).forEach((j, i) => {
+            const t = j.createdAt ? new Date(j.createdAt).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "";
+            out += `• [${t}] ${j.status || "completed"} (${j.totalOrders || 0} orders, ${j.failedCount || 0} failed)\n`;
+          });
+          out += `\n`;
+        }
+
+        out += `💡 To trace a single order: *dm track [orderRef]*\n` +
+          `💡 To view undelivered complaints: *dm not received*`;
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: DataMart Failed Recovery
+      const dmFailedRecoveryMatch = cmdText.match(/^(?:datamart|dm)\s*failed\s*recovery$/i);
+      if (dmFailedRecoveryMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/failed-recovery');
+        const d = resp?.data || resp || {};
+        const totalFailed = d.totalFailed || 0;
+        const recovered = d.recoveredCount || 0;
+        const batches = d.batchCount || (Array.isArray(d.batches) ? d.batches.length : 0);
+
+        return sendWhatsApp(from,
+          `🔄 *DATAMART FAILED RECOVERY PIPELINE*\n\n` +
+          `• ❌ *Total Failed Orders:* ${totalFailed.toLocaleString()}\n` +
+          `• 🔄 *Batches Processed:* ${batches}\n` +
+          `• ✅ *Successfully Recovered:* ${recovered.toLocaleString()}\n\n` +
+          `💡 *Actions:*\n` +
+          `• Reply: *dm failed orders* to view individual failed orders & retry`
+        );
+      }
+
+      // Direct Action Command: DataMart Skipped Recovery
+      const dmSkippedRecoveryMatch = cmdText.match(/^(?:datamart|dm)\s*skipped\s*recovery$/i);
+      if (dmSkippedRecoveryMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/skipped-recovery');
+        const d = resp?.data || resp || {};
+        const totalSkipped = d.totalSkipped || 0;
+        const val = d.totalValue != null ? Number(d.totalValue).toFixed(2) : "0.00";
+        const recovered = d.recoveredCount || 0;
+
+        return sendWhatsApp(from,
+          `⏭️ *DATAMART SKIPPED RECOVERY PIPELINE*\n\n` +
+          `• ⏭️ *Total Skipped in Queue:* ${totalSkipped.toLocaleString()}\n` +
+          `• 💰 *Total Bundle Value:* GH₵ ${val}\n` +
+          `• ✅ *Recovered / Re-Dispatched:* ${recovered.toLocaleString()}\n\n` +
+          `All skipped queues are monitored 24/7 by the DataMart worker switch.`
+        );
+      }
+
+      // Direct Action Command: DataMart Not Received Customer Reports
+      const dmNotReceivedMatch = cmdText.match(/^(?:datamart|dm)\s*not\s*received$/i);
+      if (dmNotReceivedMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/not-received');
+        const d = resp?.data || resp || {};
+        const reports = Array.isArray(d.reports) ? d.reports : [];
+        const counts = d.counts || {};
+
+        let out = `⚠️ *DATAMART "NOT RECEIVED" COMPLAINTS*\n\n` +
+          `📊 *Summary:*\n` +
+          `• ⏳ *Pending Investigation:* ${counts.pending || reports.length}\n` +
+          `• ✅ *Resolved:* ${counts.resolved || 0}\n\n`;
+
+        if (reports.length === 0) {
+          out += `_Zero open "Not Received" customer reports right now!_ 🎉\n`;
+        } else {
+          out += `📋 *Recent Customer Complaints:*\n`;
+          reports.slice(0, 5).forEach((rep, idx) => {
+            const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+            const phone = rep.phoneNumber || rep.phone || "N/A";
+            const net = rep.network || "MTN";
+            const cap = rep.capacity != null ? `${rep.capacity}GB` : "";
+            const time = getTimeAgoGhana(rep.createdAt);
+            out += `${num} *${phone}* (${net} ${cap}) - ${time}\n` +
+              `  Ref: ${rep.orderReference || rep.reference || rep._id}\n`;
+          });
+          out += `\n💡 Reply: *dm search [phone]* to inspect any customer above!`;
+        }
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: DataMart Order Verify
+      const dmOrderVerifyMatch = cmdText.match(/^(?:datamart|dm)\s*order\s*verify\s+(.+)$/i);
+      if (dmOrderVerifyMatch) {
+        const query = dmOrderVerifyMatch[1].trim();
+        const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(query)}`);
+        const results = resp?.data?.results || [];
+        const ord = results.find(r => r.type === "order" || r.order)?.order || results[0]?.order || results[0];
+
+        if (!ord || (!ord.network && !ord.phoneNumber)) {
+          return sendWhatsApp(from, `🔍 No DataMart order found matching "*${query}*". Please verify order reference or phone number.`);
+        }
+
+        const net = ord.network || "MTN";
+        const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+        const phone = ord.phoneNumber || "N/A";
+        const status = (ord.status || "processing").toUpperCase();
+        const amt = ord.amount != null ? `GH₵ ${Number(ord.amount).toFixed(2)}` : "N/A";
+        const time = ord.createdAt ? new Date(ord.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "N/A";
+
+        return sendWhatsApp(from,
+          `✅ *DATAMART ORDER VERIFICATION*\n\n` +
+          `🆔 *Order ID:* *${ord._id}*\n` +
+          `📶 *Network & Size:* ${net} ${cap}\n` +
+          `📱 *Recipient:* *${phone}*\n` +
+          `💵 *Amount:* ${amt}\n` +
+          `📊 *Carrier Status:* *${status}*\n` +
+          `🕒 *Submitted:* ${time}\n\n` +
+          `💡 *Actions:*\n` +
+          `• Re-dispatch order: *dm retry ${ord._id}*\n` +
+          `• Refund to wallet: *dm refund ${ord._id}*`
+        );
+      }
+
       // Direct Action Command 0a: Credit Agent Wallet
       const creditAgentMatch = cmdText.match(/(?:credit|fund|top\s*up)\s+(?:agent\s+)?([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i);
       if (creditAgentMatch) {
