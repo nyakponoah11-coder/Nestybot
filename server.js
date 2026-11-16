@@ -5068,7 +5068,10 @@ async function getDatamartAuthToken(callerPhone = null) {
   }
 
   // 2. Default to Master Owner Token
-  if (cachedDatamartWorkerToken) return cachedDatamartWorkerToken;
+  if (cachedDatamartWorkerToken) {
+    if (normCaller) userDatamartTokenCache.set(normCaller, cachedDatamartWorkerToken);
+    return cachedDatamartWorkerToken;
+  }
   try {
     const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
       "datamart_auth_token", "datamart_login_email", "datamart_login_password"
@@ -5092,6 +5095,7 @@ async function getDatamartAuthToken(callerPhone = null) {
       }
     }
     cachedDatamartWorkerToken = token;
+    if (normCaller && token) userDatamartTokenCache.set(normCaller, token);
     return token;
   } catch (err) {
     console.warn("getDatamartAuthToken master error:", err.message);
@@ -5262,21 +5266,28 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
   const uniqueIds = [...new Set(ids)].slice(0, 10);
   if (uniqueIds.length === 0) return null;
 
-  async function checkSingle(targetId) {
+  // Single ID: run directly
+  if (uniqueIds.length === 1) {
+    const targetId = uniqueIds[0];
     const pId = isNaN(Number(targetId)) ? String(targetId).trim() : Number(targetId);
     const startRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/start', {
       method: 'POST',
       body: { portalOrderId: pId }
     }, callerPhone);
     const jobId = startRes?.data?.jobId || startRes?.jobId;
-    if (!jobId) return { id: targetId, error: startRes?.message || "Failed to initiate audit" };
+    if (!jobId) {
+      const errDetail = startRes?.message ? ` (${startRes.message})` : "";
+      return `⚠️ Carrier audit for ID *${targetId}* could not be completed${errDetail}. Please try again shortly.`;
+    }
 
+    let result = null;
+    let syncResult = null;
     for (let i = 0; i < 35; i++) {
       await new Promise(r => setTimeout(r, 1000));
       const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
-      if (jobRes?.data?.jobStatus === 'done' || jobRes?.data?.jobStatus === 'completed') {
-        const result = jobRes.data.result;
-        let syncResult = null;
+      const st = jobRes?.data?.jobStatus;
+      if (st === 'done' || st === 'completed') {
+        result = jobRes.data.result;
         if (result && Array.isArray(result.items) && result.items.length > 0) {
           const needsSync = result.needsUpdate > 0 || result.items.some(it => it.needsUpdate);
           if (needsSync) {
@@ -5291,122 +5302,156 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
             }
           }
         }
-        return { id: targetId, result, syncResult };
+        break;
       }
-      if (jobRes?.data?.jobStatus === 'failed') {
-        return { id: targetId, error: jobRes.data.error || "Carrier job failed" };
+      if (st === 'failed') {
+        return `⚠️ Carrier audit for ID *${targetId}* failed: ${jobRes.data.error || "Carrier job failed"}`;
       }
     }
-    return { id: targetId, timeout: true };
-  }
 
-  // If single ID: detailed audit
-  if (uniqueIds.length === 1) {
-    const single = await checkSingle(uniqueIds[0]);
-    const resObj = single?.result;
-    if (resObj) {
-      const batchNum = resObj.batchNumber || "N/A";
-      const totalItems = resObj.totalItems || 0;
-      const sent = resObj.sent || 0;
-      const pending = resObj.pending || 0;
-      const failed = resObj.failed || 0;
-      const dateStr = resObj.items?.[0]?.processedDate || "N/A";
-      const checkedBy = resObj.checkedBy || "Stony";
-      const isQueued = resObj.notProcessedYet || totalItems === 0 || (sent === 0 && failed === 0 && totalItems === 0);
+    if (!result) {
+      return `⚠️ Carrier audit for ID *${targetId}* could not be completed (Carrier check timed out on DataMart). Please try again shortly.`;
+    }
 
-      const syncObj = single?.syncResult;
-      let syncLine = "";
-      if (syncObj?.ordersCompleted > 0 || syncObj?.data?.ordersCompleted > 0) {
-        const count = syncObj?.ordersCompleted || syncObj?.data?.ordersCompleted;
-        syncLine = `⚡ *Auto-Completed:* ✅ Auto-marked *${count} orders* as Completed in DataMart!\n`;
-      } else if (resObj.needsUpdate === 0 && totalItems > 0 && resObj.allDelivered) {
-        syncLine = `⚡ *Auto-Completed:* ✅ DataMart orders already 100% in sync & Completed!\n`;
-      }
+    // Format single result
+    const batchNum = result.batchNumber || "N/A";
+    const totalItems = result.totalItems || 0;
+    const sent = result.sent || 0;
+    const pending = result.pending || 0;
+    const failed = result.failed || 0;
+    const dateStr = result.items?.[0]?.processedDate || "N/A";
+    const checkedBy = result.checkedBy || "Stony";
+    const isQueued = result.notProcessedYet || totalItems === 0 || (sent === 0 && failed === 0 && totalItems === 0);
 
-      let carrierResult = "";
-      let conclusionMsg = "";
+    let syncLine = "";
+    if (syncResult?.ordersCompleted > 0 || syncResult?.data?.ordersCompleted > 0) {
+      const count = syncResult?.ordersCompleted || syncResult?.data?.ordersCompleted;
+      syncLine = `⚡ *Auto-Completed:* ✅ Auto-marked *${count} orders* as Completed in DataMart!\n`;
+    } else if (result.needsUpdate === 0 && totalItems > 0 && result.allDelivered) {
+      syncLine = `⚡ *Auto-Completed:* ✅ DataMart orders already 100% in sync & Completed!\n`;
+    }
 
-      if (isQueued) {
-        carrierResult = "⏳ QUEUED AT VENDOR (In Processing Queue)";
-        conclusionMsg = resObj.portalMessage
-          ? `⏳ *Carrier Notice:* ${resObj.portalMessage}\nYour order is currently waiting in the vendor queue for carrier dispatch. Check again in a few minutes!`
-          : `⏳ *Carrier Notice:* Your order is in the vendor dispatch queue. Please check again shortly!`;
-      } else if (resObj.allDelivered && totalItems > 0) {
-        carrierResult = "✅ ALL 100% DELIVERED";
-        conclusionMsg = `💡 All ${totalItems} number(s) in this batch were successfully delivered to MTN!`;
-      } else if (failed > 0) {
-        carrierResult = `⚠️ PARTIAL / FAILED (${failed} Failed)`;
-        conclusionMsg = `⚠️ *Action Needed:* ${failed} number(s) failed delivery. Failed numbers are shown above for re-dispatch or refund!`;
-      } else {
-        carrierResult = "⏳ IN PROGRESS / PROCESSING";
-        conclusionMsg = `⏳ Processing: ${sent}/${totalItems} lines sent so far (${pending} pending). Check back shortly for final delivery status.`;
-      }
+    let carrierResult = "";
+    let conclusionMsg = "";
 
-      const failedItems = (resObj.items || []).filter(it => {
-        const s = String(it.status || "").toLowerCase();
-        return s !== "sent" && s !== "delivered";
-      });
-
-      const failedPortalSummaries = failedItems.length > 0 ? [{
-        portalId: String(uniqueIds[0]),
-        batchNumber: resObj.batchNumber,
-        failedCount: failedItems.length,
-        totalItems,
-        failedPhones: failedItems.map(it => it.phone)
-      }] : [];
-
-      if (callerPhone) {
-        const norm = normalizeBotPhone(callerPhone);
-        lastDeliveryCheckCache.set(norm, {
-          type: "single",
-          uniqueIds,
-          batchNumber: resObj.batchNumber,
-          failedPortalIds: failedPortalSummaries,
-          failedItems: failedItems.map(it => ({
-            batchId: uniqueIds[0],
-            batchNumber: resObj.batchNumber,
-            phone: it.phone,
-            dbOrderId: it.dbOrderId || null,
-            dataSize: it.dataSize || null,
-            status: it.status || "Failed"
-          })),
-          totalNumbers: totalItems,
-          totalSent: sent,
-          totalFailed: failed
-        });
-      }
-
-      // ONLY show failed numbers! Delivered numbers are ignored completely.
-      let failedSection = "";
-      if (failedItems.length > 0) {
-        failedSection = `\n❌ *FAILED NUMBERS (${failedItems.length}):*\n` +
-          failedItems.map(it => {
-            const sizePart = it.dataSize ? ` (${it.dataSize})` : "";
-            return `• \`${it.phone}\`${sizePart} ➔ *${it.status || "Failed"}*`;
-          }).join("\n") + "\n";
-      }
-
-      return `🚚 *DATAMART CARRIER DELIVERY CHECK*\n\n` +
-        `🆔 *Portal Order ID:* *${uniqueIds[0]}*\n` +
-        `📦 *Batch Number:* #${batchNum}\n` +
-        `📊 *Status:* *${carrierResult}*\n` +
-        `• 🔢 *Total Lines:* ${totalItems}\n` +
-        `• ✅ *Carrier Sent:* ${sent}\n` +
-        (pending > 0 || isQueued ? `• ⏳ *Pending:* ${pending}\n` : "") +
-        `• ❌ *Failed:* ${failed}\n` +
-        (syncLine ? `${syncLine}` : "") +
-        `🕒 *Processed:* ${dateStr}\n` +
-        `👤 *Audited By:* ${checkedBy}\n` +
-        `${failedSection}\n` +
-        `${conclusionMsg}`;
+    if (isQueued) {
+      carrierResult = "⏳ QUEUED AT VENDOR (In Processing Queue)";
+      conclusionMsg = result.portalMessage
+        ? `⏳ *Carrier Notice:* ${result.portalMessage}\nYour order is currently waiting in the vendor queue for carrier dispatch. Check again in a few minutes!`
+        : `⏳ *Carrier Notice:* Your order is in the vendor dispatch queue. Please check again shortly!`;
+    } else if (result.allDelivered && totalItems > 0) {
+      carrierResult = "✅ ALL 100% DELIVERED";
+      conclusionMsg = `💡 All ${totalItems} number(s) in this batch were successfully delivered to MTN!`;
+    } else if (failed > 0) {
+      carrierResult = `⚠️ PARTIAL / FAILED (${failed} Failed)`;
+      conclusionMsg = `⚠️ *Action Needed:* ${failed} number(s) failed delivery. Failed numbers are shown above for re-dispatch or refund!`;
     } else {
-      const errDetail = single?.error ? ` (${single.error})` : single?.timeout ? " (Carrier check timed out on DataMart)" : "";
-      return `⚠️ Carrier audit for ID *${uniqueIds[0]}* could not be completed${errDetail}. Please try again shortly.`;
+      carrierResult = "⏳ IN PROGRESS / PROCESSING";
+      conclusionMsg = `⏳ Processing: ${sent}/${totalItems} lines sent so far (${pending} pending). Check back shortly for final delivery status.`;
     }
+
+    const failedItems = (result.items || []).filter(it => {
+      const s = String(it.status || "").toLowerCase();
+      return s !== "sent" && s !== "delivered";
+    });
+
+    const failedPortalSummaries = failedItems.length > 0 ? [{
+      portalId: String(targetId),
+      batchNumber: result.batchNumber,
+      failedCount: failedItems.length,
+      totalItems,
+      failedPhones: failedItems.map(it => it.phone)
+    }] : [];
+
+    if (callerPhone) {
+      const norm = normalizeBotPhone(callerPhone);
+      lastDeliveryCheckCache.set(norm, {
+        type: "single",
+        uniqueIds: [targetId],
+        batchNumber: result.batchNumber,
+        failedPortalIds: failedPortalSummaries,
+        failedItems: failedItems.map(it => ({
+          batchId: targetId,
+          batchNumber: result.batchNumber,
+          phone: it.phone,
+          dbOrderId: it.dbOrderId || null,
+          dataSize: it.dataSize || null,
+          status: it.status || "Failed"
+        })),
+        totalNumbers: totalItems,
+        totalSent: sent,
+        totalFailed: failed
+      });
+    }
+
+    let failedSection = "";
+    if (failedItems.length > 0) {
+      failedSection = `\n❌ *FAILED NUMBERS (${failedItems.length}):*\n` +
+        failedItems.map(it => {
+          const sizePart = it.dataSize ? ` (${it.dataSize})` : "";
+          return `• \`${it.phone}\`${sizePart} ➔ *${it.status || "Failed"}*`;
+        }).join("\n") + "\n";
+    }
+
+    return `🚚 *DATAMART CARRIER DELIVERY CHECK*\n\n` +
+      `🆔 *Portal Order ID:* *${targetId}*\n` +
+      `📦 *Batch Number:* #${batchNum}\n` +
+      `📊 *Status:* *${carrierResult}*\n` +
+      `• 🔢 *Total Lines:* ${totalItems}\n` +
+      `• ✅ *Carrier Sent:* ${sent}\n` +
+      (pending > 0 || isQueued ? `• ⏳ *Pending:* ${pending}\n` : "") +
+      `• ❌ *Failed:* ${failed}\n` +
+      (syncLine ? `${syncLine}` : "") +
+      `🕒 *Processed:* ${dateStr}\n` +
+      `👤 *Audited By:* ${checkedBy}\n` +
+      `${failedSection}\n` +
+      `${conclusionMsg}`;
   }
 
-  // Bulk IDs: Poll concurrently in parallel
-  const results = await Promise.all(uniqueIds.map(id => checkSingle(id)));
+  // Bulk IDs: Unified staged runner
+  const jobEntries = [];
+  for (const targetId of uniqueIds) {
+    const pId = isNaN(Number(targetId)) ? String(targetId).trim() : Number(targetId);
+    const startRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/start', {
+      method: 'POST',
+      body: { portalOrderId: pId }
+    }, callerPhone);
+    const jobId = startRes?.data?.jobId || startRes?.jobId;
+    jobEntries.push({ id: targetId, pId, jobId, error: jobId ? null : (startRes?.message || "Failed to start audit") });
+    await new Promise(r => setTimeout(r, 80));
+  }
+
+  // Poll in unified cycles (up to 20 cycles = 30 seconds)
+  for (let cycle = 0; cycle < 20; cycle++) {
+    const pending = jobEntries.filter(j => j.jobId && !j.result && !j.failed);
+    if (pending.length === 0) break;
+    await new Promise(r => setTimeout(r, 1500));
+
+    await Promise.all(pending.map(async (entry) => {
+      try {
+        const jRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${entry.jobId}`, {}, callerPhone);
+        const status = jRes?.data?.jobStatus;
+        if (status === 'done' || status === 'completed') {
+          entry.result = jRes.data.result;
+          if (entry.result && Array.isArray(entry.result.items) && entry.result.items.length > 0) {
+            const needsSync = entry.result.needsUpdate > 0 || entry.result.items.some(it => it.needsUpdate);
+            if (needsSync) {
+              try {
+                const applyRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/apply', {
+                  method: 'POST',
+                  body: { portalOrderId: entry.pId, items: entry.result.items }
+                }, callerPhone);
+                entry.syncResult = applyRes?.data || applyRes;
+              } catch (_) {}
+            }
+          }
+        } else if (status === 'failed') {
+          entry.failed = true;
+          entry.error = jRes.data.error || "Carrier check failed";
+        }
+      } catch (_) {}
+    }));
+  }
 
   let totalNumbers = 0;
   let totalSent = 0;
@@ -5417,7 +5462,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
   const allFailedNumbers = [];
   const failedPortalSummaries = [];
 
-  results.forEach((r, idx) => {
+  jobEntries.forEach((r, idx) => {
     const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx] || `•`;
     if (r.result) {
       const b = r.result;
@@ -5463,7 +5508,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
             status: it.status || "Failed"
           });
         });
-        failedListForBatch = `  ❌ *Failed Numbers (${failedInBatch.length}):*\n` +
+        failedListForBatch = `  ❌ *Failed (${failedInBatch.length}):*\n` +
           failedInBatch.map(it => {
             const sizePart = it.dataSize ? ` (${it.dataSize})` : "";
             return `  • \`${it.phone}\`${sizePart} ➔ *${it.status || "Failed"}*`;
@@ -5485,7 +5530,8 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         `• Status: ${batchStatusLine}\n` +
         (failedListForBatch ? `${failedListForBatch}` : "");
     } else {
-      batchSummaries += `${numEmoji} *ID: ${r.id}* ➔ ⚠️ Audit timed out or invalid ID.\n`;
+      const errReason = r.error ? ` (${r.error})` : "";
+      batchSummaries += `${numEmoji} *ID: ${r.id}* ➔ ⚠️ Audit timed out on carrier${errReason}.\n`;
     }
   });
 
