@@ -6002,56 +6002,187 @@ function extractTicketTrackingInfo(ticket, messages = []) {
     ...(messages || []).map(m => m.text || "")
   ].join(" ");
 
-  // 1. Look for Track ID: e.g. MNG-9K3YMX, TRK-1234, TRACK-12345
-  const trackIdMatch = combined.match(/\b(MNG-[A-Z0-9]+|TRK-[A-Z0-9-]+|TRACK-\d+|TRACK-[A-Z0-9]+)\b/i);
-  // 2. Look for Order Reference: e.g. AGT-MTN-GW1013BF, WS-123, D1G-123, ORD-123, MN-ZV5763NQ
-  const refMatch = combined.match(/\b(AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|D1G[A-Z0-9-]+|ORD-[A-Z0-9-]+|MN-[A-Z0-9]+)\b/i);
+  // 1. Look for Track ID: labeled (e.g. "Track ID: 561077", "Tracking #561077", "Track: 561077") or prefixed (e.g. MNG-9K3YMX, TRK-1234, TRACK-12345)
+  const explicitTrackMatch = combined.match(/\b(?:track(?:ing)?\s*(?:id|#|number|code)?|portal\s*(?:id|#|order)?|batch\s*(?:id|#)?)\s*[:#=]?\s*([A-Za-z0-9_-]{4,15})\b/i);
+  const prefixTrackMatch = combined.match(/\b(MNG-[A-Z0-9]+|TRK-[A-Z0-9-]+|TRACK-\d+|TRACK-[A-Z0-9]+)\b/i);
+  const trackId = explicitTrackMatch ? explicitTrackMatch[1] : (prefixTrackMatch ? prefixTrackMatch[0] : null);
+
+  // 2. Look for Order Reference: labeled (e.g. "Ref: AGT-MTN-GW1013BF") or prefixed (e.g. AGT-MTN-GW1013BF, WS-123, D1G-123, ORD-123, MN-ZV5763NQ)
+  const explicitRefMatch = combined.match(/\b(?:ref(?:erence)?|order\s*(?:id|ref|reference)?)\s*[:#=]?\s*([A-Za-z0-9_-]{5,25})\b/i);
+  const prefixRefMatch = combined.match(/\b(AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|D1G[A-Z0-9-]+|ORD-[A-Z0-9-]+|MN-[A-Z0-9]+)\b/i);
+  const orderRef = explicitRefMatch ? explicitRefMatch[1] : (prefixRefMatch ? prefixRefMatch[0] : null);
+
   // 3. Look for Phone Number (024, 054, 055, 059, 020, 050, 027, 057)
-  const phoneMatch = combined.match(/\b(0[2357]\d{8})\b/);
+  const explicitPhoneMatch = combined.match(/\b(?:phone|number|recipient|line)\s*[:#=]?\s*(0[2357]\d{8})\b/i);
+  const generalPhoneMatch = combined.match(/\b(0[2357]\d{8})\b/);
+  const phone = explicitPhoneMatch ? explicitPhoneMatch[1] : (generalPhoneMatch ? generalPhoneMatch[0] : (ticket.customer?.phone ? String(ticket.customer.phone).replace(/\D/g, "") : null));
+
   // 4. Look for MoMo transaction ID (10-12 digits, not starting with 0[2357])
   const momoCandidates = combined.match(/\b(\d{10,12})\b/g) || [];
   const momoTrxId = momoCandidates.find(c => !/^0[2357]\d{8}$/.test(c)) || null;
 
   return {
-    trackId: trackIdMatch ? trackIdMatch[0] : null,
-    orderRef: refMatch ? refMatch[0] : null,
-    phone: phoneMatch ? phoneMatch[0] : (ticket.customer?.phone ? String(ticket.customer.phone).replace(/\D/g, "") : null),
+    trackId,
+    orderRef,
+    phone,
     momoTrxId,
     hasDeliveryWords: /\b(?:delivery|deliver|delivered|order|bundle|data|hasn'?t\s+come|not\s+come|not\s+in|not\s+received|waiting|delayed?|queue|processing|still|network|sent)\b/i.test(combined),
     hasPaymentWords: /\b(?:momo|deducted?|paystack|paid|refund|money|cash|wallet|credit|transaction)\b/i.test(combined)
   };
 }
 
-async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null) {
-  if (!targetPhoneOrRef) return null;
-  const q = String(targetPhoneOrRef).trim();
+async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
+  try {
+    const targetId = String(portalOrderId || "").trim();
+    if (!targetId) return null;
+    const pId = isNaN(Number(targetId)) ? targetId : Number(targetId);
+    const startRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/start', {
+      method: 'POST',
+      body: { portalOrderId: pId }
+    }, callerPhone);
+    const jobId = startRes?.data?.jobId || startRes?.jobId;
+    if (!jobId) return null;
 
-  // 1. Check database for store order matching this phone or reference
+    for (let i = 0; i < 25; i++) {
+      await new Promise(r => setTimeout(r, 800));
+      const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
+      const st = jobRes?.data?.jobStatus;
+      if (st === 'done' || st === 'completed') {
+        const result = jobRes.data?.result;
+        if (!result) return null;
+        const totalItems = result.totalItems || 0;
+        const sent = result.sent || 0;
+        const pending = result.pending || 0;
+        const failed = result.failed || 0;
+        const isQueued = Boolean(result.notProcessedYet || totalItems === 0 || (sent === 0 && failed === 0 && totalItems === 0));
+        const allDelivered = Boolean(result.allDelivered || (totalItems > 0 && sent === totalItems && failed === 0));
+
+        let status = "processing";
+        if (allDelivered) status = "delivered";
+        else if (failed > 0) status = "failed";
+        else if (isQueued) status = "queued";
+
+        return {
+          found: true,
+          portalId: targetId,
+          batchNumber: result.batchNumber || null,
+          totalItems,
+          sent,
+          pending,
+          failed,
+          allDelivered,
+          isQueued,
+          portalMessage: result.portalMessage || null,
+          status,
+          rawStatus: status,
+          items: result.items || []
+        };
+      }
+      if (st === 'failed') {
+        return { found: true, portalId: targetId, status: "failed", rawStatus: "failed", error: jobRes.data?.error };
+      }
+    }
+  } catch (err) {
+    console.warn("checkDatamartCarrierRaw error:", err.message);
+  }
+  return null;
+}
+
+async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, extraCandidates = {}) {
+  if (!targetPhoneOrRef && !extraCandidates.trackId && !extraCandidates.orderRef && !extraCandidates.phone) return null;
+  const q = String(targetPhoneOrRef || extraCandidates.trackId || extraCandidates.orderRef || extraCandidates.phone || "").trim();
+  const trackCandidate = extraCandidates.trackId || (/^\d{4,9}$/.test(q) ? q : null);
+  const refCandidate = extraCandidates.orderRef || (!/^\d{4,9}$/.test(q) && !/^0[2357]\d{8}$/.test(q) ? q : null);
+  const phoneCandidate = extraCandidates.phone || (/^0[2357]\d{8}$/.test(q) ? q : null);
+
+  // 1. Direct DataMart Portal Delivery Check if we have a numeric Track ID (e.g. 561077)
+  if (trackCandidate && /^\d{4,9}$/.test(trackCandidate)) {
+    try {
+      const carrierAudit = await checkDatamartCarrierRaw(trackCandidate, callerPhone);
+      if (carrierAudit && carrierAudit.found) {
+        return {
+          found: true,
+          isCarrierAudit: true,
+          reference: trackCandidate,
+          trackId: trackCandidate,
+          batchNumber: carrierAudit.batchNumber,
+          totalItems: carrierAudit.totalItems,
+          sent: carrierAudit.sent,
+          pending: carrierAudit.pending,
+          failed: carrierAudit.failed,
+          allDelivered: carrierAudit.allDelivered,
+          isQueued: carrierAudit.isQueued,
+          portalMessage: carrierAudit.portalMessage,
+          status: carrierAudit.status,
+          rawStatus: carrierAudit.rawStatus,
+          network: "MTN",
+          phone: phoneCandidate || q
+        };
+      }
+    } catch (_) {}
+  }
+
+  // 2. Check store database orders matching reference, phone, or datamart_reference
   let matchedOrder = null;
-  try {
-    const { data: dbOrders } = await supabase
-      .from("orders")
-      .select("reference, recipient_phone, network, capacity, amount, delivery_status, payment_status, created_at, datamart_reference")
-      .or(`reference.ilike.%${q}%,recipient_phone.ilike.%${q}%,datamart_reference.ilike.%${q}%`)
-      .order("created_at", { ascending: false })
-      .limit(3);
-    if (dbOrders && dbOrders.length > 0) {
-      matchedOrder = dbOrders[0];
-    }
-  } catch (_) {}
+  const queryCandidates = [q, refCandidate, phoneCandidate, trackCandidate].filter(Boolean);
+  for (const cand of queryCandidates) {
+    try {
+      const { data: dbOrders } = await supabase
+        .from("orders")
+        .select("reference, recipient_phone, network, capacity, amount, delivery_status, payment_status, created_at, datamart_reference")
+        .or(`reference.ilike.%${cand}%,recipient_phone.ilike.%${cand}%,datamart_reference.ilike.%${cand}%`)
+        .order("created_at", { ascending: false })
+        .limit(3);
+      if (dbOrders && dbOrders.length > 0) {
+        matchedOrder = dbOrders[0];
+        break;
+      }
+    } catch (_) {}
+  }
 
-  // 2. Check DataMart support search endpoint
+  // 3. Search DataMart Support Search (/api/support/search?query=...)
   let dmOrder = null;
-  try {
-    const dmRes = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(q)}`, {}, callerPhone);
-    const dOrders = dmRes?.data?.results?.orders || (Array.isArray(dmRes?.data?.results) ? dmRes.data.results.filter(x => x.type === "order" || x.network) : []);
-    if (dOrders && dOrders.length > 0) {
-      dmOrder = dOrders[0];
-    }
-  } catch (_) {}
+  for (const cand of queryCandidates) {
+    try {
+      const dmRes = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(cand)}`, {}, callerPhone);
+      const dOrders = dmRes?.data?.results?.orders || (Array.isArray(dmRes?.data?.results) ? dmRes.data.results.filter(x => x.type === "order" || x.network) : []);
+      if (dOrders && dOrders.length > 0) {
+        dmOrder = dOrders[0];
+        break;
+      }
+    } catch (_) {}
+  }
 
-  // 3. Check carrier live status
-  const refToCheck = matchedOrder?.datamart_reference || matchedOrder?.reference || dmOrder?.orderId || dmOrder?.reference || q;
+  // 4. If dmOrder contains a carrier portalId (apiOrderId or exportTracking.portalId), run carrier check on it!
+  const dmPortalId = dmOrder?.apiOrderId || dmOrder?.exportTracking?.portalId || (dmOrder?.portalOrderId && dmOrder.portalOrderId !== dmOrder._id ? dmOrder.portalOrderId : null);
+  if (dmPortalId && /^\d{4,9}$/.test(String(dmPortalId))) {
+    try {
+      const auditRes = await checkDatamartCarrierRaw(dmPortalId, callerPhone);
+      if (auditRes && auditRes.found) {
+        return {
+          found: true,
+          isCarrierAudit: true,
+          reference: dmOrder.geonetReference || dmOrder.originalReference || dmOrder.orderId || dmPortalId,
+          trackId: dmPortalId,
+          batchNumber: auditRes.batchNumber || dmOrder.exportTracking?.batchNumber,
+          totalItems: auditRes.totalItems,
+          sent: auditRes.sent,
+          pending: auditRes.pending,
+          failed: auditRes.failed,
+          allDelivered: auditRes.allDelivered,
+          isQueued: auditRes.isQueued,
+          status: auditRes.status,
+          rawStatus: auditRes.rawStatus,
+          network: dmOrder.network || "MTN",
+          capacity: dmOrder.capacity || "",
+          phone: dmOrder.phoneNumber || dmOrder.recipientPhone || phoneCandidate || q
+        };
+      }
+    } catch (_) {}
+  }
+
+  // 5. Check real-time carrier status for references
+  const refToCheck = matchedOrder?.datamart_reference || matchedOrder?.reference || dmOrder?.orderId || dmOrder?.reference || refCandidate;
   let liveCarrierStatus = null;
   if (refToCheck && /^[A-Za-z0-9_-]{5,}$/.test(refToCheck)) {
     try {
@@ -6059,14 +6190,28 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null) 
     } catch (_) {}
   }
 
-  const finalStatus = liveCarrierStatus?.deliveryStatus || matchedOrder?.delivery_status || dmOrder?.status || dmOrder?.deliveryStatus || "processing";
+  const isConfirmedFound = Boolean(matchedOrder || dmOrder || (liveCarrierStatus && liveCarrierStatus.rawStatus !== "processing"));
+  let finalStatus = "unverified";
+  if (liveCarrierStatus && liveCarrierStatus.deliveryStatus) {
+    finalStatus = liveCarrierStatus.deliveryStatus;
+  } else if (matchedOrder && matchedOrder.delivery_status) {
+    finalStatus = matchedOrder.delivery_status;
+  } else if (dmOrder) {
+    const dmSt = String(dmOrder.status || dmOrder.deliveryStatus || "").toLowerCase();
+    if (dmSt === "completed" || dmSt === "delivered") finalStatus = "delivered";
+    else if (dmSt === "failed" || dmSt === "cancelled") finalStatus = "failed";
+    else if (dmSt === "processing" || dmSt === "in_progress") finalStatus = "processing";
+    else if (dmSt) finalStatus = dmSt;
+  }
+
   const network = matchedOrder?.network || dmOrder?.network || "network";
   const capacity = matchedOrder?.capacity || dmOrder?.capacity || "";
-  const phone = matchedOrder?.recipient_phone || dmOrder?.recipientPhone || dmOrder?.phone || q;
-  const ref = matchedOrder?.reference || dmOrder?.orderId || dmOrder?.reference || q;
+  const phone = matchedOrder?.recipient_phone || dmOrder?.phoneNumber || dmOrder?.recipientPhone || phoneCandidate || q;
+  const ref = matchedOrder?.reference || dmOrder?.geonetReference || dmOrder?.originalReference || dmOrder?.orderId || dmOrder?.reference || refCandidate || q;
 
   return {
-    found: Boolean(matchedOrder || dmOrder || (liveCarrierStatus && liveCarrierStatus.rawStatus !== "processing")),
+    found: isConfirmedFound,
+    isCarrierAudit: false,
     reference: ref,
     network,
     capacity,
@@ -6252,11 +6397,19 @@ async function closeRezolvTicket(identifier, status = "resolved") {
   }
 }
 
-async function cleanRezolvIdleGreetingTickets(maxToClean = 35) {
+async function cleanRezolvIdleGreetingTickets(maxToClean = 40) {
   try {
     let allTickets = [];
+    // 1. Fetch active/open tickets
     for (let p = 1; p <= 5; p++) {
       const res = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&page=${p}&limit=50`);
+      const list = res.data?.data?.tickets || res.data?.tickets || [];
+      if (!Array.isArray(list) || list.length === 0) break;
+      allTickets.push(...list);
+    }
+    // 2. ALSO fetch resolved tickets (so tickets like Elie, Visitor, Collins, Bello get permanently purged from 'All 53' view!)
+    for (let p = 1; p <= 4; p++) {
+      const res = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&status=resolved&page=${p}&limit=50`);
       const list = res.data?.data?.tickets || res.data?.tickets || [];
       if (!Array.isArray(list) || list.length === 0) break;
       allTickets.push(...list);
@@ -6266,14 +6419,20 @@ async function cleanRezolvIdleGreetingTickets(maxToClean = 35) {
       return "⚠️ Could not retrieve tickets from Rezolv.";
     }
 
-    const idleTickets = allTickets.filter(t => {
-      // Don't re-delete already closed tickets
+    // Deduplicate by _id
+    const seenMap = new Map();
+    allTickets.forEach(t => { if (t && t._id) seenMap.set(t._id, t); });
+    const uniqueTickets = Array.from(seenMap.values());
+
+    const idleTickets = uniqueTickets.filter(t => {
+      // Don't re-delete already closed tickets if status is explicitly closed
       if (t.status === "closed") return false;
       const txt = (t.lastMessage?.text || "").trim().toLowerCase();
-      const isBotGreeting = txt.startsWith("hi there!") || txt.includes("thanks for reaching out") || txt.startsWith("bot: hi there");
+      const isBotGreeting = txt.startsWith("hi there!") || txt.includes("thanks for reaching out") || txt.startsWith("bot: hi there") || txt.includes("please describe your issue");
       const isShortGreeting = /^(?:hi|hello|hey|good\s*(?:morning|afternoon|evening)|yo|boss|bossu)\W*$/i.test(txt);
-      const isVisitorOrEmpty = (t.customer?.name || "").toLowerCase() === "visitor" || !t.customer?.phone;
-      return isBotGreeting || isShortGreeting || isVisitorOrEmpty;
+      const isVisitor = (t.customer?.name || "").toLowerCase() === "visitor";
+      const isEmptyOrGreetingOnly = isBotGreeting || isShortGreeting || (isVisitor && (!txt || isBotGreeting));
+      return isEmptyOrGreetingOnly;
     });
 
     if (idleTickets.length === 0) {
@@ -6359,13 +6518,21 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
   const lowerLast = String(actualCustomerLastMsg || lastMsg || "").toLowerCase();
 
   // Extract reference codes & phone numbers across the whole conversation history
-  const phoneMatch = allTexts.match(/\b(0[2357]\d{8})\b/);
-  const trackIdMatch = allTexts.match(/\b(MNG-[A-Z0-9]+|TRK-[A-Z0-9-]+|TRACK-\d+|TRACK-[A-Z0-9]+)\b/i);
-  const orderRefMatch = allTexts.match(/\b(AGT-[A-Z0-9-]+|WS-[A-Z0-9]+|D1G[A-Z0-9]+|MN-[A-Z0-9]+)\b/i);
-  const momoMatch = allTexts.match(/\b(\d{10,12})\b/);
-  const validMomo = momoMatch && !phoneMatch?.[1]?.includes(momoMatch[1]) ? momoMatch[1] : null;
+  const explicitTrack = allTexts.match(/\b(?:track(?:ing)?\s*(?:id|#|number|code)?|portal\s*(?:id|#|order)?|batch\s*(?:id|#)?)\s*[:#=]?\s*([A-Za-z0-9_-]{4,15})\b/i);
+  const prefixTrack = allTexts.match(/\b(MNG-[A-Z0-9]+|TRK-[A-Z0-9-]+|TRACK-\d+|TRACK-[A-Z0-9]+)\b/i);
+  const trackIdFound = explicitTrack ? explicitTrack[1] : (prefixTrack ? prefixTrack[0] : trackInfo.trackId);
 
-  const targetQuery = trackIdMatch?.[1] || orderRefMatch?.[1] || phoneMatch?.[1] || trackInfo.trackId || trackInfo.orderRef || trackInfo.phone;
+  const explicitRef = allTexts.match(/\b(?:ref(?:erence)?|order\s*(?:id|ref|reference)?)\s*[:#=]?\s*([A-Za-z0-9_-]{5,25})\b/i);
+  const prefixRef = allTexts.match(/\b(AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|D1G[A-Z0-9-]+|ORD-[A-Z0-9-]+|MN-[A-Z0-9]+)\b/i);
+  const orderRefFound = explicitRef ? explicitRef[1] : (prefixRef ? prefixRef[0] : trackInfo.orderRef);
+
+  const phoneMatch = allTexts.match(/\b(?:phone|number|recipient|line)\s*[:#=]?\s*(0[2357]\d{8})\b/i) || allTexts.match(/\b(0[2357]\d{8})\b/);
+  const phoneFound = phoneMatch ? (phoneMatch[1] || phoneMatch[0]) : trackInfo.phone;
+
+  const momoMatch = allTexts.match(/\b(\d{10,12})\b/);
+  const validMomo = momoMatch && !phoneFound?.includes(momoMatch[1]) ? momoMatch[1] : null;
+
+  const targetQuery = trackIdFound || orderRefFound || phoneFound;
 
   // ── 1. SYNTHESIZE WHAT THE CUSTOMER IS ACTUALLY COMPLAINING ABOUT ──
   let mainIssue = "";
@@ -6395,26 +6562,44 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
   // ── 2. LIVE DATAMART DELIVERY TRACKING & CONTEXT-AWARE DRAFT ──
   const isDeliveryIntent = trackInfo.hasDeliveryWords || /\b(data|bundle|order|deliver|received|drop|land|balance|ghc|gb)\b/i.test(lowerAll);
   if (targetQuery && isDeliveryIntent) {
-    const liveTrack = await trackSupportDeliveryTarget(targetQuery);
+    const liveTrack = await trackSupportDeliveryTarget(targetQuery, null, {
+      trackId: trackIdFound,
+      orderRef: orderRefFound,
+      phone: phoneFound
+    });
+
     if (liveTrack && liveTrack.found) {
-      const st = (liveTrack.status || "processing").toLowerCase();
+      const st = (liveTrack.status || "").toLowerCase();
       const net = (liveTrack.network || "telecom").toUpperCase();
       const ph = liveTrack.phone || targetQuery;
       const refCode = liveTrack.reference || targetQuery;
+      const batchPart = liveTrack.batchNumber ? ` · Batch #${liveTrack.batchNumber}` : "";
 
       if (st === "delivered" || st === "completed" || st === "success") {
-        trackingDiagnostic = `✅ DELIVERED on ${net} to ${ph} (Ref: ${refCode})`;
-        draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on DataMart and it is confirmed DELIVERED on the ${net} network to ${ph}. Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
+        if (liveTrack.isCarrierAudit) {
+          trackingDiagnostic = `✅ ALL DELIVERED on DataMart (Tracking #${liveTrack.trackId || refCode}${batchPart} - ${liveTrack.sent || liveTrack.totalItems} Sent)`;
+          draftText = `Hello ${firstName}, we have verified your order on DataMart (Tracking #${liveTrack.trackId || refCode}) and it is confirmed ALL DELIVERED. Kindly dial *124# or *126# to verify your main balance. Thank you!`;
+        } else {
+          trackingDiagnostic = `✅ DELIVERED on ${net} to ${ph} (Ref: ${refCode})`;
+          draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on DataMart and it is confirmed DELIVERED on the ${net} network to ${ph}. Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
+        }
       } else if (st === "failed" || st === "cancelled") {
-        trackingDiagnostic = `❌ FAILED on ${net} (Ref: ${refCode})${liveTrack.failureReason ? ` - ${liveTrack.failureReason}` : ""}`;
+        const failMsg = liveTrack.failureReason ? ` - ${liveTrack.failureReason}` : (liveTrack.failed ? ` (${liveTrack.failed} Failed)` : "");
+        trackingDiagnostic = `❌ FAILED on ${net} (Ref: ${refCode})${failMsg}`;
         draftText = `Hello ${firstName}, we have verified order ${refCode} and noticed a network dispatch issue. We are reprocessing your dispatch right now so your data arrives on ${ph} immediately. Thank you for your patience!`;
+      } else if (st === "queued" || liveTrack.isQueued) {
+        trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE on DataMart (Ref: ${refCode}${batchPart})`;
+        draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on DataMart. It is currently in the vendor queue awaiting network dispatch. Your data will land shortly. Kindly dial *124# to check. Thank you for your patience!`;
+      } else if (st === "processing") {
+        trackingDiagnostic = `⏳ PROCESSING on ${net} (Ref: ${refCode})`;
+        draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on DataMart. It is currently processing on the network. Your data will reflect shortly. Kindly dial *124# to check. Thank you!`;
       } else {
-        trackingDiagnostic = `⏳ IN QUEUE on ${net} (Ref: ${refCode}) - Standard delivery line`;
-        draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on DataMart. It is currently in the ${net} delivery queue and processing. Your data will land shortly. Kindly dial *124# to check. Thank you for your patience!`;
+        trackingDiagnostic = `🔍 Order Ref: ${refCode} (Status: ${st})`;
+        draftText = `Hello ${firstName}, we are currently verifying your order (${refCode}) on DataMart. Kindly dial *124# to check your balance, or let us know if it hasn't reflected yet. Thank you!`;
       }
     } else {
-      trackingDiagnostic = `🔍 Searched ${targetQuery} on DataMart: In queue on network`;
-      draftText = `Hello ${firstName}, we are currently tracking your order (${targetQuery}) on the telecom network. It is in progress and will reflect on your phone shortly. Kindly dial *124# to verify. Thank you!`;
+      trackingDiagnostic = `⚠️ Order (${targetQuery}) not found on DataMart carrier logs`;
+      draftText = `Hello ${firstName}, thank you for reaching out. We are verifying your order details (${targetQuery}) on the network right now. Please confirm the recipient phone number if different so we can track and resolve this immediately. Thank you!`;
     }
   }
 
@@ -9739,11 +9924,13 @@ app.post("/webhook", async (req, res) => {
 
       // ── SWITCH TO FULLY LOCKED-IN SUPPORT MODE (REZOLV & DATAMART) ──
       const isSupportModeSwitch =
-        /\b(?:rezolv|resolv|rezolve|resovl)\s*(?:mode)?\b/i.test(cleanInput) ||
+        /\b(?:rezolv|resolv|rezolve|resovl|resolve)\s*(?:mode)?\b/i.test(cleanInput) ||
         /\b(?:support\s*mode|live\s*support(?:\s*mode)?|support\s*desk|customer\s*support\s*mode)\b/i.test(cleanInput) ||
-        /^(?:support|rezolv)$/i.test(cleanInput);
+        /^(?:support|rezolv|resolv|resolve)$/i.test(cleanInput);
 
-      const isSpecificRezolvAction = /^(?:reply|tell|close|resolve|ticket|view\s+ticket)\b/i.test(cleanInput);
+      const isSpecificRezolvAction =
+        /^(?:reply|tell|close\s+ticket|resolve\s+ticket|view\s+ticket|check\s+ticket)\b/i.test(cleanInput) ||
+        (/^(?:close|resolve)\s+(?:TKT-?\d+|[a-f0-9]{24})\b/i.test(cleanInput));
 
       if (isSupportModeSwitch && !isSpecificRezolvAction) {
         setUserMode(from, "support");
