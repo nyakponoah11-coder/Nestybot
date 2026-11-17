@@ -5811,6 +5811,32 @@ async function rezolvApiRequest(path, options = {}) {
   });
 }
 
+async function getRezolvInboxStats() {
+  try {
+    const res = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
+    const tickets = res.data?.data?.tickets || res.data?.tickets || [];
+    if (!Array.isArray(tickets)) return null;
+    const active = tickets.filter(t => t.status !== "resolved" && t.status !== "closed");
+    const inProgress = active.filter(t => t.status === "in_progress");
+    const open = active.filter(t => t.status === "open");
+    const urgent = active.filter(t => t.unreadCount > 0 || (t.lastMessage?.text || "").includes("Needs a human"));
+    return {
+      totalActive: active.length,
+      inProgress: inProgress.length,
+      open: open.length,
+      urgent: urgent.length,
+      recentTickets: active.slice(0, 5).map(t => ({
+        ticketNumber: t.ticketNumber,
+        customerName: t.customer?.name || "Visitor",
+        status: t.status,
+        lastMessage: (t.lastMessage?.text || "").slice(0, 60)
+      }))
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
 async function findRezolvTicket(identifier) {
   if (!identifier) return null;
   const rawId = String(identifier).trim();
@@ -7977,15 +8003,49 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   // 2. Email, Phone, Customer Search, or Order Reference
   const emailMatch = cleanInput.match(/[\w.-]+@[\w.-]+\.\w+/);
   const phoneMatch = cleanInput.match(/\b(0[2357]\d{8}|\+?233[2357]\d{8})\b/);
-  const isSearchIntent = /\b(?:search|lookup|find|customer|agent|check|who|investigate|ref|reference|trx|order|track)\b/i.test(cleanInput);
+  const isSearchIntent = /\b(?:search|lookup|find|investigate|track)\b/i.test(cleanInput) ||
+    /^(?:check|who\s+is)\s+[A-Za-z0-9_.-]+/i.test(cleanInput);
   const isRefPattern = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(cleanInput) ||
     /^(?:(?:dm|datamart)\s+)?(?:ref|reference|trx|trxref|order\s*ref|order\s*reference)(?:\s*[:#=])?\s*[A-Za-z0-9_-]+/i.test(cleanInput) ||
     /^(?:track|verify|check)\s+(?:order\s+)?(?:ref\s+|reference\s+)?([A-Za-z0-9_-]{5,45})$/i.test(cleanInput);
-  const isNameOrWord = /^[a-zA-Z\s]{3,35}$/.test(cleanInput) && !/^(?:exit|tickets?|urgent|pending|withdrawals?|deposits?|claims?|recovery|stats|my\s*datamart)$/i.test(cleanInput);
+
+  const hasSentenceWords = /\b(?:what|how|why|when|where|who|is|are|can|could|will|would|do|did|does|tell|ask|mark|resolve|clean|clear|how\s+many|inbox|messages?|tickets?|now|about|please|saying|said|reply|give)\b/i.test(cleanInput);
+  const isNameOrWord = !hasSentenceWords && /^[a-zA-Z]{3,20}(?:\s+[a-zA-Z]{2,20})?$/.test(cleanInput.trim()) && !/^(?:exit|tickets?|urgent|pending|withdrawals?|deposits?|claims?|recovery|stats|my\s*datamart)$/i.test(cleanInput);
 
   if (emailMatch || phoneMatch || isSearchIntent || isNameOrWord || isRefPattern) {
     const report = await executeDatamartSearch(cleanInput, from);
     if (report) return sendWhatsApp(from, report);
+  }
+
+  // 2b. Natural "What about [Name]" / "What of [Name]" / "How about [Name]"
+  const whatAboutMatch = cleanInput.match(/^(?:what\s+about|what\s+of|how\s+about|check\s+on)\s+([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\??$/i);
+  if (whatAboutMatch) {
+    const target = whatAboutMatch[1].trim();
+    const rep = await getRezolvTicketConversation(target);
+    return sendWhatsApp(from, rep);
+  }
+
+  // 2c. Natural "how many inbox messages now" / "how many in inbox" / "inbox count"
+  if (/\b(?:how\s+many\s+(?:inbox|messages?|tickets?)|inbox\s*(?:count|status|messages?|mesaages?)|how\s+many\s+(?:in\s+inbox|tickets))\b/i.test(cleanInput)) {
+    const stats = await getRezolvInboxStats();
+    if (stats) {
+      return sendWhatsApp(from,
+        `📬 *REZOLV INBOX STATUS UPDATE:*\n\n` +
+        `• 💬 *Total Active Conversations:* *${stats.totalActive}*\n` +
+        `• ⏳ *In Progress:* *${stats.inProgress}*\n` +
+        `• 🟢 *Open / Unassigned:* *${stats.open}*\n` +
+        `• 🚨 *Urgent / Needs Attention:* *${stats.urgent}*\n\n` +
+        `💡 *Recent in queue:*\n` +
+        stats.recentTickets.map(t => `• *${t.customerName}* (${t.ticketNumber}): "${t.lastMessage}"`).join("\n") +
+        `\n\nDrop any customer name or ticket number to view details or reply!`
+      );
+    }
+  }
+
+  // 2d. Natural "mark all ticket as resolve" / "mark all as resolved" / "resolve all tickets"
+  if (/\b(?:mark\s+all\s+(?:tickets?\s+)?as\s+resolve|resolve\s+all|close\s+all|clean\s+all)\b/i.test(cleanInput)) {
+    const cleanupRep = await cleanRezolvIdleGreetingTickets(30);
+    return sendWhatsApp(from, cleanupRep);
   }
 
   // 3a. Rezolv Draft Reply (checked first so it doesn't collide with direct reply)
@@ -8486,6 +8546,35 @@ app.post("/webhook", async (req, res) => {
       const tktId = (topViewMatch[1] || topViewMatch[2] || "").trim();
       const rep = await getRezolvTicketConversation(tktId);
       return sendWhatsApp(from, rep);
+    }
+
+    // ── TOP-LEVEL NATURAL SUPPORT QUERIES ──
+    const topWhatAboutMatch = cleanCmd.match(/^(?:what\s+about|what\s+of|how\s+about|check\s+on)\s+([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\??$/i);
+    if (topWhatAboutMatch) {
+      const target = topWhatAboutMatch[1].trim();
+      const rep = await getRezolvTicketConversation(target);
+      return sendWhatsApp(from, rep);
+    }
+
+    if (/\b(?:how\s+many\s+(?:inbox|messages?|tickets?)|inbox\s*(?:count|status|messages?|mesaages?)|how\s+many\s+(?:in\s+inbox|tickets))\b/i.test(cleanCmd)) {
+      const stats = await getRezolvInboxStats();
+      if (stats) {
+        return sendWhatsApp(from,
+          `📬 *REZOLV INBOX STATUS UPDATE:*\n\n` +
+          `• 💬 *Total Active Conversations:* *${stats.totalActive}*\n` +
+          `• ⏳ *In Progress:* *${stats.inProgress}*\n` +
+          `• 🟢 *Open / Unassigned:* *${stats.open}*\n` +
+          `• 🚨 *Urgent / Needs Attention:* *${stats.urgent}*\n\n` +
+          `💡 *Recent in queue:*\n` +
+          stats.recentTickets.map(t => `• *${t.customerName}* (${t.ticketNumber}): "${t.lastMessage}"`).join("\n") +
+          `\n\nDrop any customer name or ticket number to view details or reply!`
+        );
+      }
+    }
+
+    if (/\b(?:mark\s+all\s+(?:tickets?\s+)?as\s+resolve|resolve\s+all|close\s+all|clean\s+all)\b/i.test(cleanCmd)) {
+      const cleanupRep = await cleanRezolvIdleGreetingTickets(30);
+      return sendWhatsApp(from, cleanupRep);
     }
 
     // 1. Connect / Link DataMart Account (Self-service or Owner assignment)
@@ -9150,12 +9239,20 @@ app.post("/webhook", async (req, res) => {
 
       // ── DEDICATED SUPPORT & DATAMART CONSOLE MODE HANDLER ──
       const activeOwnerMode = getUserMode(from);
-      if (activeOwnerMode === "support" || activeOwnerMode === "datamart") {
+      if (activeOwnerMode === "support") {
         if (/^(?:exit|normal\s*mode|stony|stony\s*mode|store\s*mode|back|quit|leave|stop)$/i.test(cleanInput)) {
           setUserMode(from, "ai");
           await saveCustomerSession(from, { step: 99 });
           await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "ai" }, { onConflict: "key" });
           return sendWhatsApp(from, `👑 Exited Support Mode. Switched back to *DATA 1 GH Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
+        }
+        // In support mode, natural messages proceed straight down to AI & natural support handlers!
+      } else if (activeOwnerMode === "datamart") {
+        if (/^(?:exit|normal\s*mode|stony|stony\s*mode|store\s*mode|back|quit|leave|stop)$/i.test(cleanInput)) {
+          setUserMode(from, "ai");
+          await saveCustomerSession(from, { step: 99 });
+          await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "ai" }, { onConflict: "key" });
+          return sendWhatsApp(from, `👑 Exited DataMart Mode. Switched back to *DATA 1 GH Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
         }
 
         const dmHandled = await processDatamartConsoleCommand(from, cleanInput, true);
