@@ -5386,6 +5386,28 @@ function extractProposedActionFromText(rawText) {
     };
   }
 
+  // 8. Batch support inbox replies proposal (recovers batch drafts if memory was reset)
+  if (/DATAMART LIVE SUPPORT.*DRAFTS READY/i.test(rawText) || /Dispatch all \d+ live as Stony/i.test(rawText)) {
+    const drafts = [];
+    const blockRegex = /(?:[1-5]️⃣|\[\d+\])\s*\*?\[(TKT-?\d+|[a-f0-9]{24})\]\*?\s*\*?([^*\n]+)?\*?[\s\S]*?•\s*📝\s*\*?Draft Reply:\*?\s*[\n\r]*["“]([\s\S]*?)["”](?=(?:[\n\r]+(?:[1-5]️⃣|\[\d+\])|━|👉|$))/gi;
+    let match;
+    while ((match = blockRegex.exec(rawText)) !== null) {
+      const ticketId = match[1].trim();
+      const customerName = (match[2] || "Customer").trim();
+      const draftMessage = match[3].trim();
+      drafts.push({ ticketId, customerName, draftMessage });
+    }
+    if (drafts.length > 0) {
+      return {
+        action: {
+          type: "batch_rezolv_reply",
+          drafts
+        },
+        fullTag: null
+      };
+    }
+  }
+
   return null;
 }
 
@@ -6897,6 +6919,13 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
               type: "batch_rezolv_reply",
               drafts: drafts
             });
+            try {
+              const normFrom = String(from || "").replace(/\D/g, "");
+              await supabase.from("settings").upsert({
+                key: `latest_support_batch_${normFrom}`,
+                value: JSON.stringify(drafts)
+              }, { onConflict: "key" });
+            } catch (_) { }
 
             let msg = `📬 *DATAMART LIVE SUPPORT — ${drafts.length} DRAFTS READY (10+ MINS WAITING):*\n` +
               `━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
@@ -9896,6 +9925,23 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                   pendingAction = JSON.parse(ownerSession.bundle);
                 } catch (_) { }
               }
+              if (!pendingAction && supabase) {
+                try {
+                  const { data: setRow } = await supabase
+                    .from("settings")
+                    .select("value")
+                    .in("key", [`owner_pending_${normFrom}`, `owner_pending_${from}`])
+                    .maybeSingle();
+                  if (setRow?.value) {
+                    const parsed = typeof setRow.value === "string" ? JSON.parse(setRow.value) : setRow.value;
+                    if (parsed) {
+                      pendingAction = parsed;
+                      ownerPendingActions.set(normFrom, pendingAction);
+                      ownerPendingActions.set(String(from), pendingAction);
+                    }
+                  }
+                } catch (_) { }
+              }
 
               // Load multi-turn conversation memory early
               let history = ownerHistories.get(normFrom) || ownerHistories.get(String(from)) || [];
@@ -10062,36 +10108,82 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                 }
               }
 
-              const isMistakeOrIgnore = /^(mistake|wrong|wrong number|ignore|ignore it|ignore that|nevermind|never mind|forget it|my bad|by mistake)$/i.test(cleanInput.trim());
-              const isCancel = isMistakeOrIgnore || /^(no|nope|cancel|nah|stop|abort|leave it)$/i.test(cleanInput.trim());
+              const sanitizedInput = cleanInput.replace(/[\\\]\[]/g, "").trim();
+              const isMistakeOrIgnore = /^(mistake|wrong|wrong number|ignore|ignore it|ignore that|nevermind|never mind|forget it|my bad|by mistake)$/i.test(sanitizedInput);
+              const isCancel = isMistakeOrIgnore || /^(no|nope|cancel|nah|stop|abort|leave it)$/i.test(sanitizedInput);
 
               // Recognize confirmation strictly when confirming a pending staged action
               const isConfirm = !isCancel && (
-                /^(yes|yeah|yep|ok|okay|sure|yh|y|sharp|confirm|proceed|go|done|execute|apply|go ahead|do it|please do|send it|make it|update it|yes update|confirm update|proceed with update|send|send all|dispatch|dispatch all)$/i.test(cleanInput.trim())
+                /^(yes|yeah|yep|ok|okay|sure|yh|y|sharp|confirm|proceed|go|done|execute|apply|go ahead|do it|please do|send it|make it|update it|yes update|confirm update|proceed with update|send|send all|dispatch|dispatch all)$/i.test(sanitizedInput)
               );
 
-              // Special handler for batch_rezolv_reply (single draft dispatch or single draft edit)
-              if (pendingAction && pendingAction.type === "batch_rezolv_reply") {
-                const sendSingleMatch = cleanInput.match(/^(?:send|dispatch)\s*(\d+)$/i);
-                if (sendSingleMatch) {
+              const sendSingleMatch = sanitizedInput.match(/^(?:send|dispatch)\s*(\d+)$/i);
+              const editSingleMatch = sanitizedInput.match(/^(\d+)\s*[:,-]\s*([\s\S]+)$/);
+              const isBatchSendAll = /^(?:send\s*all|dispatch\s*all)$/i.test(sanitizedInput);
+
+              // Helper to ensure pendingAction is recovered if missing from memory
+              const ensureSupportBatchPendingAction = async () => {
+                if (pendingAction && pendingAction.type === "batch_rezolv_reply" && pendingAction.drafts?.length > 0) return pendingAction;
+                // 1. Try settings
+                try {
+                  const { data: setRow } = await supabase
+                    .from("settings")
+                    .select("value")
+                    .in("key", [`owner_pending_${normFrom}`, `owner_pending_${from}`, `latest_support_batch_${normFrom}`])
+                    .maybeSingle();
+                  if (setRow?.value) {
+                    const parsed = typeof setRow.value === "string" ? JSON.parse(setRow.value) : setRow.value;
+                    if (parsed) {
+                      pendingAction = parsed.type === "batch_rezolv_reply" ? parsed : { type: "batch_rezolv_reply", drafts: Array.isArray(parsed) ? parsed : (parsed.drafts || []) };
+                      ownerPendingActions.set(normFrom, pendingAction);
+                      return pendingAction;
+                    }
+                  }
+                } catch (_) { }
+                // 2. Try history
+                if (history && history.length > 0) {
+                  const lastAssist = [...history].reverse().find(h => h.role === "assistant" && h.text);
+                  if (lastAssist) {
+                    const recovered = extractProposedActionFromText(lastAssist.text);
+                    if (recovered?.action) {
+                      pendingAction = recovered.action;
+                      ownerPendingActions.set(normFrom, pendingAction);
+                      return pendingAction;
+                    }
+                  }
+                }
+                return pendingAction;
+              };
+
+              // ── SPECIAL HANDLER FOR BATCH REZOLV REPLIES ──
+              // A: Send single draft (e.g. "Send 1", "send 2")
+              if (sendSingleMatch) {
+                await ensureSupportBatchPendingAction();
+                if (pendingAction && pendingAction.type === "batch_rezolv_reply") {
                   const idx = parseInt(sendSingleMatch[1], 10) - 1;
                   const targetDraft = pendingAction.drafts?.[idx];
                   if (targetDraft) {
-                    const res = await sendRezolvReply(targetDraft.ticketId, targetDraft.draftMessage || targetDraft.message || targetDraft.text);
+                    const replyMsg = targetDraft.draftMessage || targetDraft.message || targetDraft.text;
+                    const res = await sendRezolvReply(targetDraft.ticketId, replyMsg);
                     pendingAction.drafts.splice(idx, 1);
                     if (pendingAction.drafts.length > 0) {
                       await setOwnerPendingAction(from, pendingAction);
                     } else {
                       await clearOwnerPendingAction(from);
                     }
-                    return sendWhatsApp(from, `${res}\n\nℹ️ *${pendingAction.drafts.length}* draft(s) remaining in this batch.`);
+                    return sendWhatsApp(from, `${res}\n\nℹ️ *${pendingAction.drafts.length}* draft(s) remaining in this batch.${pendingAction.drafts.length > 0 ? " Reply *SEND ALL* or *SEND 1* for the next." : ""}`);
                   } else {
-                    return sendWhatsApp(from, `⚠️ Invalid draft number. Please choose 1 to ${pendingAction.drafts?.length || 1}.`);
+                    return sendWhatsApp(from, `⚠️ Invalid draft number (${sendSingleMatch[1]}). Available: 1 to ${pendingAction.drafts?.length || 1}.`);
                   }
+                } else {
+                  return sendWhatsApp(from, `ℹ️ No pending drafts are currently staged in queue bossu. Text *draft 5* or *inbox* to load live tickets waiting in Rezolv!`);
                 }
+              }
 
-                const editSingleMatch = cleanInput.match(/^(\d+)\s*[:,-]\s*([\s\S]+)$/);
-                if (editSingleMatch) {
+              // B: Edit & Send single draft (e.g. "1: Custom message here")
+              if (editSingleMatch) {
+                await ensureSupportBatchPendingAction();
+                if (pendingAction && pendingAction.type === "batch_rezolv_reply") {
                   const idx = parseInt(editSingleMatch[1], 10) - 1;
                   const targetDraft = pendingAction.drafts?.[idx];
                   if (targetDraft) {
@@ -10103,9 +10195,16 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                     } else {
                       await clearOwnerPendingAction(from);
                     }
-                    return sendWhatsApp(from, `${res}\n\nℹ️ *${pendingAction.drafts.length}* draft(s) remaining in this batch.`);
+                    return sendWhatsApp(from, `${res}\n\nℹ️ *${pendingAction.drafts.length}* draft(s) remaining in this batch.${pendingAction.drafts.length > 0 ? " Reply *SEND ALL* or *SEND 1* for the next." : ""}`);
+                  } else {
+                    return sendWhatsApp(from, `⚠️ Invalid draft number. Available: 1 to ${pendingAction.drafts?.length || 1}.`);
                   }
                 }
+              }
+
+              // C: Send all staged drafts or YES confirmation
+              if (isBatchSendAll || (isConfirm && !pendingAction)) {
+                await ensureSupportBatchPendingAction();
               }
 
               // If pendingAction was missing from sessions.bundle, recover it from recent assistant turn in history
@@ -10127,7 +10226,7 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
               }
 
               // If owner is confirming AND has pendingAction
-              if (pendingAction && isConfirm) {
+              if (pendingAction && (isConfirm || isBatchSendAll)) {
                 const { type, network, capacity, status, smsText, inStock, productId, productName } = pendingAction;
                 await clearOwnerPendingAction(from);
 
@@ -10142,7 +10241,7 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                 // 0b. BATCH REZOLV SUPPORT REPLIES CONFIRMATION
                 if (type === "batch_rezolv_reply") {
                   const drafts = pendingAction.drafts || [];
-                  if (drafts.length === 0) return sendWhatsApp(from, "ℹ️ No staged drafts to send.");
+                  if (drafts.length === 0) return sendWhatsApp(from, "ℹ️ No staged drafts to send. Text *draft 5* to stage new tickets.");
 
                   const results = [];
                   for (const d of drafts) {
@@ -10491,6 +10590,10 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                     `\n\nDatabase is synchronized with reality! (SMS alerts disabled). What else would you like me to tackle?`
                   );
                 }
+              }
+
+              if (isConfirm && !pendingAction) {
+                return sendWhatsApp(from, `ℹ️ No pending action or drafts are currently waiting for confirmation bossu! Text *draft 5* or *inbox* to review live tickets, or let me know what you need.`);
               }
 
               // ── DIRECT ACTION COMMANDS (PRE-PARSER) ──
