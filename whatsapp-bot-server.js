@@ -2484,17 +2484,44 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
 
   try {
     // 1. Get configured group JID from Supabase settings
+    let groupJid = null;
     const { data: sRow } = await supabase
       .from("settings")
       .select("value")
       .eq("key", "failed_orders_group_jid")
       .maybeSingle();
 
-    const groupJid = sRow?.value;
+    if (sRow?.value) {
+      groupJid = String(sRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
+    }
+
+    if (!groupJid) {
+      // Fallback: check stored invite link or code
+      const { data: invRow } = await supabase
+        .from("settings")
+        .select("value")
+        .eq("key", "failed_orders_group_invite_code")
+        .maybeSingle();
+      if (invRow?.value) {
+        await setFailedOrdersGroup(`https://chat.whatsapp.com/${invRow.value}`);
+        const { data: retryRow } = await supabase
+          .from("settings")
+          .select("value")
+          .eq("key", "failed_orders_group_jid")
+          .maybeSingle();
+        if (retryRow?.value) {
+          groupJid = String(retryRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
+        }
+      }
+    }
+
     if (!groupJid) {
       console.log(`[FAILED ORDER] Portal ID ${cleanId} failed, but no failed_orders_group_jid configured yet.`);
       return { ok: false, reason: "no_group_configured" };
     }
+
+    // STRICT NORMALIZATION: Ensure clean JID format
+    groupJid = groupJid.replace(/(@g\.us)+$/i, "") + "@g.us";
 
     // 2. Check if this Portal ID was ALREADY submitted to the group (Persistent deduplication registry)
     const { data: regRow } = await supabase
@@ -2563,7 +2590,7 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
       // First inspect the invite to get group metadata
       const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
       if (inviteInfo?.id) {
-        targetJid = `${inviteInfo.id}@g.us`;
+        targetJid = `${String(inviteInfo.id).replace(/(@g\.us)+$/i, "")}@g.us`;
         groupSubject = inviteInfo.subject || groupSubject;
       }
       // Join group if not already a member
@@ -2576,7 +2603,7 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
       // If groupGetInviteInfo fails, attempt accept directly
       try {
         const joinedId = await sock.groupAcceptInvite(inviteCode);
-        if (joinedId) targetJid = joinedId.includes("@") ? joinedId : `${joinedId}@g.us`;
+        if (joinedId) targetJid = `${String(joinedId).replace(/(@g\.us)+$/i, "")}@g.us`;
       } catch (e2) {
         return `⚠️ Could not join WhatsApp group with invite code "${inviteCode}": ${e2.message}. Please verify the invite link is valid and not revoked!`;
       }
@@ -2586,6 +2613,8 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
   if (!targetJid) {
     return "⚠️ Please provide a valid WhatsApp group link (e.g. `https://chat.whatsapp.com/...`) or group JID!";
   }
+
+  targetJid = `${String(targetJid).replace(/(@g\.us)+$/i, "")}@g.us`;
 
   try {
     const meta = await sock.groupMetadata(targetJid);
@@ -7217,6 +7246,13 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
               return s !== "sent" && s !== "delivered";
             });
 
+            // Auto-submit failed portal ID to configured WhatsApp group if delivery failed
+            if ((failed > 0 || failedItems.length > 0) && targetId && /^\d{4,9}$/.test(String(targetId))) {
+              submitFailedPortalIdToGroup(targetId, { reason: "carrier_delivery_check_failed", failedCount: failed || failedItems.length }).catch(err => {
+                console.error("❌ Auto-submit to group error:", err.message);
+              });
+            }
+
             const failedPortalSummaries = failedItems.length > 0 ? [{
               portalId: String(targetId),
               batchNumber: result.batchNumber,
@@ -7348,6 +7384,12 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
               });
 
               if (bFailed > 0 || failedInBatch.length > 0) {
+                // Auto-submit failed portal ID to configured WhatsApp group
+                if (r.id && /^\d{4,9}$/.test(String(r.id))) {
+                  submitFailedPortalIdToGroup(r.id, { reason: "bulk_carrier_delivery_check_failed", failedCount: bFailed || failedInBatch.length }).catch(err => {
+                    console.error("❌ Auto-submit to group error:", err.message);
+                  });
+                }
                 failedPortalSummaries.push({
                   portalId: String(r.id),
                   batchNumber: b.batchNumber,
@@ -9027,6 +9069,24 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
               : `https://chat.whatsapp.com/${rawMatch}`;
             const rep = await setFailedOrdersGroup(linkOrJid, from);
             return sendWhatsApp(from, rep);
+          }
+
+          // Manual submission of Portal ID to group (e.g. "submit 561077" or "submit portal id 561077 to group")
+          const submitManualMatch =
+            cleanInput.match(/^(?:submit|send|post)\s+(?:portal\s*id\s*|track\s*id\s*|id\s*)?(\d{4,9})\s*(?:to|into)?\s*(?:the\s*)?(?:group)?$/i) ||
+            cleanInput.match(/^submit\s+(\d{4,9})$/i);
+
+          if (submitManualMatch) {
+            const mId = submitManualMatch[1];
+            const subRes = await submitFailedPortalIdToGroup(mId, { manual: true });
+            if (subRes.ok) {
+              if (subRes.skipped) {
+                return sendWhatsApp(from, `ℹ️ Portal ID *${mId}* already exists in the group history! Skipped duplicate submission.`);
+              }
+              return sendWhatsApp(from, `🚀 *Submitted Portal ID ${mId} to Failed Orders WhatsApp Group!*`);
+            } else {
+              return sendWhatsApp(from, `⚠️ Could not submit Portal ID *${mId}* to group: ${subRes.reason || subRes.error}`);
+            }
           }
 
           // 1. Delivery Check (Single/Bulk Portal IDs & Bulk Phone Numbers)
