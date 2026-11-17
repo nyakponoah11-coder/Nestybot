@@ -1910,6 +1910,12 @@ async function sendAdminWhatsApp(text) {
 
     // Deliver strictly ONE alert per unique WhatsApp number (no duplicates)
     for (const target of adminTargets) {
+      // Check if admin is currently active in Support Mode
+      const currentMode = getUserMode(target);
+      if (currentMode === "support") {
+        console.log(`🔇 Suppressing store alert to ${target} because admin is currently active in Support Mode.`);
+        continue;
+      }
       await sendWhatsApp(target, text);
     }
   } catch (err) {
@@ -5738,6 +5744,21 @@ let rezolvTokenCache = {
   expiresAt: 0
 };
 
+const userLastViewedTicket = new Map(); // normPhone -> { id, ticketNumber, name }
+
+function cleanCustomerTarget(raw) {
+  if (!raw) return "";
+  let t = String(raw).trim();
+  t = t.replace(/^(?:hey|hi|hello|please|pls|yo|stony|bot|bossu)\b[,:\s]*/i, "");
+  t = t.replace(/^(?:can\s+(?:you|we)\s+)?(?:please\s+)?(?:let(?:'s)?\s+)?(?:talk\s+|solve\s+|resolve\s+|attend\s+(?:to\s+)?|handle\s+|check\s+(?:on\s+)?|see\s+|look\s+at\s+|discuss\s+|go\s+to\s+|view\s+|open\s+)+(?:about\s+)?(?:to\s+)?/i, "");
+  t = t.replace(/^(?:what\s+(?:about|of|is|did)?\s+|how\s+about\s+|check\s+on\s+)/i, "");
+  t = t.replace(/^(?:about|for|to)\s+/i, "");
+  t = t.replace(/^(?:view\s+|check\s+|open\s+)?(?:tickets?|tkt)\b(?:\s*[:#]\s*|\s+)/i, "");
+  t = t.replace(/\s+(?:what\s+(?:is\s+|did\s+)?(?:she|he|they|the\s+customer)?\s*(?:saying|say|complaining\s+about)?|what'?s\s+the\s+issue|what'?s\s+up|what\s+happened|saying|said)\??$/i, "");
+  t = t.replace(/[?!.]+$/, "").trim();
+  return t;
+}
+
 async function getRezolvAuthToken() {
   if (rezolvTokenCache.accessToken && Date.now() < rezolvTokenCache.expiresAt) {
     return rezolvTokenCache.accessToken;
@@ -5839,7 +5860,7 @@ async function getRezolvInboxStats() {
 
 async function findRezolvTicket(identifier) {
   if (!identifier) return null;
-  const rawId = String(identifier).trim();
+  const rawId = String(cleanCustomerTarget(identifier) || identifier).trim();
 
   // If already 24-char ObjectId
   if (/^[a-f\d]{24}$/i.test(rawId)) {
@@ -5872,6 +5893,8 @@ async function findRezolvTicket(identifier) {
       if (lowerId.length >= 4 && custEmail.includes(lowerId)) return true;
       const custPhone = (t.customer?.phone || "").replace(/\D/g, "");
       if (digitsOnly && digitsOnly.length >= 7 && custPhone.includes(digitsOnly)) return true;
+      const lastMsg = (t.lastMessage?.text || "").toLowerCase();
+      if (digitsOnly && digitsOnly.length >= 9 && lastMsg.includes(digitsOnly)) return true;
       return false;
     });
     if (match) break;
@@ -5895,6 +5918,8 @@ async function findRezolvTicket(identifier) {
         if (lowerId.length >= 4 && custEmail.includes(lowerId)) return true;
         const custPhone = (t.customer?.phone || "").replace(/\D/g, "");
         if (digitsOnly && digitsOnly.length >= 7 && custPhone.includes(digitsOnly)) return true;
+        const lastMsg = (t.lastMessage?.text || "").toLowerCase();
+        if (digitsOnly && digitsOnly.length >= 9 && lastMsg.includes(digitsOnly)) return true;
         return false;
       });
       if (match) break;
@@ -5968,9 +5993,10 @@ async function getRezolvTicketsReport(filter = "active", limit = 6) {
   }
 }
 
-async function getRezolvTicketConversation(identifier) {
+async function getRezolvTicketConversation(identifier, from = null) {
   try {
-    const found = await findRezolvTicket(identifier);
+    const cleanId = cleanCustomerTarget(identifier) || identifier;
+    const found = await findRezolvTicket(cleanId);
     if (!found || !found.ticket) {
       return `⚠️ Could not find Rezolv support ticket *${identifier}*. Please check the ticket number.`;
     }
@@ -5983,6 +6009,18 @@ async function getRezolvTicketConversation(identifier) {
     const phoneStr = custPhone ? ` | 📱 ${custPhone}` : "";
     const statusStr = (t.status || "open").toUpperCase();
     const prioStr = (t.priority || "normal").toUpperCase();
+
+    if (from) {
+      const normFrom = normalizeBotPhone(from);
+      const ticketInfo = { id: found.id, ticketNumber: t.ticketNumber || found.id, name: custName };
+      userLastViewedTicket.set(from, ticketInfo);
+      userLastViewedTicket.set(normFrom, ticketInfo);
+      saveCustomerSession(from, {
+        bundle: {
+          last_support_ticket: ticketInfo
+        }
+      }).catch(() => {});
+    }
 
     let out = `💬 *REZOLV TICKET: ${t.ticketNumber || found.id}*\n\n` +
       `👤 *Customer:* *${custName}*\n` +
@@ -6148,7 +6186,7 @@ async function cleanRezolvIdleGreetingTickets(maxToClean = 25) {
 
 async function generateSupportDraftReply(identifier) {
   try {
-    let cleanId = String(identifier || "").trim();
+    let cleanId = (cleanCustomerTarget(String(identifier || "")) || String(identifier || "")).trim();
 
     // 1. Is it a DataMart ticket ID (RPT...) or customer name on DataMart?
     let dmTk = null;
@@ -8513,7 +8551,8 @@ app.post("/webhook", async (req, res) => {
       cleanCmd.match(/^(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i) ||
       cleanCmd.match(/^(.+?)\s+(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)$/i);
     if (topDraftMatch) {
-      const targetId = (topDraftMatch[1] || "").trim();
+      const rawTarget = (topDraftMatch[1] || "").trim();
+      const targetId = cleanCustomerTarget(rawTarget);
       const draftRes = await generateSupportDraftReply(targetId);
       if (!draftRes.ok) return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find ticket to draft reply."}`);
       await setOwnerPendingAction(from, {
@@ -8533,29 +8572,40 @@ app.post("/webhook", async (req, res) => {
       cleanCmd.match(/^(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\s*[:,-]?\s+([\s\S]+)$/i) ||
       cleanCmd.match(/^([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\s+(?:reply|tell)\s*[:,-]?\s+([\s\S]+)$/i);
     if (topReplyMatch && topReplyMatch[1].toLowerCase() !== "draft") {
-      const tktId = topReplyMatch[1].trim();
+      const rawTarget = topReplyMatch[1].trim();
+      const tktId = cleanCustomerTarget(rawTarget);
       const replyMsg = topReplyMatch[2].trim();
       const rep = await sendRezolvReply(tktId, replyMsg);
       return sendWhatsApp(from, rep);
     }
 
+    // Direct reply without ticket ID if owner recently viewed a ticket
+    const directReplyMatch = cleanCmd.match(/^(?:reply|tell(?:\s+(?:her|him|them|customer))?)\s*[:,-]?\s+([\s\S]+)$/i);
+    if (directReplyMatch && !/^(?:draft|status|info|all|now|tickets?)$/i.test(directReplyMatch[1].trim())) {
+      const lastTkt = userLastViewedTicket.get(from) || (await getCustomerSession(from))?.bundle?.last_support_ticket;
+      if (lastTkt) {
+        const replyMsg = directReplyMatch[1].trim();
+        const rep = await sendRezolvReply(lastTkt.ticketNumber || lastTkt.id || lastTkt, replyMsg);
+        return sendWhatsApp(from, rep);
+      }
+    }
+
     const topViewMatch =
-      cleanCmd.match(/^(?:what\s+(?:is\s+|did\s+)?(.+?)\s+(?:saying|say|complaining\s+about)|(.+?)\s+what\s+(?:is\s+(?:she|he|they)\s+saying|did\s+(?:she|he|they)\s+say|is\s+(?:she|he|they)\s+complaining\s+about|is\s+the\s+issue|is\s+saying))\??$/i) ||
-      cleanCmd.match(/^(?:view\s+ticket|check\s+ticket|ticket)\s+(.+)$/i);
+      cleanCmd.match(/^(?:what\s+(?:is\s+|did\s+)?(.+?)\s+(?:saying|say|complaining\s+about)|(.+?)\s+what\s+(?:is\s+(?:she|he|they|the\s+customer)?\s*saying|did\s+(?:she|he|they|the\s+customer)?\s*say|is\s+(?:she|he|they)?\s*complaining\s+about|is\s+the\s+issue|is\s+saying|said))\??$/i) ||
+      cleanCmd.match(/^(?:what\s+about|what\s+of|how\s+about|check\s+on)\s+(.+)\??$/i) ||
+      cleanCmd.match(/^(?:view\s+ticket|check\s+ticket|ticket|open\s+ticket|inspect\s+ticket)\s+(.+)$/i) ||
+      cleanCmd.match(/^(?:can\s+(?:we|you)\s+)?(?:please\s+)?(?:let(?:'s)?\s+)?(?:talk\s+|solve\s+|resolve\s+|attend\s+(?:to\s+)?|handle\s+|check\s+(?:on\s+)?|see\s+|look\s+at\s+|discuss\s+)(?:about\s+)?(?:to\s+)?([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\??$/i);
+
     if (topViewMatch) {
-      const tktId = (topViewMatch[1] || topViewMatch[2] || "").trim();
-      const rep = await getRezolvTicketConversation(tktId);
-      return sendWhatsApp(from, rep);
+      const rawTarget = (topViewMatch[1] || topViewMatch[2] || "").trim();
+      const tktId = cleanCustomerTarget(rawTarget);
+      if (tktId) {
+        const rep = await getRezolvTicketConversation(tktId, from);
+        return sendWhatsApp(from, rep);
+      }
     }
 
     // ── TOP-LEVEL NATURAL SUPPORT QUERIES ──
-    const topWhatAboutMatch = cleanCmd.match(/^(?:what\s+about|what\s+of|how\s+about|check\s+on)\s+([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\??$/i);
-    if (topWhatAboutMatch) {
-      const target = topWhatAboutMatch[1].trim();
-      const rep = await getRezolvTicketConversation(target);
-      return sendWhatsApp(from, rep);
-    }
-
     if (/\b(?:how\s+many\s+(?:inbox|messages?|tickets?)|inbox\s*(?:count|status|messages?|mesaages?)|how\s+many\s+(?:in\s+inbox|tickets))\b/i.test(cleanCmd)) {
       const stats = await getRezolvInboxStats();
       if (stats) {
@@ -8575,6 +8625,27 @@ app.post("/webhook", async (req, res) => {
     if (/\b(?:mark\s+all\s+(?:tickets?\s+)?as\s+resolve|resolve\s+all|close\s+all|clean\s+all)\b/i.test(cleanCmd)) {
       const cleanupRep = await cleanRezolvIdleGreetingTickets(30);
       return sendWhatsApp(from, cleanupRep);
+    }
+
+    // ── IN SUPPORT MODE: HANDLE BARE CUSTOMER NAMES & TICKET IDS DIRECTLY ──
+    const activeOwnerMode = getUserMode(from);
+    if (activeOwnerMode === "support") {
+      if (/^(?:exit|normal\s*mode|stony|stony\s*mode|store\s*mode|back|quit|leave|stop)$/i.test(cleanCmd)) {
+        setUserMode(from, "ai");
+        await saveCustomerSession(from, { step: 99 });
+        await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "ai" }, { onConflict: "key" });
+        return sendWhatsApp(from, `👑 Exited Support Mode. Switched back to *DATA 1 GH Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
+      }
+
+      // Check if user entered a bare customer name or ticket number (e.g. "Patience", "Simon", "TKT-180249", "180249", "Good One")
+      const candidate = cleanCustomerTarget(cleanCmd);
+      if (candidate && candidate.length >= 3 && candidate.length <= 40 && !/^(?:hi|hello|hey|yes|no|ok|okay|help|menu|exit|close|status|tickets?)$/i.test(candidate)) {
+        const found = await findRezolvTicket(candidate);
+        if (found) {
+          const rep = await getRezolvTicketConversation(found.ticket?.ticketNumber || found.id, from);
+          return sendWhatsApp(from, rep);
+        }
+      }
     }
 
     // 1. Connect / Link DataMart Account (Self-service or Owner assignment)
@@ -10358,8 +10429,25 @@ app.post("/webhook", async (req, res) => {
       }
 
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
-      let ownerSystemPrompt =
-        "You are Stony, the owner's personal AI Senior Full-Stack Engineer, System Architect, and Commercial Co-Pilot at DATA 1 GH.\n" +
+      let ownerSystemPrompt = "";
+      if (activeOwnerMode === "support") {
+        ownerSystemPrompt =
+          "You are Stony 💙, the business owner's personal AI Customer Support Specialist & Live Co-Pilot on Rezolv (https://www.rezolv.dev/dashboard).\n" +
+          "The owner is currently locked into SUPPORT MODE on WhatsApp, actively reviewing and answering live customer support tickets.\n\n" +
+          "CRITICAL OPERATIONAL RULES FOR SUPPORT MODE:\n" +
+          "- Respond naturally, conversationally, and warmly like an expert support colleague sitting right beside the owner.\n" +
+          "- DO NOT talk about DATA 1 GH store statistics, store sales, wholesale margins, or failed store checkouts unless the owner explicitly asks about them!\n" +
+          "- Focus 100% on the customers on Rezolv, their complaints, their orders, and how to resolve their issues.\n" +
+          "- When the owner mentions a customer name (e.g. 'Patience', 'Simon', 'Karlina') or ticket (e.g. 'TKT-180249'), explain what the customer wants, what the issue is, and offer to reply or resolve it.\n" +
+          "- When the owner asks you to reply to a customer, output [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"...\", \"message\": \"...\"}].\n" +
+          "- When the owner asks you to close or resolve a ticket, output [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"...\"}].\n\n" +
+          (rezolvLiveContext ? `${rezolvLiveContext}\n` : "") +
+          "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
+          "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
+          "  - NEVER output HTML tags like <br> or markdown tables.\n";
+      } else {
+        ownerSystemPrompt =
+          "You are Stony, the owner's personal AI Senior Full-Stack Engineer, System Architect, and Commercial Co-Pilot at DATA 1 GH.\n" +
         "You have 100% visibility into EVERY CORNER of the codebase (Vercel frontend + API and Render 24/7 Nestybot worker), Supabase database tables, state lock tags, Paystack webhooks, DataMart API, and live runtime logs — just like Antigravity.\n" +
         "You are having a direct, private WhatsApp conversation with the business owner.\n\n" +
         "OFFICIAL STORE LINKS & ACCESS:\n" +
@@ -10477,6 +10565,7 @@ app.post("/webhook", async (req, res) => {
       if (aiConfig.aiSystemInstructions) {
         ownerSystemPrompt += `\n\nGLOBAL STORE AI INSTRUCTIONS:\n${aiConfig.aiSystemInstructions}\n`;
       }
+    }
 
       const siteBase = STORE_FRONTEND_URL;
       const siteAiEndpoint = `${siteBase.replace(/\/+$/, "")}/api/admin?fn=admin-ai`;
