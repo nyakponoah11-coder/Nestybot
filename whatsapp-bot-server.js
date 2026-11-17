@@ -5826,47 +5826,62 @@ async function findRezolvTicket(identifier) {
   const cleanNum = rawId.replace(/^#/, "").toUpperCase();
   const digitsOnly = cleanNum.replace(/\D/g, "");
   const lowerId = rawId.toLowerCase();
+  const words = lowerId.split(/\s+/).filter(w => w.length >= 3);
 
-  // 1. Search in active tickets
-  const activeRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
-  const activeTickets = activeRes.data?.data?.tickets || [];
-  let match = activeTickets.find(t => {
-    if (!t) return false;
-    if (t._id === rawId) return true;
-    const tn = (t.ticketNumber || "").toUpperCase();
-    if (tn === cleanNum) return true;
-    if (digitsOnly && tn.endsWith(digitsOnly)) return true;
-    const custName = (t.customer?.name || "").toLowerCase();
-    if (lowerId.length >= 3 && custName.includes(lowerId)) return true;
-    const custEmail = (t.customer?.email || "").toLowerCase();
-    if (lowerId.length >= 4 && custEmail.includes(lowerId)) return true;
-    return false;
-  });
-
-  // 2. If not found in active, search resolved
-  if (!match) {
-    const resRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId + "&status=resolved&limit=50");
-    const resTickets = resRes.data?.data?.tickets || [];
-    match = resTickets.find(t => {
+  // 1. Search in active tickets across pages
+  let match = null;
+  for (let p = 1; p <= 6; p++) {
+    const activeRes = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&page=${p}&limit=50`);
+    const activeTickets = activeRes.data?.data?.tickets || activeRes.data?.tickets || [];
+    if (!Array.isArray(activeTickets) || activeTickets.length === 0) break;
+    match = activeTickets.find(t => {
       if (!t) return false;
       if (t._id === rawId) return true;
       const tn = (t.ticketNumber || "").toUpperCase();
       if (tn === cleanNum) return true;
-      if (digitsOnly && tn.endsWith(digitsOnly)) return true;
+      if (digitsOnly && digitsOnly.length >= 4 && tn.endsWith(digitsOnly)) return true;
       const custName = (t.customer?.name || "").toLowerCase();
-      if (lowerId.length >= 3 && custName.includes(lowerId)) return true;
+      if (custName && (custName.includes(lowerId) || (words.length > 0 && words.every(w => custName.includes(w))))) return true;
       const custEmail = (t.customer?.email || "").toLowerCase();
       if (lowerId.length >= 4 && custEmail.includes(lowerId)) return true;
+      const custPhone = (t.customer?.phone || "").replace(/\D/g, "");
+      if (digitsOnly && digitsOnly.length >= 7 && custPhone.includes(digitsOnly)) return true;
       return false;
     });
+    if (match) break;
+  }
+
+  // 2. If not found in active, search resolved across pages
+  if (!match) {
+    for (let p = 1; p <= 3; p++) {
+      const resRes = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&status=resolved&page=${p}&limit=50`);
+      const resTickets = resRes.data?.data?.tickets || resRes.data?.tickets || [];
+      if (!Array.isArray(resTickets) || resTickets.length === 0) break;
+      match = resTickets.find(t => {
+        if (!t) return false;
+        if (t._id === rawId) return true;
+        const tn = (t.ticketNumber || "").toUpperCase();
+        if (tn === cleanNum) return true;
+        if (digitsOnly && digitsOnly.length >= 4 && tn.endsWith(digitsOnly)) return true;
+        const custName = (t.customer?.name || "").toLowerCase();
+        if (custName && (custName.includes(lowerId) || (words.length > 0 && words.every(w => custName.includes(w))))) return true;
+        const custEmail = (t.customer?.email || "").toLowerCase();
+        if (lowerId.length >= 4 && custEmail.includes(lowerId)) return true;
+        const custPhone = (t.customer?.phone || "").replace(/\D/g, "");
+        if (digitsOnly && digitsOnly.length >= 7 && custPhone.includes(digitsOnly)) return true;
+        return false;
+      });
+      if (match) break;
+    }
   }
 
   if (match) {
     const details = await rezolvApiRequest("/tickets/" + match._id);
+    const dData = details.data?.data || details.data || {};
     return {
       id: match._id,
-      ticket: details.data?.data?.ticket || match,
-      messages: details.data?.data?.messages || []
+      ticket: dData.ticket || match,
+      messages: dData.messages || dData.ticket?.messages || []
     };
   }
   return null;
@@ -7973,36 +7988,13 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     if (report) return sendWhatsApp(from, report);
   }
 
-  // 3a. Rezolv Live Reply to Customer
-  const dmRezolvReplyMatch = cleanInput.match(/^(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})\s+([\s\S]+)$/i);
-  if (dmRezolvReplyMatch) {
-    const tktId = dmRezolvReplyMatch[1].trim();
-    const replyMsg = dmRezolvReplyMatch[2].trim();
-    const rep = await sendRezolvReply(tktId, replyMsg);
-    return sendWhatsApp(from, rep);
-  }
-
-  // 3b. Rezolv View Ticket Conversation
-  const dmRezolvViewMatch = cleanInput.match(/^(?:view\s+ticket|check\s+ticket|ticket)\s+(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i);
-  if (dmRezolvViewMatch) {
-    const tktId = dmRezolvViewMatch[1].trim();
-    const rep = await getRezolvTicketConversation(tktId);
-    return sendWhatsApp(from, rep);
-  }
-
-  // 3c. Rezolv Close/Resolve Ticket
-  const dmRezolvCloseMatch = cleanInput.match(/^(?:close|resolve)\s+(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i);
-  if (dmRezolvCloseMatch) {
-    const tktId = dmRezolvCloseMatch[1].trim();
-    const rep = await closeRezolvTicket(tktId);
-    return sendWhatsApp(from, rep);
-  }
-
-  // 3d. Rezolv Draft Reply
-  const dmDraftMatch = cleanInput.match(/^(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i);
+  // 3a. Rezolv Draft Reply (checked first so it doesn't collide with direct reply)
+  const dmDraftMatch =
+    cleanInput.match(/^(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i) ||
+    cleanInput.match(/^(.+?)\s+(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)$/i);
   if (dmDraftMatch) {
     const targetId = (dmDraftMatch[1] || "").trim();
-    const draftRes = await generateRezolvDraftReply(targetId);
+    const draftRes = await generateSupportDraftReply(targetId);
     if (!draftRes.ok) return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find ticket to draft reply."}`);
     await setOwnerPendingAction(from, {
       type: "rezolv_reply",
@@ -8015,6 +8007,35 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
       `👉 Reply: *YES* or *SEND* to dispatch right now as *Stony 💙*!\n` +
       `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
     );
+  }
+
+  // 3b. Rezolv Live Reply to Customer ("Karlina Grey reply it will come okay" or "reply Karlina Grey it will come okay")
+  const dmRezolvReplyMatch =
+    cleanInput.match(/^(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\s*[:,-]?\s+([\s\S]+)$/i) ||
+    cleanInput.match(/^([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\s+(?:reply|tell)\s*[:,-]?\s+([\s\S]+)$/i);
+  if (dmRezolvReplyMatch && dmRezolvReplyMatch[1].toLowerCase() !== "draft") {
+    const tktId = dmRezolvReplyMatch[1].trim();
+    const replyMsg = dmRezolvReplyMatch[2].trim();
+    const rep = await sendRezolvReply(tktId, replyMsg);
+    return sendWhatsApp(from, rep);
+  }
+
+  // 3c. Rezolv View Ticket Conversation ("Karlina Grey what is she saying", "what is Karlina saying", "ticket Karlina")
+  const dmRezolvViewMatch =
+    cleanInput.match(/^(?:what\s+(?:is\s+|did\s+)?(.+?)\s+(?:saying|say|complaining\s+about)|(.+?)\s+what\s+(?:is\s+(?:she|he|they)\s+saying|did\s+(?:she|he|they)\s+say|is\s+(?:she|he|they)\s+complaining\s+about|is\s+the\s+issue|is\s+saying))\??$/i) ||
+    cleanInput.match(/^(?:view\s+ticket|check\s+ticket|ticket)\s+(.+)$/i);
+  if (dmRezolvViewMatch) {
+    const tktId = (dmRezolvViewMatch[1] || dmRezolvViewMatch[2] || "").trim();
+    const rep = await getRezolvTicketConversation(tktId);
+    return sendWhatsApp(from, rep);
+  }
+
+  // 3d. Rezolv Close/Resolve Ticket
+  const dmRezolvCloseMatch = cleanInput.match(/^(?:close|resolve)\s+(?:ticket\s+)?(.+)$/i);
+  if (dmRezolvCloseMatch) {
+    const tktId = dmRezolvCloseMatch[1].trim();
+    const rep = await closeRezolvTicket(tktId);
+    return sendWhatsApp(from, rep);
   }
 
   // 3e_clean. Clean idle visitor / hi tickets
@@ -8425,6 +8446,46 @@ app.post("/webhook", async (req, res) => {
     ) {
       const cleanupRep = await cleanRezolvIdleGreetingTickets(25);
       return sendWhatsApp(from, cleanupRep);
+    }
+
+    // ── REZOLV LIVE DRAFT / REPLY / VIEW NATURAL LANGUAGE ROUTER ──
+    const topDraftMatch =
+      cleanCmd.match(/^(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i) ||
+      cleanCmd.match(/^(.+?)\s+(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)$/i);
+    if (topDraftMatch) {
+      const targetId = (topDraftMatch[1] || "").trim();
+      const draftRes = await generateSupportDraftReply(targetId);
+      if (!draftRes.ok) return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find ticket to draft reply."}`);
+      await setOwnerPendingAction(from, {
+        type: "rezolv_reply",
+        ticketId: draftRes.ticketId,
+        message: draftRes.draftMessage
+      });
+      return sendWhatsApp(from,
+        `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
+        `"${draftRes.draftMessage}"\n\n` +
+        `👉 Reply: *YES* or *SEND* to dispatch right now as *Stony 💙*!\n` +
+        `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
+      );
+    }
+
+    const topReplyMatch =
+      cleanCmd.match(/^(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\s*[:,-]?\s+([\s\S]+)$/i) ||
+      cleanCmd.match(/^([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\s+(?:reply|tell)\s*[:,-]?\s+([\s\S]+)$/i);
+    if (topReplyMatch && topReplyMatch[1].toLowerCase() !== "draft") {
+      const tktId = topReplyMatch[1].trim();
+      const replyMsg = topReplyMatch[2].trim();
+      const rep = await sendRezolvReply(tktId, replyMsg);
+      return sendWhatsApp(from, rep);
+    }
+
+    const topViewMatch =
+      cleanCmd.match(/^(?:what\s+(?:is\s+|did\s+)?(.+?)\s+(?:saying|say|complaining\s+about)|(.+?)\s+what\s+(?:is\s+(?:she|he|they)\s+saying|did\s+(?:she|he|they)\s+say|is\s+(?:she|he|they)\s+complaining\s+about|is\s+the\s+issue|is\s+saying))\??$/i) ||
+      cleanCmd.match(/^(?:view\s+ticket|check\s+ticket|ticket)\s+(.+)$/i);
+    if (topViewMatch) {
+      const tktId = (topViewMatch[1] || topViewMatch[2] || "").trim();
+      const rep = await getRezolvTicketConversation(tktId);
+      return sendWhatsApp(from, rep);
     }
 
     // 1. Connect / Link DataMart Account (Self-service or Owner assignment)
