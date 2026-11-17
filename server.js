@@ -3531,6 +3531,7 @@ function getUserMode(phone, session) {
   const norm = String(phone || "").replace(/\D/g, "");
   if (userModes.has(norm)) return userModes.get(norm);
   if (userModes.has(String(phone))) return userModes.get(String(phone));
+  if (session?.step === 97) return "support";
   if (session?.step === 98) return "datamart";
   if (session?.step === 99) return "ai";
   return "bot";
@@ -4485,6 +4486,9 @@ async function executeOwnerDirectAction(type, payload = {}) {
     // 16. Support Chat
     if (cleanType === "resolve_support_chat") {
       const cId = payload.conversation_id || payload.conversationId;
+      if (!cId && !payload.confirmed && !payload.all) {
+        return null;
+      }
       let q = supabase.from("chat_conversations").update({ status: "resolved", unread_for_support: 0, updated_at: new Date().toISOString() });
       if (cId) q = q.eq("id", cId);
       else q = q.eq("status", "open");
@@ -4805,7 +4809,9 @@ async function executeOwnerDirectAction(type, payload = {}) {
     // 30. DataMart Retry Order
     if (cleanType === "datamart_retry_order") {
       const orderId = payload.orderId || payload.id;
-      if (!orderId) return "⚠️ Missing orderId to retry.";
+      if (!orderId || /[^0-9a-zA-Z_-]/.test(orderId) || /^(prince|amehati|customer|support|ticket|reply|him|her)/i.test(orderId)) {
+        return null;
+      }
       const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/retry`, {
         method: "POST",
         body: { reason: payload.reason || "Support retry via WhatsApp" }
@@ -4816,12 +4822,114 @@ async function executeOwnerDirectAction(type, payload = {}) {
     // 31. DataMart Refund Order
     if (cleanType === "datamart_refund_order") {
       const orderId = payload.orderId || payload.id;
-      if (!orderId) return "⚠️ Missing orderId to refund.";
+      if (!orderId || /[^0-9a-zA-Z_-]/.test(orderId) || /^(prince|amehati|customer|support|ticket|reply|him|her)/i.test(orderId)) {
+        return null;
+      }
       const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/refund`, {
         method: "POST",
         body: { reason: payload.reason || "Support refund via WhatsApp", notifyCustomer: true }
       });
       return resp?.status === "success" || resp?.success ? `💸 Order ${orderId} has been refunded to agent wallet!` : `⚠️ Refund failed: ${resp?.message || "Unknown error"}`;
+    }
+
+    // 32. Rezolv Customer Support Tickets List
+    if (cleanType === "rezolv_tickets" || cleanType === "list_rezolv_tickets" || cleanType === "support_tickets") {
+      return await getRezolvTicketsReport(payload.status || "active", payload.limit || 6);
+    }
+
+    // 33. Rezolv View Ticket Details & Conversation
+    if (cleanType === "rezolv_view_ticket" || cleanType === "rezolv_ticket" || cleanType === "view_ticket") {
+      const tId = payload.ticketId || payload.ticket || payload.id;
+      if (!tId) return "⚠️ Missing ticketId to view.";
+      return await getRezolvTicketConversation(tId);
+    }
+
+    // 34. Rezolv Live Reply to Customer
+    if (cleanType === "rezolv_reply" || cleanType === "reply_rezolv_ticket" || cleanType === "reply_ticket") {
+      const tId = payload.ticketId || payload.ticket || payload.id;
+      const msg = payload.message || payload.text || payload.reply;
+      if (!tId || !msg) return "⚠️ Missing ticketId or message to reply.";
+      return await sendRezolvReply(tId, msg);
+    }
+
+    // 35. Rezolv Resolve/Close Ticket
+    if (cleanType === "rezolv_close" || cleanType === "resolve_rezolv_ticket" || cleanType === "close_ticket") {
+      const tId = payload.ticketId || payload.ticket || payload.id;
+      if (!tId) return "⚠️ Missing ticketId to close.";
+      return await closeRezolvTicket(tId, payload.status || "resolved");
+    }
+
+    // 36. Send Customer Message / Reply across DataMart RPT, Rezolv, or Direct WhatsApp
+    if (cleanType === "send_customer_message" || cleanType === "message_customer" || cleanType === "reply_customer") {
+      const rawTarget = payload.target || payload.customer || payload.phone || payload.ticketId || payload.reportId || payload.recipient;
+      const msg = payload.message || payload.text || payload.reply;
+      if (!rawTarget || !msg) {
+        return "⚠️ Please provide recipient/target and message to send.";
+      }
+
+      const targetStr = String(rawTarget).trim();
+      const cleanMsg = String(msg).replace(/^to\s+/i, "").replace(/^that\s+/i, "").trim();
+
+      // A. Is target a phone number directly? (e.g. 054..., 233...)
+      const digitsOnly = targetStr.replace(/\D/g, "");
+      if (digitsOnly.length === 10 || (digitsOnly.startsWith("233") && digitsOnly.length === 12)) {
+        await sendWhatsApp(digitsOnly, cleanMsg).catch(() => {});
+        await sendAdminSms(cleanMsg, digitsOnly).catch(() => {});
+        const cleanWa = digitsOnly.startsWith("0") ? digitsOnly.slice(1) : (digitsOnly.startsWith("233") ? digitsOnly.slice(3) : digitsOnly);
+        return `✅ Message dispatched directly via WhatsApp to *${digitsOnly}*!\n\n💬 "${cleanMsg}"\n\n👉 *Chat link:*\nhttps://wa.me/233${cleanWa}`;
+      }
+
+      // B. Is it a DataMart ticket (RPT...) or a customer name on DataMart?
+      if (/^RPT\d+$/i.test(targetStr) || !/^TKT-\d+$/i.test(targetStr)) {
+        try {
+          const dmData = await fetchDatamartSupportTickets({ search: targetStr, limit: 3 });
+          const dmTk = dmData?.tickets?.[0];
+          if (dmTk) {
+            const custName = (dmTk.userId?.name || dmTk.name || "Customer").trim();
+            const custPhone = (dmTk.phoneNumber || dmTk.userId?.phoneNumber || "").replace(/\D/g, "");
+            const reportId = dmTk.reportId || dmTk._id;
+
+            if (custPhone) {
+              const fullMsg = `Hello ${custName.split(" ")[0]}, regarding your DataMart ticket ${reportId}: ${cleanMsg}. - DataMart Support`;
+              await sendWhatsApp(custPhone, fullMsg).catch(() => {});
+              await sendAdminSms(fullMsg, custPhone).catch(() => {});
+              const cleanWa = custPhone.startsWith("0") ? custPhone.slice(1) : custPhone;
+
+              return `✅ *MESSAGE DISPATCHED TO ${custName.toUpperCase()}!*\n\n` +
+                `📱 *Recipient:* ${custName} (*${custPhone}*)\n` +
+                `🆔 *DataMart Ticket:* *${reportId}*\n` +
+                `💬 *Message Sent via WhatsApp:*\n"${fullMsg}"\n\n` +
+                `👉 *Chat directly with customer on WhatsApp:*\nhttps://wa.me/233${cleanWa}`;
+            }
+          }
+        } catch (e) {
+          console.warn("send_customer_message dm lookup error:", e.message);
+        }
+      }
+
+      // C. Is it Rezolv ticket (TKT-...) or customer name on Rezolv?
+      try {
+        const rezResp = await sendRezolvReply(targetStr, cleanMsg);
+        return rezResp;
+      } catch (e) {
+        console.warn("send_customer_message rezolv error:", e.message);
+      }
+
+      // D. Fallback: check Supabase chat_conversations
+      try {
+        const { data: conv } = await supabase.from("chat_conversations").select("*").or(`customer_name.ilike.%${targetStr}%,customer_phone.ilike.%${targetStr}%`).limit(1).maybeSingle();
+        if (conv) {
+          await supabase.from("chat_messages").insert({
+            conversation_id: conv.id,
+            sender: "support",
+            message: cleanMsg,
+            created_at: new Date().toISOString()
+          });
+          return `✅ Reply posted in website Live Chat for *${conv.customer_name || conv.customer_phone}*!`;
+        }
+      } catch (_) {}
+
+      return `⚠️ Could not find an active ticket or customer contact matching "${targetStr}".`;
     }
   } catch (e) {
     console.warn("executeOwnerDirectAction error:", e.message);
@@ -5608,6 +5716,449 @@ async function fetchDatamartSupportEndpoint(endpoint, options = {}, callerPhone 
   }
 }
 
+/* =========================================================
+   REZOLV LIVE CUSTOMER SUPPORT INTEGRATION (REZOLV.DEV)
+   Connects Stony WhatsApp Bot directly to DataMart Live Customer Chat
+   Account: stillmoving11@gmail.com / Stony ("Stony 💙")
+   Workspace: 69ac50723a7c792c48a0fbb8
+========================================================= */
+
+const REZOLV_CONFIG = {
+  apiBase: process.env.REZOLV_API_BASE || "https://api.rezolv.dev/api",
+  email: process.env.REZOLV_EMAIL || "stillmoving11@gmail.com",
+  password: process.env.REZOLV_PASSWORD || "Stony",
+  workspaceId: process.env.REZOLV_WORKSPACE_ID || "69ac50723a7c792c48a0fbb8",
+  agentId: "69ade92d9660c59426fec6cc",
+  agentName: "Stony 💙"
+};
+
+let rezolvTokenCache = {
+  accessToken: null,
+  refreshToken: null,
+  expiresAt: 0
+};
+
+async function getRezolvAuthToken() {
+  if (rezolvTokenCache.accessToken && Date.now() < rezolvTokenCache.expiresAt) {
+    return rezolvTokenCache.accessToken;
+  }
+  return new Promise((resolve, reject) => {
+    const https = require("https");
+    const payload = JSON.stringify({ email: REZOLV_CONFIG.email, password: REZOLV_CONFIG.password });
+    const req = https.request(REZOLV_CONFIG.apiBase + "/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+    }, res => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => {
+        try {
+          const json = JSON.parse(data);
+          if (json.success && json.data?.accessToken) {
+            rezolvTokenCache = {
+              accessToken: json.data.accessToken,
+              refreshToken: json.data.refreshToken || null,
+              expiresAt: Date.now() + 12 * 60 * 1000
+            };
+            resolve(rezolvTokenCache.accessToken);
+          } else {
+            reject(new Error(json.message || "Rezolv login failed"));
+          }
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function rezolvApiRequest(path, options = {}) {
+  const token = await getRezolvAuthToken();
+  return new Promise((resolve, reject) => {
+    const https = require("https");
+    const url = new URL(path.startsWith("http") ? path : REZOLV_CONFIG.apiBase + path);
+    const reqOpts = {
+      hostname: url.hostname,
+      port: 443,
+      path: url.pathname + url.search,
+      method: options.method || "GET",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      }
+    };
+    const req = https.request(reqOpts, res => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve({ status: res.statusCode, data: parsed });
+        } catch (_) {
+          resolve({ status: res.statusCode, raw: data });
+        }
+      });
+    });
+    req.on("error", reject);
+    if (options.body) {
+      req.write(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
+    }
+    req.end();
+  });
+}
+
+async function findRezolvTicket(identifier) {
+  if (!identifier) return null;
+  const rawId = String(identifier).trim();
+
+  // If already 24-char ObjectId
+  if (/^[a-f\d]{24}$/i.test(rawId)) {
+    const res = await rezolvApiRequest("/tickets/" + rawId);
+    if (res.status === 200 && res.data?.data?.ticket) {
+      return { id: rawId, ticket: res.data.data.ticket, messages: res.data.data.messages || [] };
+    }
+  }
+
+  const cleanNum = rawId.replace(/^#/, "").toUpperCase();
+  const digitsOnly = cleanNum.replace(/\D/g, "");
+  const lowerId = rawId.toLowerCase();
+
+  // 1. Search in active tickets
+  const activeRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
+  const activeTickets = activeRes.data?.data?.tickets || [];
+  let match = activeTickets.find(t => {
+    if (!t) return false;
+    if (t._id === rawId) return true;
+    const tn = (t.ticketNumber || "").toUpperCase();
+    if (tn === cleanNum) return true;
+    if (digitsOnly && tn.endsWith(digitsOnly)) return true;
+    const custName = (t.customer?.name || "").toLowerCase();
+    if (lowerId.length >= 3 && custName.includes(lowerId)) return true;
+    const custEmail = (t.customer?.email || "").toLowerCase();
+    if (lowerId.length >= 4 && custEmail.includes(lowerId)) return true;
+    return false;
+  });
+
+  // 2. If not found in active, search resolved
+  if (!match) {
+    const resRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId + "&status=resolved&limit=50");
+    const resTickets = resRes.data?.data?.tickets || [];
+    match = resTickets.find(t => {
+      if (!t) return false;
+      if (t._id === rawId) return true;
+      const tn = (t.ticketNumber || "").toUpperCase();
+      if (tn === cleanNum) return true;
+      if (digitsOnly && tn.endsWith(digitsOnly)) return true;
+      const custName = (t.customer?.name || "").toLowerCase();
+      if (lowerId.length >= 3 && custName.includes(lowerId)) return true;
+      const custEmail = (t.customer?.email || "").toLowerCase();
+      if (lowerId.length >= 4 && custEmail.includes(lowerId)) return true;
+      return false;
+    });
+  }
+
+  if (match) {
+    const details = await rezolvApiRequest("/tickets/" + match._id);
+    return {
+      id: match._id,
+      ticket: details.data?.data?.ticket || match,
+      messages: details.data?.data?.messages || []
+    };
+  }
+  return null;
+}
+
+async function getRezolvTicketsReport(filter = "active", limit = 6) {
+  try {
+    let url = "/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId;
+    if (filter === "resolved") {
+      url += "&status=resolved&limit=15";
+    }
+    const res = await rezolvApiRequest(url);
+    const tickets = res.data?.data?.tickets || [];
+    if (tickets.length === 0) {
+      return `🎉 *DATAMART LIVE SUPPORT (REZOLV)*\n\nNo active customer support tickets at the moment! All customer chats resolved.`;
+    }
+
+    // Sort: unread first, urgent/high priority next, then latest customer message
+    const sorted = [...tickets].sort((a, b) => {
+      const aUnread = a.unreadCount || 0;
+      const bUnread = b.unreadCount || 0;
+      if (aUnread !== bUnread) return bUnread - aUnread;
+      const aUrgent = (a.lastMessage?.text || "").includes("Needs a human") || a.tags?.includes("ai-escalated") || a.priority === "urgent" || a.priority === "high";
+      const bUrgent = (b.lastMessage?.text || "").includes("Needs a human") || b.tags?.includes("ai-escalated") || b.priority === "urgent" || b.priority === "high";
+      if (aUrgent && !bUrgent) return -1;
+      if (!aUrgent && bUrgent) return 1;
+      return new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt);
+    });
+
+    const displayList = sorted.slice(0, limit);
+    let out = `🎟️ *DATAMART LIVE SUPPORT (REZOLV)*\n` +
+      `Logged in as: *${REZOLV_CONFIG.agentName}* | Active: *${tickets.length} tickets*\n\n`;
+
+    displayList.forEach((t, idx) => {
+      const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣"][idx] || "•";
+      const custName = t.customer?.name || "Customer";
+      const custEmail = t.customer?.email ? ` (${t.customer.email})` : "";
+      const statusStr = (t.status || "open").toUpperCase();
+      const isUrgent = (t.lastMessage?.text || "").includes("Needs a human") || t.tags?.includes("ai-escalated") || t.priority === "urgent" || t.priority === "high";
+      const urgentTag = isUrgent ? " 🚨 *URGENT*" : "";
+      const unreadStr = t.unreadCount > 0 ? ` • 💬 *${t.unreadCount} unread*` : "";
+      const lastMsg = (t.lastMessage?.text || "").replace(/\s+/g, " ").trim().slice(0, 90);
+
+      out += `${numEmoji} *[${t.ticketNumber || t._id}]* *${custName}*${unreadStr}${urgentTag}\n` +
+        `   • Status: *${statusStr}*${custEmail}\n` +
+        `   • Last message: "${lastMsg}${lastMsg.length >= 90 ? "..." : ""}"\n\n`;
+    });
+
+    out += `💡 *Quick Actions:*\n` +
+      `• *ticket [TicketNumber]* - View full chat history\n` +
+      `• *reply [TicketNumber] [message]* - Send live reply as Stony 💙\n` +
+      `• *close [TicketNumber]* - Resolve ticket`;
+
+    return out.trim();
+  } catch (err) {
+    console.warn("getRezolvTicketsReport error:", err.message);
+    return `⚠️ Could not connect to Rezolv support dashboard. Please check API connection.`;
+  }
+}
+
+async function getRezolvTicketConversation(identifier) {
+  try {
+    const found = await findRezolvTicket(identifier);
+    if (!found || !found.ticket) {
+      return `⚠️ Could not find Rezolv support ticket *${identifier}*. Please check the ticket number.`;
+    }
+
+    const t = found.ticket;
+    const msgs = found.messages || [];
+    const custName = t.customer?.name || "Customer";
+    const custEmail = t.customer?.email || "N/A";
+    const custPhone = t.customer?.phone || "";
+    const phoneStr = custPhone ? ` | 📱 ${custPhone}` : "";
+    const statusStr = (t.status || "open").toUpperCase();
+    const prioStr = (t.priority || "normal").toUpperCase();
+
+    let out = `💬 *REZOLV TICKET: ${t.ticketNumber || found.id}*\n\n` +
+      `👤 *Customer:* *${custName}*\n` +
+      `📧 *Email:* ${custEmail}${phoneStr}\n` +
+      `📊 *Status:* *${statusStr}* | *Priority:* ${prioStr}\n`;
+
+    if (t.escalationReason) {
+      const cleanEsc = t.escalationReason.replace(/\s+/g, " ").trim().slice(0, 180);
+      out += `🚨 *Escalation:* ${cleanEsc}${t.escalationReason.length > 180 ? "..." : ""}\n`;
+    }
+
+    out += `\n📜 *Recent Conversation:*\n`;
+
+    if (msgs.length === 0) {
+      out += `_No messages recorded on this ticket yet._\n`;
+    } else {
+      const recentMsgs = msgs.slice(-6);
+      recentMsgs.forEach(m => {
+        let sender = m.senderName || m.senderType || "User";
+        if (m.senderType === "agent") sender = `💙 ${sender}`;
+        else if (m.senderType === "system") sender = `⚙️ ${sender}`;
+        else sender = `👤 ${sender}`;
+        const time = m.createdAt ? new Date(m.createdAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Africa/Accra" }) : "";
+        const timeStr = time ? ` [${time}]` : "";
+        const textClean = (m.text || "").replace(/\s+/g, " ").trim();
+        out += `${sender}${timeStr}: "${textClean}"\n\n`;
+      });
+    }
+
+    out += `💡 *Reply to customer live on DataMart:*\n` +
+      `Send: *reply ${t.ticketNumber || found.id} [your message]*\n\n` +
+      `💡 *To resolve/close ticket:*\n` +
+      `Send: *close ${t.ticketNumber || found.id}*`;
+
+    return out.trim();
+  } catch (err) {
+    console.warn("getRezolvTicketConversation error:", err.message);
+    return `⚠️ Error fetching ticket conversation: ${err.message}`;
+  }
+}
+
+async function sendRezolvReply(identifier, replyText) {
+  try {
+    if (!replyText || !replyText.trim()) {
+      return `⚠️ Please provide a message to send. Example: *reply ${identifier} Hello, your order has been delivered!*`;
+    }
+    const cleanText = replyText.trim();
+    const found = await findRezolvTicket(identifier);
+    if (!found || !found.id) {
+      return `⚠️ Could not find ticket *${identifier}* on Rezolv. Please verify the ticket number.`;
+    }
+
+    const tktId = found.id;
+    const ticketNumber = found.ticket?.ticketNumber || identifier;
+    const custName = found.ticket?.customer?.name || "Customer";
+
+    const res = await rezolvApiRequest("/tickets/" + tktId + "/messages", {
+      method: "POST",
+      body: {
+        text: cleanText,
+        attachments: [],
+        audioUrl: ""
+      }
+    });
+
+    if (res.status === 200 || res.status === 201) {
+      return `✅ *REPLY SENT TO CUSTOMER LIVE!*\n\n` +
+        `🆔 *Ticket:* *${ticketNumber}*\n` +
+        `👤 *Customer:* ${custName}\n` +
+        `💙 *Sent As:* Stony 💙 (DataMart Support)\n` +
+        `💬 *Message:*\n"${cleanText}"\n\n` +
+        `The customer will see this message directly in the DataMart chat widget! 🎉`;
+    } else {
+      const errMsg = res.data?.message || res.raw || "Failed to post message";
+      return `⚠️ Could not send reply (Status ${res.status}): ${errMsg}`;
+    }
+  } catch (err) {
+    console.warn("sendRezolvReply error:", err.message);
+    return `⚠️ Error sending reply to Rezolv: ${err.message}`;
+  }
+}
+
+async function closeRezolvTicket(identifier, status = "resolved") {
+  try {
+    const found = await findRezolvTicket(identifier);
+    if (!found || !found.id) {
+      return `⚠️ Could not find ticket *${identifier}* on Rezolv. Please verify the ticket number.`;
+    }
+
+    const tktId = found.id;
+    const ticketNumber = found.ticket?.ticketNumber || identifier;
+    const custName = found.ticket?.customer?.name || "Customer";
+
+    const res = await rezolvApiRequest("/tickets/" + tktId + "/status", {
+      method: "PATCH",
+      body: { status: status }
+    });
+
+    if (res.status === 200) {
+      return `✅ *TICKET ${ticketNumber} RESOLVED!*\n\n` +
+        `👤 *Customer:* ${custName}\n` +
+        `📊 *Status:* Closed & Marked Resolved on Rezolv Dashboard.`;
+    } else {
+      const errMsg = res.data?.message || res.raw || "Failed to update ticket status";
+      return `⚠️ Could not update ticket status (Status ${res.status}): ${errMsg}`;
+    }
+  } catch (err) {
+    console.warn("closeRezolvTicket error:", err.message);
+    return `⚠️ Error updating ticket on Rezolv: ${err.message}`;
+  }
+}
+
+async function generateSupportDraftReply(identifier) {
+  try {
+    let cleanId = String(identifier || "").trim();
+
+    // 1. Is it a DataMart ticket ID (RPT...) or customer name on DataMart?
+    let dmTk = null;
+    if (cleanId && (/^RPT\d+$/i.test(cleanId) || !/^TKT-\d+$/i.test(cleanId))) {
+      const dmData = await fetchDatamartSupportTickets({ search: cleanId, limit: 3 });
+      dmTk = dmData?.tickets?.[0];
+    }
+
+    if (dmTk) {
+      const custFullName = (dmTk.userId?.name || dmTk.name || "Customer").trim();
+      const firstName = custFullName.split(" ")[0] || "there";
+      const cleanPhone = (dmTk.phoneNumber || dmTk.userId?.phoneNumber || "").replace(/\D/g, "");
+      const reportId = dmTk.reportId || dmTk._id;
+      const desc = `${dmTk.issueType || ""} ${dmTk.issueDescription || ""} ${dmTk.description || ""}`.toLowerCase();
+
+      let draft = "";
+      if (desc.includes("deposit") || desc.includes("momo") || desc.includes("wallet") || desc.includes("uncredited") || desc.includes("credit")) {
+        const amtMatch = desc.match(/(?:gh[c₵]?\s*|amt\s*|amount\s*)(\d+(?:\.\d{2})?)/i) || (dmTk.issueDescription || "").match(/(\d+(?:\.\d{2})?)/);
+        const amtStr = amtMatch ? ` of GH₵ ${amtMatch[1]}` : "";
+        draft = `Hello ${firstName}, thank you for contacting DataMart support. We have received your MoMo deposit verification request${amtStr} for ticket ${reportId}. Our finance team is reconciling it with the network and your wallet will be credited shortly. Thank you for your patience!`;
+      } else if (desc.includes("refund")) {
+        draft = `Hello ${firstName}, thank you for reaching out. Regarding your DataMart ticket ${reportId}, your refund has been approved and processed to your wallet balance. Kindly refresh your account to verify. Thank you!`;
+      } else if (desc.includes("order") || desc.includes("bundle") || desc.includes("fail") || desc.includes("delay")) {
+        draft = `Hello ${firstName}, thank you for contacting DataMart support regarding ticket ${reportId}. We are tracking your bundle delivery with the network and ensuring it reflects on your phone shortly. We apologize for any delay!`;
+      } else {
+        draft = `Hello ${firstName}, thank you for reaching out to DataMart support regarding ticket ${reportId}. We are actively attending to your request right now to resolve it for you. Thank you!`;
+      }
+
+      return {
+        ok: true,
+        platform: "datamart",
+        ticketId: reportId,
+        customerName: custFullName,
+        phone: cleanPhone,
+        draftMessage: draft
+      };
+    }
+
+    // 2. Check Rezolv (live web chat widget)
+    let found = null;
+    if (cleanId) {
+      found = await findRezolvTicket(cleanId);
+    }
+    if (!found) {
+      const activeRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
+      const tickets = activeRes.data?.data?.tickets || [];
+      const urgent = tickets.find(t => t.status !== "resolved" && (t.unreadCount > 0 || (t.lastMessage?.text || "").includes("Needs a human")));
+      const target = urgent || tickets.find(t => t.status !== "resolved");
+      if (target) {
+        found = await findRezolvTicket(target.ticketNumber || target._id);
+      }
+    }
+
+    if (found && found.ticket) {
+      const t = found.ticket;
+      const msgs = found.messages || [];
+      const custFullName = t.customer?.name || "Customer";
+      const firstName = custFullName.split(" ")[0] || "there";
+      const lastCustomerMsg = [...(msgs || [])].reverse().find(m => m.senderType === "customer")?.text || t.lastMessage?.text || "";
+      const escReason = t.escalationReason || "";
+      const combinedContext = (lastCustomerMsg + " " + escReason).toLowerCase();
+
+      const orderMatch = (escReason + " " + lastCustomerMsg).match(/\b(MN-[A-Z0-9]+|AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|\d{8,12})\b/i);
+      const orderRefStr = orderMatch ? ` for order ${orderMatch[0]}` : "";
+
+      let draft = "";
+      if (combinedContext.includes("refund") || combinedContext.includes("wallet") || combinedContext.includes("money")) {
+        draft = `Hello ${firstName}, thank you for waiting. We have verified your transaction${orderRefStr} and your refund has been processed to your wallet balance. Kindly refresh your account to check. Thank you for your patience!`;
+      } else if (combinedContext.includes("delay") || combinedContext.includes("waiting") || combinedContext.includes("not come") || combinedContext.includes("haven't received") || combinedContext.includes("not delivered")) {
+        draft = `Hello ${firstName}, thank you for reaching out. We are currently tracking your delivery${orderRefStr} with the telecom network. It is in progress and will reflect shortly. We sincerely apologize for the delay!`;
+      } else if (combinedContext.includes("failed")) {
+        draft = `Hello ${firstName}, we have investigated the failed delivery${orderRefStr}. We are reprocessing your dispatch right now so it credits to your phone. Thank you for your patience!`;
+      } else {
+        draft = `Hello ${firstName}, thank you for contacting DataMart support. I am attending to your request right now and resolving this for you immediately!`;
+      }
+
+      return {
+        ok: true,
+        platform: "rezolv",
+        ticket: t,
+        ticketId: t.ticketNumber || found.id,
+        customerName: custFullName,
+        draftMessage: draft
+      };
+    }
+
+    // 3. Fallback: Check DataMart pending tickets without filter
+    const dmPending = await fetchDatamartSupportTickets({ status: "pending", limit: 3 });
+    const fallbackDm = dmPending?.tickets?.[0];
+    if (fallbackDm) {
+      return await generateSupportDraftReply(fallbackDm.reportId || fallbackDm._id);
+    }
+
+    return { ok: false, error: "No active customer ticket found across DataMart or Rezolv to draft a reply for." };
+  } catch (err) {
+    console.warn("generateSupportDraftReply error:", err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+const generateRezolvDraftReply = generateSupportDraftReply;
+
 async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) {
   const ids = Array.isArray(portalOrderIds)
     ? portalOrderIds.map(x => String(x).trim()).filter(Boolean)
@@ -5952,16 +6503,68 @@ async function executeDatamartSearch(rawQuery, callerPhone = null) {
 
   if (!q) return "🔍 Please provide a customer name, phone number, email, or order reference to search.";
 
-  const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(q)}`, {}, callerPhone);
-  const d = resp?.data;
+  // 1. Check DataMart Support Tickets first (e.g. Prince Boachie, Amehati Prince, RPT005281)
+  let foundTickets = [];
+  try {
+    const tkRes = await fetchDatamartSupportTickets({ search: q, limit: 3 }, callerPhone);
+    if (tkRes?.tickets && tkRes.tickets.length > 0) {
+      foundTickets = tkRes.tickets;
+    }
+  } catch (_) {}
+
+  // 2. Check Rezolv Tickets (live web chat widget)
+  let rezolvFound = null;
+  try {
+    rezolvFound = await findRezolvTicket(q);
+  } catch (_) {}
+
+  // 3. Search DataMart Users & Orders
+  let d = null;
+  try {
+    const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(q)}`, {}, callerPhone);
+    d = resp?.data;
+  } catch (_) {}
   const users = d?.results?.users || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "customer" || x.email) : []);
   const orders = d?.results?.orders || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "order" || x.network) : []);
 
-  if (users.length === 0 && orders.length === 0) {
-    return `🔍 No DataMart customer, agent, or order found matching "*${q}*".`;
+  if (foundTickets.length === 0 && !rezolvFound && users.length === 0 && orders.length === 0) {
+    return `🔍 No DataMart support ticket, customer, agent, or order found matching "*${q}*".`;
   }
 
-  let out = `🔍 *DATAMART LOOKUP RESULTS FOR "${q}":*\n\n`;
+  let out = `🔍 *LOOKUP RESULTS FOR "${q}":*\n\n`;
+
+  // Display Open Support Tickets if found
+  if (foundTickets.length > 0) {
+    out += `🎫 *OPEN DATAMART SUPPORT TICKETS (${foundTickets.length}):*\n`;
+    foundTickets.forEach((tk) => {
+      const custName = (tk.userId?.name || "Customer").trim();
+      const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
+      const cleanPhone = custPhone.replace(/\D/g, "");
+      const prio = (tk.priority || "normal").toUpperCase();
+      const status = (tk.status || "pending").toUpperCase();
+      const desc = (tk.issueDescription || tk.description || "").replace(/\s+/g, " ").trim();
+      out += `• *[${tk.reportId}]* *${tk.reportReason || tk.issueType || "Support"}* (*${prio}* - *${status}*)\n` +
+        `  👤 *Customer:* *${custName}* (*${custPhone}*)\n` +
+        `  📝 *Details:* "${desc.slice(0, 110)}${desc.length >= 110 ? "..." : ""}"\n`;
+      if (cleanPhone) {
+        const waLink = `https://wa.me/233${cleanPhone.startsWith("0") ? cleanPhone.slice(1) : cleanPhone}`;
+        out += `  👉 *WhatsApp Customer:* ${waLink}\n`;
+      }
+      out += `  💡 *Quick Reply:* *reply ${custName.split(" ")[0]} [your message]*\n` +
+        `  💡 *AI Draft:* *draft reply for ${custName.split(" ")[0]}*\n\n`;
+    });
+  }
+
+  // Display Rezolv chat if found
+  if (rezolvFound && rezolvFound.ticket) {
+    const rt = rezolvFound.ticket;
+    out += `💬 *REZOLV LIVE CHAT TICKET:*\n` +
+      `• *ID:* *${rt.ticketNumber || rt._id}*\n` +
+      `• *Customer:* ${rt.customer?.name || "Customer"} (${rt.customer?.email || ""})\n` +
+      `• *Status:* ${(rt.status || "open").toUpperCase()}\n` +
+      `• *Last Message:* "${(rt.lastMessage?.text || "").slice(0, 90)}"\n` +
+      `💡 *Reply:* *reply ${rt.ticketNumber || rt._id} [your message]*\n\n`;
+  }
 
   if (users.length > 0) {
     users.slice(0, 3).forEach((u, i) => {
@@ -7319,6 +7922,56 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     if (report) return sendWhatsApp(from, report);
   }
 
+  // 3a. Rezolv Live Reply to Customer
+  const dmRezolvReplyMatch = cleanInput.match(/^(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})\s+([\s\S]+)$/i);
+  if (dmRezolvReplyMatch) {
+    const tktId = dmRezolvReplyMatch[1].trim();
+    const replyMsg = dmRezolvReplyMatch[2].trim();
+    const rep = await sendRezolvReply(tktId, replyMsg);
+    return sendWhatsApp(from, rep);
+  }
+
+  // 3b. Rezolv View Ticket Conversation
+  const dmRezolvViewMatch = cleanInput.match(/^(?:view\s+ticket|check\s+ticket|ticket)\s+(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i);
+  if (dmRezolvViewMatch) {
+    const tktId = dmRezolvViewMatch[1].trim();
+    const rep = await getRezolvTicketConversation(tktId);
+    return sendWhatsApp(from, rep);
+  }
+
+  // 3c. Rezolv Close/Resolve Ticket
+  const dmRezolvCloseMatch = cleanInput.match(/^(?:close|resolve)\s+(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i);
+  if (dmRezolvCloseMatch) {
+    const tktId = dmRezolvCloseMatch[1].trim();
+    const rep = await closeRezolvTicket(tktId);
+    return sendWhatsApp(from, rep);
+  }
+
+  // 3d. Rezolv Draft Reply
+  const dmDraftMatch = cleanInput.match(/^(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i);
+  if (dmDraftMatch) {
+    const targetId = (dmDraftMatch[1] || "").trim();
+    const draftRes = await generateRezolvDraftReply(targetId);
+    if (!draftRes.ok) return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find ticket to draft reply."}`);
+    await setOwnerPendingAction(from, {
+      type: "rezolv_reply",
+      ticketId: draftRes.ticketId,
+      message: draftRes.draftMessage
+    });
+    return sendWhatsApp(from,
+      `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
+      `"${draftRes.draftMessage}"\n\n` +
+      `👉 Reply: *YES* or *SEND* to dispatch right now as *Stony 💙*!\n` +
+      `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
+    );
+  }
+
+  // 3e. Rezolv Customer Live Tickets (supports typos like 'rezolv mode e', 'rezolv', etc.)
+  if (/\b(?:rezolv|resolv|rezolve|resovl)\b/i.test(cleanInput) || /^(?:customer\s*tickets?|live\s*tickets?)$/i.test(cleanInput)) {
+    const rep = await getRezolvTicketsReport("active");
+    return sendWhatsApp(from, rep);
+  }
+
   // 3. Tickets
   if (/^(?:tickets?|urgent|pending)$/i.test(cleanInput)) {
     const data = await fetchDatamartSupportTickets({ status: cleanInput.toLowerCase() === "urgent" ? "pending" : "pending", priority: cleanInput.toLowerCase() === "urgent" ? "urgent" : undefined, limit: 5 }, from);
@@ -7670,6 +8323,37 @@ app.post("/webhook", async (req, res) => {
     DATAMART MULTI-USER CONNECT & CONSOLE ROUTER
     ===================================================== */
     const cleanCmd = (text || "").trim();
+
+    // ── TOP-LEVEL REZOLV LIVE CUSTOMER SUPPORT DESK (https://www.rezolv.dev/dashboard) ──
+    const isRezolvModeIntent =
+      /\b(?:rezolv|resolv|rezolve|resovl)\b/i.test(cleanCmd) ||
+      /\b(?:support\s*mode|customer\s*support\s*mode|support\s*desk|live\s*support)\b/i.test(cleanCmd) ||
+      /^(?:rezolv|support)$/i.test(cleanCmd);
+
+    const isSpecificReplyAction = /^(?:reply|tell|draft\s+reply)\b/i.test(cleanCmd);
+
+    if (isRezolvModeIntent && !isSpecificReplyAction) {
+      const normF = normalizeBotPhone(from);
+      setUserMode(from, "support");
+      await saveCustomerSession(from, { step: 97 });
+      await supabase.from("settings").upsert({ key: `owner_mode_${normF}`, value: "support" }, { onConflict: "key" });
+      const initialReport = await getRezolvTicketsReport("active", 6);
+      return sendWhatsApp(from,
+        `🎟️ *CONNECTED TO REZOLV LIVE SUPPORT DESK!* 🚀\n` +
+        `🔗 *Dashboard:* https://www.rezolv.dev/dashboard\n` +
+        `👤 *Agent:* *Stony 💙* (stillmoving11@gmail.com)\n\n` +
+        `🚫 *DATA 1 GH store statistics & orders are MUTED.*\n` +
+        `You are now controlling live customer tickets from *rezolv.dev*!\n\n` +
+        `${initialReport}\n\n` +
+        `💡 *How to reply right now:*\n` +
+        `• *reply [TicketNumber or Name] [message]*\n` +
+        `  Example: *reply TKT-179633 Hello Prince, we have credited your MoMo deposit!*\n` +
+        `• *draft reply [Name]* ➔ I draft the response, you tap YES to dispatch live!\n` +
+        `• *ticket [TicketNumber]* ➔ View full conversation on Rezolv\n` +
+        `• *close [TicketNumber]* ➔ Close/resolve ticket on Rezolv\n` +
+        `• *exit* ➔ Return to normal DATA 1 store mode.`
+      );
+    }
 
     // 1. Connect / Link DataMart Account (Self-service or Owner assignment)
     const connectDmMatch = cleanCmd.match(/^(?:connect|link|login)\s+datamart(?:\s+(?:for\s+)?(\+?\d{9,15}))?(?:\s+([\w.-]+@[\w.-]+\.\w+))(?:\s+(.+))?$/i);
@@ -8301,8 +8985,46 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // ── DEDICATED DATAMART WORKER CONSOLE MODE HANDLER ──
-      if (getUserMode(from) === "datamart") {
+      // ── SWITCH TO FULLY LOCKED-IN SUPPORT MODE (REZOLV & DATAMART) ──
+      const isSupportModeSwitch =
+        /\b(?:rezolv|resolv|rezolve|resovl)\s*(?:mode)?\b/i.test(cleanInput) ||
+        /\b(?:support\s*mode|live\s*support(?:\s*mode)?|support\s*desk|customer\s*support\s*mode)\b/i.test(cleanInput) ||
+        /^(?:support|rezolv)$/i.test(cleanInput);
+
+      const isSpecificRezolvAction = /^(?:reply|tell|close|resolve|ticket|view\s+ticket)\b/i.test(cleanInput);
+
+      if (isSupportModeSwitch && !isSpecificRezolvAction) {
+        setUserMode(from, "support");
+        await saveCustomerSession(from, { step: 97 });
+        await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "support" }, { onConflict: "key" });
+        const initialReport = await getRezolvTicketsReport("active", 5);
+        return sendWhatsApp(from,
+          `🔒 *SUPPORT MODE FULLY LOCKED IN!* ⚡\n` +
+          `Logged in as: *Stony 💙* (Live Support Desk)\n\n` +
+          `🚫 *DATA 1 GH store statistics, sales numbers, and marketing are MUTED.*\n` +
+          `I am now 100% focused strictly on customer support tickets, live chats, and issue resolutions!\n\n` +
+          `${initialReport}\n\n` +
+          `💡 *Quick Commands in Support Mode:*\n` +
+          `• *reply [Name or Ticket] [message]* ➔ Send WhatsApp/SMS to customer or reply on Rezolv\n` +
+          `• *reply him to text me on 0547100951* ➔ Resolves pronoun from recent ticket & sends direct WhatsApp\n` +
+          `• *draft reply [Name or Ticket]* ➔ AI writes professional response, tap YES to send\n` +
+          `• *ticket [ReportID or TKT-ID]* ➔ View full chat history & issue details\n` +
+          `• *[Customer Name or Phone]* ➔ Look up tickets, complaints & orders\n` +
+          `• *tickets* or *urgent* ➔ Refresh ticket queue\n` +
+          `• *exit* or *normal mode* ➔ Return to normal DATA 1 GH store co-pilot.`
+        );
+      }
+
+      // ── DEDICATED SUPPORT & DATAMART CONSOLE MODE HANDLER ──
+      const activeOwnerMode = getUserMode(from);
+      if (activeOwnerMode === "support" || activeOwnerMode === "datamart") {
+        if (/^(?:exit|normal\s*mode|stony|stony\s*mode|store\s*mode|back|quit|leave|stop)$/i.test(cleanInput)) {
+          setUserMode(from, "ai");
+          await saveCustomerSession(from, { step: 99 });
+          await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "ai" }, { onConflict: "key" });
+          return sendWhatsApp(from, `👑 Exited Support Mode. Switched back to *DATA 1 GH Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
+        }
+
         const dmHandled = await processDatamartConsoleCommand(from, cleanInput, true);
         if (dmHandled) return dmHandled;
       }
@@ -8413,6 +9135,20 @@ app.post("/webhook", async (req, res) => {
       if (pendingAction && isConfirm) {
         const { type, network, capacity, status, smsText, inStock, productId, productName } = pendingAction;
         await clearOwnerPendingAction(from);
+
+        // 0. REZOLV LIVE CUSTOMER REPLY CONFIRMATION
+        if (type === "rezolv_reply") {
+          const tId = pendingAction.ticketId || pendingAction.ticket || pendingAction.id;
+          const replyText = pendingAction.message || pendingAction.text;
+          const res = await sendRezolvReply(tId, replyText);
+          return sendWhatsApp(from, res);
+        }
+
+        // 0b. UNIFIED CUSTOMER MESSAGE / DATAMART REPLY CONFIRMATION
+        if (type === "send_customer_message" || type === "reply_customer" || type === "message_customer") {
+          const res = await executeOwnerDirectAction("send_customer_message", pendingAction);
+          return sendWhatsApp(from, res);
+        }
 
         // Gather all target references from pendingAction
         let targetRefs = [];
@@ -9361,6 +10097,36 @@ app.post("/webhook", async (req, res) => {
         }
       } catch (_) {}
 
+      let rezolvLiveContext = "";
+      try {
+        const rzRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
+        const rzTickets = rzRes.data?.data?.tickets || [];
+        if (rzTickets.length > 0) {
+          const activeList = rzTickets.filter(t => t.status !== "resolved");
+          const urgentList = activeList.filter(t => t.unreadCount > 0 || (t.lastMessage?.text || "").includes("Needs a human") || t.tags?.includes("ai-escalated"));
+          const listToShow = (urgentList.length > 0 ? urgentList : activeList).slice(0, 6);
+          const formatted = listToShow.map((t, idx) => {
+            const num = t.ticketNumber || t._id;
+            const cust = t.customer?.name || "Customer";
+            const email = t.customer?.email ? ` (${t.customer.email})` : "";
+            const last = (t.lastMessage?.text || "").replace(/\s+/g, " ").trim().slice(0, 90);
+            return `  ${idx + 1}. [${num}] Customer: "${cust}"${email} | Unread: ${t.unreadCount || 0} | Last message: "${last}"`;
+          }).join("\n");
+
+          rezolvLiveContext = `LIVE CUSTOMER SUPPORT DESK (REZOLV.DEV):\n` +
+            `- Status: 100% CONNECTED & AUTHENTICATED as agent "Stony 💙" (${REZOLV_CONFIG.email})\n` +
+            `- Active Customer Tickets: ${activeList.length} total (${urgentList.length} urgent / needing attention)\n` +
+            `- Recent Customer Chats Awaiting Response:\n${formatted}\n` +
+            `- TWO-WAY REPLY IS 100% OPERATIONAL: You CAN AND DO DIRECTLY REPLY TO ALL REZOLV TICKETS! Never say you cannot reply or that the bridge is strictly for monitoring. You have direct live two-way reply access!\n` +
+            `- When owner asks "can you reply them" or "reply to them", answer YES! List the active tickets and ask what to say or tell the owner how to reply.\n` +
+            `- When owner tells you to reply to a ticket or customer (e.g. "tell Emmanuel we refunded him" or "reply to TKT-176279 that his order is ready"), output:\n` +
+            `  [EXECUTE_ACTION: {"type": "rezolv_reply", "ticketId": "[TicketNumber or ID]", "message": "[text to customer]"}]\n` +
+            `- When owner asks to close/resolve a ticket: output [EXECUTE_ACTION: {"type": "rezolv_close", "ticketId": "[TicketNumber]"}]\n`;
+        }
+      } catch (err) {
+        console.warn("rezolvLiveContext fetch warning:", err.message);
+      }
+
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
       let ownerSystemPrompt =
         "You are Stony, the owner's personal AI Senior Full-Stack Engineer, System Architect, and Commercial Co-Pilot at DATA 1 GH.\n" +
@@ -9428,11 +10194,19 @@ app.post("/webhook", async (req, res) => {
         "      - Query recent Social Media Boost orders: {\"type\": \"query_boost_orders\", \"limit\": 8}\n" +
         "      - Two-Tier Rule: Reseller profit margin must ALWAYS be >= provider wholesale markup (M_agent >= M_admin).\n" +
         "  20. DataMart Agent Support & Ticket Operations: Direct live access to DataMart Agent Support queue ('dm tickets', 'view ticket [ReportID]', 'dm search [query]'). You have 100% visibility into agent escalations, complaints, and worker tickets.\n" +
+        "      - When the owner asks to reply, message, or text a customer on a DataMart ticket (e.g. 'reply him to text me on 0547100951', 'reply Prince Boachie', 'message customer'):\n" +
+        "        NEVER retry orders, NEVER mark orders failed, and NEVER mark chats resolved! NEVER say you cannot reply or don't have a reply button! You dispatch messages directly to the customer's phone via WhatsApp and SMS!\n" +
+        "        Output: [EXECUTE_ACTION: {\"type\": \"send_customer_message\", \"target\": \"[CustomerName or RPT ID]\", \"message\": \"[message]\"}].\n" +
         "      - When the owner asks to do a delivery check for any batch or order on DataMart (e.g. 'Do delivery check for 2313443' or 'check batch 2313443'), output [EXECUTE_ACTION: {\"type\": \"datamart_delivery_check\", \"portalOrderId\": \"2313443\"}].\n" +
         "      - When the owner asks to look up a customer on DataMart (e.g. 'check out this customer on DataMart nyakponoah11@gmail.com'), output [EXECUTE_ACTION: {\"type\": \"datamart_search_customer\", \"query\": \"nyakponoah11@gmail.com\"}].\n" +
-        "      - When the owner asks to retry a failed DataMart order, output [EXECUTE_ACTION: {\"type\": \"datamart_retry_order\", \"orderId\": \"...\"}].\n" +
-        "      - When the owner asks to refund a DataMart order, output [EXECUTE_ACTION: {\"type\": \"datamart_refund_order\", \"orderId\": \"...\"}].\n" +
-        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\"|\"datamart_delivery_check\"|\"datamart_search_customer\"|\"datamart_retry_order\"|\"datamart_refund_order\", ...}] at the end of your reply.\n" +
+        "      - When the owner EXPLICITLY asks to retry an order, output [EXECUTE_ACTION: {\"type\": \"datamart_retry_order\", \"orderId\": \"...\"}]. NEVER output this for customer support replies!\n" +
+        "      - When the owner EXPLICITLY asks to refund an order, output [EXECUTE_ACTION: {\"type\": \"datamart_refund_order\", \"orderId\": \"...\"}].\n" +
+        "  21. Rezolv Live Customer Support Chat (https://www.rezolv.dev/dashboard): You are authenticated directly as agent Stony 💙 (stillmoving11@gmail.com). You can list active customer tickets, view ticket conversations, reply directly to customers in the live DataMart chat widget, and resolve tickets.\n" +
+        "      - When owner asks to list/check live support tickets on Rezolv/DataMart: output [EXECUTE_ACTION: {\"type\": \"rezolv_tickets\"}].\n" +
+        "      - When owner asks to view a ticket conversation (e.g. 'view ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_view_ticket\", \"ticketId\": \"TKT-179538\"}].\n" +
+        "      - When owner asks to reply to a customer on Rezolv (e.g. 'reply to TKT-179538 Hello, your order has been delivered'): output [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"TKT-179538\", \"message\": \"...\"}].\n" +
+        "      - When owner asks to resolve/close a ticket (e.g. 'close ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"TKT-179538\"}].\n" +
+        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\"|\"datamart_delivery_check\"|\"datamart_search_customer\"|\"datamart_retry_order\"|\"datamart_refund_order\"|\"rezolv_tickets\"|\"rezolv_view_ticket\"|\"rezolv_reply\"|\"rezolv_close\"|\"send_customer_message\", ...}] at the end of your reply.\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
         "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
@@ -9459,6 +10233,7 @@ app.post("/webhook", async (req, res) => {
         (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
         (specificOrderCtx ? `\n${specificOrderCtx}` : "") +
         (dmSupportLiveContext ? `\n${dmSupportLiveContext}` : "") +
+        (rezolvLiveContext ? `\n${rezolvLiveContext}\n` : "") +
         (recentRuntimeLogSummary ? `\n${recentRuntimeLogSummary}\n` : "") +
         (boostLiveContext ? `\n${boostLiveContext}` : "") +
         (liveCornerDiagnosticsCtx ? `\n${liveCornerDiagnosticsCtx}\n` : "");
@@ -9912,6 +10687,178 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
+      // Direct Query: "can you reply them", "reply them", "how to reply", "can you reply", "can draft reply himself"
+      if (/^(?:can\s+(?:you\s+)?(?:reply|message|text)(?:\s+(?:them|him|her|customer|tickets?))?|can\s+(?:you\s+)?draft(?:\s+reply)?(?:\s+himself)?|how\s+(?:do\s+i|can\s+i|to)\s+reply)/i.test(cmdText)) {
+        let rzReport = "";
+        try { rzReport = await getRezolvTicketsReport("active", 3); } catch (_) {}
+        return sendWhatsApp(from,
+          `Yes bossu! I can reply directly to ANY customer or ticket right now! 🚀\n\n` +
+          `1️⃣ *DataMart Tickets (RPT... / Agents)*:\n` +
+          `• *reply Prince to text me on 0547100951*\n` +
+          `• *reply him [your message]*\n` +
+          `• *reply RPT005281 [your message]*\n` +
+          `I dispatch a direct WhatsApp message to their phone, attempt SMS, and send you a 1-tap WhatsApp chat link!\n\n` +
+          `2️⃣ *Rezolv Live Customer Chat (TKT-...)*:\n` +
+          `• *reply TKT-179978 [your message]*\n` +
+          `• *reply Emmanuel [your message]*\n` +
+          `I post directly into their live chat widget as *Stony 💙*!\n\n` +
+          `3️⃣ *AI Auto-Draft Replies (I draft it myself!)*:\n` +
+          `• Just say: *draft reply* or *draft reply for Prince*\n` +
+          `I generate the best professional reply, and you just tap *YES* or *SEND* to dispatch live!\n\n` +
+          (rzReport ? `${rzReport}` : "")
+        );
+      }
+
+      // Direct Command: Draft Reply (e.g. "draft reply for Emmanuel", "draft reply", "suggest reply")
+      const draftReplyMatch = cmdText.match(/^(?:(?:can\s+you\s+)?draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply|help\s+me\s+reply|what\s+should\s+i\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i);
+      if (draftReplyMatch) {
+        const targetId = (draftReplyMatch[1] || "").trim();
+        const draftRes = await generateSupportDraftReply(targetId);
+        if (!draftRes.ok) {
+          return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find a ticket to draft a reply for."}`);
+        }
+
+        await setOwnerPendingAction(from, {
+          type: draftRes.platform === "datamart" ? "send_customer_message" : "rezolv_reply",
+          target: draftRes.phone || draftRes.ticketId,
+          ticketId: draftRes.ticketId,
+          customerName: draftRes.customerName,
+          message: draftRes.draftMessage
+        });
+
+        const platformLabel = draftRes.platform === "datamart" ? "DataMart Ticket (WhatsApp/SMS)" : "Rezolv Live Chat Widget (Stony 💙)";
+
+        return sendWhatsApp(from,
+          `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
+          `"${draftRes.draftMessage}"\n\n` +
+          `🌐 *Destination:* ${platformLabel}\n` +
+          `💡 *Ready to dispatch this live?*\n` +
+          `👉 Reply: *YES* or *SEND* to dispatch right now!\n` +
+          `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
+        );
+      }
+
+      // Unified Live Reply Handler (Rezolv live tickets, DataMart RPT tickets, customer names, phone numbers, and pronouns)
+      const unifiedReplyPrefixMatch =
+        cmdText.match(/^(?:(?:dm|rezolv)\s+)?(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?([\s\S]+)$/i);
+
+      if (unifiedReplyPrefixMatch) {
+        let remainder = unifiedReplyPrefixMatch[1].trim();
+        let rawTarget = "";
+        let replyMsg = "";
+
+        // Case A: Pronouns (him, her, them, the customer, etc.)
+        const pronounMatch = remainder.match(/^(him|her|them|the\s+customer|customer|client|user)\b(?:\s+(?:to|that|saying|:)?\s*)?([\s\S]*)$/i);
+        if (pronounMatch) {
+          rawTarget = pronounMatch[1].trim();
+          replyMsg = pronounMatch[2].trim();
+        }
+        // Case B: Ticket ID (RPT005281, TKT-179978, mongoId)
+        else if (/^(RPT\d+|TKT-?\d+|[a-f0-9]{24})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i.test(remainder)) {
+          const tMatch = remainder.match(/^(RPT\d+|TKT-?\d+|[a-f0-9]{24})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i);
+          rawTarget = tMatch[1].trim();
+          replyMsg = tMatch[2].trim();
+        }
+        // Case C: Phone Number (054..., 233...)
+        else if (/^(0[2357]\d{8}|233\d{9})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i.test(remainder)) {
+          const pMatch = remainder.match(/^(0[2357]\d{8}|233\d{9})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i);
+          rawTarget = pMatch[1].trim();
+          replyMsg = pMatch[2].trim();
+        }
+        // Case D: Separator words like " to ", " that ", " saying ", or ": "
+        else if (/^(.+?)\s+(?:to|that|saying|:)\s+([\s\S]+)$/i.test(remainder)) {
+          const sepMatch = remainder.match(/^(.+?)\s+(?:to|that|saying|:)\s+([\s\S]+)$/i);
+          rawTarget = sepMatch[1].trim();
+          replyMsg = sepMatch[2].trim();
+        }
+        // Case E: Customer name followed by text (e.g. "Prince Boachie text me on...", "Emmanuel we refunded you")
+        else {
+          const words = remainder.split(/\s+/);
+          if (words.length >= 3) {
+            rawTarget = words.slice(0, 2).join(" ");
+            replyMsg = words.slice(2).join(" ");
+          } else if (words.length === 2) {
+            rawTarget = words[0];
+            replyMsg = words[1];
+          } else {
+            rawTarget = remainder;
+            replyMsg = "";
+          }
+        }
+
+        // Clean up message
+        if (/^to\s+/i.test(replyMsg)) replyMsg = replyMsg.replace(/^to\s+/i, "").trim();
+        if (/^that\s+/i.test(replyMsg)) replyMsg = replyMsg.replace(/^that\s+/i, "").trim();
+
+        // If target is pronoun "him", "her", "them", "the customer"
+        if (/^(?:him|her|them|the\s+customer|customer|client|user)$/i.test(rawTarget)) {
+          const historyTexts = (history || []).slice(-5).map(h => h.text).reverse();
+          for (const ht of historyTexts) {
+            const rptMatch = ht.match(/RPT\d+/i);
+            if (rptMatch) { rawTarget = rptMatch[0]; break; }
+            const tktMatch = ht.match(/TKT-\d+/i);
+            if (tktMatch) { rawTarget = tktMatch[0]; break; }
+            const nameMatch = ht.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+))\b/);
+            if (nameMatch && !/^(DataMart|Stony|Rezolv|Admin|Understood)/i.test(nameMatch[0])) {
+              rawTarget = nameMatch[0];
+              break;
+            }
+          }
+        }
+
+        // If no message was provided, auto-draft a reply!
+        if (!replyMsg) {
+          const draftRes = await generateSupportDraftReply(rawTarget);
+          if (!draftRes.ok) {
+            return sendWhatsApp(from, `⚠️ ${draftRes.error || "Please include the message to send: e.g. *reply " + rawTarget + " [message]*"}`);
+          }
+          await setOwnerPendingAction(from, {
+            type: draftRes.platform === "datamart" ? "send_customer_message" : "rezolv_reply",
+            target: draftRes.phone || draftRes.ticketId,
+            ticketId: draftRes.ticketId,
+            customerName: draftRes.customerName,
+            message: draftRes.draftMessage
+          });
+          const platformLabel = draftRes.platform === "datamart" ? "DataMart Ticket (WhatsApp/SMS)" : "Rezolv Live Chat Widget (Stony 💙)";
+          return sendWhatsApp(from,
+            `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
+            `"${draftRes.draftMessage}"\n\n` +
+            `🌐 *Destination:* ${platformLabel}\n` +
+            `💡 *Ready to dispatch this live?*\n` +
+            `👉 Reply: *YES* or *SEND* to dispatch right now!\n` +
+            `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
+          );
+        }
+
+        // We have rawTarget and replyMsg: dispatch directly
+        const rep = await executeOwnerDirectAction("send_customer_message", { target: rawTarget, message: replyMsg });
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command: Rezolv View Ticket Conversation (e.g. "ticket TKT-179538", "view ticket TKT-179538", "ticket Emmanuel")
+      const rezolvViewMatch = cmdText.match(/^(?:(?:dm|view|check)\s+)?ticket\s+(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i) ||
+        cmdText.match(/^(?:view\s+ticket|check\s+ticket|dm\s+ticket)\s+(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i);
+      if (rezolvViewMatch) {
+        const tktId = rezolvViewMatch[1].trim();
+        const rep = await getRezolvTicketConversation(tktId);
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command: Rezolv Close/Resolve Ticket (e.g. "close ticket TKT-179538", "resolve ticket TKT-179538", "dm close TKT-179538")
+      const rezolvCloseMatch = cmdText.match(/^(?:(?:dm|rezolv)\s+)?(?:close|resolve)\s+(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24})$/i);
+      if (rezolvCloseMatch) {
+        const tktId = rezolvCloseMatch[1].trim();
+        const rep = await closeRezolvTicket(tktId);
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command: Rezolv Customer Live Tickets (e.g. "rezolv", "rezolv tickets", "live tickets", "customer tickets", "support tickets")
+      const rezolvTicketsMatch = cmdText.match(/^(?:(?:dm|datamart)\s+)?(?:rezolv|rezolv\s*tickets?|live\s*tickets?|customer\s*tickets?|support\s*tickets?)$/i);
+      if (rezolvTicketsMatch) {
+        const rep = await getRezolvTicketsReport("active");
+        return sendWhatsApp(from, rep);
+      }
+
       // Direct Action Command: View Specific DataMart Ticket
       const viewDmTicketMatch = cmdText.match(/^(?:view\s+ticket|dm\s+ticket|ticket|check\s+ticket)\s+(RPT\d+|[a-f0-9]{24})/i);
       if (viewDmTicketMatch) {
@@ -10098,80 +11045,6 @@ app.post("/webhook", async (req, res) => {
       // Direct Action Command: DataMart Withdrawals
       const dmWithdrawalsMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?withdrawals?$/i);
       if (dmWithdrawalsMatch) {
-        const resp = await fetchDatamartSupportEndpoint('/api/support/withdrawals?limit=5');
-        const list = resp?.data?.withdrawals || [];
-        if (list.length === 0) {
-          return sendWhatsApp(from, `💰 *DATAMART AGENT WITHDRAWALS:* No pending withdrawal requests found.`);
-        }
-
-        let out = `💰 *DATAMART AGENT WITHDRAWALS (${list.length} shown):*\n\n`;
-        list.forEach((w, idx) => {
-          const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-          const agentName = w.agentId?.name || "Agent";
-          const storeName = w.storeId?.storeName || "Store";
-          const amt = w.requestedAmount != null ? Number(w.requestedAmount).toFixed(2) : "0.00";
-          const status = (w.status || "pending").toUpperCase();
-          const wId = w.withdrawalId || w._id;
-
-          out += `${num} *[${wId}]* GH₵ ${amt} (${status})\n` +
-            `• 👤 *Agent:* ${agentName} (${w.agentId?.phoneNumber || "N/A"})\n` +
-            `• 🏪 *Store:* ${storeName}\n` +
-            `• 💳 *Method:* ${w.method || "wallet"}\n\n`;
-        });
-        return sendWhatsApp(from, out);
-      }
-
-      // Direct Action Command: DataMart Deposits
-      const dmDepositsMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?deposits?$/i);
-      if (dmDepositsMatch) {
-        const resp = await fetchDatamartSupportEndpoint('/api/support/deposits?limit=5');
-        const list = resp?.data?.deposits || [];
-        if (list.length === 0) {
-          return sendWhatsApp(from, `💳 *DATAMART AGENT DEPOSITS:* No recent deposits found.`);
-        }
-
-        let out = `💳 *DATAMART RECENT DEPOSITS:*\n\n`;
-        list.forEach((dep, idx) => {
-          const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-          const userName = dep.userId?.name || "Agent";
-          const userPhone = dep.userId?.phoneNumber || "N/A";
-          const amt = dep.amount != null ? Number(dep.amount).toFixed(2) : "0.00";
-          const type = (dep.type || "deposit").toUpperCase();
-          const time = getTimeAgoGhana(dep.createdAt);
-
-          out += `${num} *GH₵ ${amt}* (${type}) - ${time}\n` +
-            `• 👤 *User:* ${userName} (${userPhone})\n` +
-            `• 💰 *Wallet After:* GH₵ ${Number(dep.balanceAfter || 0).toFixed(2)}\n\n`;
-        });
-        return sendWhatsApp(from, out);
-      }
-
-      // Direct Action Command: Universal Customer / Agent Investigation
-      const dmInvestigateMatch =
-        cmdText.match(/^(?:datamart|dm)\s*(?:investigate|customer|agent|lookup|search|check)\s+(.+)$/i) ||
-        cmdText.match(/^(?:datamart|dm)\s+(0[2357]\d{8}|\+?233[2357]\d{8})$/i) ||
-        cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:this\s+)?(?:customer|user|agent|number|phone)?\s*(?:on\s+datamart\s+)?(?:for\s+me\s+)?([^\s]+@[^\s]+|0[2357]\d{8}|\+?233[2357]\d{8})/i) ||
-        cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:on\s+datamart\s+)?([^\s]+@[^\s]+)/i);
-      if (dmInvestigateMatch) {
-        const query = dmInvestigateMatch[1].trim();
-        const report = await executeDatamartSearch(query, from);
-        if (report) return sendWhatsApp(from, report);
-      }
-
-      // Direct Action Command: Live Failed Orders or Delivery Check Failed Query
-      const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cmdText) ||
-        /^(?:failed|failed\s*orders?|failed\s*queue|open\s*failed)$/i.test(cmdText);
-      if (isLiveFailedQuery) {
-        const report = await getLiveFailedOrdersReport(from);
-        if (report) return sendWhatsApp(from, report);
-      }
-
-      const isAuditFailedQuery = /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cmdText) ||
-        /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cmdText);
-      if (isAuditFailedQuery) {
-        const norm = normalizeBotPhone(from);
-        const cached = lastDeliveryCheckCache.get(norm);
-        const reply = await formatFailedItemsReply(cached, from);
         return sendWhatsApp(from, reply);
       }
 
@@ -10812,11 +11685,42 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, msg);
       }
 
+      // Check if user is in Support Mode
+      const isSupportMode = getUserMode(from, currentSession) === "support" || currentSession?.step === 97;
+
+      let effectiveSystemPrompt = ownerSystemPrompt;
+      if (isSupportMode) {
+        effectiveSystemPrompt =
+          "You are Stony 💙, the Head of Live Customer Support & Support Desk Operations at DataMart and Rezolv.\n" +
+          "You are having a direct WhatsApp conversation with the business owner in LOCKED-IN SUPPORT MODE.\n\n" +
+          "STRICT SUPPORT MODE MANDATE (ZERO DATA 1 STORE PROMPT DUMPING):\n" +
+          "- You are 100% DEDICATED to customer support tickets, resolving agent/customer complaints, drafting replies, and tracking issue resolutions.\n" +
+          "- NEVER talk about DATA 1 GH store orders, today's store sales, revenue, marketing promos, campus reps, or failed store checkout orders!\n" +
+          "- NEVER talk about retrying store dispatches (like WS-MFDA8PM) or clearing store queue!\n" +
+          "- NEVER say you cannot reply or don't have a reply button! You can dispatch WhatsApp & SMS directly to customers, and reply directly on Rezolv!\n" +
+          "- Talk like an intelligent, sharp Ghanaian customer support lead ('bossu', 'chale', 'sharp', 'no wahala'). Keep replies crisp, direct, and focused strictly on the tickets and customer communications.\n\n" +
+          "CUSTOMER SUPPORT CAPABILITIES & ACTIONS:\n" +
+          "1. DataMart Tickets (RPT...): You dispatch WhatsApp and SMS directly to customer phones!\n" +
+          "   When owner asks to reply, tell, or message a customer on a DataMart ticket (e.g. 'reply him to text me on 0547100951' or 'reply Prince Boachie'):\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"send_customer_message\", \"target\": \"[name/phone/RPT]\", \"message\": \"[message]\"}]\n" +
+          "2. Rezolv Live Chat (TKT-...): You reply directly in the live web chat widget as Stony 💙.\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"[TKT-ID]\", \"message\": \"[message]\"}]\n" +
+          "3. Close/Resolve Ticket:\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"[TKT-ID]\"}]\n" +
+          "4. Carrier Delivery Check on Portal Order ID:\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"datamart_delivery_check\", \"portalOrderId\": \"[id]\"}]\n" +
+          "5. Search customer/agent on DataMart:\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"datamart_search_customer\", \"query\": \"[query]\"}]\n\n" +
+          "LIVE CUSTOMER SUPPORT QUEUES & TICKETS CONTEXT:\n" +
+          (rezolvLiveContext ? `${rezolvLiveContext}\n` : "") +
+          (dmSupportLiveContext ? `${dmSupportLiveContext}\n` : "");
+      }
+
       // ── STEP 1: FAST DIRECT IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──
       let aiReply = "";
       try {
         const aiResult = await executeBotAi({
-          systemPrompt: ownerSystemPrompt,
+          systemPrompt: effectiveSystemPrompt,
           userMessage: text,
           history,
           maxTokens: 2500,
@@ -10889,7 +11793,7 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // If AI emitted [SUGGEST_ACTION: {...}], also execute it immediately for the verified owner!
+      // If AI emitted [SUGGEST_ACTION: {...}], handle confirmation vs execution cleanly
       if (aiReply) {
         const proposed = extractProposedActionFromText(aiReply);
         if (proposed?.action) {
@@ -10899,13 +11803,20 @@ app.post("/webhook", async (req, res) => {
             }
             const aType = proposed.action.action_type || proposed.action.type;
             const aPayload = proposed.action.payload || proposed.action;
-            const execRes = await executeOwnerDirectAction(aType, aPayload);
-            await syncActionToSite(aType, aPayload);
-            if (execRes) {
-              aiReply += `\n\n✅ Done bossu! ${execRes}`;
+            const isQuestion = /\?|shall\s+i|do\s+you\s+want|would\s+you\s+like|confirm|approve/i.test(aiReply);
+
+            if (isQuestion) {
+              // Store as pending action so owner's next reply ("yes", "proceed") executes it safely
+              await setOwnerPendingAction(from, proposed.action);
+            } else {
+              const execRes = await executeOwnerDirectAction(aType, aPayload);
+              await syncActionToSite(aType, aPayload);
+              if (execRes) {
+                aiReply += `\n\n✅ Done bossu! ${execRes}`;
+              }
             }
           } catch (err) {
-            console.warn("Failed executing suggested action:", err.message);
+            console.warn("Failed handling suggested action:", err.message);
           }
         }
 
@@ -10916,8 +11827,11 @@ app.post("/webhook", async (req, res) => {
 
       // ── SMART CONVERSATIONAL PERSONAL ASSISTANT FALLBACK ──
       if (!aiReply) {
+        if (isSupportMode) {
+          aiReply = `I dey with you bossu! 🎫 *Support Mode is fully locked in.*\nLet me know which customer ticket or complaint you'd like me to inspect, draft a reply for, or dispatch!`;
+        }
         // 1. Order Lookups (like WSF7AEZQA)
-        if (specificOrderCtx) {
+        else if (specificOrderCtx) {
           aiReply = `🔍 *Live Order Status:*\n${specificOrderCtx}\nIf payment just went through on MoMo, you can refresh or I can trigger delivery directly for you!`;
         }
 
@@ -13712,6 +14626,87 @@ async function runDatamartSupportWatcher() {
 // Check every 3 minutes for new urgent customer/agent escalations on DataMart
 setInterval(runDatamartSupportWatcher, 180000);
 setTimeout(runDatamartSupportWatcher, 20000);
+
+/* =========================================================
+24/7 REZOLV LIVE CUSTOMER SUPPORT URGENT TICKET WATCHER
+Alerts owner on WhatsApp when customer needs human help
+========================================================= */
+
+const alertedRezolvTickets = new Set();
+let isRezolvWatcherInitialized = false;
+
+async function runRezolvUrgentWatcher() {
+  try {
+    const res = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
+    const tickets = res.data?.data?.tickets || [];
+    if (!Array.isArray(tickets) || tickets.length === 0) return;
+
+    // Filter for tickets needing human attention
+    const urgentTickets = tickets.filter(t => {
+      if (t.status === "resolved") return false;
+      const text = t.lastMessage?.text || "";
+      const isNeedsHuman = text.includes("Needs a human") || t.tags?.includes("ai-escalated") || t.priority === "urgent";
+      return isNeedsHuman && (t.unreadCount > 0 || text.includes("Needs a human"));
+    });
+
+    if (!isRezolvWatcherInitialized) {
+      urgentTickets.forEach(t => {
+        const key = `${t._id}_${t.lastMessage?.createdAt || t.updatedAt || ""}`;
+        alertedRezolvTickets.add(key);
+      });
+      isRezolvWatcherInitialized = true;
+      return;
+    }
+
+    for (const t of urgentTickets) {
+      const key = `${t._id}_${t.lastMessage?.createdAt || t.updatedAt || ""}`;
+      if (!alertedRezolvTickets.has(key)) {
+        alertedRezolvTickets.add(key);
+
+        const { data: sRows } = await supabase.from("settings").select("key,value").in("key", ["admin_whatsapp_number", "admin_alert_phone"]);
+        const sMap = {};
+        (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+        const targetPhone = sMap["admin_whatsapp_number"] || sMap["admin_alert_phone"] || process.env.ADMIN_PHONE;
+
+        if (targetPhone) {
+          const custName = t.customer?.name || "Customer";
+          const custEmail = t.customer?.email ? ` (${t.customer.email})` : "";
+          const tktNum = t.ticketNumber || t._id;
+          const lastMsg = (t.lastMessage?.text || "").replace(/\s+/g, " ").trim().slice(0, 160);
+
+          let draftHint = "";
+          try {
+            const draft = await generateRezolvDraftReply(tktNum);
+            if (draft.ok && draft.draftMessage) {
+              await setOwnerPendingAction(targetPhone, {
+                type: "rezolv_reply",
+                ticketId: tktNum,
+                message: draft.draftMessage
+              });
+              draftHint = `\n📝 *Suggested Reply Draft:*\n"${draft.draftMessage}"\n\n👉 *Reply YES or SEND to dispatch this reply live now!*\n`;
+            }
+          } catch (_) {}
+
+          await sendWhatsApp(targetPhone,
+            `🚨 *DATAMART CUSTOMER SUPPORT ALERT (REZOLV)*\n\n` +
+            `🆔 *Ticket:* *${tktNum}*\n` +
+            `👤 *Customer:* ${custName}${custEmail}\n` +
+            `🚩 *Status:* Needs a Human\n` +
+            `💬 *Message:*\n"${lastMsg}${lastMsg.length >= 160 ? "..." : ""}"\n` +
+            draftHint +
+            `\n💡 *Or customize:* *reply ${tktNum} [your message]*`
+          ).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("runRezolvUrgentWatcher error:", err.message);
+  }
+}
+
+// Check every 2 minutes for new urgent tickets on Rezolv
+setInterval(runRezolvUrgentWatcher, 120000);
+setTimeout(runRezolvUrgentWatcher, 25000);
 
 /* =========================================================
 START SERVER
