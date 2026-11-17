@@ -5744,6 +5744,7 @@ async function findRezolvTicket(identifier) {
 
   const cleanNum = rawId.replace(/^#/, "").toUpperCase();
   const digitsOnly = cleanNum.replace(/\D/g, "");
+  const lowerId = rawId.toLowerCase();
 
   // 1. Search in active tickets
   const activeRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
@@ -5754,6 +5755,10 @@ async function findRezolvTicket(identifier) {
     const tn = (t.ticketNumber || "").toUpperCase();
     if (tn === cleanNum) return true;
     if (digitsOnly && tn.endsWith(digitsOnly)) return true;
+    const custName = (t.customer?.name || "").toLowerCase();
+    if (lowerId.length >= 3 && custName.includes(lowerId)) return true;
+    const custEmail = (t.customer?.email || "").toLowerCase();
+    if (lowerId.length >= 4 && custEmail.includes(lowerId)) return true;
     return false;
   });
 
@@ -5767,6 +5772,10 @@ async function findRezolvTicket(identifier) {
       const tn = (t.ticketNumber || "").toUpperCase();
       if (tn === cleanNum) return true;
       if (digitsOnly && tn.endsWith(digitsOnly)) return true;
+      const custName = (t.customer?.name || "").toLowerCase();
+      if (lowerId.length >= 3 && custName.includes(lowerId)) return true;
+      const custEmail = (t.customer?.email || "").toLowerCase();
+      if (lowerId.length >= 4 && custEmail.includes(lowerId)) return true;
       return false;
     });
   }
@@ -9766,6 +9775,36 @@ app.post("/webhook", async (req, res) => {
         }
       } catch (_) {}
 
+      let rezolvLiveContext = "";
+      try {
+        const rzRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
+        const rzTickets = rzRes.data?.data?.tickets || [];
+        if (rzTickets.length > 0) {
+          const activeList = rzTickets.filter(t => t.status !== "resolved");
+          const urgentList = activeList.filter(t => t.unreadCount > 0 || (t.lastMessage?.text || "").includes("Needs a human") || t.tags?.includes("ai-escalated"));
+          const listToShow = (urgentList.length > 0 ? urgentList : activeList).slice(0, 6);
+          const formatted = listToShow.map((t, idx) => {
+            const num = t.ticketNumber || t._id;
+            const cust = t.customer?.name || "Customer";
+            const email = t.customer?.email ? ` (${t.customer.email})` : "";
+            const last = (t.lastMessage?.text || "").replace(/\s+/g, " ").trim().slice(0, 90);
+            return `  ${idx + 1}. [${num}] Customer: "${cust}"${email} | Unread: ${t.unreadCount || 0} | Last message: "${last}"`;
+          }).join("\n");
+
+          rezolvLiveContext = `LIVE CUSTOMER SUPPORT DESK (REZOLV.DEV):\n` +
+            `- Status: 100% CONNECTED & AUTHENTICATED as agent "Stony 💙" (${REZOLV_CONFIG.email})\n` +
+            `- Active Customer Tickets: ${activeList.length} total (${urgentList.length} urgent / needing attention)\n` +
+            `- Recent Customer Chats Awaiting Response:\n${formatted}\n` +
+            `- TWO-WAY REPLY IS 100% OPERATIONAL: You CAN AND DO DIRECTLY REPLY TO ALL REZOLV TICKETS! Never say you cannot reply or that the bridge is strictly for monitoring. You have direct live two-way reply access!\n` +
+            `- When owner asks "can you reply them" or "reply to them", answer YES! List the active tickets and ask what to say or tell the owner how to reply.\n` +
+            `- When owner tells you to reply to a ticket or customer (e.g. "tell Emmanuel we refunded him" or "reply to TKT-176279 that his order is ready"), output:\n` +
+            `  [EXECUTE_ACTION: {"type": "rezolv_reply", "ticketId": "[TicketNumber or ID]", "message": "[text to customer]"}]\n` +
+            `- When owner asks to close/resolve a ticket: output [EXECUTE_ACTION: {"type": "rezolv_close", "ticketId": "[TicketNumber]"}]\n`;
+        }
+      } catch (err) {
+        console.warn("rezolvLiveContext fetch warning:", err.message);
+      }
+
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
       let ownerSystemPrompt =
         "You are Stony, the owner's personal AI Senior Full-Stack Engineer, System Architect, and Commercial Co-Pilot at DATA 1 GH.\n" +
@@ -9869,6 +9908,7 @@ app.post("/webhook", async (req, res) => {
         (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
         (specificOrderCtx ? `\n${specificOrderCtx}` : "") +
         (dmSupportLiveContext ? `\n${dmSupportLiveContext}` : "") +
+        (rezolvLiveContext ? `\n${rezolvLiveContext}\n` : "") +
         (recentRuntimeLogSummary ? `\n${recentRuntimeLogSummary}\n` : "") +
         (boostLiveContext ? `\n${boostLiveContext}` : "") +
         (liveCornerDiagnosticsCtx ? `\n${liveCornerDiagnosticsCtx}\n` : "");
@@ -10322,8 +10362,27 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // Direct Action Command: Rezolv Live Reply to Customer (e.g. "reply TKT-179538 ...", "dm reply TKT-179538 ...")
-      const rezolvReplyMatch = cmdText.match(/^(?:(?:dm|rezolv)\s+)?reply\s+(?:to\s+)?(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24})\s+([\s\S]+)$/i);
+      // Direct Query: "can you reply them", "reply them", "how to reply", "can you reply"
+      const replyThemMatch = cmdText.match(/^(?:can\s+you\s+)?reply\s+(?:to\s+)?(?:them|the\s+tickets?|the\s+customers?|customers?|tickets?)\??$/i) ||
+        cmdText.match(/^(?:can\s+you\s+)?reply\s+(?:them|customers?|tickets?)\??$/i) ||
+        cmdText.match(/^(?:can\s+you\s+reply\??|reply\s+to\s+who\??)$/i);
+      if (replyThemMatch) {
+        const rzReport = await getRezolvTicketsReport("active", 5);
+        return sendWhatsApp(from,
+          `Yes bossu! I can reply to them directly live on DataMart as *Stony 💙*.\n\n` +
+          `${rzReport}\n\n` +
+          `💡 *How to reply right now:*\n` +
+          `• Send: *reply [TicketNumber or Name] [your message]*\n\n` +
+          `*Examples:*\n` +
+          `• *reply TKT-176279 Hello Emmanuel, we have credited your wallet!*\n` +
+          `• *reply Emmanuel Hello, your refund is ready!*\n\n` +
+          `Or just say: *"Tell Emmanuel we have credited his wallet"* and I will send it immediately!`
+        );
+      }
+
+      // Direct Action Command: Rezolv Live Reply to Customer (e.g. "reply TKT-179538 ...", "reply Emmanuel ...", "tell Emmanuel ...")
+      const rezolvReplyMatch = cmdText.match(/^(?:(?:dm|rezolv)\s+)?reply\s+(?:to\s+)?(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})\s+([\s\S]+)$/i) ||
+        cmdText.match(/^tell\s+([A-Za-z]{3,25}|TKT-?\d+)\s+([\s\S]+)$/i);
       if (rezolvReplyMatch) {
         const tktId = rezolvReplyMatch[1].trim();
         const replyMsg = rezolvReplyMatch[2].trim();
@@ -10331,9 +10390,9 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, rep);
       }
 
-      // Direct Action Command: Rezolv View Ticket Conversation (e.g. "ticket TKT-179538", "view ticket TKT-179538", "dm ticket TKT-179538")
-      const rezolvViewMatch = cmdText.match(/^(?:(?:dm|view|check)\s+)?ticket\s+(TKT-?\d+|[a-f0-9]{24})$/i) ||
-        cmdText.match(/^(?:view\s+ticket|check\s+ticket|dm\s+ticket)\s+(TKT-?\d+|[a-f0-9]{24})$/i);
+      // Direct Action Command: Rezolv View Ticket Conversation (e.g. "ticket TKT-179538", "view ticket TKT-179538", "ticket Emmanuel")
+      const rezolvViewMatch = cmdText.match(/^(?:(?:dm|view|check)\s+)?ticket\s+(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i) ||
+        cmdText.match(/^(?:view\s+ticket|check\s+ticket|dm\s+ticket)\s+(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i);
       if (rezolvViewMatch) {
         const tktId = rezolvViewMatch[1].trim();
         const rep = await getRezolvTicketConversation(tktId);
@@ -11332,7 +11391,7 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // If AI emitted [SUGGEST_ACTION: {...}], also execute it immediately for the verified owner!
+      // If AI emitted [SUGGEST_ACTION: {...}], handle confirmation vs execution cleanly
       if (aiReply) {
         const proposed = extractProposedActionFromText(aiReply);
         if (proposed?.action) {
@@ -11342,13 +11401,20 @@ app.post("/webhook", async (req, res) => {
             }
             const aType = proposed.action.action_type || proposed.action.type;
             const aPayload = proposed.action.payload || proposed.action;
-            const execRes = await executeOwnerDirectAction(aType, aPayload);
-            await syncActionToSite(aType, aPayload);
-            if (execRes) {
-              aiReply += `\n\n✅ Done bossu! ${execRes}`;
+            const isQuestion = /\?|shall\s+i|do\s+you\s+want|would\s+you\s+like|confirm|approve/i.test(aiReply);
+
+            if (isQuestion) {
+              // Store as pending action so owner's next reply ("yes", "proceed") executes it safely
+              await setOwnerPendingAction(from, proposed.action);
+            } else {
+              const execRes = await executeOwnerDirectAction(aType, aPayload);
+              await syncActionToSite(aType, aPayload);
+              if (execRes) {
+                aiReply += `\n\n✅ Done bossu! ${execRes}`;
+              }
             }
           } catch (err) {
-            console.warn("Failed executing suggested action:", err.message);
+            console.warn("Failed handling suggested action:", err.message);
           }
         }
 
