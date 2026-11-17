@@ -9015,11 +9015,14 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
 
           // Set Failed Orders Group (Invite Link or JID)
           const setGroupMatch =
-            cleanInput.match(/^(?:set\s+)?(?:failed\s*(?:orders?)?\s*)?group(?:\s*link|\s*jid)?\s*[:=]?\s*(https:\/\/chat\.whatsapp\.com\/[^\s]+|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i) ||
-            cleanInput.match(/^(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{20,28})$/i);
+            cleanInput.match(/https:\/\/chat\.whatsapp\.com\/([A-Za-z0-9_-]{15,35})/i) ||
+            cleanInput.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
 
           if (setGroupMatch) {
-            const linkOrJid = setGroupMatch[1].trim();
+            const rawMatch = setGroupMatch[1].trim();
+            const linkOrJid = rawMatch.includes("@g.us")
+              ? rawMatch
+              : `https://chat.whatsapp.com/${rawMatch}`;
             const rep = await setFailedOrdersGroup(linkOrJid, from);
             return sendWhatsApp(from, rep);
           }
@@ -11462,8 +11465,28 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
         } catch (_) { }
       }
 
-      // Live All-Corners X-Ray & Codebase Inspection if owner asks about errors, bugs, diagnostics, why something happened, or code files
+      // Context variables for AI system prompt
+      let dmSupportLiveContext = "";
+      let rezolvLiveContext = "";
+      let recentRuntimeLogSummary = "";
+      let boostLiveContext = "";
       let liveCornerDiagnosticsCtx = "";
+
+      if (activeOwnerMode === "support" || /\b(rezolv|ticket|tickets|support|complaint)\b/i.test(text)) {
+        try {
+          rezolvLiveContext = await getRezolvTicketsReport("active", 5);
+        } catch (_) { }
+      }
+      if (activeOwnerMode === "datamart" || /\b(datamart|dm\s+|worker)\b/i.test(text)) {
+        try {
+          const tickets = await fetchDatamartSupportTickets({ status: "pending", limit: 5 }, from);
+          if (tickets?.data && Array.isArray(tickets.data)) {
+            dmSupportLiveContext = `LIVE DATAMART TICKETS (${tickets.data.length}):\n` + tickets.data.map(t => `• [${t.report_id || t.id}] ${t.customer_name || 'Customer'}: ${t.issue_type || t.subject || 'Ticket'} (${t.status})`).join("\n");
+          }
+        } catch (_) { }
+      }
+
+      // Live All-Corners X-Ray & Codebase Inspection if owner asks about errors, bugs, diagnostics, why something happened, or code files
       if (/\b(why|error|errors|bug|bugs|diagnos|scan|corner|corners|code|codebase|file|sync|desync|missing|alert|webhook|datamart|paystack|pending|stuck|problem|issue|check\s+system|audit|heal|fix)\b/i.test(text)) {
         try {
           const shouldAutoFixNow = /\b(fix\s+all|auto\s*fix|heal\s+system|sync\s+all)\b/i.test(text);
@@ -11645,11 +11668,14 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
 
       // Direct Action Command: Configure Failed Orders WhatsApp Group (Invite Link or JID)
       const setGroupMatch =
-        cmdText.match(/^(?:set\s+)?(?:failed\s*(?:orders?)?\s*)?group(?:\s*link|\s*jid)?\s*[:=]?\s*(https:\/\/chat\.whatsapp\.com\/[^\s]+|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i) ||
-        cmdText.match(/^(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{20,28})$/i);
+        cmdText.match(/https:\/\/chat\.whatsapp\.com\/([A-Za-z0-9_-]{15,35})/i) ||
+        cmdText.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
 
       if (setGroupMatch) {
-        const linkOrJid = setGroupMatch[1].trim();
+        const rawMatch = setGroupMatch[1].trim();
+        const linkOrJid = rawMatch.includes("@g.us")
+          ? rawMatch
+          : `https://chat.whatsapp.com/${rawMatch}`;
         const rep = await setFailedOrdersGroup(linkOrJid, from);
         return sendWhatsApp(from, rep);
       }
