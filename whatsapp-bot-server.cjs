@@ -6481,7 +6481,29 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
       return !(isOnlyGreeting && isOld);
     });
 
-    const listToProcess = (validTickets.length > 0 ? validTickets : active).slice(0, limit);
+    const candidatePool = validTickets.length > 0 ? validTickets : active;
+
+    // Filter for tickets from 10 minutes and above (waiting 10+ mins for customer attention)
+    const tenMinPlusTickets = candidatePool.filter(t => {
+      const msgTime = new Date(t.lastCustomerMessageAt || t.updatedAt || t.createdAt).getTime();
+      return !isNaN(msgTime) && (Date.now() - msgTime) >= 10 * 60 * 1000;
+    });
+
+    // Sort by longest waiting first
+    tenMinPlusTickets.sort((a, b) => {
+      const tA = new Date(a.lastCustomerMessageAt || a.updatedAt || a.createdAt).getTime() || 0;
+      const tB = new Date(b.lastCustomerMessageAt || b.updatedAt || b.createdAt).getTime() || 0;
+      return tA - tB;
+    });
+
+    // Backfill with other candidates if fewer than limit so bossu always gets up to 5
+    let listToProcess = [...tenMinPlusTickets];
+    if (listToProcess.length < limit) {
+      const remaining = candidatePool.filter(t => !listToProcess.some(p => p._id === t._id));
+      listToProcess.push(...remaining);
+    }
+    listToProcess = listToProcess.slice(0, limit);
+
     const drafts = [];
 
     for (const t of listToProcess) {
@@ -6496,6 +6518,11 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
 
       const trackInfo = extractTicketTrackingInfo(fullTicket, msgs);
       const lastMsg = (fullTicket.lastMessage?.text || "").replace(/\s+/g, " ").trim();
+
+      // Calculate how long this customer has been waiting
+      const waitTimeMs = Date.now() - new Date(fullTicket.lastCustomerMessageAt || fullTicket.updatedAt || fullTicket.createdAt).getTime();
+      const waitMins = Math.max(1, Math.round(waitTimeMs / (60 * 1000)));
+      const waitLabel = waitMins >= 60 ? `${Math.floor(waitMins / 60)}h ${waitMins % 60}m` : `${waitMins} mins`;
 
       let draftText = "";
       let trackingDiagnostic = "";
@@ -6539,6 +6566,7 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
         ticketId: tNum,
         customerName: custFullName,
         lastMessage: lastMsg || "New support request",
+        waitLabel,
         trackingDiagnostic,
         draftMessage: draftText
       });
@@ -6553,13 +6581,13 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
       drafts: drafts
     });
 
-    let msg = `📬 *DATAMART LIVE SUPPORT — ${drafts.length} DRAFTED REPLIES READY FOR REVIEW:*\n` +
+    let msg = `📬 *DATAMART LIVE SUPPORT — ${drafts.length} DRAFTS READY (10+ MINS WAITING):*\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
     const numEmojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"];
     drafts.forEach((d, idx) => {
       const emoji = numEmojis[idx] || `[${idx + 1}]`;
-      msg += `${emoji} *[${d.ticketId}]* *${d.customerName}*\n` +
+      msg += `${emoji} *[${d.ticketId}]* *${d.customerName}* (⏳ Waiting: *${d.waitLabel}*)\n` +
         `• *Customer said:* "${d.lastMessage.slice(0, 80)}${d.lastMessage.length > 80 ? "..." : ""}"\n` +
         `• 🔍 *DataMart Track:* ${d.trackingDiagnostic}\n` +
         `• 📝 *Draft Reply:*\n"${d.draftMessage}"\n\n`;
@@ -8422,9 +8450,11 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   const dmRezolvCloseMatch = cleanInput.match(/^(?:close|resolve)\s+(?:ticket\s+)?(.+)$/i);
   if (dmRezolvCloseMatch) {
     const rawTarget = dmRezolvCloseMatch[1].trim();
-    const tktId = cleanCustomerTarget(rawTarget);
-    const rep = await closeRezolvTicket(tktId);
-    return sendWhatsApp(from, rep);
+    if (!/^(?:mode|support|rezolv|resolv|inbox|tickets?)$/i.test(rawTarget)) {
+      const tktId = cleanCustomerTarget(rawTarget);
+      const rep = await closeRezolvTicket(tktId);
+      return sendWhatsApp(from, rep);
+    }
   }
 
   // 3e_clean. Clean idle visitor / hi tickets
@@ -8797,9 +8827,9 @@ app.post("/webhook", async (req, res) => {
 
     // ── TOP-LEVEL REZOLV LIVE CUSTOMER SUPPORT DESK (https://www.rezolv.dev/dashboard) ──
     const isRezolvModeIntent =
-      /\b(?:rezolv|resolv|rezolve|resovl)\b/i.test(cleanCmd) ||
+      /\b(?:rezolv|resolv|rezolve|resovl|resolve)\s*(?:mode)?\b/i.test(cleanCmd) ||
       /\b(?:support\s*mode|customer\s*support\s*mode|support\s*desk|live\s*support)\b/i.test(cleanCmd) ||
-      /^(?:rezolv|support)$/i.test(cleanCmd);
+      /^(?:rezolv|resolv|resolve|support)$/i.test(cleanCmd);
 
     const isSpecificReplyAction = /^(?:reply|tell|draft\s+reply)\b/i.test(cleanCmd);
 
@@ -8919,8 +8949,8 @@ app.post("/webhook", async (req, res) => {
     // ── BATCH INBOX DRAFTING (5-BY-5 REVIEW & DISPATCH) ──
     const isBatchDraftIntent =
       /\b(?:draft\s+(?:all|5|inbox|replies)|reply\s+all|check\s+inbox|review\s+inbox|pick\s+5|inbox\s+drafts?|draft\s+next|next\s+5|next\s+inbox)\b/i.test(cleanCmd) ||
-      /\b(?:what\s+are\s+they\s+saying\s+in\s+(?:the\s+)?inbox|what\s+are\s+customers\s+saying)\b/i.test(cleanCmd) ||
-      (getUserMode(from) === "support" && /^(?:draft|drafts|inbox|messages?|replies|all\s+messages)$/i.test(cleanCmd));
+      /\b(?:what\s+are\s+they\s+saying\s+in\s+(?:the\s+)?inbox|what\s+are\s+customers\s+saying|any\s+(?:new\s+)?messages?|check\s+messages?|inbox\s+messages?|who\s+is\s+waiting|any\s+customer\s+waiting)\b/i.test(cleanCmd) ||
+      (getUserMode(from) === "support" && /^(?:draft|drafts|inbox|messages?|replies|all\s+messages|any\s+message|any\s+messages)$/i.test(cleanCmd));
 
     if (isBatchDraftIntent) {
       const batchRep = await buildSupportInboxBatchDraft(from, 5);
@@ -9493,7 +9523,7 @@ app.post("/webhook", async (req, res) => {
       currentSession = baseSession;
     }
 
-    const isInBotCheckoutStep = Boolean(currentSession && currentSession.step > 1 && currentSession.step < 99);
+    const isInBotCheckoutStep = Boolean(currentSession && currentSession.step >= 2 && currentSession.step <= 10);
     if (isInBotCheckoutStep) {
       setUserMode(from, "bot");
     }
@@ -9506,7 +9536,7 @@ app.post("/webhook", async (req, res) => {
     const ownerTestingMenuDigit = isOwner && isMainMenuNumber;
     const shouldEnterOwnerAi = isOwner && !hasAgent && (
       isOwnerExplicitAiCommand ||
-      (!isInBotCheckoutStep && !ownerTestingMenuDigit && (activeMode === "ai" || !/^(menu|customer)$/i.test(text.trim())))
+      (!isInBotCheckoutStep && !ownerTestingMenuDigit && (activeMode === "ai" || activeMode === "support" || activeMode === "datamart" || !/^(menu|customer)$/i.test(text.trim())))
     );
 
     /* =====================================================
