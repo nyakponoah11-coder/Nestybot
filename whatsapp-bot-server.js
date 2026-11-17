@@ -6054,6 +6054,57 @@ async function closeRezolvTicket(identifier, status = "resolved") {
   }
 }
 
+async function cleanRezolvIdleGreetingTickets(maxToClean = 25) {
+  try {
+    const res = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
+    const tickets = res.data?.tickets || res.data?.data?.tickets || [];
+    if (!Array.isArray(tickets) || tickets.length === 0) {
+      return "⚠️ Could not retrieve tickets from Rezolv.";
+    }
+
+    const idleTickets = tickets.filter(t => {
+      if (t.status === "resolved" || t.status === "closed") return false;
+      const txt = (t.lastMessage?.text || "").trim().toLowerCase();
+      const isBotGreeting = txt.startsWith("hi there!") || txt.includes("thanks for reaching out");
+      const isShortGreeting = /^(?:hi|hello|hey|good\s*(?:morning|afternoon|evening)|yo)\W*$/i.test(txt);
+      const isVisitorOrEmpty = (t.customer?.name || "").toLowerCase() === "visitor" || !t.customer?.phone || !t.customer?.email;
+      return isBotGreeting || (isShortGreeting && isVisitorOrEmpty);
+    });
+
+    if (idleTickets.length === 0) {
+      return "✨ *All clean bossu!* No idle greeting or visitor tickets found in your Rezolv inbox.";
+    }
+
+    const toResolve = idleTickets.slice(0, maxToClean);
+    const resolvedList = [];
+
+    for (const tkt of toResolve) {
+      try {
+        const patchRes = await rezolvApiRequest("/tickets/" + tkt._id + "/status", {
+          method: "PATCH",
+          body: { status: "resolved" }
+        });
+        if (patchRes.status === 200) {
+          const cust = tkt.customer?.name || "Visitor";
+          resolvedList.push(`• *${tkt.ticketNumber || tkt._id}* (${cust})`);
+        }
+      } catch (e) {
+        console.warn(`Failed to resolve ${tkt.ticketNumber}:`, e.message);
+      }
+    }
+
+    return (
+      `🧹 *REZOLV INBOX CLEANUP COMPLETED!* ✨\n\n` +
+      `Closed & marked resolved *${resolvedList.length}* idle greeting chat(s):\n` +
+      resolvedList.join("\n") +
+      `\n\n🎯 Refreshed in *https://www.rezolv.dev/dashboard* — your inbox is clear!`
+    );
+  } catch (err) {
+    console.warn("cleanRezolvIdleGreetingTickets error:", err.message);
+    return `⚠️ Error cleaning Rezolv inbox: ${err.message}`;
+  }
+}
+
 async function generateSupportDraftReply(identifier) {
   try {
     let cleanId = String(identifier || "").trim();
@@ -7966,6 +8017,16 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     );
   }
 
+  // 3e_clean. Clean idle visitor / hi tickets
+  if (
+    /\b(?:clean|clear|close|resolve|purge)\s+(?:all\s+)?(?:hi|idle|empty|visitor|greetings?)\b/i.test(cleanInput) ||
+    /\b(?:clean|clear)\s+(?:up\s+)?(?:the\s+)?(?:inbox|queue)\b/i.test(cleanInput) ||
+    /^(?:auto\s*clean|clean\s*hi|close\s*hi)$/i.test(cleanInput)
+  ) {
+    const rep = await cleanRezolvIdleGreetingTickets(25);
+    return sendWhatsApp(from, rep);
+  }
+
   // 3e. Rezolv Customer Live Tickets (supports typos like 'rezolv mode e', 'rezolv', etc.)
   if (/\b(?:rezolv|resolv|rezolve|resovl)\b/i.test(cleanInput) || /^(?:customer\s*tickets?|live\s*tickets?)$/i.test(cleanInput)) {
     const rep = await getRezolvTicketsReport("active");
@@ -8351,8 +8412,19 @@ app.post("/webhook", async (req, res) => {
         `• *draft reply [Name]* ➔ I draft the response, you tap YES to dispatch live!\n` +
         `• *ticket [TicketNumber]* ➔ View full conversation on Rezolv\n` +
         `• *close [TicketNumber]* ➔ Close/resolve ticket on Rezolv\n` +
+        `• *clean hi tickets* ➔ Auto-close idle empty/visitor 'hi' chats in 1 tap!\n` +
         `• *exit* ➔ Return to normal DATA 1 store mode.`
       );
+    }
+
+    // ── REZOLV AUTO-CLEANUP IDLE 'HI' / VISITOR TICKETS ──
+    if (
+      /\b(?:clean|clear|close|resolve|purge)\s+(?:all\s+)?(?:hi|idle|empty|visitor|greetings?)\s*(?:tickets?|messages?|chats?)?/i.test(cleanCmd) ||
+      /\b(?:clean|clear)\s+(?:up\s+)?(?:the\s+)?(?:inbox|queue)\b/i.test(cleanCmd) ||
+      /^(?:auto\s*clean|clean\s*hi|close\s*hi)$/i.test(cleanCmd)
+    ) {
+      const cleanupRep = await cleanRezolvIdleGreetingTickets(25);
+      return sendWhatsApp(from, cleanupRep);
     }
 
     // 1. Connect / Link DataMart Account (Self-service or Owner assignment)
@@ -14698,6 +14770,29 @@ async function runRezolvUrgentWatcher() {
           ).catch(() => {});
         }
       }
+    }
+
+    // Auto-sweep idle greeting/visitor tickets older than 20 minutes (e.g. empty 'Hi there!' bot greetings)
+    const twentyMinsAgo = Date.now() - 20 * 60 * 1000;
+    const autoSweeps = tickets.filter(t => {
+      if (t.status === "resolved" || t.status === "closed") return false;
+      const createdAt = new Date(t.createdAt || t.updatedAt).getTime();
+      if (createdAt > twentyMinsAgo) return false;
+      const txt = (t.lastMessage?.text || "").trim().toLowerCase();
+      const isBotGreeting = txt.startsWith("hi there!") || txt.includes("thanks for reaching out");
+      const isShortGreeting = /^(?:hi|hello|hey|good\s*(?:morning|afternoon|evening)|yo)\W*$/i.test(txt);
+      const isVisitorOrEmpty = (t.customer?.name || "").toLowerCase() === "visitor" || !t.customer?.phone;
+      return isBotGreeting || (isShortGreeting && isVisitorOrEmpty);
+    });
+
+    for (const idleTkt of autoSweeps.slice(0, 5)) {
+      try {
+        await rezolvApiRequest("/tickets/" + idleTkt._id + "/status", {
+          method: "PATCH",
+          body: { status: "resolved" }
+        });
+        console.log(`🧹 [AUTO-SWEEP] Auto-resolved idle greeting ticket ${idleTkt.ticketNumber} (${idleTkt.customer?.name})`);
+      } catch (_) { }
     }
   } catch (err) {
     console.warn("runRezolvUrgentWatcher error:", err.message);
