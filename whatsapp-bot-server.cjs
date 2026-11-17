@@ -5749,6 +5749,7 @@ const userLastViewedTicket = new Map(); // normPhone -> { id, ticketNumber, name
 function cleanCustomerTarget(raw) {
   if (!raw) return "";
   let t = String(raw).trim();
+  if (/^(?:mode|support|rezolv|resolv|resolve|datamart|inbox|tickets?|all|none|nothing)$/i.test(t)) return "";
   t = t.replace(/^(?:hey|hi|hello|please|pls|yo|stony|bot|bossu)\b[,:\s]*/i, "");
   t = t.replace(/^(?:can\s+(?:you|we)\s+)?(?:please\s+)?(?:let(?:'s)?\s+)?(?:talk\s+|solve\s+|resolve\s+|attend\s+(?:to\s+)?|handle\s+|check\s+(?:on\s+)?|see\s+|look\s+at\s+|discuss\s+|go\s+to\s+|view\s+|open\s+)+(?:about\s+)?(?:to\s+)?/i, "");
   t = t.replace(/^(?:what\s+(?:about|of|is|did)?\s+|how\s+about\s+|check\s+on\s+)/i, "");
@@ -5756,6 +5757,7 @@ function cleanCustomerTarget(raw) {
   t = t.replace(/^(?:view\s+|check\s+|open\s+)?(?:tickets?|tkt)\b(?:\s*[:#]\s*|\s+)/i, "");
   t = t.replace(/\s+(?:what\s+(?:is\s+|did\s+)?(?:she|he|they|the\s+customer)?\s*(?:saying|say|complaining\s+about)?|what'?s\s+the\s+issue|what'?s\s+up|what\s+happened|saying|said)\??$/i, "");
   t = t.replace(/[?!.]+$/, "").trim();
+  if (/^(?:mode|support|rezolv|resolv|resolve|datamart|inbox|tickets?|all|none|nothing)$/i.test(t)) return "";
   return t;
 }
 
@@ -6268,9 +6270,9 @@ async function cleanRezolvIdleGreetingTickets(maxToClean = 35) {
       if (t.status === "closed") return false;
       const txt = (t.lastMessage?.text || "").trim().toLowerCase();
       const isBotGreeting = txt.startsWith("hi there!") || txt.includes("thanks for reaching out") || txt.startsWith("bot: hi there");
-      const isShortGreeting = /^(?:hi|hello|hey|good\s*(?:morning|afternoon|evening)|yo)\W*$/i.test(txt);
+      const isShortGreeting = /^(?:hi|hello|hey|good\s*(?:morning|afternoon|evening)|yo|boss|bossu)\W*$/i.test(txt);
       const isVisitorOrEmpty = (t.customer?.name || "").toLowerCase() === "visitor" || !t.customer?.phone;
-      return isBotGreeting || (isShortGreeting && isVisitorOrEmpty);
+      return isBotGreeting || isShortGreeting || isVisitorOrEmpty;
     });
 
     if (idleTickets.length === 0) {
@@ -6608,46 +6610,49 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
     }
     listToProcess = listToProcess.slice(0, limit);
 
-    const drafts = [];
+    const drafts = (await Promise.all(listToProcess.map(async (t) => {
+      try {
+        const details = await rezolvApiRequest("/tickets/" + t._id);
+        const dData = details.data?.data || details.data || {};
+        const fullTicket = dData.ticket || t;
+        const msgs = dData.messages || fullTicket.messages || [];
 
-    for (const t of listToProcess) {
-      const details = await rezolvApiRequest("/tickets/" + t._id);
-      const dData = details.data?.data || details.data || {};
-      const fullTicket = dData.ticket || t;
-      const msgs = dData.messages || fullTicket.messages || [];
+        const custFullName = fullTicket.customer?.name || "Customer";
+        const firstName = custFullName.split(" ")[0] || "there";
+        const tNum = fullTicket.ticketNumber || fullTicket._id;
 
-      const custFullName = fullTicket.customer?.name || "Customer";
-      const firstName = custFullName.split(" ")[0] || "there";
-      const tNum = fullTicket.ticketNumber || fullTicket._id;
+        const trackInfo = extractTicketTrackingInfo(fullTicket, msgs);
+        const lastMsg = (fullTicket.lastMessage?.text || "").replace(/\s+/g, " ").trim();
 
-      const trackInfo = extractTicketTrackingInfo(fullTicket, msgs);
-      const lastMsg = (fullTicket.lastMessage?.text || "").replace(/\s+/g, " ").trim();
+        // Calculate how long this customer has been waiting
+        const waitTimeMs = Date.now() - new Date(fullTicket.lastCustomerMessageAt || fullTicket.updatedAt || fullTicket.createdAt).getTime();
+        const waitMins = Math.max(1, Math.round(waitTimeMs / (60 * 1000)));
+        const waitLabel = waitMins >= 60 ? `${Math.floor(waitMins / 60)}h ${waitMins % 60}m` : `${waitMins} mins`;
 
-      // Calculate how long this customer has been waiting
-      const waitTimeMs = Date.now() - new Date(fullTicket.lastCustomerMessageAt || fullTicket.updatedAt || fullTicket.createdAt).getTime();
-      const waitMins = Math.max(1, Math.round(waitTimeMs / (60 * 1000)));
-      const waitLabel = waitMins >= 60 ? `${Math.floor(waitMins / 60)}h ${waitMins % 60}m` : `${waitMins} mins`;
+        const { mainIssue, draftText, trackingDiagnostic } = await composeIntelligentSupportDraft({
+          firstName,
+          custFullName,
+          tNum,
+          fullTicket,
+          msgs,
+          trackInfo,
+          lastMsg
+        });
 
-      const { mainIssue, draftText, trackingDiagnostic } = await composeIntelligentSupportDraft({
-        firstName,
-        custFullName,
-        tNum,
-        fullTicket,
-        msgs,
-        trackInfo,
-        lastMsg
-      });
-
-      drafts.push({
-        ticketId: tNum,
-        customerName: custFullName,
-        mainIssue,
-        lastMessage: lastMsg || "New support request",
-        waitLabel,
-        trackingDiagnostic,
-        draftMessage: draftText
-      });
-    }
+        return {
+          ticketId: tNum,
+          customerName: custFullName,
+          mainIssue,
+          lastMessage: lastMsg || "New support request",
+          waitLabel,
+          trackingDiagnostic,
+          draftMessage: draftText
+        };
+      } catch (err) {
+        console.warn(`Draft error for ${t.ticketNumber}:`, err.message);
+        return null;
+      }
+    }))).filter(Boolean);
 
     if (drafts.length === 0) {
       return `ℹ️ All current tickets are already attended to or resolved!`;
@@ -8987,18 +8992,23 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    const topViewMatch =
+    const isSupportSwitchWord = /^(?:rezolv|resolv|resolve|support|rezolv\s*mode|resolv\s*mode|resolve\s*mode|support\s*mode|mode)$/i.test(cleanCmd.trim());
+
+    const topViewMatch = !isSupportSwitchWord && (
       cleanCmd.match(/^(?:what\s+(?:is\s+|did\s+)?(.+?)\s+(?:saying|say|complaining\s+about)|(.+?)\s+what\s+(?:is\s+(?:she|he|they|the\s+customer)?\s*saying|did\s+(?:she|he|they|the\s+customer)?\s*say|is\s+(?:she|he|they)?\s*complaining\s+about|is\s+the\s+issue|is\s+saying|said))\??$/i) ||
       cleanCmd.match(/^(?:what\s+about|what\s+of|how\s+about|check\s+on)\s+(.+)\??$/i) ||
       cleanCmd.match(/^(?:view\s+ticket|check\s+ticket|ticket|open\s+ticket|inspect\s+ticket)\s+(.+)$/i) ||
-      cleanCmd.match(/^(?:can\s+(?:we|you)\s+)?(?:please\s+)?(?:let(?:'s)?\s+)?(?:talk\s+|solve\s+|resolve\s+|attend\s+(?:to\s+)?|handle\s+|check\s+(?:on\s+)?|see\s+|look\s+at\s+|discuss\s+)(?:about\s+)?(?:to\s+)?([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\??$/i);
+      cleanCmd.match(/^(?:can\s+(?:we|you)\s+)?(?:please\s+)?(?:let(?:'s)?\s+)?(?:talk\s+|solve\s+|resolve\s+|attend\s+(?:to\s+)?|handle\s+|check\s+(?:on\s+)?|see\s+|look\s+at\s+|discuss\s+)(?:about\s+)?(?:to\s+)?([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\??$/i)
+    );
 
     if (topViewMatch) {
       const rawTarget = (topViewMatch[1] || topViewMatch[2] || "").trim();
-      const tktId = cleanCustomerTarget(rawTarget);
-      if (tktId) {
-        const rep = await getRezolvTicketConversation(tktId, from);
-        return sendWhatsApp(from, rep);
+      if (!/^(?:mode|support|rezolv|resolv|resolve|datamart|inbox|tickets?|all|none|nothing)$/i.test(rawTarget)) {
+        const tktId = cleanCustomerTarget(rawTarget);
+        if (tktId && !/^(?:mode|support|rezolv|resolv|resolve|datamart|inbox|tickets?|all|none|nothing)$/i.test(tktId)) {
+          const rep = await getRezolvTicketConversation(tktId, from);
+          return sendWhatsApp(from, rep);
+        }
       }
     }
 
@@ -10849,53 +10859,8 @@ app.post("/webhook", async (req, res) => {
         (bSettings || []).forEach(r => { bMap[r.key] = r.value; });
         const admInc = bMap["boost_markup_percent"] || "10";
         const agInc = bMap["default_agent_boost_markup_percent"] || "20";
-        boostLiveContext = `- Social Media Boost Services (BoostUpGH SMM): Wholesale Markup from Provider: +${admInc}% | Universal Reseller Margin: +${agInc}% (Rule: Reseller margin >= Provider markup)\n`;
+        boostLiveContext = `\nBOOST / SMM SOCIAL ENGAGEMENT SERVICES CONTEXT:\n- Wholesale API: Boostghana (status: operational)\n- Master Admin Boost Markup: +${admInc}%\n- Default Agent Reseller Boost Markup: +${agInc}%\n`;
       } catch (_) {}
-
-      let dmSupportLiveContext = "";
-      try {
-        const dmSup = await fetchDatamartSupportTickets({ status: "pending", limit: 3 });
-        if (dmSup && dmSup.tickets) {
-          const bdMap = {};
-          (dmSup.statusBreakdown || []).forEach(b => { bdMap[b._id] = b.count; });
-          const pendingCount = bdMap["pending"] ?? 0;
-          const reviewCount = bdMap["under_review"] ?? 0;
-          const investCount = bdMap["investigating"] ?? 0;
-          const topIssues = dmSup.tickets.map(t => `[${t.reportId || "ID"}] ${t.userId?.name || "Customer"} (${t.priority || "normal"}): "${(t.description || "").slice(0, 75)}..."`).join(" | ");
-          dmSupportLiveContext = `- DataMart Agent Support Queue: ${pendingCount.toLocaleString()} pending tickets (${reviewCount} under review, ${investCount} investigating). Latest: ${topIssues}\n` +
-            `  (Commands: 'dm tickets' to view queue, 'view ticket [ID]' for full details, 'dm search [query]')\n`;
-        }
-      } catch (_) {}
-
-      let rezolvLiveContext = "";
-      try {
-        const rzRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
-        const rzTickets = rzRes.data?.data?.tickets || [];
-        if (rzTickets.length > 0) {
-          const activeList = rzTickets.filter(t => t.status !== "resolved");
-          const urgentList = activeList.filter(t => t.unreadCount > 0 || (t.lastMessage?.text || "").includes("Needs a human") || t.tags?.includes("ai-escalated"));
-          const listToShow = (urgentList.length > 0 ? urgentList : activeList).slice(0, 6);
-          const formatted = listToShow.map((t, idx) => {
-            const num = t.ticketNumber || t._id;
-            const cust = t.customer?.name || "Customer";
-            const email = t.customer?.email ? ` (${t.customer.email})` : "";
-            const last = (t.lastMessage?.text || "").replace(/\s+/g, " ").trim().slice(0, 90);
-            return `  ${idx + 1}. [${num}] Customer: "${cust}"${email} | Unread: ${t.unreadCount || 0} | Last message: "${last}"`;
-          }).join("\n");
-
-          rezolvLiveContext = `LIVE CUSTOMER SUPPORT DESK (REZOLV.DEV):\n` +
-            `- Status: 100% CONNECTED & AUTHENTICATED as agent "Stony 💙" (${REZOLV_CONFIG.email})\n` +
-            `- Active Customer Tickets: ${activeList.length} total (${urgentList.length} urgent / needing attention)\n` +
-            `- Recent Customer Chats Awaiting Response:\n${formatted}\n` +
-            `- TWO-WAY REPLY IS 100% OPERATIONAL: You CAN AND DO DIRECTLY REPLY TO ALL REZOLV TICKETS! Never say you cannot reply or that the bridge is strictly for monitoring. You have direct live two-way reply access!\n` +
-            `- When owner asks "can you reply them" or "reply to them", answer YES! List the active tickets and ask what to say or tell the owner how to reply.\n` +
-            `- When owner tells you to reply to a ticket or customer (e.g. "tell Emmanuel we refunded him" or "reply to TKT-176279 that his order is ready"), output:\n` +
-            `  [EXECUTE_ACTION: {"type": "rezolv_reply", "ticketId": "[TicketNumber or ID]", "message": "[text to customer]"}]\n` +
-            `- When owner asks to close/resolve a ticket: output [EXECUTE_ACTION: {"type": "rezolv_close", "ticketId": "[TicketNumber]"}]\n`;
-        }
-      } catch (err) {
-        console.warn("rezolvLiveContext fetch warning:", err.message);
-      }
 
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
       let ownerSystemPrompt = "";
