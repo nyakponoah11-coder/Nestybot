@@ -6527,43 +6527,15 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
       const waitMins = Math.max(1, Math.round(waitTimeMs / (60 * 1000)));
       const waitLabel = waitMins >= 60 ? `${Math.floor(waitMins / 60)}h ${waitMins % 60}m` : `${waitMins} mins`;
 
-      let draftText = "";
-      let trackingDiagnostic = "";
-
-      const targetQuery = trackInfo.trackId || trackInfo.orderRef || trackInfo.phone;
-      if (targetQuery && trackInfo.hasDeliveryWords) {
-        const liveTrack = await trackSupportDeliveryTarget(targetQuery);
-        if (liveTrack && liveTrack.found) {
-          const st = liveTrack.status.toLowerCase();
-          const net = (liveTrack.network || "network").toUpperCase();
-          const ph = liveTrack.phone || targetQuery;
-          const refCode = liveTrack.reference || targetQuery;
-
-          if (st === "delivered" || st === "completed" || st === "success") {
-            trackingDiagnostic = `✅ DELIVERED on ${net} to ${ph} (Ref: ${refCode})`;
-            draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on DataMart and it is confirmed DELIVERED on the ${net} network to ${ph}. Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
-          } else if (st === "failed" || st === "cancelled") {
-            trackingDiagnostic = `❌ FAILED on ${net} (Ref: ${refCode})${liveTrack.failureReason ? ` - ${liveTrack.failureReason}` : ""}`;
-            draftText = `Hello ${firstName}, we have verified order ${refCode} and noticed a network dispatch issue. We are reprocessing your dispatch right now so your data arrives on ${ph} immediately. Thank you for your patience!`;
-          } else {
-            trackingDiagnostic = `⏳ IN QUEUE on ${net} (Ref: ${refCode}) - Standard delivery line`;
-            draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on DataMart. It is currently in the ${net} delivery queue and processing. Your data will land shortly. Kindly dial *124# to check. Thank you for your patience!`;
-          }
-        } else {
-          trackingDiagnostic = `🔍 Searched ${targetQuery} on DataMart: In queue on network`;
-          draftText = `Hello ${firstName}, we are currently tracking your order (${targetQuery}) on the telecom network. It is in progress and will reflect on your phone shortly. Kindly dial *124# to verify. Thank you!`;
-        }
-      } else if (trackInfo.hasDeliveryWords && !targetQuery) {
-        trackingDiagnostic = `⚠️ No Track ID or recipient phone provided by customer yet.`;
-        draftText = `Hello ${firstName}, thank you for reaching out. Please kindly provide your Track ID (or Order Reference) and the recipient phone number so we can track and speed up your data delivery on DataMart immediately!`;
-      } else if (trackInfo.hasPaymentWords || trackInfo.momoTrxId) {
-        const trxStr = trackInfo.momoTrxId ? ` (Trx ID: ${trackInfo.momoTrxId})` : "";
-        trackingDiagnostic = `💳 Payment / MoMo deduction issue${trxStr} - Escalated to Finance`;
-        draftText = `Hello ${firstName}, thank you for reaching out. We have flagged your payment reconciliation${trxStr} with our finance team as top priority. Your balance will be resolved shortly. Thank you for your patience!`;
-      } else {
-        trackingDiagnostic = `💬 General support inquiry`;
-        draftText = `Hello ${firstName}, thank you for contacting DataMart Support. We are attending to your request right now and getting this sorted for you immediately!`;
-      }
+      const { draftText, trackingDiagnostic } = await composeIntelligentSupportDraft({
+        firstName,
+        custFullName,
+        tNum,
+        fullTicket,
+        msgs,
+        trackInfo,
+        lastMsg
+      });
 
       drafts.push({
         ticketId: tNum,
