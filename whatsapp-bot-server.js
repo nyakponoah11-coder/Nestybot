@@ -8688,6 +8688,24 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
+      // ── SWITCH TO REZOLV LIVE CUSTOMER SUPPORT MODE ──
+      if (/^(?:rezolv\s*mode|support\s*mode|live\s*support\s*mode|rezolv)$/i.test(cleanInput)) {
+        setUserMode(from, "datamart");
+        await saveCustomerSession(from, { step: 98 });
+        await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "datamart" }, { onConflict: "key" });
+        const initialReport = await getRezolvTicketsReport("active", 5);
+        return sendWhatsApp(from,
+          `🎟️ *SWITCHED TO REZOLV LIVE SUPPORT MODE!* 🚀\n` +
+          `Logged in as: *Stony 💙* (DataMart Support Desk)\n\n` +
+          `${initialReport}\n\n` +
+          `💡 *Quick Commands in this Mode:*\n` +
+          `• *reply [TicketNumber] [message]* - Send live reply to customer\n` +
+          `• *ticket [TicketNumber]* - View full chat history\n` +
+          `• *close [TicketNumber]* - Resolve ticket\n` +
+          `• *exit* - Return to normal Stony Store Co-Pilot mode.`
+        );
+      }
+
       // ── DEDICATED DATAMART WORKER CONSOLE MODE HANDLER ──
       if (getUserMode(from) === "datamart") {
         const dmHandled = await processDatamartConsoleCommand(from, cleanInput, true);
