@@ -6140,7 +6140,7 @@ async function getRezolvTicketConversation(identifier, from = null) {
     const trackInfo = extractTicketTrackingInfo(t, msgs);
     const lastMsg = (msgs[msgs.length - 1]?.text || t.lastMessage?.text || "").replace(/\s+/g, " ").trim();
 
-    const { mainIssue, draftText, trackingDiagnostic } = await composeIntelligentSupportDraft({
+    const { mainIssue, draftText, trackingDiagnostic, actualCustomerLastMsg } = await composeIntelligentSupportDraft({
       firstName: custName.split(" ")[0] || "there",
       custFullName: custName,
       tNum: t.ticketNumber || found.id,
@@ -6151,6 +6151,7 @@ async function getRezolvTicketConversation(identifier, from = null) {
     });
 
     out += `🎯 *MAIN ISSUE:* ${mainIssue}\n`;
+    out += `💬 *Customer said:* "${actualCustomerLastMsg || "New support request"}"\n`;
     if (trackingDiagnostic) {
       out += `🔍 *DATAMART STATUS:* ${trackingDiagnostic}\n\n`;
     } else {
@@ -6315,10 +6316,39 @@ async function cleanRezolvIdleGreetingTickets(maxToClean = 35) {
   }
 }
 
+async function synthesizeCustomerMainIssue(custName, customerTexts, targetRef) {
+  const snippet = (customerTexts || []).slice(-4).join(" \n ");
+  if (!snippet) return targetRef ? `Customer checking delivery status of order (${targetRef})` : "Customer waiting for support assistance";
+  try {
+    const res = await executeBotAi({
+      systemPrompt: "You are a customer support triage assistant. In 8 to 15 words in plain, natural human English, state exactly what this customer is complaining about, asking for, or upset about. Focus on their personal complaint, question, or grievance (e.g. 'Customer says data hasn\\'t arrived after 4 hours', 'Customer complaining money deducted on MoMo without data', 'Customer upset about no response', 'Agent asking how to reset withdrawal PIN'). Never output operational carrier codes or status labels. Start with 'Customer says...', 'Customer asking...', or 'Customer complaining...'. Output only the single summary sentence.",
+      userMessage: `Customer Name: ${custName}\nCustomer Messages:\n${snippet}\n(Reference: ${targetRef || "None"})`,
+      maxTokens: 60,
+      temperature: 0.2
+    });
+    let summary = res?.text?.replace(/^["']|["']$/g, "").replace(/\n/g, " ").trim();
+    if (summary && summary.length >= 10 && summary.length <= 160) {
+      return summary;
+    }
+  } catch (e) {
+    console.warn("synthesizeCustomerMainIssue AI error:", e.message);
+  }
+  return "";
+}
+
 async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, fullTicket, msgs, trackInfo, lastMsg }) {
   let draftText = "";
   let trackingDiagnostic = "";
-  let mainIssue = "Customer Support Inquiry";
+
+  // Extract actual customer-written messages (excluding system bot responses and email quote noise)
+  const customerMsgs = (msgs || []).filter(m => m.senderType === "customer" || (m.senderName && m.senderName !== "Bot" && m.senderType !== "agent"));
+  const customerTexts = customerMsgs
+    .map(m => (m.text || "").trim())
+    .filter(t => t && !t.startsWith("🚩 Needs a human") && !t.includes("On Wed,") && !t.includes("On Thu,") && !t.includes("On Mon,") && !t.includes("On Tue,") && !t.includes("On Fri,") && !t.includes("wrote:"));
+
+  const actualCustomerLastMsg = customerTexts.length > 0
+    ? customerTexts[customerTexts.length - 1]
+    : (lastMsg || fullTicket.subject || fullTicket.lastMessage?.text || "New support request").replace(/\s+/g, " ").trim();
 
   // Scan ALL conversation history (subject + all messages)
   const allTexts = [
@@ -6326,7 +6356,7 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
     ...(msgs || []).map(m => m.text || "")
   ].join(" ").trim();
   const lowerAll = allTexts.toLowerCase();
-  const lowerLast = String(lastMsg || "").toLowerCase();
+  const lowerLast = String(actualCustomerLastMsg || lastMsg || "").toLowerCase();
 
   // Extract reference codes & phone numbers across the whole conversation history
   const phoneMatch = allTexts.match(/\b(0[2357]\d{8})\b/);
@@ -6337,10 +6367,34 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
 
   const targetQuery = trackIdMatch?.[1] || orderRefMatch?.[1] || phoneMatch?.[1] || trackInfo.trackId || trackInfo.orderRef || trackInfo.phone;
 
-  // 1. DELIVERY INQUIRY / CHECK (with Track ID, Order Ref, or Recipient Phone)
+  // ── 1. SYNTHESIZE WHAT THE CUSTOMER IS ACTUALLY COMPLAINING ABOUT ──
+  let mainIssue = "";
+  if (customerTexts.length > 0) {
+    mainIssue = await synthesizeCustomerMainIssue(custFullName, customerTexts, targetQuery);
+  }
+
+  if (!mainIssue || mainIssue.length < 6) {
+    const joinedCust = customerTexts.join(" | ").toLowerCase();
+    if (/\b(still\s*not|haven'?t\s*come|not\s*delivered|not\s*in|waiting|since\s*morning|delay|hours|days|week|not\s*received|where\s*is\s*my)\b/i.test(joinedCust)) {
+      mainIssue = `Customer complaining that data ${targetQuery ? `(${targetQuery}) ` : ""}is delayed and has not landed yet`;
+    } else if (/\b(down|working|system)\b/i.test(joinedCust)) {
+      mainIssue = "Customer asking if network/service is currently down before buying";
+    } else if (/\b(momo|deduct|paid|debit)\b/i.test(joinedCust)) {
+      mainIssue = "Customer says money was deducted on MoMo but order is pending";
+    } else if (/\b(refund|reverse|money\s*back|wasted)\b/i.test(joinedCust)) {
+      mainIssue = "Customer requesting a refund for delayed or uncredited transaction";
+    } else if (/\b(withdraw|cashout|pin)\b/i.test(joinedCust)) {
+      mainIssue = "Agent asking for wallet cashout or withdrawal PIN reset";
+    } else if (targetQuery) {
+      mainIssue = `Customer checking why order (${targetQuery}) has not landed`;
+    } else {
+      mainIssue = actualCustomerLastMsg ? `Customer inquiry: "${actualCustomerLastMsg.slice(0, 70)}"` : "Customer waiting for support assistance";
+    }
+  }
+
+  // ── 2. LIVE DATAMART DELIVERY TRACKING & CONTEXT-AWARE DRAFT ──
   const isDeliveryIntent = trackInfo.hasDeliveryWords || /\b(data|bundle|order|deliver|received|drop|land|balance|ghc|gb)\b/i.test(lowerAll);
   if (targetQuery && isDeliveryIntent) {
-    mainIssue = `Data bundle delivery status check (${targetQuery})`;
     const liveTrack = await trackSupportDeliveryTarget(targetQuery);
     if (liveTrack && liveTrack.found) {
       const st = (liveTrack.status || "processing").toLowerCase();
@@ -6349,15 +6403,12 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
       const refCode = liveTrack.reference || targetQuery;
 
       if (st === "delivered" || st === "completed" || st === "success") {
-        mainIssue = `Delivered ${net} data bundle (${refCode})`;
         trackingDiagnostic = `✅ DELIVERED on ${net} to ${ph} (Ref: ${refCode})`;
         draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on DataMart and it is confirmed DELIVERED on the ${net} network to ${ph}. Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
       } else if (st === "failed" || st === "cancelled") {
-        mainIssue = `Failed ${net} delivery needing re-dispatch (${refCode})`;
         trackingDiagnostic = `❌ FAILED on ${net} (Ref: ${refCode})${liveTrack.failureReason ? ` - ${liveTrack.failureReason}` : ""}`;
         draftText = `Hello ${firstName}, we have verified order ${refCode} and noticed a network dispatch issue. We are reprocessing your dispatch right now so your data arrives on ${ph} immediately. Thank you for your patience!`;
       } else {
-        mainIssue = `In-queue ${net} delivery processing (${refCode})`;
         trackingDiagnostic = `⏳ IN QUEUE on ${net} (Ref: ${refCode}) - Standard delivery line`;
         draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on DataMart. It is currently in the ${net} delivery queue and processing. Your data will land shortly. Kindly dial *124# to check. Thank you for your patience!`;
       }
@@ -6367,64 +6418,56 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
     }
   }
 
-  // 2. CUSTOMER PROVIDED A PHONE NUMBER OR CODE WITHOUT DELIVERY WORDS
+  // 3. CUSTOMER PROVIDED A PHONE NUMBER OR CODE WITHOUT DELIVERY WORDS
   else if (targetQuery && !draftText) {
-    mainIssue = `Order / phone reference provided (${targetQuery})`;
     trackingDiagnostic = `📱 Customer provided reference: ${targetQuery}`;
     draftText = `Hello ${firstName}, we have received your reference (${targetQuery}). We are tracking and processing this on the network right now to ensure it delivers successfully. Kindly dial *124# to verify your balance. Thank you!`;
   }
 
-  // 3. DELIVERY QUESTION BUT MISSING TRACK ID / PHONE
+  // 4. DELIVERY QUESTION BUT MISSING TRACK ID / PHONE
   else if (trackInfo.hasDeliveryWords && !targetQuery) {
-    mainIssue = "Order delivery inquiry (Missing Track ID / Phone)";
     trackingDiagnostic = `⚠️ No Track ID or recipient phone provided by customer yet.`;
     draftText = `Hello ${firstName}, thank you for reaching out. Please kindly provide your Track ID (or Order Reference) and the recipient phone number so we can track and speed up your data delivery on DataMart immediately!`;
   }
 
-  // 4. MOMO / PAYMENT DEDUCTION
+  // 5. MOMO / PAYMENT DEDUCTION
   else if (validMomo || trackInfo.hasPaymentWords || /\b(deposit|credited|uncredited|momo\s*deduct|deducted|paid)\b/i.test(lowerAll)) {
     const trxStr = validMomo || trackInfo.momoTrxId ? ` (Trx ID: ${validMomo || trackInfo.momoTrxId})` : "";
-    mainIssue = `MoMo payment deposit verification${trxStr}`;
     trackingDiagnostic = `💳 Payment / MoMo deduction issue${trxStr} - Escalated to Finance`;
     draftText = `Hello ${firstName}, thank you for reaching out. We have flagged your payment reconciliation${trxStr} with our finance team as top priority. Your balance will be resolved shortly. Thank you for your patience!`;
   }
 
-  // 5. AGENT WITHDRAWAL / CASHOUT / PIN RESET
+  // 6. AGENT WITHDRAWAL / CASHOUT / PIN RESET
   else if (/\b(withdraw|cashout|pin|change\s*pin|reset\s*pin|cant\s*withdraw|cannot\s*withdraw|withdrawal)\b/i.test(lowerAll)) {
-    mainIssue = "Agent wallet cashout / PIN reset request";
     trackingDiagnostic = `💳 Agent Withdrawal / PIN Assistance`;
     draftText = `Hello ${firstName}, regarding your withdrawal request, please kindly provide your registered DataMart phone number or email so we can verify your wallet and assist you in resetting your withdrawal PIN right away!`;
   }
 
-  // 6. REFUND / WALLET REVERSAL
+  // 7. REFUND / WALLET REVERSAL
   else if (/\b(refund|reverse|reversal|money\s*back)\b/i.test(lowerAll)) {
-    mainIssue = "Refund / payment reversal request";
     trackingDiagnostic = `💰 Refund / Wallet Balance Reversal`;
     draftText = `Hello ${firstName}, we have received your refund request. Please provide your Order Reference or registered phone number so our team can verify the failed order and credit the amount back to your DataMart wallet immediately!`;
   }
 
-  // 7. CUSTOMER COMPLAINING ABOUT WAITING / DELAY / FRUSTRATION
+  // 8. CUSTOMER COMPLAINING ABOUT WAITING / DELAY / FRUSTRATION
   else if (/\b(not\s*minding|mind\s*me|long\s*time|too\s*slow|since\s*morning|nonsense|delay|delaying|waiting|hours\s*since|where\s*is\s*my)\b/i.test(lowerAll)) {
-    mainIssue = "Customer complaint regarding delayed response / wait time";
     trackingDiagnostic = `⚠️ Customer expressing frustration about waiting time`;
     draftText = `Hello ${firstName}, we sincerely apologize for the delay and frustration! We are actively attending to your chat right now as priority. Please provide your phone number or Order ID so we can get this sorted for you immediately!`;
   }
 
-  // 8. BUYING DATA / NETWORK UPTIME INQUIRY
+  // 9. BUYING DATA / NETWORK UPTIME INQUIRY
   else if (/\b(purchase\s*data|buy\s*data|will\s*the\s*person\s*receive|is\s*mtn\s*working|is\s*telecel\s*working|can\s*i\s*buy)\b/i.test(lowerAll)) {
-    mainIssue = "Pre-purchase service & network availability inquiry";
     trackingDiagnostic = `📶 Service Inquiry: Network availability & purchasing data`;
     draftText = `Hello ${firstName}, yes! Data deliveries across all networks (MTN, Telecel, AT) are active and processing. You can place your order now and it will deliver directly to the line. Let us know if you need any assistance!`;
   }
 
-  // 9. SIMPLE ACKNOWLEDGMENT ("OKAY", "THANK YOU")
+  // 10. SIMPLE ACKNOWLEDGMENT ("OKAY", "THANK YOU")
   else if (/^(?:ok|okay|thank\s*you|thanks|alright|noted|seen|fine)\b/i.test(lowerLast)) {
-    mainIssue = "Customer acknowledgment / confirmation";
     trackingDiagnostic = `🤝 Customer acknowledgment`;
     draftText = `Hello ${firstName}, you're very welcome! We are monitoring everything closely for you. Please let us know if you need any further assistance!`;
   }
 
-  // 10. AI GENERATION FOR ALL OTHER INQUIRIES & QUESTIONS
+  // 11. AI GENERATION FOR ALL OTHER INQUIRIES & QUESTIONS
   if (!draftText) {
     try {
       const aiRes = await executeBotAi({
@@ -6439,23 +6482,21 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
       });
       if (aiRes && aiRes.text && aiRes.text.trim().length > 10) {
         const textOut = aiRes.text.trim();
-        const issueM = textOut.match(/ISSUE:\s*(.+?)(?:\n|$)/i);
         const replyM = textOut.match(/REPLY:\s*([\s\S]+)$/i);
-        if (issueM) mainIssue = issueM[1].trim();
         if (replyM) draftText = replyM[1].trim();
         else draftText = textOut.replace(/ISSUE:.*?\n/i, "").trim();
-        trackingDiagnostic = `💬 Customer Inquiry: "${lastMsg.slice(0, 40)}"`;
+        trackingDiagnostic = `💬 Customer Inquiry: "${actualCustomerLastMsg.slice(0, 40)}"`;
       }
     } catch (_) { }
   }
 
-  // 11. Final fallback if offline
+  // 12. Final fallback if offline
   if (!draftText) {
     trackingDiagnostic = `💬 Customer Support Inquiry`;
     draftText = `Hello ${firstName}, thank you for reaching out to DataMart support. We are attending to your request right now to resolve this for you immediately!`;
   }
 
-  return { mainIssue, draftText, trackingDiagnostic };
+  return { mainIssue, draftText, trackingDiagnostic, actualCustomerLastMsg };
 }
 
 async function generateSupportDraftReply(identifier) {
@@ -6629,7 +6670,7 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
         const waitMins = Math.max(1, Math.round(waitTimeMs / (60 * 1000)));
         const waitLabel = waitMins >= 60 ? `${Math.floor(waitMins / 60)}h ${waitMins % 60}m` : `${waitMins} mins`;
 
-        const { mainIssue, draftText, trackingDiagnostic } = await composeIntelligentSupportDraft({
+        const { mainIssue, draftText, trackingDiagnostic, actualCustomerLastMsg } = await composeIntelligentSupportDraft({
           firstName,
           custFullName,
           tNum,
@@ -6643,7 +6684,7 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
           ticketId: tNum,
           customerName: custFullName,
           mainIssue,
-          lastMessage: lastMsg || "New support request",
+          lastMessage: actualCustomerLastMsg || lastMsg || "New support request",
           waitLabel,
           trackingDiagnostic,
           draftMessage: draftText
@@ -10846,21 +10887,6 @@ app.post("/webhook", async (req, res) => {
           } catch (_) {}
         }
       }
-
-      const recentRuntimeLogSummary = RUNTIME_ERROR_LOG.length > 0
-        ? `\nRECENT SERVER RUNTIME LOGS (LAST ${Math.min(5, RUNTIME_ERROR_LOG.length)}):\n` +
-          RUNTIME_ERROR_LOG.slice(0, 5).map(e => `• [${e.time}] ${e.level}: ${e.message}`).join("\n")
-        : `\nRECENT SERVER RUNTIME LOGS: Zero runtime errors (All background workers healthy).`;
-
-      let boostLiveContext = "";
-      try {
-        const { data: bSettings } = await supabase.from("settings").select("key, value").in("key", ["boost_markup_percent", "default_agent_boost_markup_percent"]);
-        const bMap = {};
-        (bSettings || []).forEach(r => { bMap[r.key] = r.value; });
-        const admInc = bMap["boost_markup_percent"] || "10";
-        const agInc = bMap["default_agent_boost_markup_percent"] || "20";
-        boostLiveContext = `\nBOOST / SMM SOCIAL ENGAGEMENT SERVICES CONTEXT:\n- Wholesale API: Boostghana (status: operational)\n- Master Admin Boost Markup: +${admInc}%\n- Default Agent Reseller Boost Markup: +${agInc}%\n`;
-      } catch (_) {}
 
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
       let ownerSystemPrompt = "";
