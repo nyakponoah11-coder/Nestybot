@@ -6820,7 +6820,7 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
 
         async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
           try {
-            const res = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&page=${page}&limit=35`);
+            const res = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&page=${page}&limit=50`);
             const tickets = res.data?.data?.tickets || res.data?.tickets || [];
             if (!Array.isArray(tickets) || tickets.length === 0) {
               return `🎉 *DATAMART LIVE SUPPORT INBOX IS CLEAR!*\n\nNo active customer support tickets at the moment. All chats resolved!`;
@@ -6843,28 +6843,24 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
             const candidatePool = validTickets.length > 0 ? validTickets : active;
             const now = Date.now();
 
-            // Filter active tickets in the live inbox that have been waiting 10+ minutes (up to 12 hours)
-            const currentInbox10mPlus = candidatePool.filter(t => {
+            // Calculate waiting time for each active candidate
+            const poolWithWaitTime = candidatePool.map(t => {
               const msgTime = new Date(t.lastCustomerMessageAt || t.updatedAt || t.createdAt).getTime();
-              if (isNaN(msgTime)) return false;
-              const waitMins = Math.round((now - msgTime) / (60 * 1000));
-              return waitMins >= 10 && waitMins <= 720; // 10 minutes to 12 hours (today's active inbox)
+              const waitMins = isNaN(msgTime) ? 0 : Math.max(0, Math.round((now - msgTime) / (60 * 1000)));
+              return { ...t, _waitMins: waitMins, _msgTime: msgTime };
             });
 
-            // Sort by live inbox activity (most recent in active inbox first among those waiting >= 10m)
-            currentInbox10mPlus.sort((a, b) => {
-              const tA = new Date(a.lastCustomerMessageAt || a.updatedAt || a.createdAt).getTime() || 0;
-              const tB = new Date(b.lastCustomerMessageAt || b.updatedAt || b.createdAt).getTime() || 0;
-              return tB - tA;
-            });
+            // Filter tickets that have been waiting 10+ minutes
+            let currentInbox10mPlus = poolWithWaitTime.filter(t => t._waitMins >= 10);
 
-            // Backfill with other candidates if fewer than limit so bossu always gets up to 5
-            let listToProcess = [...currentInbox10mPlus];
-            if (listToProcess.length < limit) {
-              const remaining = candidatePool.filter(t => !listToProcess.some(p => p._id === t._id));
-              listToProcess.push(...remaining);
+            // FIRST COME FIRST SERVED: Sort strictly by HIGHEST waiting time first (oldest waiting customer first!)
+            currentInbox10mPlus.sort((a, b) => b._waitMins - a._waitMins);
+
+            if (currentInbox10mPlus.length === 0) {
+              return `🎉 *ALL CAUGHT UP!* No open support tickets currently waiting more than 10 minutes in Rezolv inbox.`;
             }
-            listToProcess = listToProcess.slice(0, limit);
+
+            const listToProcess = currentInbox10mPlus.slice(0, limit);
 
             const drafts = (await Promise.all(listToProcess.map(async (t) => {
               try {
