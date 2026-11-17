@@ -7424,6 +7424,172 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
         }
 
         /* =========================================================
+        DATAMART BULK PHONE NUMBER DELIVERY CHECK
+        ========================================================= */
+
+        async function executeDatamartBulkPhoneCheck(rawPhoneList, callerPhone = null) {
+          const phones = (Array.isArray(rawPhoneList) ? rawPhoneList : String(rawPhoneList || "").match(/\b(?:0[2357]\d{8}|\+?233[2357]\d{8})\b/g) || [])
+            .map(p => {
+              let clean = String(p).replace(/\D/g, "");
+              if (clean.startsWith("233") && clean.length === 12) clean = "0" + clean.slice(3);
+              return clean;
+            })
+            .filter(p => /^0[2357]\d{8}$/.test(p));
+
+          const uniquePhones = [...new Set(phones)].slice(0, 15);
+          if (uniquePhones.length === 0) return null;
+
+          // Check all phone numbers in parallel
+          const results = await Promise.all(uniquePhones.map(async (phone) => {
+            try {
+              // 1. Search DataMart
+              let dmOrders = [];
+              try {
+                const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(phone)}`, {}, callerPhone);
+                dmOrders = resp?.data?.results?.orders || (Array.isArray(resp?.data?.results) ? resp.data.results.filter(x => x.type === "order" || x.network) : []) || [];
+              } catch (_) { }
+
+              // 2. Search store database orders
+              let dbOrders = [];
+              try {
+                const { data } = await supabase
+                  .from("orders")
+                  .select("*")
+                  .ilike("recipient_phone", `%${phone.slice(-9)}%`)
+                  .order("created_at", { ascending: false })
+                  .limit(2);
+                if (data) dbOrders = data;
+              } catch (_) { }
+
+              const primaryOrder = dmOrders[0] || dbOrders[0] || null;
+
+              if (!primaryOrder) {
+                return {
+                  phone,
+                  found: false,
+                  statusText: "NO ORDER FOUND",
+                  statusEmoji: "❓"
+                };
+              }
+
+              const network = (primaryOrder.network || "MTN").toUpperCase();
+              const capacity = primaryOrder.capacity ? `${primaryOrder.capacity}GB` : "";
+              const rawStatus = String(primaryOrder.status || primaryOrder.delivery_status || "processing").toUpperCase();
+              const portalId = primaryOrder.apiOrderId || primaryOrder.exportTracking?.portalId || (primaryOrder.portalOrderId && primaryOrder.portalOrderId !== primaryOrder._id ? primaryOrder.portalOrderId : null) || primaryOrder.datamart_reference || null;
+              const batchNumber = primaryOrder.exportTracking?.batchNumber || null;
+              const ref = primaryOrder.geonetReference || primaryOrder.originalReference || primaryOrder.reference || null;
+              const createdAt = primaryOrder.createdAt || primaryOrder.created_at || null;
+              const timeAgo = createdAt ? getTimeAgoGhana(createdAt) : "recently";
+
+              // Status normalization
+              let statusText = rawStatus;
+              let statusEmoji = "⏳";
+              let isDelivered = false;
+              let isFailed = false;
+
+              if (rawStatus === "COMPLETED" || rawStatus === "DELIVERED" || rawStatus === "SUCCESS") {
+                statusText = "DELIVERED";
+                statusEmoji = "✅";
+                isDelivered = true;
+              } else if (rawStatus === "FAILED" || rawStatus === "CANCELLED" || rawStatus === "ERROR") {
+                statusText = "FAILED";
+                statusEmoji = "❌";
+                isFailed = true;
+              } else if (rawStatus === "QUEUED" || rawStatus === "VENDOR_QUEUE") {
+                statusText = "IN QUEUE";
+                statusEmoji = "⏳";
+              } else {
+                statusText = "PROCESSING";
+                statusEmoji = "⏳";
+              }
+
+              // If portalId is numeric and order is not yet confirmed delivered, run carrier verification
+              if (portalId && /^\d{4,9}$/.test(String(portalId)) && !isDelivered) {
+                try {
+                  const carrier = await checkDatamartCarrierRaw(portalId, callerPhone);
+                  if (carrier && carrier.found) {
+                    if (carrier.allDelivered) {
+                      statusText = "DELIVERED (Carrier Verified)";
+                      statusEmoji = "✅";
+                      isDelivered = true;
+                      isFailed = false;
+                    } else if (carrier.failed > 0) {
+                      statusText = `FAILED (${carrier.failed} Failed on Carrier)`;
+                      statusEmoji = "❌";
+                      isFailed = true;
+                    }
+                  }
+                } catch (_) { }
+              }
+
+              return {
+                phone,
+                found: true,
+                network,
+                capacity,
+                statusText,
+                statusEmoji,
+                isDelivered,
+                isFailed,
+                portalId,
+                batchNumber,
+                ref,
+                timeAgo
+              };
+            } catch (err) {
+              return {
+                phone,
+                found: false,
+                statusText: "CHECK ERROR",
+                statusEmoji: "⚠️"
+              };
+            }
+          }));
+
+          let deliveredCount = 0;
+          let failedCount = 0;
+          let inProgressCount = 0;
+          let notFoundCount = 0;
+
+          const numEmojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟", "1️⃣1️⃣", "1️⃣2️⃣", "1️⃣3️⃣", "1️⃣4️⃣", "1️⃣5️⃣"];
+
+          let msg = `📱 *DATAMART BULK NUMBER CHECK (${results.length} NUMBERS)*\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+          results.forEach((r, idx) => {
+            const numEmoji = numEmojis[idx] || `[${idx + 1}]`;
+            if (r.found) {
+              if (r.isDelivered) deliveredCount++;
+              else if (r.isFailed) failedCount++;
+              else inProgressCount++;
+
+              const pkgPart = r.capacity ? ` (${r.network} ${r.capacity})` : ` (${r.network})`;
+              const batchPart = r.batchNumber ? ` (Batch #${r.batchNumber})` : "";
+              const refPart = r.ref ? ` · Ref: ${r.ref}` : "";
+
+              msg += `${numEmoji} *${r.phone}*${pkgPart}\n` +
+                `• 📊 *Status:* ${r.statusEmoji} *${r.statusText}*\n` +
+                `• 🆔 *Portal ID:* *${r.portalId || "Pending Export"}*${batchPart}\n` +
+                `• 🕒 *Placed:* ${r.timeAgo}${refPart}\n`;
+              if (r.isFailed && (r.portalId || r.ref)) {
+                msg += `• 💡 *Action:* Reply *retry ${r.portalId || r.phone}* to reprocess\n`;
+              }
+              msg += "\n";
+            } else {
+              notFoundCount++;
+              msg += `${numEmoji} *${r.phone}*\n` +
+                `• 📊 *Status:* ${r.statusEmoji} *${r.statusText}* (No active order found)\n\n`;
+            }
+          });
+
+          msg += `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `📈 *Summary:* ${deliveredCount} Delivered · ${failedCount} Failed · ${inProgressCount} In Queue/Processing${notFoundCount > 0 ? ` · ${notFoundCount} Not Found` : ""}\n\n` +
+            `💡 *Quick Action:* Reply with any *Portal ID* (e.g. *561077*) to run live carrier check, or reply *retry [ID or Phone]* to re-dispatch!`;
+
+          return msg;
+        }
+
+        /* =========================================================
         SEND ADMIN SMS (ARKESEL)
         ========================================================= */
 
@@ -8673,9 +8839,18 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
             );
           }
 
-          // 1. Delivery Check (Single or Bulk IDs)
+          // 1. Delivery Check (Single/Bulk Portal IDs & Bulk Phone Numbers)
           const allNums = cleanInput.match(/\b\d{4,9}[a-zA-Z]?\b/g);
-          const isDeliveryCheckIntent = /\b(?:delivery\s*check|check\s*delivery|audit)\b/i.test(cleanInput);
+          const allPhones = cleanInput.match(/\b(?:0[2357]\d{8}|\+?233[2357]\d{8})\b/g);
+          const isDeliveryCheckIntent = /\b(?:delivery\s*check|check\s*delivery|audit|bulk\s*check|check\s*numbers?)\b/i.test(cleanInput);
+
+          // 1a. Bulk Phone Numbers Check (e.g. "0559143388 0241234567" or "bulk check 0559143388 0241234567")
+          if ((allPhones && allPhones.length > 1) || (allPhones && allPhones.length === 1 && isDeliveryCheckIntent)) {
+            const report = await executeDatamartBulkPhoneCheck(allPhones, from);
+            if (report) return sendWhatsApp(from, report);
+          }
+
+          // 1b. Portal IDs / Batch IDs Delivery Check
           if (isDeliveryCheckIntent || (allNums && allNums.length > 0 && /^[0-9a-zA-Z,\s\n\r]+$/.test(cleanInput))) {
             const targetIds = allNums || [];
             if (targetIds.length > 0) {
@@ -8981,7 +9156,7 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
             return sendWhatsApp(from,
               `🏢 *DATAMART AGENT SUPPORT TOOLS CONSOLE*\n\n` +
               `You can text any of these commands directly:\n\n` +
-              `🚚 *Delivery Check:* Send single or bulk IDs (e.g. *2313443* or *2313443 2313467*)\n` +
+              `🚚 *Delivery Check:* Send single/bulk IDs (e.g. *2313443*) OR *bulk phone numbers* (e.g. *0559143388 0241234567*)\n` +
               `🔍 *Search / Investigate:* Send email, phone, or name\n` +
               `🎫 *Tickets:* Send *tickets* or *urgent*\n` +
               `❌ *Failed Orders:* Send *failed*\n` +
@@ -9513,7 +9688,15 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
               }
 
               // Direct DataMart delivery check trigger even outside console mode
-              const hasDeliveryCheckWord = /\b(?:delivery\s*check|check\s*delivery|carrier\s*check|audit)\b/i.test(cleanCmd);
+              const hasDeliveryCheckWord = /\b(?:delivery\s*check|check\s*delivery|carrier\s*check|audit|bulk\s*check|check\s*numbers?)\b/i.test(cleanCmd);
+              const allPhonesMatches = cleanCmd.match(/\b(?:0[2357]\d{8}|\+?233[2357]\d{8})\b/g);
+              if ((allPhonesMatches && allPhonesMatches.length > 1) || (allPhonesMatches && allPhonesMatches.length === 1 && hasDeliveryCheckWord)) {
+                if (/^[0-9a-zA-Z,\s\n\r+]+$/.test(cleanCmd) || hasDeliveryCheckWord) {
+                  const report = await executeDatamartBulkPhoneCheck(allPhonesMatches, from);
+                  if (report) return sendWhatsApp(from, report);
+                }
+              }
+
               const isRawPortalIds = /^[0-9a-zA-Z,\s\n\r]+$/.test(cleanCmd) && /\b\d{4,9}[a-zA-Z]?\b/.test(cleanCmd);
               if (hasDeliveryCheckWord || isRawPortalIds) {
                 const idMatches = cleanCmd.match(/\b\d{4,9}[a-zA-Z]?\b/g);
@@ -10367,82 +10550,6 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                   } catch (err) {
                     return sendWhatsApp(from, `❌ Resync error: ${err.message}`);
                   }
-                }
-
-                // 3. RETRY ORDER
-                if (type === "retry_order" && targetRefs.length > 0) {
-                  const r = targetRefs[0];
-                  const aPhone = pendingAction.phone;
-                  try {
-                    const retryRes = await axios.post(`${DATAMART_BASE}/purchase`, {
-                      phoneNumber: aPhone,
-                      network: network || "YELLO",
-                      capacity: String(capacity || "1"),
-                      gateway: "wallet",
-                      delivery: "fast"
-                    }, { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 });
-                    const retryData = retryRes.data?.data || retryRes.data || {};
-                    const newRef = retryData.reference || retryData.orderReference || null;
-                    await supabase.from("orders").update({ delivery_status: "processing", updated_at: new Date().toISOString() }).eq("reference", r);
-                    return sendWhatsApp(from, `✅ *RETRY DISPATCHED BOSS!*\n\nPackage: ${capacity}GB → ${aPhone}\nNetwork: ${network || "YELLO"}${newRef ? `\nNew supplier ref: ${newRef}` : ""}\n\nI will continue supervising delivery for you.`);
-                  } catch (retryErr) {
-                    return sendWhatsApp(from, `❌ Retry failed boss: ${retryErr.response?.data?.message || retryErr.message}\nCheck DataMart wallet balance and try again.`);
-                  }
-                }
-
-                // 4. SEND CUSTOM SMS
-                if (type === "send_sms" && pendingAction.phone) {
-                  const msg = smsText || pendingAction.smsText || pendingAction.message || "DATA 1 GH: Your order has been updated. Thank you!";
-                  await sendAdminSms(msg, pendingAction.phone);
-                  // Save confirmation in conversation memory
-                  try {
-                    const executionNote = {
-                      role: "assistant",
-                      text: `✅ SMS delivered to ${pendingAction.phone} with Sender ID D_1Gh: "${msg}"`
-                    };
-                    const updatedHistory = [...history.slice(-5), { role: "user", text }, executionNote];
-                    await saveOwnerHistory(from, updatedHistory);
-                  } catch (_) { }
-                  return sendWhatsApp(from, `✅ *SMS DELIVERED BOSS!*\n\nRecipient: ${pendingAction.phone}\nSender ID: *D_1Gh*\nMessage: "${msg}"\n\nAnything else on your mind?`);
-                }
-
-                // 5. TOGGLE PRODUCT STOCK
-                if ((type === "toggle_stock" || type === "toggle_product_stock") && (productId || pendingAction.product_id)) {
-                  const pId = productId || pendingAction.product_id;
-                  await supabase.from("products").update({ in_stock: Boolean(inStock), updated_at: new Date().toISOString() }).eq("id", pId);
-                  return sendWhatsApp(from, `✅ *INVENTORY UPDATED!*\n\n*${productName || "Package"}* is now *${inStock ? "IN STOCK" : "OUT OF STOCK"}* on the website!`);
-                }
-
-                // 6. UPDATE PRODUCT PRICE
-                if (type === "update_product_price" && (productId || pendingAction.product_id)) {
-                  const pId = productId || pendingAction.product_id;
-                  const newPrice = parseFloat(pendingAction.price || pendingAction.new_price);
-                  if (!isNaN(newPrice)) {
-                    await supabase.from("products").update({ price: newPrice, updated_at: new Date().toISOString() }).eq("id", pId);
-                    return sendWhatsApp(from, `✅ *PRICE UPDATED!*\n\n*${productName || "Package"}* price has been changed to *GH₵ ${newPrice.toFixed(2)}* on the store!`);
-                  }
-                }
-
-                // 7. RESOLVE SUPPORT CHAT
-                if (type === "resolve_support_chat") {
-                  const cId = pendingAction.conversation_id || pendingAction.conversationId;
-                  const cPhone = pendingAction.phone;
-                  let q = supabase.from("chat_conversations").update({ status: "resolved", unread_for_support: 0, updated_at: new Date().toISOString() });
-                  if (cId) q = q.eq("id", cId);
-                  else if (cPhone) q = q.eq("customer_phone", cPhone);
-                  else q = q.eq("status", "open");
-                  await q;
-                  return sendWhatsApp(from, `✅ *SUPPORT CHAT RESOLVED!*\n\nActive customer support conversation has been marked as resolved and closed from queue.`);
-                }
-
-                // 8. UPDATE DIGITAL SERVICE STATUS (Netflix, MashUp, AFA)
-                if (type === "update_service_status" && targetRefs.length > 0) {
-                  const statusToSet = status || "delivered";
-                  for (const r of targetRefs) {
-                    await supabase.from("service_orders").update({ delivery_status: statusToSet }).or(`reference.ilike.%${r}%`);
-                    // Per owner instruction: Stop sending SMS when delivery status is updated
-                  }
-                  return sendWhatsApp(from, `✅ *SERVICE ORDER UPDATED!*\n\nReference(s): ${targetRefs.join(", ")}\nNew Status: *${statusToSet.toUpperCase()}*`);
                 }
 
                 // 9. UPDATE CHECKER STATUS
