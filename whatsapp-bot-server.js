@@ -5973,6 +5973,61 @@ async function closeRezolvTicket(identifier, status = "resolved") {
   }
 }
 
+async function generateRezolvDraftReply(identifier) {
+  try {
+    let found = null;
+    if (identifier) {
+      found = await findRezolvTicket(identifier);
+    }
+    if (!found) {
+      const activeRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
+      const tickets = activeRes.data?.data?.tickets || [];
+      const urgent = tickets.find(t => t.status !== "resolved" && (t.unreadCount > 0 || (t.lastMessage?.text || "").includes("Needs a human")));
+      const target = urgent || tickets.find(t => t.status !== "resolved");
+      if (target) {
+        found = await findRezolvTicket(target.ticketNumber || target._id);
+      }
+    }
+
+    if (!found || !found.ticket) {
+      return { ok: false, error: "No active customer ticket found to draft a reply for." };
+    }
+
+    const t = found.ticket;
+    const msgs = found.messages || [];
+    const custFullName = t.customer?.name || "Customer";
+    const firstName = custFullName.split(" ")[0] || "there";
+    const lastCustomerMsg = [...(msgs || [])].reverse().find(m => m.senderType === "customer")?.text || t.lastMessage?.text || "";
+    const escReason = t.escalationReason || "";
+    const combinedContext = (lastCustomerMsg + " " + escReason).toLowerCase();
+
+    const orderMatch = (escReason + " " + lastCustomerMsg).match(/\b(MN-[A-Z0-9]+|AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|\d{8,12})\b/i);
+    const orderRefStr = orderMatch ? ` for order ${orderMatch[0]}` : "";
+
+    let draft = "";
+    if (combinedContext.includes("refund") || combinedContext.includes("wallet") || combinedContext.includes("money")) {
+      draft = `Hello ${firstName}, thank you for waiting. We have verified your transaction${orderRefStr} and your refund has been processed to your wallet balance. Kindly refresh your account to check. Thank you for your patience!`;
+    } else if (combinedContext.includes("delay") || combinedContext.includes("waiting") || combinedContext.includes("not come") || combinedContext.includes("haven't received") || combinedContext.includes("not delivered")) {
+      draft = `Hello ${firstName}, thank you for reaching out. We are currently tracking your delivery${orderRefStr} with the telecom network. It is in progress and will reflect shortly. We sincerely apologize for the delay!`;
+    } else if (combinedContext.includes("failed")) {
+      draft = `Hello ${firstName}, we have investigated the failed delivery${orderRefStr}. We are reprocessing your dispatch right now so it credits to your phone. Thank you for your patience!`;
+    } else {
+      draft = `Hello ${firstName}, thank you for contacting DataMart support. I am attending to your request right now and resolving this for you immediately!`;
+    }
+
+    return {
+      ok: true,
+      ticket: t,
+      ticketId: t.ticketNumber || found.id,
+      customerName: custFullName,
+      draftMessage: draft
+    };
+  } catch (err) {
+    console.warn("generateRezolvDraftReply error:", err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) {
   const ids = Array.isArray(portalOrderIds)
     ? portalOrderIds.map(x => String(x).trim()).filter(Boolean)
@@ -8828,6 +8883,14 @@ app.post("/webhook", async (req, res) => {
         const { type, network, capacity, status, smsText, inStock, productId, productName } = pendingAction;
         await clearOwnerPendingAction(from);
 
+        // 0. REZOLV LIVE CUSTOMER REPLY CONFIRMATION
+        if (type === "rezolv_reply") {
+          const tId = pendingAction.ticketId || pendingAction.ticket || pendingAction.id;
+          const replyText = pendingAction.message || pendingAction.text;
+          const res = await sendRezolvReply(tId, replyText);
+          return sendWhatsApp(from, res);
+        }
+
         // Gather all target references from pendingAction
         let targetRefs = [];
         if (Array.isArray(pendingAction.orders)) targetRefs.push(...pendingAction.orders);
@@ -10376,7 +10439,31 @@ app.post("/webhook", async (req, res) => {
           `*Examples:*\n` +
           `• *reply TKT-176279 Hello Emmanuel, we have credited your wallet!*\n` +
           `• *reply Emmanuel Hello, your refund is ready!*\n\n` +
-          `Or just say: *"Tell Emmanuel we have credited his wallet"* and I will send it immediately!`
+          `Or ask me: *"Draft reply for Emmanuel"* and I will write a complete professional response for you to review and send!`
+        );
+      }
+
+      // Direct Command: Draft Reply (e.g. "draft reply for Emmanuel", "draft reply", "suggest reply")
+      const draftReplyMatch = cmdText.match(/^(?:(?:can\s+you\s+)?draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply|help\s+me\s+reply|what\s+should\s+i\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i);
+      if (draftReplyMatch) {
+        const targetId = (draftReplyMatch[1] || "").trim();
+        const draftRes = await generateRezolvDraftReply(targetId);
+        if (!draftRes.ok) {
+          return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find a ticket to draft a reply for."}`);
+        }
+
+        await setOwnerPendingAction(from, {
+          type: "rezolv_reply",
+          ticketId: draftRes.ticketId,
+          message: draftRes.draftMessage
+        });
+
+        return sendWhatsApp(from,
+          `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
+          `"${draftRes.draftMessage}"\n\n` +
+          `💡 *Ready to dispatch this live as Stony 💙?*\n` +
+          `👉 Reply: *YES* or *SEND* to dispatch right now!\n` +
+          `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
         );
       }
 
@@ -10600,80 +10687,6 @@ app.post("/webhook", async (req, res) => {
       // Direct Action Command: DataMart Withdrawals
       const dmWithdrawalsMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?withdrawals?$/i);
       if (dmWithdrawalsMatch) {
-        const resp = await fetchDatamartSupportEndpoint('/api/support/withdrawals?limit=5');
-        const list = resp?.data?.withdrawals || [];
-        if (list.length === 0) {
-          return sendWhatsApp(from, `💰 *DATAMART AGENT WITHDRAWALS:* No pending withdrawal requests found.`);
-        }
-
-        let out = `💰 *DATAMART AGENT WITHDRAWALS (${list.length} shown):*\n\n`;
-        list.forEach((w, idx) => {
-          const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-          const agentName = w.agentId?.name || "Agent";
-          const storeName = w.storeId?.storeName || "Store";
-          const amt = w.requestedAmount != null ? Number(w.requestedAmount).toFixed(2) : "0.00";
-          const status = (w.status || "pending").toUpperCase();
-          const wId = w.withdrawalId || w._id;
-
-          out += `${num} *[${wId}]* GH₵ ${amt} (${status})\n` +
-            `• 👤 *Agent:* ${agentName} (${w.agentId?.phoneNumber || "N/A"})\n` +
-            `• 🏪 *Store:* ${storeName}\n` +
-            `• 💳 *Method:* ${w.method || "wallet"}\n\n`;
-        });
-        return sendWhatsApp(from, out);
-      }
-
-      // Direct Action Command: DataMart Deposits
-      const dmDepositsMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?deposits?$/i);
-      if (dmDepositsMatch) {
-        const resp = await fetchDatamartSupportEndpoint('/api/support/deposits?limit=5');
-        const list = resp?.data?.deposits || [];
-        if (list.length === 0) {
-          return sendWhatsApp(from, `💳 *DATAMART AGENT DEPOSITS:* No recent deposits found.`);
-        }
-
-        let out = `💳 *DATAMART RECENT DEPOSITS:*\n\n`;
-        list.forEach((dep, idx) => {
-          const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-          const userName = dep.userId?.name || "Agent";
-          const userPhone = dep.userId?.phoneNumber || "N/A";
-          const amt = dep.amount != null ? Number(dep.amount).toFixed(2) : "0.00";
-          const type = (dep.type || "deposit").toUpperCase();
-          const time = getTimeAgoGhana(dep.createdAt);
-
-          out += `${num} *GH₵ ${amt}* (${type}) - ${time}\n` +
-            `• 👤 *User:* ${userName} (${userPhone})\n` +
-            `• 💰 *Wallet After:* GH₵ ${Number(dep.balanceAfter || 0).toFixed(2)}\n\n`;
-        });
-        return sendWhatsApp(from, out);
-      }
-
-      // Direct Action Command: Universal Customer / Agent Investigation
-      const dmInvestigateMatch =
-        cmdText.match(/^(?:datamart|dm)\s*(?:investigate|customer|agent|lookup|search|check)\s+(.+)$/i) ||
-        cmdText.match(/^(?:datamart|dm)\s+(0[2357]\d{8}|\+?233[2357]\d{8})$/i) ||
-        cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:this\s+)?(?:customer|user|agent|number|phone)?\s*(?:on\s+datamart\s+)?(?:for\s+me\s+)?([^\s]+@[^\s]+|0[2357]\d{8}|\+?233[2357]\d{8})/i) ||
-        cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:on\s+datamart\s+)?([^\s]+@[^\s]+)/i);
-      if (dmInvestigateMatch) {
-        const query = dmInvestigateMatch[1].trim();
-        const report = await executeDatamartSearch(query, from);
-        if (report) return sendWhatsApp(from, report);
-      }
-
-      // Direct Action Command: Live Failed Orders or Delivery Check Failed Query
-      const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cmdText) ||
-        /^(?:failed|failed\s*orders?|failed\s*queue|open\s*failed)$/i.test(cmdText);
-      if (isLiveFailedQuery) {
-        const report = await getLiveFailedOrdersReport(from);
-        if (report) return sendWhatsApp(from, report);
-      }
-
-      const isAuditFailedQuery = /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cmdText) ||
-        /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cmdText);
-      if (isAuditFailedQuery) {
-        const norm = normalizeBotPhone(from);
-        const cached = lastDeliveryCheckCache.get(norm);
-        const reply = await formatFailedItemsReply(cached, from);
         return sendWhatsApp(from, reply);
       }
 
@@ -14269,16 +14282,27 @@ async function runRezolvUrgentWatcher() {
           const tktNum = t.ticketNumber || t._id;
           const lastMsg = (t.lastMessage?.text || "").replace(/\s+/g, " ").trim().slice(0, 160);
 
+          let draftHint = "";
+          try {
+            const draft = await generateRezolvDraftReply(tktNum);
+            if (draft.ok && draft.draftMessage) {
+              await setOwnerPendingAction(targetPhone, {
+                type: "rezolv_reply",
+                ticketId: tktNum,
+                message: draft.draftMessage
+              });
+              draftHint = `\n📝 *Suggested Reply Draft:*\n"${draft.draftMessage}"\n\n👉 *Reply YES or SEND to dispatch this reply live now!*\n`;
+            }
+          } catch (_) {}
+
           await sendWhatsApp(targetPhone,
             `🚨 *DATAMART CUSTOMER SUPPORT ALERT (REZOLV)*\n\n` +
             `🆔 *Ticket:* *${tktNum}*\n` +
             `👤 *Customer:* ${custName}${custEmail}\n` +
             `🚩 *Status:* Needs a Human\n` +
-            `💬 *Message:*\n"${lastMsg}${lastMsg.length >= 160 ? "..." : ""}"\n\n` +
-            `💡 *To reply directly from WhatsApp:*\n` +
-            `Send: *reply ${tktNum} [your message]*\n\n` +
-            `💡 *To view full conversation:*\n` +
-            `Send: *ticket ${tktNum}*`
+            `💬 *Message:*\n"${lastMsg}${lastMsg.length >= 160 ? "..." : ""}"\n` +
+            draftHint +
+            `\n💡 *Or customize:* *reply ${tktNum} [your message]*`
           ).catch(() => {});
         }
       }
