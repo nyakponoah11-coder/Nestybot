@@ -343,7 +343,7 @@ export default async function handler(req: any, res: any) {
                   notes: cNotes || null,
                 }).eq("id", cOrder.id);
 
-                if (cOrder.customer_phone && (outcome.pin || outcome.serialNumber)) {
+                if (cOrder.customer_phone && !String(cOrder.customer_phone).replace(/\D/g, "").endsWith("599599254") && (outcome.pin || outcome.serialNumber)) {
                   const type = cOrder.checker_type || "Result Checker";
                   const smsMsg = `DATA 1 GH: Your ${type} Result Checker Details:\nSerial: ${outcome.serialNumber || "N/A"}\nPIN: ${outcome.pin || "N/A"}\nRef: ${cOrder.reference}\nCheck results at the official WAEC/BECE portal. Thank you for choosing DATA 1 GH!`;
                   const arkeselKey = process.env.ARKESEL_API_KEY || process.env.VITE_ARKESEL_API_KEY;

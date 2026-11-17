@@ -130,10 +130,18 @@ function stripEmojis(str: string): string {
 
 async function sendArkeselSms(supabase: any, phone: string, message: string) {
   try {
+    if (String(phone || "").replace(/\D/g, "").endsWith("599599254")) {
+      console.log(`🚫 [SMS BLOCKED] Outbound SMS to ${phone} suppressed per owner instruction.`);
+      return { ok: false, error: "Recipient blocked from notifications" };
+    }
     const formatted = formatArkeselPhone(phone);
     if (!formatted) {
       console.warn("sendArkeselSms: Invalid phone number:", phone);
       return { ok: false, error: "Invalid phone number" };
+    }
+    if (String(formatted || "").replace(/\D/g, "").endsWith("599599254")) {
+      console.log(`🚫 [SMS BLOCKED] Outbound SMS to ${formatted} suppressed per owner instruction.`);
+      return { ok: false, error: "Recipient blocked from notifications" };
     }
 
     const cleanMessage = stripEmojis(message);
@@ -1381,6 +1389,46 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
           });
         }
 
+        // Action H2: Reply to Customer Support Chat
+        if (action_type === "reply_support_chat" || action_type === "send_support_reply") {
+          const { conversation_id, phone, message } = payload;
+          const replyText = String(message || payload.text || "").trim();
+          if (!replyText) return res.status(400).json({ error: "Missing reply message" });
+
+          let convId = conversation_id;
+          if (!convId) {
+            let q = admin.from("chat_conversations").select("id").order("updated_at", { ascending: false }).limit(1);
+            if (phone) {
+              const cleanP = String(phone).replace(/\D/g, "");
+              q = q.or(`customer_phone.ilike.%${cleanP}%,customer_name.ilike.%${phone}%`);
+            } else {
+              q = q.eq("status", "open");
+            }
+            const { data: cData } = await q.maybeSingle();
+            convId = cData?.id;
+          }
+
+          if (!convId) return res.status(404).json({ error: "No active support conversation found" });
+
+          const { error: msgErr } = await admin.from("chat_messages").insert({
+            conversation_id: convId,
+            sender: "support",
+            message: replyText,
+            created_at: new Date().toISOString(),
+          });
+          if (msgErr) return res.status(500).json({ error: msgErr.message });
+
+          await admin.from("chat_conversations").update({
+            updated_at: new Date().toISOString(),
+          }).eq("id", convId);
+
+          return res.status(200).json({
+            ok: true,
+            action_type,
+            message: `Reply posted successfully to customer chat!`,
+          });
+        }
+
         // Action I: Toggle Setting
         if (action_type === "toggle_setting") {
           const { key, value } = payload;
@@ -1805,6 +1853,40 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
             else q = q.eq("status", "open");
             await q;
             return `Customer support conversation marked as resolved!`;
+          }
+
+          if (actionType === "reply_support_chat" || actionType === "send_support_reply") {
+            const { conversation_id, phone, message } = actionPayload;
+            const replyText = String(message || actionPayload.text || "").trim();
+            if (!replyText) return "Missing reply message text.";
+
+            let convId = conversation_id;
+            if (!convId) {
+              let q = admin.from("chat_conversations").select("id").order("updated_at", { ascending: false }).limit(1);
+              if (phone) {
+                const cleanP = String(phone).replace(/\D/g, "");
+                q = q.or(`customer_phone.ilike.%${cleanP}%,customer_name.ilike.%${phone}%`);
+              } else {
+                q = q.eq("status", "open");
+              }
+              const { data: cData } = await q.maybeSingle();
+              convId = cData?.id;
+            }
+
+            if (!convId) return "No active customer support chat found to reply to.";
+
+            await admin.from("chat_messages").insert({
+              conversation_id: convId,
+              sender: "support",
+              message: replyText,
+              created_at: new Date().toISOString(),
+            });
+
+            await admin.from("chat_conversations").update({
+              updated_at: new Date().toISOString(),
+            }).eq("id", convId);
+
+            return `Reply sent to customer in Support Chat: "${replyText}"`;
           }
 
           if (actionType === "query_top_customers") {

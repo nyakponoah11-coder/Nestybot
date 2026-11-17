@@ -456,6 +456,8 @@ export default async function handler(req: any, res: any) {
     }
 
     // 2. Dispatch in batches of 50 with AbortController timeout to guarantee no hangs
+    // Permanently suppress sending bulk SMS to 0599599254 per owner instruction
+    recipients = recipients.filter((r) => !String(r || "").replace(/\D/g, "").endsWith("599599254"));
     const BATCH_SIZE = 50;
     let totalSent = 0;
     let totalFailed = 0;

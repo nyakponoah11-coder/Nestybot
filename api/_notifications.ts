@@ -32,11 +32,20 @@ function formatPhoneForWhatsApp(raw: string): string {
 // Owner instruction:
 // 1. All Admin SMS alerts are BLOCKED per owner instruction.
 // 2. WhatsApp order alerts go to 0547100951 (normalized: 233547100951)
+// 3. 0599599254 is permanently blocked from receiving ANY DATA 1 GH notifications (SMS, WhatsApp, Admin alerts)
 export const ADMIN_PRIMARY_SMS_PHONE = "0592753424";
 export const ADMIN_WHATSAPP_ONLY_PHONE = "233547100951";
 
+export function isBlockedFromData1Notification(raw?: string | null): boolean {
+  if (!raw) return false;
+  const digits = String(raw).replace(/\D/g, "");
+  if (digits.endsWith("599599254")) return true;
+  return false;
+}
+
 export function isBlockedFromAdminSms(raw: string): boolean {
   if (!raw) return true;
+  if (isBlockedFromData1Notification(raw)) return true;
   return false;
 }
 
@@ -321,6 +330,7 @@ export async function sendPaymentReceivedNotification(
         [ADMIN_WHATSAPP_ONLY_PHONE, ...candidatePhones]
           .map(formatPhoneForWhatsApp)
           .filter(Boolean)
+          .filter((p) => !isBlockedFromData1Notification(p))
       )
     );
 
@@ -666,10 +676,19 @@ async function dispatchArkeselSms(
   recipient: string,
   message: string
 ): Promise<{ ok: boolean; error?: string }> {
+  if (isBlockedFromData1Notification(recipient)) {
+    console.log(`🚫 [DATA 1 NOTIFICATION BLOCKED] Outbound SMS to ${recipient} suppressed per owner instruction.`);
+    return { ok: false, error: "Recipient blocked from notifications" };
+  }
   let target = String(recipient || "").replace(/\D/g, "");
   if (target.startsWith("2330") && target.length === 13) target = "233" + target.slice(4);
   else if (target.startsWith("0") && target.length === 10) target = "233" + target.slice(1);
   else if (target.length === 9) target = "233" + target;
+
+  if (isBlockedFromData1Notification(target)) {
+    console.log(`🚫 [DATA 1 NOTIFICATION BLOCKED] Outbound SMS to ${target} suppressed per owner instruction.`);
+    return { ok: false, error: "Recipient blocked from notifications" };
+  }
 
   if (!target || target.length < 10) {
     console.warn("[Arkesel SMS] Recipient phone number invalid:", recipient);
@@ -927,6 +946,7 @@ export async function sendWithdrawalAlertNotification(
         [ADMIN_WHATSAPP_ONLY_PHONE, ...candidatePhones]
           .map(formatPhoneForWhatsApp)
           .filter(Boolean)
+          .filter((p) => !isBlockedFromData1Notification(p))
       )
     );
     const adminSmsPhones = Array.from(
@@ -1247,7 +1267,7 @@ ${storeUrl}`;
     ].filter(Boolean) as string[];
 
     const adminWhatsAppPhones = Array.from(
-      new Set([ADMIN_WHATSAPP_ONLY_PHONE, ...candidatePhones.map(formatPhoneForWhatsApp)].filter(Boolean))
+      new Set([ADMIN_WHATSAPP_ONLY_PHONE, ...candidatePhones.map(formatPhoneForWhatsApp)].filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
     );
     const adminSmsPhones = Array.from(
       new Set(
@@ -1698,7 +1718,7 @@ export async function sendAdminLowBalanceOrderFailedAlert(
     ].filter(Boolean) as string[];
 
     const adminWhatsAppPhones = Array.from(
-      new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean))
+      new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
     );
 
     let arkeselKey = cleanApiKey(
@@ -2261,11 +2281,10 @@ export async function sendAdminSpinWinnerAlert(
       sMap.support_phone,
       ADMIN_WHATSAPP_ONLY_PHONE,
       "0547100951",
-      "0599599254",
     ].filter(Boolean) as string[];
 
     const adminWhatsAppPhones = Array.from(
-      new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean))
+      new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
     );
 
     const adminSmsPhones = [
@@ -2450,11 +2469,10 @@ export async function sendAdminAgentReferralWinnerAlert(
       sMap.support_phone,
       ADMIN_WHATSAPP_ONLY_PHONE,
       "0547100951",
-      "0599599254",
     ].filter(Boolean) as string[];
 
     const adminWhatsAppPhones = Array.from(
-      new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean))
+      new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
     );
 
     const adminSmsPhones = [
@@ -3045,6 +3063,7 @@ export async function sendOrderDeliveredNotification(
         ]
           .map(formatPhoneForWhatsApp)
           .filter(Boolean)
+          .filter((p) => !isBlockedFromData1Notification(p))
       )
     );
 

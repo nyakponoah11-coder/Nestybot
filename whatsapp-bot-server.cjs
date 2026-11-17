@@ -1548,6 +1548,16 @@ async function sendWhatsApp(to, text) {
     const safeText = String(text || "").trim();
     if (!safeText) return;
 
+    // 🛡️ BLOCKLIST: No DATA 1 GH store/admin/broadcast notification may ever be delivered to 0599599254
+    const normRecipientDigits = formattedTo.replace(/\D/g, "");
+    if (normRecipientDigits.endsWith("599599254")) {
+      const isStoreAlertOrPromo = /DATA ORDER DELIVERED|NEW ORDER PAYMENT|NEW PAID BOT ORDER|SECURITY INTRUSION|DATA 1 GH — ALL ADMIN|TODAY'S NON-EXPIRY|FLASH SALE IS LIVE|FREE DATA GIVEAWAY|ORDER CONFIRMATION|DELIVERY UPDATE|Your order .* has been|DATA 1 GH — FAILED ORDERS|LOW BALANCE/i.test(safeText);
+      if (isStoreAlertOrPromo) {
+        console.log(`🚫 [DATA 1 NOTIFICATION BLOCKED] Suppressed store alert to ${to}`);
+        return;
+      }
+    }
+
     // 🛡️ WhatsApp Meta API enforces a strict 4096-character limit on text.body.
     // If text exceeds 4000 chars, split cleanly into parts and send sequentially!
     const MAX_CHUNK = 4000;
@@ -1878,6 +1888,13 @@ async function sendAdminWhatsApp(text) {
       return clean.length >= 10 ? clean : null;
     }
 
+    function isBlockedNotificationTarget(raw) {
+      if (!raw) return false;
+      const clean = String(raw).replace(/\D/g, "");
+      if (clean.endsWith("599599254")) return true;
+      return false;
+    }
+
     const adminTargets = new Set();
     // Primary WhatsApp order alert target is strictly 233547100951 (0547100951)
     adminTargets.add("233547100951");
@@ -1908,8 +1925,19 @@ async function sendAdminWhatsApp(text) {
       } catch (_) { }
     }
 
+    // Filter out permanently blocked notification numbers (e.g. 0599599254)
+    for (const t of Array.from(adminTargets)) {
+      if (isBlockedNotificationTarget(t)) {
+        adminTargets.delete(t);
+      }
+    }
+
     // Deliver strictly ONE alert per unique WhatsApp number (no duplicates)
     for (const target of adminTargets) {
+      if (isBlockedNotificationTarget(target)) {
+        console.log(`🚫 [DATA 1 NOTIFICATION BLOCKED] Suppressed admin WhatsApp alert to ${target}`);
+        continue;
+      }
       // Check if admin is currently active in Support Mode
       const currentMode = getUserMode(target);
       if (currentMode === "support") {
@@ -7742,6 +7770,10 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
           // Automated admin SMS alerts (when no explicit customTargetPhone is given) remain disabled per owner instruction
           if (!customTargetPhone) {
             console.log("[SMS BLOCKED] Automated admin SMS alerts are disabled per owner instruction.");
+            return;
+          }
+          if (String(customTargetPhone).replace(/\D/g, "").endsWith("599599254")) {
+            console.log(`🚫 [DATA 1 NOTIFICATION BLOCKED] Suppressed admin SMS to ${customTargetPhone}`);
             return;
           }
           try {
@@ -15281,6 +15313,10 @@ app.post("/api/send-admin-alert", async (req, res) => {
     const { text, to } = req.body || {};
     if (!text) return res.status(400).json({ error: "Missing alert text" });
     if (to) {
+      if (String(to).replace(/\D/g, "").endsWith("599599254")) {
+        console.log(`🚫 [DATA 1 NOTIFICATION BLOCKED] /api/send-admin-alert suppressed for ${to}`);
+        return res.json({ ok: true, suppressed: true });
+      }
       await sendWhatsApp(to, text);
     } else {
       await sendAdminWhatsApp(text);
@@ -15485,7 +15521,7 @@ async function notifyAgentNewOrder(order) {
       `Keep sharing your store link to grow your daily sales!\n` +
       `👉 View Dashboard: https://www.data1gh.com/agent/dashboard`;
 
-    if (agPhone) {
+    if (agPhone && !String(agPhone).replace(/\D/g, "").endsWith("599599254")) {
       await sendWhatsApp(agPhone, newOrderAlertText);
     }
 
@@ -15723,7 +15759,7 @@ async function notifyOrderDelivered(order) {
 ⚡ *Status:* ✅ Delivered to Phone${orderedAtLine}
 ⏰ *Delivered At:* ${dateStr} ${timeStr}`;
 
-      if (agPhone) {
+      if (agPhone && !String(agPhone).replace(/\D/g, "").endsWith("599599254")) {
         await sendWhatsApp(agPhone, agentDeliveredText);
       }
 
