@@ -4485,6 +4485,9 @@ async function executeOwnerDirectAction(type, payload = {}) {
     // 16. Support Chat
     if (cleanType === "resolve_support_chat") {
       const cId = payload.conversation_id || payload.conversationId;
+      if (!cId && !payload.confirmed && !payload.all) {
+        return null;
+      }
       let q = supabase.from("chat_conversations").update({ status: "resolved", unread_for_support: 0, updated_at: new Date().toISOString() });
       if (cId) q = q.eq("id", cId);
       else q = q.eq("status", "open");
@@ -10493,13 +10496,76 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // Direct Action Command: Rezolv Live Reply to Customer (e.g. "reply TKT-179538 ...", "reply Emmanuel ...", "tell Emmanuel ...")
-      const rezolvReplyMatch = cmdText.match(/^(?:(?:dm|rezolv)\s+)?reply\s+(?:to\s+)?(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})\s+([\s\S]+)$/i) ||
-        cmdText.match(/^tell\s+([A-Za-z]{3,25}|TKT-?\d+)\s+([\s\S]+)$/i);
-      if (rezolvReplyMatch) {
-        const tktId = rezolvReplyMatch[1].trim();
-        const replyMsg = rezolvReplyMatch[2].trim();
-        const rep = await sendRezolvReply(tktId, replyMsg);
+      // Unified Live Reply Handler (Rezolv live tickets, DataMart RPT tickets, and pronouns "him/her/them")
+      const unifiedReplyMatch =
+        cmdText.match(/^(?:(?:dm|rezolv)\s+)?(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?(him|her|them|the\s+customer|customer|TKT-?\d+|RPT\d+|[a-f0-9]{24}|[A-Za-z]{3,25})\s+([\s\S]+)$/i) ||
+        cmdText.match(/^(?:reply|tell)\s+(him|her|them|the\s+customer|customer)\s+([\s\S]+)$/i);
+
+      if (unifiedReplyMatch) {
+        let rawTarget = unifiedReplyMatch[1].trim();
+        let replyMsg = unifiedReplyMatch[2].trim();
+
+        // Strip leading "to " if user said "reply him to text me..."
+        if (/^to\s+/i.test(replyMsg)) {
+          replyMsg = replyMsg.replace(/^to\s+/i, "").trim();
+        }
+
+        // If target is pronoun "him", "her", "them", "the customer"
+        if (/^(?:him|her|them|the\s+customer|customer|client|user)$/i.test(rawTarget)) {
+          const historyTexts = (history || []).slice(-5).map(h => h.text).reverse();
+          let resolvedFromHistory = null;
+
+          for (const ht of historyTexts) {
+            const rptMatch = ht.match(/RPT\d+/i);
+            if (rptMatch) {
+              resolvedFromHistory = { type: "rpt", id: rptMatch[0] };
+              break;
+            }
+            const tktMatch = ht.match(/TKT-\d+/i);
+            if (tktMatch) {
+              resolvedFromHistory = { type: "tkt", id: tktMatch[0] };
+              break;
+            }
+            const nameMatch = ht.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+))\b/);
+            if (nameMatch && !/^(DataMart|Stony|Rezolv|Admin|Understood)/i.test(nameMatch[0])) {
+              resolvedFromHistory = { type: "name", id: nameMatch[0] };
+              break;
+            }
+          }
+
+          if (resolvedFromHistory) {
+            rawTarget = resolvedFromHistory.id;
+          }
+        }
+
+        // 1. Is it a DataMart RPT ticket (e.g. RPT005281 or named customer like Prince Boachie)?
+        if (/^RPT\d+$/i.test(rawTarget) || !/^TKT-\d+$/i.test(rawTarget)) {
+          const dmData = await fetchDatamartSupportTickets({ search: rawTarget, limit: 1 });
+          const dmTk = dmData?.tickets?.[0];
+          if (dmTk) {
+            const custName = (dmTk.userId?.name || "Customer").trim();
+            const custPhone = dmTk.phoneNumber || dmTk.userId?.phoneNumber || "";
+            const cleanPhone = custPhone.replace(/\D/g, "");
+            const reportId = dmTk.reportId || dmTk._id;
+
+            if (cleanPhone) {
+              const smsText = `Hello ${custName.split(" ")[0]}, regarding your DataMart ticket ${reportId}: ${replyMsg}. - DataMart Support`;
+              await sendAdminSms(smsText, cleanPhone);
+              const waLink = `https://wa.me/233${cleanPhone.startsWith("0") ? cleanPhone.slice(1) : cleanPhone}`;
+
+              return sendWhatsApp(from,
+                `✅ *MESSAGE DISPATCHED TO ${custName.toUpperCase()}!*\n\n` +
+                `📱 *Recipient:* ${custName} (*${cleanPhone}*)\n` +
+                `🆔 *DataMart Ticket:* *${reportId}*\n` +
+                `💬 *SMS Sent via Arkesel (D_1Gh):*\n"${smsText}"\n\n` +
+                `👉 *Chat directly with customer on WhatsApp:*\n${waLink}`
+              );
+            }
+          }
+        }
+
+        // 2. Otherwise route to Rezolv live chat widget
+        const rep = await sendRezolvReply(rawTarget, replyMsg);
         return sendWhatsApp(from, rep);
       }
 
