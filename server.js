@@ -2442,6 +2442,139 @@ async function postToWhatsAppChannel(messageText, options = {}) {
   };
 }
 
+/* =========================================================
+FAILED ORDERS WHATSAPP GROUP ENGINE
+Auto-submits raw Portal ID (only the ID) to a WhatsApp group
+Pre-checks if Portal ID already exists to prevent duplicates!
+========================================================= */
+
+async function submitFailedPortalIdToGroup(portalId, meta = {}) {
+  const cleanId = String(portalId || "").replace(/\D/g, "");
+  if (!cleanId || cleanId.length < 4 || cleanId.length > 9) return { ok: false, reason: "invalid_id" };
+
+  try {
+    // 1. Get configured group JID from Supabase settings
+    const { data: sRow } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", "failed_orders_group_jid")
+      .maybeSingle();
+
+    const groupJid = sRow?.value;
+    if (!groupJid) {
+      console.log(`[FAILED ORDER] Portal ID ${cleanId} failed, but no failed_orders_group_jid configured yet.`);
+      return { ok: false, reason: "no_group_configured" };
+    }
+
+    // 2. Check if this Portal ID was ALREADY submitted to the group (Persistent deduplication registry)
+    const { data: regRow } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", "failed_orders_posted_portal_ids")
+      .maybeSingle();
+
+    let postedIds = [];
+    if (regRow?.value) {
+      try {
+        postedIds = typeof regRow.value === "string" ? JSON.parse(regRow.value) : regRow.value;
+      } catch (_) { }
+    }
+    if (!Array.isArray(postedIds)) postedIds = [];
+
+    // Check if ID already exists in registry
+    if (postedIds.includes(cleanId)) {
+      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group history. Skipping duplicate submission.`);
+      return { ok: true, skipped: true, reason: "already_exists" };
+    }
+
+    // 3. Connect Baileys client to post strictly to group
+    const { ok: bOk, sock } = await initBaileysChannelClient();
+    if (!bOk || !sock) {
+      console.warn("[FAILED ORDER GROUP] Baileys socket not ready to post failed portal ID:", cleanId);
+      return { ok: false, reason: "baileys_not_ready" };
+    }
+
+    // 4. Send ONLY the Portal ID (clean copyable ID as requested)
+    await sock.sendMessage(groupJid, { text: String(cleanId) });
+    console.log(`🚀 [FAILED ORDER GROUP] Posted Portal ID ${cleanId} to WhatsApp group ${groupJid}`);
+
+    // 5. Record cleanId in persistent registry
+    postedIds.push(cleanId);
+    if (postedIds.length > 1500) postedIds = postedIds.slice(-1500); // keep last 1500 IDs
+    await supabase.from("settings").upsert({
+      key: "failed_orders_posted_portal_ids",
+      value: JSON.stringify(postedIds),
+      updated_at: new Date().toISOString()
+    }, { onConflict: "key" });
+
+    return { ok: true, submitted: true, portalId: cleanId };
+  } catch (err) {
+    console.error(`❌ [FAILED ORDER GROUP] Error submitting ${cleanId} to group:`, err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+async function setFailedOrdersGroup(rawInput, callerPhone = null) {
+  const input = String(rawInput || "").trim();
+  const inviteMatch = input.match(/(?:chat\.whatsapp\.com\/|invite\/)([A-Za-z0-9_-]{20,28})/i);
+  const jidMatch = input.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
+
+  const { ok: bOk, sock } = await initBaileysChannelClient();
+  if (!bOk || !sock) {
+    return "⚠️ WhatsApp Baileys engine is currently connecting. Please try again in 10 seconds.";
+  }
+
+  let targetJid = jidMatch ? jidMatch[1] : null;
+  let groupSubject = "Failed Orders Group";
+
+  if (inviteMatch) {
+    const inviteCode = inviteMatch[1];
+    try {
+      // First inspect the invite to get group metadata
+      const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
+      if (inviteInfo?.id) {
+        targetJid = `${inviteInfo.id}@g.us`;
+        groupSubject = inviteInfo.subject || groupSubject;
+      }
+      // Join group if not already a member
+      try {
+        await sock.groupAcceptInvite(inviteCode);
+      } catch (joinErr) {
+        // If already in group or status 409, that's fine!
+      }
+    } catch (invErr) {
+      // If groupGetInviteInfo fails, attempt accept directly
+      try {
+        const joinedId = await sock.groupAcceptInvite(inviteCode);
+        if (joinedId) targetJid = joinedId.includes("@") ? joinedId : `${joinedId}@g.us`;
+      } catch (e2) {
+        return `⚠️ Could not join WhatsApp group with invite code "${inviteCode}": ${e2.message}. Please verify the invite link is valid and not revoked!`;
+      }
+    }
+  }
+
+  if (!targetJid) {
+    return "⚠️ Please provide a valid WhatsApp group link (e.g. `https://chat.whatsapp.com/...`) or group JID!";
+  }
+
+  try {
+    const meta = await sock.groupMetadata(targetJid);
+    if (meta?.subject) groupSubject = meta.subject;
+  } catch (_) { }
+
+  await supabase.from("settings").upsert([
+    { key: "failed_orders_group_jid", value: targetJid },
+    { key: "failed_orders_group_name", value: groupSubject },
+    { key: "failed_orders_group_invite", value: input }
+  ], { onConflict: "key" });
+
+  return `✅ *FAILED ORDERS WHATSAPP GROUP CONNECTED!*\n\n` +
+    `• *Group Name:* *${groupSubject}*\n` +
+    `• *Group JID:* \`${targetJid}\`\n\n` +
+    `🛡️ *How it works:*\n` +
+    `Whenever an order fails on DataMart or carrier delivery checks, Stony will search the group history first. If the Portal ID does not already exist, Stony will automatically submit **only the Portal ID** to this group!`;
+}
+
 
 /* =========================================================
 API KEY CLEANER & ENHANCED MULTI-PROVIDER AI SYSTEM
@@ -6084,6 +6217,10 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
         else if (failed > 0) status = "failed";
         else if (isQueued) status = "queued";
 
+        if (failed > 0 && targetId) {
+          submitFailedPortalIdToGroup(targetId, { reason: "carrier_check_failed", failedCount: failed }).catch(() => {});
+        }
+
         return {
           found: true,
           portalId: targetId,
@@ -6603,6 +6740,9 @@ async function synthesizeCustomerMainIssue(custName, customerTexts, targetRef) {
 
       if (st === "failed" || st === "cancelled" || (liveTrack.failed && liveTrack.failed > 0)) {
         portalId = detectedPortalId || refCode;
+        if (portalId && /^\d{4,9}$/.test(String(portalId))) {
+          submitFailedPortalIdToGroup(portalId, { reason: "support_draft_failed" }).catch(() => {});
+        }
         trackingDiagnostic = `❌ FAILED on DataMart · 🆔 *Portal ID:* *${portalId}*${liveTrack.failed ? ` (${liveTrack.failed} Failed)` : ""}`;
         draftText = `Hello ${firstName}, we have checked your order on DataMart and noticed a delivery issue on the network. Don't worry at all, it will be fixed and reprocessed for you right away so your data delivers immediately. Thank you for your patience!`;
       } else if (st === "delivered" || st === "completed" || st === "success") {
@@ -7557,7 +7697,12 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
             const numEmoji = numEmojis[idx] || `[${idx + 1}]`;
             if (r.found) {
               if (r.isDelivered) deliveredCount++;
-              else if (r.isFailed) failedCount++;
+              else if (r.isFailed) {
+                failedCount++;
+                if (r.portalId && /^\d{4,9}$/.test(String(r.portalId))) {
+                  submitFailedPortalIdToGroup(r.portalId, { reason: "bulk_phone_failed", phone: r.phone }).catch(() => {});
+                }
+              }
               else inProgressCount++;
 
               const pkgPart = r.capacity ? ` (${r.network} ${r.capacity})` : ` (${r.network})`;
@@ -8834,6 +8979,17 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
               `👋 *DATAMART ACCOUNT DISCONNECTED!*\n\n` +
               `Your account (${acc?.email || "linked account"}) has been unlinked and your session cleared from this WhatsApp number.`
             );
+          }
+
+          // Set Failed Orders Group (Invite Link or JID)
+          const setGroupMatch =
+            cleanInput.match(/^(?:set\s+)?(?:failed\s*(?:orders?)?\s*)?group(?:\s*link|\s*jid)?\s*[:=]?\s*(https:\/\/chat\.whatsapp\.com\/[^\s]+|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i) ||
+            cleanInput.match(/^(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{20,28})$/i);
+
+          if (setGroupMatch) {
+            const linkOrJid = setGroupMatch[1].trim();
+            const rep = await setFailedOrdersGroup(linkOrJid, from);
+            return sendWhatsApp(from, rep);
           }
 
           // 1. Delivery Check (Single/Bulk Portal IDs & Bulk Phone Numbers)
@@ -11454,6 +11610,17 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
       const cmdText = (effectiveText || text).trim();
       const lt = cmdText.toLowerCase();
       const orderRefsInText = extractOrderReferences(cmdText);
+
+      // Direct Action Command: Configure Failed Orders WhatsApp Group (Invite Link or JID)
+      const setGroupMatch =
+        cmdText.match(/^(?:set\s+)?(?:failed\s*(?:orders?)?\s*)?group(?:\s*link|\s*jid)?\s*[:=]?\s*(https:\/\/chat\.whatsapp\.com\/[^\s]+|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i) ||
+        cmdText.match(/^(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{20,28})$/i);
+
+      if (setGroupMatch) {
+        const linkOrJid = setGroupMatch[1].trim();
+        const rep = await setFailedOrdersGroup(linkOrJid, from);
+        return sendWhatsApp(from, rep);
+      }
 
       // Direct Action Command 0a_channel_config: Configure Whapi Token, Channel JID, or Native 8-Digit Channel Pairing
       const setWhapiMatch = cmdText.match(/^set\s+(?:whapi|channel)\s+token\s+([^\s]+)$/i);
