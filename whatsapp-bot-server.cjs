@@ -6482,22 +6482,25 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
     });
 
     const candidatePool = validTickets.length > 0 ? validTickets : active;
+    const now = Date.now();
 
-    // Filter for tickets from 10 minutes and above (waiting 10+ mins for customer attention)
-    const tenMinPlusTickets = candidatePool.filter(t => {
+    // Filter active tickets in the live inbox that have been waiting 10+ minutes (up to 12 hours)
+    const currentInbox10mPlus = candidatePool.filter(t => {
       const msgTime = new Date(t.lastCustomerMessageAt || t.updatedAt || t.createdAt).getTime();
-      return !isNaN(msgTime) && (Date.now() - msgTime) >= 10 * 60 * 1000;
+      if (isNaN(msgTime)) return false;
+      const waitMins = Math.round((now - msgTime) / (60 * 1000));
+      return waitMins >= 10 && waitMins <= 720; // 10 minutes to 12 hours (today's active inbox)
     });
 
-    // Sort by longest waiting first
-    tenMinPlusTickets.sort((a, b) => {
+    // Sort by live inbox activity (most recent in active inbox first among those waiting >= 10m)
+    currentInbox10mPlus.sort((a, b) => {
       const tA = new Date(a.lastCustomerMessageAt || a.updatedAt || a.createdAt).getTime() || 0;
       const tB = new Date(b.lastCustomerMessageAt || b.updatedAt || b.createdAt).getTime() || 0;
-      return tA - tB;
+      return tB - tA;
     });
 
     // Backfill with other candidates if fewer than limit so bossu always gets up to 5
-    let listToProcess = [...tenMinPlusTickets];
+    let listToProcess = [...currentInbox10mPlus];
     if (listToProcess.length < limit) {
       const remaining = candidatePool.filter(t => !listToProcess.some(p => p._id === t._id));
       listToProcess.push(...remaining);
