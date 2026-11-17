@@ -8324,6 +8324,37 @@ app.post("/webhook", async (req, res) => {
     ===================================================== */
     const cleanCmd = (text || "").trim();
 
+    // ── TOP-LEVEL REZOLV LIVE CUSTOMER SUPPORT DESK (https://www.rezolv.dev/dashboard) ──
+    const isRezolvModeIntent =
+      /\b(?:rezolv|resolv|rezolve|resovl)\b/i.test(cleanCmd) ||
+      /\b(?:support\s*mode|customer\s*support\s*mode|support\s*desk|live\s*support)\b/i.test(cleanCmd) ||
+      /^(?:rezolv|support)$/i.test(cleanCmd);
+
+    const isSpecificReplyAction = /^(?:reply|tell|draft\s+reply)\b/i.test(cleanCmd);
+
+    if (isRezolvModeIntent && !isSpecificReplyAction) {
+      const normF = normalizeBotPhone(from);
+      setUserMode(from, "support");
+      await saveCustomerSession(from, { step: 97 });
+      await supabase.from("settings").upsert({ key: `owner_mode_${normF}`, value: "support" }, { onConflict: "key" });
+      const initialReport = await getRezolvTicketsReport("active", 6);
+      return sendWhatsApp(from,
+        `🎟️ *CONNECTED TO REZOLV LIVE SUPPORT DESK!* 🚀\n` +
+        `🔗 *Dashboard:* https://www.rezolv.dev/dashboard\n` +
+        `👤 *Agent:* *Stony 💙* (stillmoving11@gmail.com)\n\n` +
+        `🚫 *DATA 1 GH store statistics & orders are MUTED.*\n` +
+        `You are now controlling live customer tickets from *rezolv.dev*!\n\n` +
+        `${initialReport}\n\n` +
+        `💡 *How to reply right now:*\n` +
+        `• *reply [TicketNumber or Name] [message]*\n` +
+        `  Example: *reply TKT-179633 Hello Prince, we have credited your MoMo deposit!*\n` +
+        `• *draft reply [Name]* ➔ I draft the response, you tap YES to dispatch live!\n` +
+        `• *ticket [TicketNumber]* ➔ View full conversation on Rezolv\n` +
+        `• *close [TicketNumber]* ➔ Close/resolve ticket on Rezolv\n` +
+        `• *exit* ➔ Return to normal DATA 1 store mode.`
+      );
+    }
+
     // 1. Connect / Link DataMart Account (Self-service or Owner assignment)
     const connectDmMatch = cleanCmd.match(/^(?:connect|link|login)\s+datamart(?:\s+(?:for\s+)?(\+?\d{9,15}))?(?:\s+([\w.-]+@[\w.-]+\.\w+))(?:\s+(.+))?$/i);
     if (connectDmMatch) {
