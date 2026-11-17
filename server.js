@@ -1613,8 +1613,10 @@ async function sendWhatsApp(to, text) {
         await new Promise(r => setTimeout(r, 600));
       }
     }
+    return { ok: true };
   } catch (e) {
     console.error(`WA ERROR sending to [${to}]:`, e.response?.data || e.message);
+    return { ok: false, error: e.message };
   }
 }
 
@@ -9380,6 +9382,7 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
         ========================================================= */
 
         const sendDirectWhatsApp = sendWhatsApp;
+        const processedIncomingMessageIds = new Map();
 
         app.post("/webhook", async (req, res) => {
           res.sendStatus(200);
@@ -9394,6 +9397,20 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                 console.warn("⚠️ [WA STATUS ALERT]", JSON.stringify(statusObj));
               }
               return;
+            }
+
+            // 🛡️ Webhook Deduplication: Drop duplicate webhook deliveries of the same message ID
+            const incomingMsgId = msg.id || msg.key?.id;
+            if (incomingMsgId) {
+              if (processedIncomingMessageIds.has(incomingMsgId)) {
+                console.log(`🛡️ [DEDUP] Dropping duplicate incoming WhatsApp message: ${incomingMsgId}`);
+                return;
+              }
+              processedIncomingMessageIds.set(incomingMsgId, Date.now());
+              if (processedIncomingMessageIds.size > 2000) {
+                const oldest = processedIncomingMessageIds.keys().next().value;
+                if (oldest) processedIncomingMessageIds.delete(oldest);
+              }
             }
 
             let from =
@@ -9832,8 +9849,8 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
             const hasDatamartAccess = isOwner || Boolean(userDmAccount);
 
             if (activeUserMode === "datamart") {
-              const dmHandled = await processDatamartConsoleCommand(from, cleanCmd, isOwner);
-              if (dmHandled) return dmHandled;
+              await processDatamartConsoleCommand(from, cleanCmd, isOwner);
+              return;
             } else if (activeUserMode === "ai") {
               // 👑 OWNER IS IN STONY MODE (DATA 1 GH STORE CO-PILOT)
               const hasExplicitDmPrefix = /^(?:datamart|dm)\s+/i.test(cleanCmd);
@@ -10399,8 +10416,8 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                   return sendWhatsApp(from, `👑 Exited DataMart Mode. Switched back to *DATA 1 GH Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
                 }
 
-                const dmHandled = await processDatamartConsoleCommand(from, cleanInput, true);
-                if (dmHandled) return dmHandled;
+                await processDatamartConsoleCommand(from, cleanInput, true);
+                return;
               }
 
               // ── 0. OWNER AI TRAINING & CORRECTION HANDLER (WHATSAPP → PERMANENT MEMORY) ──
@@ -10445,33 +10462,6 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                   try {
                     const { data: sRow } = await supabase
                       .from("settings")
-                      .select("value")
-                      .eq("key", "ai_system_instructions")
-                      .maybeSingle();
-
-                    const existingInstructions = (sRow?.value || "").trim();
-                    const dateTag = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
-                    const newDirective = `• [Owner WhatsApp Training - ${dateTag}]: ${ruleToSave}`;
-
-                    let updatedInstructions = existingInstructions
-                      ? `${existingInstructions}\n\n${newDirective}`
-                      : newDirective;
-
-                    await supabase.from("settings").upsert(
-                      [{ key: "ai_system_instructions", value: updatedInstructions }],
-                      { onConflict: "key" }
-                    );
-
-                    const ackMsg = `Sharp bossu! 🧠 Saved and learned.\n\nI have permanently recorded this instruction in my AI training memory:\n👉 "${ruleToSave}"\n\nFrom now on, I will strictly follow this on WhatsApp, on the website customer support, and everywhere in the system! You can also view or add more in Admin > AI Training & Prompts anytime.`;
-
-                    const updatedHist = [
-                      ...history.slice(-5),
-                      { role: "user", text: cleanInput },
-                      { role: "assistant", text: ackMsg }
-                    ];
-                    await saveOwnerHistory(from, updatedHist);
-
-                    return sendWhatsApp(from, ackMsg);
                   } catch (trainErr) {
                     console.error("Failed saving WhatsApp training directive:", trainErr);
                     return sendWhatsApp(from, `⚠️ Could not save training to database: ${trainErr.message}`);
