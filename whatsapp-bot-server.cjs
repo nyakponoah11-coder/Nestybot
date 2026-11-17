@@ -7740,7 +7740,7 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   }
 
   // 3a. Rezolv Live Reply to Customer
-  const dmRezolvReplyMatch = cleanInput.match(/^reply\s+(?:to\s+)?(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24})\s+([\s\S]+)$/i);
+  const dmRezolvReplyMatch = cleanInput.match(/^(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})\s+([\s\S]+)$/i);
   if (dmRezolvReplyMatch) {
     const tktId = dmRezolvReplyMatch[1].trim();
     const replyMsg = dmRezolvReplyMatch[2].trim();
@@ -7749,7 +7749,7 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   }
 
   // 3b. Rezolv View Ticket Conversation
-  const dmRezolvViewMatch = cleanInput.match(/^(?:view\s+ticket|check\s+ticket|ticket)\s+(TKT-?\d+|[a-f0-9]{24})$/i);
+  const dmRezolvViewMatch = cleanInput.match(/^(?:view\s+ticket|check\s+ticket|ticket)\s+(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i);
   if (dmRezolvViewMatch) {
     const tktId = dmRezolvViewMatch[1].trim();
     const rep = await getRezolvTicketConversation(tktId);
@@ -7757,15 +7757,34 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   }
 
   // 3c. Rezolv Close/Resolve Ticket
-  const dmRezolvCloseMatch = cleanInput.match(/^(?:close|resolve)\s+(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24})$/i);
+  const dmRezolvCloseMatch = cleanInput.match(/^(?:close|resolve)\s+(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i);
   if (dmRezolvCloseMatch) {
     const tktId = dmRezolvCloseMatch[1].trim();
     const rep = await closeRezolvTicket(tktId);
     return sendWhatsApp(from, rep);
   }
 
-  // 3d. Rezolv Customer Live Tickets
-  if (/^(?:rezolv|rezolv\s*tickets?|live\s*tickets?|customer\s*tickets?)$/i.test(cleanInput)) {
+  // 3d. Rezolv Draft Reply
+  const dmDraftMatch = cleanInput.match(/^(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i);
+  if (dmDraftMatch) {
+    const targetId = (dmDraftMatch[1] || "").trim();
+    const draftRes = await generateRezolvDraftReply(targetId);
+    if (!draftRes.ok) return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find ticket to draft reply."}`);
+    await setOwnerPendingAction(from, {
+      type: "rezolv_reply",
+      ticketId: draftRes.ticketId,
+      message: draftRes.draftMessage
+    });
+    return sendWhatsApp(from,
+      `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
+      `"${draftRes.draftMessage}"\n\n` +
+      `👉 Reply: *YES* or *SEND* to dispatch right now as *Stony 💙*!\n` +
+      `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
+    );
+  }
+
+  // 3e. Rezolv Customer Live Tickets (supports typos like 'rezolv mode e', 'rezolv', etc.)
+  if (/\b(?:rezolv|resolv|rezolve|resovl)\b/i.test(cleanInput) || /^(?:customer\s*tickets?|live\s*tickets?)$/i.test(cleanInput)) {
     const rep = await getRezolvTicketsReport("active");
     return sendWhatsApp(from, rep);
   }
@@ -8753,7 +8772,13 @@ app.post("/webhook", async (req, res) => {
       }
 
       // ── SWITCH TO REZOLV LIVE CUSTOMER SUPPORT MODE ──
-      if (/^(?:rezolv\s*mode|support\s*mode|live\s*support\s*mode|rezolv)$/i.test(cleanInput)) {
+      const isRezolvModeSwitch =
+        /\b(?:rezolv|resolv|rezolve|resovl)\b/i.test(cleanInput) ||
+        /^(?:support\s*mode|live\s*support(?:\s*mode)?)$/i.test(cleanInput);
+
+      const isSpecificRezolvAction = /^(?:reply|tell|close|resolve|ticket|view\s+ticket)\b/i.test(cleanInput);
+
+      if (isRezolvModeSwitch && !isSpecificRezolvAction) {
         setUserMode(from, "datamart");
         await saveCustomerSession(from, { step: 98 });
         await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "datamart" }, { onConflict: "key" });
@@ -8763,9 +8788,10 @@ app.post("/webhook", async (req, res) => {
           `Logged in as: *Stony 💙* (DataMart Support Desk)\n\n` +
           `${initialReport}\n\n` +
           `💡 *Quick Commands in this Mode:*\n` +
-          `• *reply [TicketNumber] [message]* - Send live reply to customer\n` +
+          `• *reply [TicketNumber or Name] [message]* - Send live reply\n` +
+          `• *draft reply [Name]* - Let me write the reply for you\n` +
           `• *ticket [TicketNumber]* - View full chat history\n` +
-          `• *close [TicketNumber]* - Resolve ticket\n` +
+          `• *close [TicketNumber]* - Mark ticket resolved\n` +
           `• *exit* - Return to normal Stony Store Co-Pilot mode.`
         );
       }
