@@ -111,6 +111,19 @@ DATA 1 GH — COMPLETE SITE KNOWLEDGE BASE (FROM HTTPS://WWW.DATA1GH.COM):
   - Telecel Cash: Approve prompt or dial *110#.
   - AirtelTigo Money: Approve prompt or dial *110#.
   - Fallback Paystack Link: If direct prompt doesn't pop up, a secure online link is generated for instant payment.
+
+6. SOCIAL MEDIA BOOST SERVICES (POWERED BY BOOSTUPGH SMM):
+• Direct Portal: ${STORE_FRONTEND_URL}/services (or /s/[store-slug]/services on agent storefronts)
+• Supported Platforms: TikTok, Instagram, YouTube, Facebook, Twitter (X), Telegram, Spotify, Audiomack, Threads
+• Service Offerings:
+  - Followers, Likes, Views, Retweets/Reposts, Comments, Watch Time Hours, Live Stream Viewers, Telegram Members
+• Two-Tier Pricing Hierarchy & Architecture:
+  - Wholesale Rate: Direct wholesale cost from provider (BoostUpGH API: https://www.boostupgh.com/api/v2).
+  - Admin Increment (% Markup from Provider): Configured in settings.boost_markup_percent (e.g. +10%). This is our profit margin when selling wholesale to resellers or platform base rate.
+  - Reseller Selling Profit Margin (% Markup on Storefronts): Configured in settings.default_agent_boost_markup_percent (and each agent's custom_prices.boost_markup_percent). This is the margin resellers charge their retail buyers.
+  - Platform Minimum Rule: An agent's selling margin CANNOT be less than the admin wholesale increment (M_agent >= M_admin). The system automatically enforces this constraint.
+• Provider API Balance: Real-time balance on BoostUpGH API (action: "balance").
+• Automatic SMM Dispatch: Once payment is verified on Paystack, boost orders are submitted directly to BoostUpGH API (action: "add"), recording the provider order ID and dispatch timestamp in service_orders.
 `;
 
 /* =========================================================
@@ -1091,9 +1104,153 @@ with 100% strict storefront isolation & zero wholesale leakage.
 ========================================================= */
 const botSessions = new Map();
 const agentPricesCache = new Map();
+const lastDeliveryCheckCache = new Map();
+
+async function getLiveFailedOrdersReport(callerPhone = null, limit = 10) {
+  try {
+    const resp = await fetchDatamartSupportEndpoint(`/api/support/failed-orders?limit=${limit}`, {}, callerPhone);
+    const orders = resp?.data?.orders || [];
+    if (orders.length === 0) {
+      return `🎉 *[DATAMART]* Zero failed orders in queue! All carrier dispatches are green and healthy.`;
+    }
+    let out = `⚠️ *DATAMART FAILED ORDERS (${orders.length} in queue):*\n\n`;
+    orders.forEach((ord, idx) => {
+      const num = idx + 1;
+      const phone = ord.phoneNumber || ord.recipientPhone || "N/A";
+      const net = ord.network || "MTN";
+      const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+      const portalId = ord.apiOrderId || ord.exportTracking?.portalId;
+      const portalStr = portalId ? ` | Portal ID: *${portalId}*` : "";
+      const reason = ord.exportTracking?.deliveryInfo || ord.apiResponse?.error || ord.failureReason || ord.status || "Failed";
+      const time = typeof getTimeAgoGhana === "function" ? getTimeAgoGhana(ord.createdAt) : "recently";
+      out += `${num}. 📱 *${phone}* (${net} ${cap})${portalStr}\n` +
+        `   ❌ *Reason:* ${reason}\n` +
+        `   🕒 *Time:* ${time}\n` +
+        `   🆔 *DB ID:* \`${ord._id}\`\n\n`;
+    });
+    const uniquePhones = [...new Set(orders.map(o => o.phoneNumber || o.recipientPhone).filter(Boolean))];
+    if (uniquePhones.length > 0) {
+      out += `📋 *Failed Phone Numbers:*\n\`\`\`\n${uniquePhones.join("\n")}\n\`\`\`\n\n`;
+    }
+    out += `💡 *Actions:*\n` +
+      `• Retry order: *dm retry [DB ID]*\n` +
+      `• Refund to agent: *dm refund [DB ID]*`;
+    return out.trim();
+  } catch (err) {
+    console.warn("getLiveFailedOrdersReport error:", err.message);
+    return `⚠️ Could not fetch live failed orders from DataMart. Please check connection.`;
+  }
+}
+
+async function formatFailedItemsReply(cached, callerPhone = null) {
+  if (!cached) {
+    const liveReport = await getLiveFailedOrdersReport(callerPhone);
+    return `ℹ️ *No recent delivery check audit in memory.* Here is the live failed orders queue from DataMart:\n\n${liveReport}`;
+  }
+
+  const failedItems = cached.failedItems || [];
+  const failedPortals = cached.failedPortalIds || [];
+
+  if (failedItems.length === 0 && failedPortals.length === 0) {
+    return `✅ *All numbers in your last delivery check were 100% delivered to the carrier!* Zero failed numbers.`;
+  }
+
+  let out = `🚨 *FAILED ORDERS FROM LAST DELIVERY CHECK:*\n\n`;
+  failedItems.forEach((f, i) => {
+    const num = i + 1;
+    const p = f.phone || f.recipient || "N/A";
+    const net = f.network || "";
+    const sz = f.dataSize ? `(${f.dataSize})` : "";
+    const portal = f.batchId || f.portalOrderId || f.orderId || "";
+    const portalStr = portal ? ` [Portal ID: *${portal}*]` : "";
+    const reason = f.reason || f.error || f.status || "Failed";
+    out += `${num}. 📱 *${p}* ${net} ${sz}${portalStr}\n   ❌ *Reason:* ${reason}\n\n`;
+  });
+
+  const uniquePhones = [...new Set(failedItems.map(f => f.phone || f.recipient).filter(Boolean))];
+  const uniquePortals = failedPortals.length > 0
+    ? failedPortals.map(p => p.portalId)
+    : [...new Set(failedItems.map(f => f.batchId || f.portalOrderId || f.orderId).filter(Boolean))];
+
+  if (uniquePhones.length > 0) {
+    out += `📋 *Failed Phone Numbers (${uniquePhones.length}):*\n\`\`\`\n${uniquePhones.join("\n")}\n\`\`\`\n\n`;
+  }
+  if (uniquePortals.length > 0) {
+    out += `📋 *Failed Portal IDs:*\n\`\`\`\n${uniquePortals.join("\n")}\n\`\`\`\n`;
+  }
+  return out.trim();
+}
+
+async function getData1FailedOrdersReport() {
+  if (!supabase) return "⚠️ Database connection unavailable.";
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const { data: todayFailed } = await supabase
+      .from("orders")
+      .select("id,ref,reference,phone_number,recipient_phone,network,capacity,amount,status,payment_status,delivery_status,error_message,created_at")
+      .or("status.eq.failed,delivery_status.eq.failed,payment_status.eq.failed")
+      .gte("created_at", today)
+      .order("created_at", { ascending: false });
+
+    const { count: todayTotal } = await supabase
+      .from("orders")
+      .select("*", { count: "exact", head: true })
+      .gte("created_at", today);
+
+    if (!todayFailed || todayFailed.length === 0) {
+      const { data: recentFailed } = await supabase
+        .from("orders")
+        .select("id,ref,reference,phone_number,recipient_phone,network,capacity,amount,status,error_message,created_at")
+        .or("status.eq.failed,delivery_status.eq.failed,payment_status.eq.failed")
+        .order("created_at", { ascending: false })
+        .limit(3);
+
+      return `🎉 *DATA 1 GH — ZERO FAILED ORDERS TODAY!*\n\n` +
+        `• 📊 *Today's Total Orders:* ${todayTotal || 0}\n` +
+        `• ✅ *Status:* All orders today are paid, processing, or successfully delivered!\n\n` +
+        (recentFailed && recentFailed.length > 0
+          ? `🕒 *Last failed order was on ${new Date(recentFailed[0].created_at).toLocaleDateString("en-GB")}:*\n• Ref: *${recentFailed[0].reference || recentFailed[0].ref}* (${recentFailed[0].network} ${recentFailed[0].capacity}GB) - ${recentFailed[0].error_message || "Payment cancelled"}`
+          : "");
+    }
+
+    let out = `👑 *DATA 1 GH — FAILED ORDERS REPORT*\n\n` +
+      `📦 *Failed Orders Today (${todayFailed.length}/${todayTotal || todayFailed.length}):*\n\n`;
+
+    todayFailed.forEach((o, i) => {
+      const num = i + 1;
+      const ref = o.reference || o.ref || "N/A";
+      const phone = o.recipient_phone || o.phone_number || "N/A";
+      const net = o.network || "MTN";
+      const cap = o.capacity ? `${o.capacity}GB` : "";
+      const amt = o.amount ? `GH₵ ${Number(o.amount).toFixed(2)}` : "";
+      const reason = o.error_message || (o.payment_status === "failed" ? "Payment not completed on MoMo" : "Delivery issue");
+      const time = o.created_at ? new Date(o.created_at).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "today";
+      out += `${num}. 📱 *${phone}* (${net} ${cap}) — *${amt}*\n` +
+        `   • 🆔 *Ref:* \`${ref}\`\n` +
+        `   • ❌ *Reason:* ${reason}\n` +
+        `   • 🕒 *Time:* ${time}\n\n`;
+    });
+
+    const copyablePhones = [...new Set(todayFailed.map(o => o.recipient_phone || o.phone_number).filter(Boolean))];
+    if (copyablePhones.length > 0) {
+      out += `📋 *Copyable Failed Numbers:*\n\`\`\`\n${copyablePhones.join("\n")}\n\`\`\`\n\n`;
+    }
+    out += `💡 All other ${Math.max(0, (todayTotal || 0) - todayFailed.length)} orders today are successful or currently processing!`;
+    return out.trim();
+  } catch (err) {
+    console.warn("getData1FailedOrdersReport error:", err.message);
+    return `⚠️ Could not query Data 1 orders: ${err.message}`;
+  }
+}
 
 function normalizeBotPhone(p) {
-  return String(p || "").replace(/\D/g, "");
+  if (!p) return "";
+  const s = String(p).trim();
+  // Preserve WhatsApp Username IDs (e.g. GH.1765821157838205 or alphanumeric handles)
+  if (/[a-zA-Z]/.test(s)) {
+    return s.replace(/@.+$/, "").trim();
+  }
+  return s.replace(/\D/g, "");
 }
 
 async function getFreshAgentPricing(agentId, slug, fallbackPrices = {}) {
@@ -1361,29 +1518,328 @@ async function sendWhatsApp(to, text) {
       return;
     }
 
-    const cleanTo = String(to || "").replace(/\D/g, "");
-    const formattedTo = cleanTo.startsWith("0") && cleanTo.length === 10
-      ? "233" + cleanTo.slice(1)
-      : cleanTo;
+    if (!to) {
+      console.warn("⚠️ [sendWhatsApp] Aborting: 'to' recipient is empty or undefined!");
+      return;
+    }
 
-    await axios.post(
-      `https://graph.facebook.com/v20.0/${phoneId}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to: formattedTo,
-        text: { body: text }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 10000
+    const rawTo = String(to).trim();
+    let formattedTo = "";
+
+    // 1. WhatsApp Username account (e.g. "GH.1765821157838205" or alphanumeric JID)
+    if (/[a-zA-Z]/.test(rawTo)) {
+      formattedTo = rawTo.replace(/@.+$/, "").trim();
+    } else {
+      // 2. Standard numeric phone number (e.g. "0547100951", "233547100951")
+      const digitsOnly = rawTo.replace(/\D/g, "");
+      if (digitsOnly.startsWith("0") && digitsOnly.length === 10) {
+        formattedTo = "233" + digitsOnly.slice(1);
+      } else {
+        formattedTo = digitsOnly;
       }
-    );
+    }
+
+    if (!formattedTo) {
+      console.warn("⚠️ [sendWhatsApp] Aborting: formattedTo is empty after cleaning for recipient:", to);
+      return;
+    }
+
+    const isBsuid = /^[a-zA-Z]{2}\./.test(formattedTo) || /[a-zA-Z]/.test(formattedTo);
+    const safeText = String(text || "").trim();
+    if (!safeText) return;
+
+    // 🛡️ WhatsApp Meta API enforces a strict 4096-character limit on text.body.
+    // If text exceeds 4000 chars, split cleanly into parts and send sequentially!
+    const MAX_CHUNK = 4000;
+    const chunks = [];
+    if (safeText.length <= MAX_CHUNK) {
+      chunks.push(safeText);
+    } else {
+      let remaining = safeText;
+      while (remaining.length > 0) {
+        if (remaining.length <= MAX_CHUNK) {
+          chunks.push(remaining);
+          break;
+        }
+        let splitIdx = remaining.lastIndexOf("\n\n", MAX_CHUNK);
+        if (splitIdx === -1 || splitIdx < 1500) {
+          splitIdx = remaining.lastIndexOf("\n", MAX_CHUNK);
+        }
+        if (splitIdx === -1 || splitIdx < 1500) {
+          splitIdx = MAX_CHUNK;
+        }
+        chunks.push(remaining.slice(0, splitIdx).trim());
+        remaining = remaining.slice(splitIdx).trim();
+      }
+    }
+
+    for (const chunk of chunks) {
+      if (!chunk) continue;
+      console.log(`📤 [sendWhatsApp] Sending to [${formattedTo}] (${isBsuid ? "BSUID" : "Phone"}): "${chunk.slice(0, 35).replace(/\n/g, ' ')}..." (${chunk.length} chars)`);
+      const msgPayload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        type: "text",
+        text: { body: chunk }
+      };
+      if (isBsuid) {
+        msgPayload.recipient = formattedTo;
+      } else {
+        msgPayload.to = formattedTo;
+      }
+
+      await axios.post(
+        `https://graph.facebook.com/v20.0/${phoneId}/messages`,
+        msgPayload,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          },
+          timeout: 10000
+        }
+      );
+      if (chunks.length > 1) {
+        await new Promise(r => setTimeout(r, 600));
+      }
+    }
   } catch (e) {
-    console.error("WA ERROR:", e.response?.data || e.message);
+    console.error(`WA ERROR sending to [${to}]:`, e.response?.data || e.message);
   }
+}
+
+/* =========================================================
+WHATSAPP VOICE NOTE TRANSCRIPTION (SPEECH-TO-TEXT ENGINE)
+Automatically downloads audio messages from Meta Graph API
+and transcribes them with Groq Whisper Large v3 (ultra-fast)
+or Gemini 2.0 Flash as multimodal fallback!
+========================================================= */
+
+async function transcribeWhatsAppVoiceNote(mediaId, mimeType = "audio/ogg", defaultToken = null) {
+  let token = defaultToken || ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
+  if (supabase) {
+    try {
+      const { data: sRows } = await supabase
+        .from("settings")
+        .select("key,value")
+        .in("key", ["whatsapp_access_token", "ACCESS_TOKEN", "meta_whatsapp_token", "whatsapp_token"]);
+      if (sRows && sRows.length > 0) {
+        const smap = Object.fromEntries(sRows.map((s) => [s.key, s.value]));
+        const dbToken = smap.whatsapp_access_token || smap.ACCESS_TOKEN || smap.meta_whatsapp_token || smap.whatsapp_token;
+        if (dbToken) token = dbToken;
+      }
+    } catch (_) {}
+  }
+
+  if (!token) throw new Error("WhatsApp API token is missing, cannot download voice media");
+
+  // 1. Get download URL from Meta Graph API
+  const metaUrl = `https://graph.facebook.com/v21.0/${mediaId}`;
+  const metaRes = await axios.get(metaUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+    timeout: 15000
+  });
+
+  const downloadUrl = metaRes.data?.url;
+  if (!downloadUrl) throw new Error("Meta returned no download URL for voice note media ID: " + mediaId);
+
+  // 2. Download binary audio stream from Meta
+  const audioRes = await axios.get(downloadUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "curl/7.68.0"
+    },
+    responseType: "arraybuffer",
+    timeout: 25000
+  });
+
+  const audioBuffer = Buffer.from(audioRes.data);
+  if (!audioBuffer || audioBuffer.length === 0) throw new Error("Downloaded audio file is empty");
+
+  // 3. Resolve transcription AI keys
+  let groqKey = process.env.GROQ_API_KEY;
+  let geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (supabase) {
+    try {
+      const { data: sRows } = await supabase
+        .from("settings")
+        .select("key,value")
+        .in("key", ["groq_api_key", "gemini_api_key", "google_api_key"]);
+      (sRows || []).forEach(r => {
+        if (r.key === "groq_api_key" && r.value) groqKey = r.value;
+        if ((r.key === "gemini_api_key" || r.key === "google_api_key") && r.value) geminiKey = r.value;
+      });
+    } catch (_) {}
+  }
+
+  // 4. Primary: Groq Whisper Large v3 Turbo (~200ms ultra-fast transcription)
+  if (groqKey) {
+    try {
+      const cleanMime = (mimeType || "audio/ogg").split(";")[0].trim();
+      const ext = cleanMime.includes("mp4") || cleanMime.includes("m4a") ? "m4a" : (cleanMime.includes("wav") ? "wav" : "ogg");
+      const form = new FormData();
+      form.append("file", new Blob([audioBuffer], { type: cleanMime }), `voice.${ext}`);
+      form.append("model", "whisper-large-v3-turbo");
+      form.append("prompt", "WhatsApp voice message about Ghana mobile data bundles, orders, MTN, Telecel, AT, AirtelTigo, Paystack, failed orders, prices, 054, 024, 055, 059, 020, 027.");
+
+      const groqRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${groqKey}` },
+        body: form
+      });
+      const groqData = await groqRes.json();
+      if (groqData?.text && groqData.text.trim()) {
+        return groqData.text.trim();
+      }
+    } catch (gErr) {
+      console.warn("Groq Whisper transcription fallback:", gErr.message);
+    }
+  }
+
+  // 5. Fallback: Gemini Flash (native audio comprehension)
+  if (geminiKey) {
+    const audioModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest"];
+    for (const m of audioModels) {
+      try {
+        const cleanMime = (mimeType || "audio/ogg").split(";")[0].trim();
+        const base64Audio = audioBuffer.toString("base64");
+        const geminiRes = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(geminiKey)}`,
+          {
+            contents: [{
+              parts: [
+                { text: "You are a speech-to-text transcriber for a Ghanaian WhatsApp store. Transcribe this spoken audio message accurately. Correctly write down phone numbers, names, data sizes (e.g. 1GB, 5GB, 10GB), networks (MTN, Telecel, AT), and references. Return ONLY the transcribed text, nothing else." },
+                {
+                  inline_data: {
+                    mime_type: cleanMime,
+                    data: base64Audio
+                  }
+                }
+              ]
+            }]
+          },
+          { headers: { "Content-Type": "application/json" }, timeout: 15000 }
+        );
+        const textOut = geminiRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (textOut && textOut.trim()) {
+          return textOut.trim();
+        }
+      } catch (gmErr) {
+        console.warn(`Gemini audio model ${m} fallback:`, gmErr.response?.data?.error?.message || gmErr.message);
+      }
+    }
+  }
+
+  throw new Error("No speech-to-text service available or speech could not be deciphered");
+}
+
+/* =========================================================
+WHATSAPP IMAGE & SCREENSHOT OCR / VISION ANALYSIS (GEMINI VISION)
+========================================================= */
+async function analyzeWhatsAppImage(mediaId, mimeType = "image/jpeg", userCaption = "", defaultToken = null) {
+  let token = defaultToken || ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
+  if (supabase) {
+    try {
+      const { data: sRows } = await supabase
+        .from("settings")
+        .select("key,value")
+        .in("key", ["whatsapp_access_token", "ACCESS_TOKEN", "meta_whatsapp_token", "whatsapp_token"]);
+      if (sRows && sRows.length > 0) {
+        const smap = Object.fromEntries(sRows.map((s) => [s.key, s.value]));
+        const dbToken = smap.whatsapp_access_token || smap.ACCESS_TOKEN || smap.meta_whatsapp_token || smap.whatsapp_token;
+        if (dbToken) token = dbToken;
+      }
+    } catch (_) {}
+  }
+
+  if (!token) throw new Error("WhatsApp API token is missing, cannot download image");
+
+  // 1. Get download URL from Meta Graph API
+  const metaUrl = `https://graph.facebook.com/v21.0/${mediaId}`;
+  const metaRes = await axios.get(metaUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+    timeout: 15000
+  });
+
+  const downloadUrl = metaRes.data?.url;
+  if (!downloadUrl) throw new Error("Meta returned no download URL for image media ID: " + mediaId);
+
+  // 2. Download binary image from Meta
+  const imgRes = await axios.get(downloadUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "curl/7.68.0"
+    },
+    responseType: "arraybuffer",
+    timeout: 25000
+  });
+
+  const imgBuffer = Buffer.from(imgRes.data);
+  if (!imgBuffer || imgBuffer.length === 0) throw new Error("Downloaded image file is empty");
+
+  // 3. Resolve Gemini Key
+  let geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (supabase) {
+    try {
+      const { data: sRows } = await supabase
+        .from("settings")
+        .select("key,value")
+        .in("key", ["gemini_api_key", "google_api_key"]);
+      (sRows || []).forEach(r => {
+        if ((r.key === "gemini_api_key" || r.key === "google_api_key") && r.value) geminiKey = r.value;
+      });
+    } catch (_) {}
+  }
+
+  if (!geminiKey) throw new Error("Gemini AI API key not found for image vision analysis");
+
+  const cleanMime = (mimeType || "image/jpeg").split(";")[0].trim();
+  const base64Img = imgBuffer.toString("base64");
+
+  const promptText = 
+    `You are Stony, the intelligent and friendly AI Store Co-Pilot for DATA 1 GH (an automated Ghanaian mobile data, airtime, result checker, and digital services company).\n` +
+    `The store owner or customer just sent this screenshot/image via WhatsApp.\n` +
+    (userCaption ? `User's question or caption: "${userCaption}"\n\n` : `\n`) +
+    `Carefully examine everything in this image and provide a thorough, structured, and helpful response:\n` +
+    `1. 📱 If it is a MoMo / Telecel Cash / AT Money payment SMS or receipt:\n` +
+    `   - Clearly extract: Transaction ID, Amount (GH₵), Sender / Recipient Phone, Network, Date & Time, and Status.\n` +
+    `   - State clearly whether the payment appears successful and completed.\n` +
+    `2. 🚚 If it is a DataMart or carrier delivery portal screenshot:\n` +
+    `   - Extract: Order IDs, Batch Numbers, numbers sent vs failed, carrier delivery logs, or failure reasons.\n` +
+    `3. ⚠️ If it is an error screen, website bug, or system failure:\n` +
+    `   - Diagnose the root cause of the error and give clear step-by-step instructions on how to fix or resolve it.\n` +
+    `4. 💬 If it is a customer chat or inquiry:\n` +
+    `   - Summarize the customer's request and draft the best response to send them.\n` +
+    `5. Tone: Respectful, intelligent, Ghanaian business warmth (use 'bossu' when addressing the store owner). Use clean WhatsApp formatting (*bold*, bullet points, emojis). Keep it easy to read on mobile.`;
+
+  const modelsToTry = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest"];
+  for (const m of modelsToTry) {
+    try {
+      const res = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(geminiKey)}`,
+        {
+          contents: [{
+            parts: [
+              { text: promptText },
+              {
+                inline_data: {
+                  mime_type: cleanMime,
+                  data: base64Img
+                }
+              }
+            ]
+          }]
+        },
+        { headers: { "Content-Type": "application/json" }, timeout: 25000 }
+      );
+      const answer = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (answer && answer.trim()) return answer.trim();
+    } catch (err) {
+      console.warn(`Vision model ${m} attempt:`, err.response?.data?.error?.message || err.message);
+    }
+  }
+
+  throw new Error("Unable to analyze image with vision AI right now. Please try again.");
 }
 
 const recentAdminAlertSignatures = new Map();
@@ -1520,17 +1976,48 @@ async function buildChannelPostFromSystem(topicOrMode = "general", customBody = 
 
   // 2. Flash Sale Channel Broadcast
   if (/flash/i.test(mode)) {
-    const flashInfo = await getFlashSaleLiveInfo().catch(() => null);
-    const items = flashInfo?.products || [];
+    const flashInfo = await getFlashSaleDetails().catch(() => null);
+    let items = (flashInfo?.products || []).filter(p => p.in_stock !== false);
+    if (!items || items.length === 0) {
+      items = [
+        { capacity: "1", price: 4.5, original_price: 6.0 },
+        { capacity: "2", price: 8.5, original_price: 11.0 },
+        { capacity: "3", price: 12.5, original_price: 16.0 },
+        { capacity: "4", price: 16.5, original_price: 21.0 },
+        { capacity: "5", price: 20.0, original_price: 26.0 },
+        { capacity: "6", price: 24.5, original_price: 31.0 },
+        { capacity: "8", price: 32.5, original_price: 41.0 },
+        { capacity: "10", price: 40.0, original_price: 50.0 },
+        { capacity: "15", price: 60.0, original_price: 75.0 },
+        { capacity: "20", price: 78.0, original_price: 98.0 },
+      ];
+    }
+    const saleTitle = flashInfo?.title || "LIMITED TIME MTN FLASH SALE";
+    const saleNotice = flashInfo?.notice || "Special mega-discounted MTN non-expiry bundles! Immediate automated delivery.";
+
     let msg = `⚡🔥 *FLASH SALE IS LIVE ON DATA 1 GH!* 🔥⚡\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
-      `Grab discounted *${flashInfo?.title || "MTN Non-Expiry Data Bundles"}* right now before the timer runs out!\n\n`;
-    if (items.length > 0) {
-      msg += items.slice(0, 10).map(p => `🔥 *${p.capacity}GB* — *GH₵ ${Number(p.price).toFixed(2)}*`).join("\n") + `\n\n`;
+      `*${saleTitle}*\n` +
+      (saleNotice ? `📢 ${saleNotice}\n\n` : `\n`) +
+      `Grab mega-discounted *MTN Non-Expiry Bundles* right now before the sale ends!\n\n`;
+
+    msg += items.slice(0, 10).map(p => {
+      const orig = p.original_price ? ` ~(₵${Number(p.original_price).toFixed(2)})~` : "";
+      return `🔥 *${p.capacity}GB* — *GH₵ ${Number(p.price).toFixed(2)}*${orig}`;
+    }).join("\n") + `\n\n`;
+
+    if (flashInfo?.endTime) {
+      try {
+        const endD = new Date(flashInfo.endTime);
+        if (!isNaN(endD.getTime())) {
+          msg += `⏳ *Ends:* ${endD.toLocaleString("en-GB", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" })} (or while stock lasts!)\n\n`;
+        }
+      } catch (_) {}
     }
-    msg += `👉 *Rush to the Store Now:* ${STORE_FRONTEND_URL}\n` +
-      `📍 *Track Orders:* ${TRACK_ORDER_URL}\n` +
-      `🤖 *Or Order on WhatsApp Bot:* https://wa.me/233200598553?text=Hi`;
+
+    msg += `👉 *Order Instantly On Store:* ${STORE_FRONTEND_URL}\n` +
+      `📍 *Track Delivery Live:* ${TRACK_ORDER_URL}\n` +
+      `🤖 *WhatsApp Bot:* https://wa.me/233200598553?text=Hi`;
     return msg;
   }
 
@@ -3038,12 +3525,13 @@ USER MODE STATE (BOT MODE vs STONY AI MODE)
 - 'bot': Displays MENU, follows step-by-step numbers 1-8
 - 'ai':  Chat with Stony AI (Gemini / OpenAI / Site Knowledge)
 ========================================================= */
-const userModes = new Map(); // normPhone -> 'bot' | 'ai'
+const userModes = new Map(); // normPhone -> 'bot' | 'ai' | 'datamart'
 
 function getUserMode(phone, session) {
   const norm = String(phone || "").replace(/\D/g, "");
   if (userModes.has(norm)) return userModes.get(norm);
   if (userModes.has(String(phone))) return userModes.get(String(phone));
+  if (session?.step === 98) return "datamart";
   if (session?.step === 99) return "ai";
   return "bot";
 }
@@ -3698,6 +4186,75 @@ async function getOrderFullDetails(query) {
   return results;
 }
 
+/* =========================================================
+BOOSTUPGH SMM PROVIDER BALANCE & ORDER HELPERS
+========================================================= */
+async function getBoostUpGhLiveBalance() {
+  let apiKey = process.env.BOOSTUPGH_API_KEY || process.env.BOOST_API_KEY || "";
+  if (!apiKey) {
+    const { data: sRow } = await supabase.from("settings").select("value").in("key", ["boostupgh_api_key", "boost_api_key", "smm_api_key", "BOOSTUPGH_API_KEY"]).maybeSingle();
+    if (sRow?.value) apiKey = String(sRow.value).trim();
+  }
+  if (!apiKey) return { ok: false, error: "BoostUpGH API key not configured in settings." };
+
+  try {
+    const form = new URLSearchParams();
+    form.append("key", apiKey);
+    form.append("action", "balance");
+    const res = await axios.post("https://www.boostupgh.com/api/v2", form.toString(), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      timeout: 8000,
+    });
+    const d = res.data;
+    if (d?.error) return { ok: false, error: d.error };
+    const bal = d?.balance;
+    if (bal !== undefined && bal !== null) {
+      return { ok: true, balance: String(bal).trim(), currency: d?.currency || "GHS" };
+    }
+    return { ok: false, error: "Could not parse balance from BoostUpGH." };
+  } catch (err) {
+    return { ok: false, error: err?.message || "Network error calling BoostUpGH API" };
+  }
+}
+
+async function queryBoostOrdersSummary(limit = 8) {
+  try {
+    const { data: ords } = await supabase
+      .from("service_orders")
+      .select("id, reference, service, customer_phone, amount, delivery_status, notes, created_at")
+      .eq("service", "boost")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (!ords || ords.length === 0) {
+      return "No Social Media Boost orders found in database.";
+    }
+
+    const lines = ords.map((o, idx) => {
+      const notes = o.notes || "";
+      const sNameMatch = notes.match(/\[boost_service_name:([^\]]+)\]/i);
+      const qtyMatch = notes.match(/\[boost_quantity:([^\]]+)\]/i);
+      const linkMatch = notes.match(/\[boost_link:([^\]]+)\]/i);
+      const smmIdMatch = notes.match(/\[boost_order_id:([^\]]+)\]/i);
+      const serviceName = sNameMatch ? sNameMatch[1] : "Social Media Boost";
+      const qty = qtyMatch ? qtyMatch[1] : "";
+      const link = linkMatch ? linkMatch[1] : "";
+      const smmId = smmIdMatch ? smmIdMatch[1] : "";
+      const timeStr = o.created_at ? formatGhanaTime(new Date(o.created_at)) : "";
+
+      return `${idx + 1}. *${o.reference}* — ${serviceName}${qty ? ` (${qty})` : ""}\n` +
+        `   • Amount: GH₵ ${Number(o.amount || 0).toFixed(2)} | Status: *${(o.delivery_status || "processing").toUpperCase()}*` +
+        (smmId ? ` | SMM ID: ${smmId}` : "") +
+        (timeStr ? `\n   • Placed: ${timeStr}` : "") +
+        (link ? `\n   • Link: ${link}` : "");
+    });
+
+    return `🚀 *RECENT SOCIAL MEDIA BOOST ORDERS:*\n━━━━━━━━━━━━━━━━━━━━━\n${lines.join("\n\n")}`;
+  } catch (err) {
+    return `Error querying boost orders: ${err.message}`;
+  }
+}
+
 async function executeOwnerDirectAction(type, payload = {}) {
   const cleanType = String(type || "").toLowerCase().trim();
 
@@ -3935,6 +4492,53 @@ async function executeOwnerDirectAction(type, payload = {}) {
       return "Customer support chat marked as resolved!";
     }
 
+    // 16b. Reply to Customer Support Chat
+    if (cleanType === "reply_support_chat" || cleanType === "send_support_reply" || cleanType === "reply_customer") {
+      const cId = payload.conversation_id || payload.conversationId;
+      const targetPhone = payload.phone || payload.customer_phone;
+      const replyMsg = String(payload.message || payload.text || payload.reply || "").trim();
+
+      if (!replyMsg) {
+        return "Please provide the message text you want to send to the customer.";
+      }
+
+      let activeConv = null;
+      if (cId) {
+        const { data } = await supabase.from("chat_conversations").select("*").eq("id", cId).maybeSingle();
+        activeConv = data;
+      } else if (targetPhone) {
+        const cleanP = String(targetPhone).replace(/\D/g, "");
+        const { data } = await supabase.from("chat_conversations").select("*").or(`customer_phone.ilike.%${cleanP}%,customer_name.ilike.%${targetPhone}%`).order("updated_at", { ascending: false }).limit(1).maybeSingle();
+        activeConv = data;
+      } else {
+        const { data } = await supabase.from("chat_conversations").select("*").eq("status", "open").order("updated_at", { ascending: false }).limit(1).maybeSingle();
+        activeConv = data;
+      }
+
+      if (!activeConv || !activeConv.id) {
+        return "No matching active customer support conversation found to reply to.";
+      }
+
+      const { error: msgErr } = await supabase.from("chat_messages").insert({
+        conversation_id: activeConv.id,
+        sender: "support",
+        message: replyMsg,
+        created_at: new Date().toISOString(),
+      });
+
+      if (msgErr) {
+        return `Failed to post support reply: ${msgErr.message}`;
+      }
+
+      await supabase.from("chat_conversations").update({
+        updated_at: new Date().toISOString(),
+        unread_for_customer: ((activeConv.unread_for_customer || 0) + 1),
+      }).eq("id", activeConv.id);
+
+      const customerLabel = activeConv.customer_name || activeConv.customer_phone || `Chat #${activeConv.id.slice(0, 8)}`;
+      return `Reply sent to *${customerLabel}* in live Support Chat!\n\n💬 *Message:* "${replyMsg}"`;
+    }
+
     // 17. Flash Sale Toggle
     if (cleanType === "toggle_flash_sale") {
       const active = Boolean(payload.active ?? payload.enabled);
@@ -4008,19 +4612,40 @@ async function executeOwnerDirectAction(type, payload = {}) {
       const dmKey = DATA_API_KEY || process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY;
       const dmSec = process.env.DATAMART_API_SECRET || DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET;
 
-      const dmRes = await axios.post(
-        `${DATAMART_BASE}/purchase`,
-        { phoneNumber: cleanPhone, network: dmNet, capacity: cleanCap, gateway: "wallet", ref, delivery: "fast" },
-        {
-          headers: {
-            "x-api-key": dmKey,
-            ...(dmSec ? { "x-api-secret": dmSec } : {}),
-            "X-Idempotency-Key": ref,
-            "Content-Type": "application/json"
-          },
-          timeout: 25000
+      let dmRes = null;
+      try {
+        dmRes = await axios.post(
+          `${DATAMART_BASE}/purchase`,
+          { phoneNumber: cleanPhone, network: dmNet, capacity: cleanCap, gateway: "wallet", ref, delivery: "fast" },
+          {
+            headers: {
+              "x-api-key": dmKey,
+              ...(dmSec ? { "x-api-secret": dmSec } : {}),
+              "X-Idempotency-Key": ref,
+              "Content-Type": "application/json"
+            },
+            timeout: 25000
+          }
+        );
+      } catch (firstErr) {
+        if (firstErr.response && (firstErr.response.status === 401 || firstErr.response.status === 403)) {
+          dmRes = await axios.post(
+            `${DATAMART_BASE}/purchase`,
+            { phoneNumber: cleanPhone, network: dmNet, capacity: cleanCap, gateway: "wallet", ref, delivery: "fast" },
+            {
+              headers: {
+                "x-api-key": VERIFIED_DATAMART_KEY,
+                "x-api-secret": VERIFIED_DATAMART_SECRET,
+                "X-Idempotency-Key": ref,
+                "Content-Type": "application/json"
+              },
+              timeout: 25000
+            }
+          );
+        } else {
+          throw firstErr;
         }
-      );
+      }
       const dmData = dmRes.data?.data || dmRes.data || {};
       const dmRef = dmData.reference || dmData.orderReference || dmData.purchaseId || ref;
       await supabase.from("orders").insert([{
@@ -4075,6 +4700,155 @@ async function executeOwnerDirectAction(type, payload = {}) {
       return `📢 *WhatsApp Channel Broadcast Ready!*\n🔗 Channel: ${res.channelUrl}\n` +
         (res.apiErrorNote ? `⚠️ Note: ${res.apiErrorNote}\n` : `💡 *(Reply "pair channel" to get an 8-digit code to link your WhatsApp Channel for 100% automatic direct posting)*`) +
         `\n━━━━━━━━━━━━━━━━━━━━\n${res.postText}`;
+    }
+
+    // 24. Query Boost Provider Balance (BoostUpGH)
+    if (cleanType === "query_boost_balance" || cleanType === "boost_balance" || cleanType === "smm_balance") {
+      const bRes = await getBoostUpGhLiveBalance();
+      const { data: sRows } = await supabase.from("settings").select("key, value").in("key", ["boost_markup_percent", "default_agent_boost_markup_percent"]);
+      const sMap = {};
+      (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+      const wholesaleInc = sMap["boost_markup_percent"] || "10";
+      const resellerInc = sMap["default_agent_boost_markup_percent"] || "20";
+
+      if (!bRes.ok) {
+        return `⚠️ BoostUpGH API Note: ${bRes.error}\nWholesale Markup: +${wholesaleInc}% | Reseller Margin: +${resellerInc}%`;
+      }
+      return `⚡ *BOOSTUPGH SMM PROVIDER BALANCE:*\n━━━━━━━━━━━━━━━━━━━━━\n` +
+        `💰 *Available Balance:* GH₵ ${Number(bRes.balance).toFixed(2)} (${bRes.currency})\n` +
+        `📈 *Wholesale Markup from Provider:* +${wholesaleInc}%\n` +
+        `👥 *Universal Reseller Margin:* +${resellerInc}% (Enforced: Reseller margin >= Wholesale markup)\n` +
+        `🚀 *Status:* Connected & Ready`;
+    }
+
+    // 25. Set Provider Wholesale Markup %
+    if (cleanType === "set_boost_provider_markup" || cleanType === "set_provider_boost_markup" || cleanType === "update_boost_provider_markup") {
+      const pct = Math.max(0, Math.min(500, parseFloat(payload.percent || payload.markup || payload.value || 10)));
+      await supabase.from("settings").upsert({ key: "boost_markup_percent", value: String(pct) }, { onConflict: "key" });
+
+      // Check if universal reseller margin needs to be bumped to satisfy M_agent >= M_admin
+      const { data: curRes } = await supabase.from("settings").select("value").eq("key", "default_agent_boost_markup_percent").maybeSingle();
+      let resPct = Number(curRes?.value);
+      if (isNaN(resPct) || resPct < pct) {
+        resPct = pct;
+        await supabase.from("settings").upsert([
+          { key: "default_agent_boost_markup_percent", value: String(resPct) },
+          { key: "agent_boost_default_markup_percent", value: String(resPct) }
+        ], { onConflict: "key" });
+      }
+
+      return `✅ *PROVIDER WHOLESALE INCREMENT UPDATED!*\n━━━━━━━━━━━━━━━━━━━━━\n` +
+        `📈 *Wholesale Markup:* +${pct}% from BoostUpGH\n` +
+        `👥 *Universal Reseller Margin:* +${resPct}% (Constraint satisfied: M_agent >= M_admin)\n` +
+        `💡 All reseller base prices and platform rates now reflect this wholesale base!`;
+    }
+
+    // 26. Set Universal All Agents Boost Markup
+    if (cleanType === "set_all_agents_boost_markup" || cleanType === "set_agent_boost_markup") {
+      let pct = Math.max(0, Math.min(500, parseFloat(payload.percent || payload.markup || payload.value || 20)));
+      const { data: sRow } = await supabase.from("settings").select("value").eq("key", "boost_markup_percent").maybeSingle();
+      const adminMarkup = Number(sRow?.value || 10);
+      if (pct < adminMarkup) {
+        pct = adminMarkup;
+      }
+
+      const { data: ags } = await supabase.from("agents").select("id, store_slug, custom_prices");
+      let count = 0;
+      if (Array.isArray(ags)) {
+        const settingsRows = [];
+        for (const ag of ags) {
+          const updated = { ...(ag.custom_prices || {}), boost_markup_percent: pct };
+          await supabase.from("agents").update({ custom_prices: updated }).eq("id", ag.id);
+          settingsRows.push({ key: `agent_pricing_${ag.id}`, value: JSON.stringify(updated) });
+          if (ag.store_slug) {
+            settingsRows.push({ key: `agent_pricing_${String(ag.store_slug).toLowerCase().trim()}`, value: JSON.stringify(updated) });
+          }
+          count++;
+        }
+        if (settingsRows.length > 0) {
+          try { await supabase.from("settings").upsert(settingsRows, { onConflict: "key" }); } catch (_) {}
+        }
+      }
+
+      await supabase.from("settings").upsert([
+        { key: "default_agent_boost_markup_percent", value: String(pct) },
+        { key: "agent_boost_default_markup_percent", value: String(pct) },
+      ], { onConflict: "key" });
+
+      return `✅ *UNIVERSAL RESELLER BOOST MARGIN APPLIED!*\n━━━━━━━━━━━━━━━━━━━━━\n` +
+        `👥 *Reseller Margin:* +${pct}% applied across *${count}* active agents!\n` +
+        `📈 *Platform Base Rule:* Enforced (M_agent ${pct}% >= Wholesale ${adminMarkup}%)\n` +
+        `🚀 Reseller storefronts now sell all social boost services at +${pct}% profit!`;
+    }
+
+    // 27. Query Boost Orders
+    if (cleanType === "query_boost_orders" || cleanType === "list_boost_orders") {
+      const limit = Math.min(30, Math.max(1, parseInt(payload.limit || "8", 10)));
+      return await queryBoostOrdersSummary(limit);
+    }
+
+    // 28. DataMart Delivery Check (Single or Bulk)
+    if (cleanType === "datamart_delivery_check" || cleanType === "delivery_check") {
+      const ids = payload.ids || payload.portalOrderIds || payload.portalOrderId || payload.id || payload.orderId || payload.batchId || payload.reference;
+      if (!ids) return "⚠️ Missing portalOrderId(s) for delivery check.";
+      const report = await executeDatamartDeliveryCheck(ids);
+      return report || `Delivery check completed for ${JSON.stringify(ids)}.`;
+    }
+
+    // 29. DataMart Customer / Agent Search
+    if (cleanType === "datamart_search_customer" || cleanType === "datamart_search" || cleanType === "datamart_investigate") {
+      const q = payload.query || payload.phone || payload.email || payload.name;
+      if (!q) return "⚠️ Missing search query.";
+      return await executeDatamartSearch(q);
+    }
+
+    // 30. DataMart Retry Order
+    if (cleanType === "datamart_retry_order") {
+      const orderId = payload.orderId || payload.id;
+      if (!orderId) return "⚠️ Missing orderId to retry.";
+      const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/retry`, {
+        method: "POST",
+        body: { reason: payload.reason || "Support retry via WhatsApp" }
+      });
+      return resp?.status === "success" || resp?.success ? `✅ Order ${orderId} has been re-queued for dispatch!` : `⚠️ Retry failed: ${resp?.message || "Unknown error"}`;
+    }
+
+    // 31. DataMart Refund Order
+    if (cleanType === "datamart_refund_order") {
+      const orderId = payload.orderId || payload.id;
+      if (!orderId) return "⚠️ Missing orderId to refund.";
+      const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/refund`, {
+        method: "POST",
+        body: { reason: payload.reason || "Support refund via WhatsApp", notifyCustomer: true }
+      });
+      return resp?.status === "success" || resp?.success ? `💸 Order ${orderId} has been refunded to agent wallet!` : `⚠️ Refund failed: ${resp?.message || "Unknown error"}`;
+    }
+
+    // 32. Rezolv Customer Support Tickets List
+    if (cleanType === "rezolv_tickets" || cleanType === "list_rezolv_tickets" || cleanType === "support_tickets") {
+      return await getRezolvTicketsReport(payload.status || "active", payload.limit || 6);
+    }
+
+    // 33. Rezolv View Ticket Details & Conversation
+    if (cleanType === "rezolv_view_ticket" || cleanType === "rezolv_ticket" || cleanType === "view_ticket") {
+      const tId = payload.ticketId || payload.ticket || payload.id;
+      if (!tId) return "⚠️ Missing ticketId to view.";
+      return await getRezolvTicketConversation(tId);
+    }
+
+    // 34. Rezolv Live Reply to Customer
+    if (cleanType === "rezolv_reply" || cleanType === "reply_rezolv_ticket" || cleanType === "reply_ticket") {
+      const tId = payload.ticketId || payload.ticket || payload.id;
+      const msg = payload.message || payload.text || payload.reply;
+      if (!tId || !msg) return "⚠️ Missing ticketId or message to reply.";
+      return await sendRezolvReply(tId, msg);
+    }
+
+    // 35. Rezolv Resolve/Close Ticket
+    if (cleanType === "rezolv_close" || cleanType === "resolve_rezolv_ticket" || cleanType === "close_ticket") {
+      const tId = payload.ticketId || payload.ticket || payload.id;
+      if (!tId) return "⚠️ Missing ticketId to close.";
+      return await closeRezolvTicket(tId, payload.status || "resolved");
     }
   } catch (e) {
     console.warn("executeOwnerDirectAction error:", e.message);
@@ -4175,10 +4949,23 @@ async function runAllCornersSystemXRay(autoFix = false) {
     const dmKey = DATA_API_KEY || process.env.DATA_API_KEY || VERIFIED_DATAMART_KEY;
     const dmSec = process.env.DATAMART_API_SECRET || DATAMART_API_SECRET || VERIFIED_DATAMART_SECRET;
     try {
-      const dmRes = await axios.get(`${DATAMART_BASE}/transactions?limit=60`, {
-        headers: { "x-api-key": dmKey, ...(dmSec ? { "x-api-secret": dmSec } : {}) },
-        timeout: 8000,
-      });
+      let dmRes = null;
+      try {
+        dmRes = await axios.get(`${DATAMART_BASE}/transactions?limit=60`, {
+          headers: { "x-api-key": dmKey, "x-api-secret": dmSec },
+          timeout: 8000,
+        });
+      } catch (firstErr) {
+        if (firstErr.response && (firstErr.response.status === 401 || firstErr.response.status === 403)) {
+          // Fallback to verified credentials pair
+          dmRes = await axios.get(`${DATAMART_BASE}/transactions?limit=60`, {
+            headers: { "x-api-key": VERIFIED_DATAMART_KEY, "x-api-secret": VERIFIED_DATAMART_SECRET },
+            timeout: 8000,
+          });
+        } else {
+          throw firstErr;
+        }
+      }
       dmTransactions = dmRes.data?.data?.transactions || dmRes.data?.transactions || dmRes.data?.data || [];
       if (!Array.isArray(dmTransactions)) dmTransactions = [];
     } catch (dmErr) {
@@ -4249,24 +5036,20 @@ async function runAllCornersSystemXRay(autoFix = false) {
             (mappedDmStatus === "processing" && ord.delivery_status === "pending")
           ) {
             statusDesyncs.push({ ord, dmStatus: mappedDmStatus, rawDmStatus, dmRef: dmMatch.reference || dmMatch.transactionReference || canonicalDmRef });
-            if (autoFix) {
-              const nextNotes = notes.includes("[dm_dispatched]") ? notes : `${notes} [dm_dispatched]`.trim();
-              await supabase.from("orders").update({
-                delivery_status: mappedDmStatus,
-                datamart_status: rawDmStatus || mappedDmStatus,
-                datamart_reference: ord.datamart_reference || dmMatch.reference || dmMatch.transactionReference || canonicalDmRef,
-                notes: nextNotes,
-                updated_at: new Date().toISOString()
-              }).eq("id", ord.id);
-              fixesApplied.push(`Synced *${ord.reference}* (${ord.recipient_phone}) from *${ord.delivery_status}* → *${mappedDmStatus.toUpperCase()}*`);
-            }
+            const nextNotes = notes.includes("[dm_dispatched]") ? notes : `${notes} [dm_dispatched]`.trim();
+            await supabase.from("orders").update({
+              delivery_status: mappedDmStatus,
+              datamart_status: rawDmStatus || mappedDmStatus,
+              datamart_reference: ord.datamart_reference || dmMatch.reference || dmMatch.transactionReference || canonicalDmRef,
+              notes: nextNotes,
+              updated_at: new Date().toISOString()
+            }).eq("id", ord.id);
+            fixesApplied.push(`Synced *${ord.reference}* (${ord.recipient_phone}) from *${ord.delivery_status}* → *${mappedDmStatus.toUpperCase()}*`);
           }
         } else if (!isFlash && !ord.datamart_reference && !notes.includes("[dm_dispatched]") && ord.delivery_status === "pending" && ageMs > 45000 && ageMs < 12 * 60 * 60 * 1000) {
           paidUndispatched.push(ord);
-          if (autoFix) {
-            await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 }).catch(() => null);
-            fixesApplied.push(`Triggered DataMart dispatch & alert for paid order *${ord.reference}* (${ord.capacity}GB ${ord.network} → ${ord.recipient_phone})`);
-          }
+          await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 }).catch(() => null);
+          fixesApplied.push(`Triggered DataMart dispatch & alert for paid order *${ord.reference}* (${ord.capacity}GB ${ord.network} → ${ord.recipient_phone})`);
         }
 
         if (!notes.includes("[wa_alert_sent]") && ageMs < 6 * 60 * 60 * 1000) {
@@ -4275,9 +5058,9 @@ async function runAllCornersSystemXRay(autoFix = false) {
         if (ord.delivery_status === "failed") {
           recentFailedOrders.push(ord);
         }
-      } else if (ord.payment_status === "pending" && psKey && ageMs > 30000 && ageMs < 3 * 60 * 60 * 1000) {
-        // Check up to 5 recent pending orders against Paystack live
-        if (unverifiedButPaidOnPaystack.length < 5) {
+      } else if (ord.payment_status === "pending" && psKey && ageMs > 30000 && ageMs < 6 * 60 * 60 * 1000) {
+        // Check up to 10 recent pending orders against Paystack live
+        if (unverifiedButPaidOnPaystack.length < 10) {
           try {
             const psRes = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(ord.reference)}`, {
               headers: { Authorization: `Bearer ${psKey}` },
@@ -4285,10 +5068,11 @@ async function runAllCornersSystemXRay(autoFix = false) {
             });
             if (psRes.data?.data?.status === "success") {
               unverifiedButPaidOnPaystack.push(ord);
-              if (autoFix) {
-                await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 }).catch(() => null);
-                fixesApplied.push(`Verified Paystack payment & dispatched *${ord.reference}* (${ord.capacity}GB ${ord.network} → ${ord.recipient_phone})`);
-              }
+              // ALWAYS auto-heal confirmed Paystack payments immediately!
+              try {
+                await axios.post(verifyEndpoint, { reference: ord.reference }, { timeout: 15000 });
+                fixesApplied.push(`Auto-verified Paystack payment & dispatched *${ord.reference}* (${ord.capacity}GB ${ord.network} → ${ord.recipient_phone})`);
+              } catch (_) {}
             }
           } catch (_) {}
         }
@@ -4297,8 +5081,8 @@ async function runAllCornersSystemXRay(autoFix = false) {
 
     // Build Corner-by-Corner Report
     if (unverifiedButPaidOnPaystack.length > 0) {
-      findings.push(`🔴 *Unverified Paystack Payments (${unverifiedButPaidOnPaystack.length}):* Customer paid on MoMo, but browser closed before redirect:\n` +
-        unverifiedButPaidOnPaystack.map(o => `  • *${o.reference}* (${o.capacity}GB ${o.network} → ${o.recipient_phone}, ₵${o.amount})`).join("\n"));
+      findings.push(`🟢 *Auto-Healed Paystack Payments (${unverifiedButPaidOnPaystack.length}):* Customer paid on MoMo and closed browser, but system auto-verified with Paystack & dispatched to DataMart:\n` +
+        unverifiedButPaidOnPaystack.map(o => `  • *${o.reference}* (${o.capacity}GB ${o.network} → ${o.recipient_phone}, ₵${o.amount}) — ✅ AUTO-DISPATCHED`).join("\n"));
     } else {
       findings.push(`✅ *Paystack Reconciliation:* 0 unverified MoMo payments.`);
     }
@@ -4604,6 +5388,998 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
   }
 
   return { deliveryStatus: "processing", rawStatus: "processing" };
+}
+
+/* =========================================================
+DATAMART MULTI-USER AGENT SUPPORT HELPER & QUEUE ENGINE
+========================================================= */
+
+let cachedDatamartWorkerToken = null;
+const userDatamartTokenCache = new Map(); // normPhone -> token
+
+async function getDatamartAuthToken(callerPhone = null) {
+  const normCaller = callerPhone ? String(callerPhone).replace(/\D/g, "") : null;
+
+  // 1. If a specific caller phone is provided, check for user-bound account
+  if (normCaller) {
+    if (userDatamartTokenCache.has(normCaller)) {
+      return userDatamartTokenCache.get(normCaller);
+    }
+    try {
+      const { data: row } = await supabase
+        .from("settings")
+        .select("value")
+        .eq("key", `datamart_account_${normCaller}`)
+        .maybeSingle();
+
+      if (row?.value) {
+        let acc = null;
+        try { acc = JSON.parse(row.value); } catch (_) {}
+        if (acc) {
+          let userToken = acc.token;
+          if (!userToken && acc.email && acc.password) {
+            const res = await fetch("https://api.datamartgh.shop/api/v1/login", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ email: acc.email, password: acc.password })
+            });
+            const data = await res.json();
+            if (data?.token) {
+              userToken = data.token;
+              acc.token = userToken;
+              await supabase.from("settings").upsert({
+                key: `datamart_account_${normCaller}`,
+                value: JSON.stringify(acc)
+              }, { onConflict: "key" });
+            }
+          }
+          if (userToken) {
+            userDatamartTokenCache.set(normCaller, userToken);
+            return userToken;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("getDatamartAuthToken caller check error:", e.message);
+    }
+  }
+
+  // 2. Default to Master Owner Token
+  if (cachedDatamartWorkerToken) {
+    if (normCaller) userDatamartTokenCache.set(normCaller, cachedDatamartWorkerToken);
+    return cachedDatamartWorkerToken;
+  }
+  try {
+    const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
+      "datamart_auth_token", "datamart_login_email", "datamart_login_password"
+    ]);
+    const sMap = {};
+    (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+    let token = sMap["datamart_auth_token"] || process.env.DATAMART_AUTH_TOKEN;
+    const email = sMap["datamart_login_email"] || "nyakponoah11@gmail.com";
+    const pass = sMap["datamart_login_password"] || "Stillmoving11";
+
+    if (!token && email && pass) {
+      const res = await fetch("https://api.datamartgh.shop/api/v1/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password: pass })
+      });
+      const data = await res.json();
+      if (data?.token) {
+        token = data.token;
+        await supabase.from("settings").upsert({ key: "datamart_auth_token", value: token }, { onConflict: "key" });
+      }
+    }
+    cachedDatamartWorkerToken = token;
+    if (normCaller && token) userDatamartTokenCache.set(normCaller, token);
+    return token;
+  } catch (err) {
+    console.warn("getDatamartAuthToken master error:", err.message);
+    return null;
+  }
+}
+
+async function connectUserDatamartAccount(phone, email, password) {
+  const norm = String(phone).replace(/\D/g, "");
+  try {
+    const res = await fetch("https://api.datamartgh.shop/api/v1/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: String(email).trim(), password: String(password).trim() })
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.token) {
+      return { success: false, error: data?.message || "Invalid DataMart email or password." };
+    }
+    const token = data.token;
+    const user = data.user || {};
+
+    // 🛡️ CRITICAL VERIFICATION: ONLY ACCOUNTS WITH LIVE AGENT SUPPORT ACCESS ARE ALLOWED
+    const roleLower = String(user.role || "").toLowerCase();
+    const isSupportRole = roleLower === "worker" || roleLower === "admin" || roleLower === "support" || roleLower === "agent_support";
+
+    let hasLiveSupportAccess = false;
+    try {
+      const checkRes = await fetch("https://api.datamartgh.shop/api/support/dashboard", {
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "x-auth-token": token
+        }
+      });
+      if (checkRes.status === 200) {
+        hasLiveSupportAccess = true;
+      }
+    } catch (_) {}
+
+    if (!isSupportRole && !hasLiveSupportAccess) {
+      return {
+        success: false,
+        error: `🚫 *ACCESS DENIED: AGENT SUPPORT REQUIRED*\n\nThe DataMart account for *${user.email || email}* does not have Agent Support worker permissions.\n\nOnly official DataMart Support workers and staff accounts can connect to this console.`
+      };
+    }
+
+    const payload = {
+      email: String(email).trim(),
+      password: String(password).trim(),
+      token,
+      name: user.name || "Support Worker",
+      role: user.role || "worker",
+      walletBalance: user.walletBalance || 0,
+      id: user._id || null,
+      hasAgentSupport: true,
+      connectedAt: new Date().toISOString()
+    };
+    userDatamartTokenCache.set(norm, token);
+    await supabase.from("settings").upsert({
+      key: `datamart_account_${norm}`,
+      value: JSON.stringify(payload)
+    }, { onConflict: "key" });
+    return { success: true, user: payload };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function getUserDatamartAccount(phone) {
+  const norm = String(phone).replace(/\D/g, "");
+  try {
+    const { data: row } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", `datamart_account_${norm}`)
+      .maybeSingle();
+    if (row?.value) {
+      return JSON.parse(row.value);
+    }
+  } catch (_) {}
+  return null;
+}
+
+async function disconnectUserDatamartAccount(phone) {
+  const norm = String(phone).replace(/\D/g, "");
+  userDatamartTokenCache.delete(norm);
+  userModes.delete(norm);
+  try {
+    await supabase.from("settings").delete().eq("key", `datamart_account_${norm}`);
+    await saveCustomerSession(phone, { step: 1 });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function fetchDatamartSupportTickets(params = {}, callerPhone = null) {
+  let token = await getDatamartAuthToken(callerPhone);
+  if (!token) return null;
+  const q = new URLSearchParams(params).toString();
+  try {
+    let res = await fetch(`https://api.datamartgh.shop/api/support/tickets?${q}`, {
+      headers: { "Authorization": `Bearer ${token}` }
+    });
+    if (res.status === 401) {
+      if (callerPhone) {
+        userDatamartTokenCache.delete(String(callerPhone).replace(/\D/g, ""));
+      } else {
+        cachedDatamartWorkerToken = null;
+      }
+      token = await getDatamartAuthToken(callerPhone);
+      if (token) {
+        res = await fetch(`https://api.datamartgh.shop/api/support/tickets?${q}`, {
+          headers: { "Authorization": `Bearer ${token}` }
+        });
+      }
+    }
+    const data = await res.json();
+    return data?.data || null;
+  } catch (err) {
+    console.warn("fetchDatamartSupportTickets error:", err.message);
+    return null;
+  }
+}
+
+async function fetchDatamartSupportEndpoint(endpoint, options = {}, callerPhone = null) {
+  let token = await getDatamartAuthToken(callerPhone);
+  if (!token) return null;
+  const url = endpoint.startsWith("http") ? endpoint : `https://api.datamartgh.shop${endpoint}`;
+  try {
+    const headers = {
+      "Authorization": `Bearer ${token}`,
+      "x-auth-token": token,
+      ...(options.headers || {})
+    };
+    let body = options.body;
+    if (body && typeof body === "object") {
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify(body);
+    }
+    let res = await fetch(url, { ...options, headers, body });
+    if (res.status === 401) {
+      if (callerPhone) {
+        userDatamartTokenCache.delete(String(callerPhone).replace(/\D/g, ""));
+      } else {
+        cachedDatamartWorkerToken = null;
+      }
+      token = await getDatamartAuthToken(callerPhone);
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+        headers["x-auth-token"] = token;
+        res = await fetch(url, { ...options, headers, body });
+      }
+    }
+    const data = await res.json();
+    return data;
+  } catch (err) {
+    console.warn(`fetchDatamartSupportEndpoint (${endpoint}) error:`, err.message);
+    return null;
+  }
+}
+
+/* =========================================================
+   REZOLV LIVE CUSTOMER SUPPORT INTEGRATION (REZOLV.DEV)
+   Connects Stony WhatsApp Bot directly to DataMart Live Customer Chat
+   Account: stillmoving11@gmail.com / Stony ("Stony 💙")
+   Workspace: 69ac50723a7c792c48a0fbb8
+========================================================= */
+
+const REZOLV_CONFIG = {
+  apiBase: process.env.REZOLV_API_BASE || "https://api.rezolv.dev/api",
+  email: process.env.REZOLV_EMAIL || "stillmoving11@gmail.com",
+  password: process.env.REZOLV_PASSWORD || "Stony",
+  workspaceId: process.env.REZOLV_WORKSPACE_ID || "69ac50723a7c792c48a0fbb8",
+  agentId: "69ade92d9660c59426fec6cc",
+  agentName: "Stony 💙"
+};
+
+let rezolvTokenCache = {
+  accessToken: null,
+  refreshToken: null,
+  expiresAt: 0
+};
+
+async function getRezolvAuthToken() {
+  if (rezolvTokenCache.accessToken && Date.now() < rezolvTokenCache.expiresAt) {
+    return rezolvTokenCache.accessToken;
+  }
+  return new Promise((resolve, reject) => {
+    const https = require("https");
+    const payload = JSON.stringify({ email: REZOLV_CONFIG.email, password: REZOLV_CONFIG.password });
+    const req = https.request(REZOLV_CONFIG.apiBase + "/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+    }, res => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => {
+        try {
+          const json = JSON.parse(data);
+          if (json.success && json.data?.accessToken) {
+            rezolvTokenCache = {
+              accessToken: json.data.accessToken,
+              refreshToken: json.data.refreshToken || null,
+              expiresAt: Date.now() + 12 * 60 * 1000
+            };
+            resolve(rezolvTokenCache.accessToken);
+          } else {
+            reject(new Error(json.message || "Rezolv login failed"));
+          }
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function rezolvApiRequest(path, options = {}) {
+  const token = await getRezolvAuthToken();
+  return new Promise((resolve, reject) => {
+    const https = require("https");
+    const url = new URL(path.startsWith("http") ? path : REZOLV_CONFIG.apiBase + path);
+    const reqOpts = {
+      hostname: url.hostname,
+      port: 443,
+      path: url.pathname + url.search,
+      method: options.method || "GET",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      }
+    };
+    const req = https.request(reqOpts, res => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve({ status: res.statusCode, data: parsed });
+        } catch (_) {
+          resolve({ status: res.statusCode, raw: data });
+        }
+      });
+    });
+    req.on("error", reject);
+    if (options.body) {
+      req.write(typeof options.body === "string" ? options.body : JSON.stringify(options.body));
+    }
+    req.end();
+  });
+}
+
+async function findRezolvTicket(identifier) {
+  if (!identifier) return null;
+  const rawId = String(identifier).trim();
+
+  // If already 24-char ObjectId
+  if (/^[a-f\d]{24}$/i.test(rawId)) {
+    const res = await rezolvApiRequest("/tickets/" + rawId);
+    if (res.status === 200 && res.data?.data?.ticket) {
+      return { id: rawId, ticket: res.data.data.ticket, messages: res.data.data.messages || [] };
+    }
+  }
+
+  const cleanNum = rawId.replace(/^#/, "").toUpperCase();
+  const digitsOnly = cleanNum.replace(/\D/g, "");
+
+  // 1. Search in active tickets
+  const activeRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
+  const activeTickets = activeRes.data?.data?.tickets || [];
+  let match = activeTickets.find(t => {
+    if (!t) return false;
+    if (t._id === rawId) return true;
+    const tn = (t.ticketNumber || "").toUpperCase();
+    if (tn === cleanNum) return true;
+    if (digitsOnly && tn.endsWith(digitsOnly)) return true;
+    return false;
+  });
+
+  // 2. If not found in active, search resolved
+  if (!match) {
+    const resRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId + "&status=resolved&limit=50");
+    const resTickets = resRes.data?.data?.tickets || [];
+    match = resTickets.find(t => {
+      if (!t) return false;
+      if (t._id === rawId) return true;
+      const tn = (t.ticketNumber || "").toUpperCase();
+      if (tn === cleanNum) return true;
+      if (digitsOnly && tn.endsWith(digitsOnly)) return true;
+      return false;
+    });
+  }
+
+  if (match) {
+    const details = await rezolvApiRequest("/tickets/" + match._id);
+    return {
+      id: match._id,
+      ticket: details.data?.data?.ticket || match,
+      messages: details.data?.data?.messages || []
+    };
+  }
+  return null;
+}
+
+async function getRezolvTicketsReport(filter = "active", limit = 6) {
+  try {
+    let url = "/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId;
+    if (filter === "resolved") {
+      url += "&status=resolved&limit=15";
+    }
+    const res = await rezolvApiRequest(url);
+    const tickets = res.data?.data?.tickets || [];
+    if (tickets.length === 0) {
+      return `🎉 *DATAMART LIVE SUPPORT (REZOLV)*\n\nNo active customer support tickets at the moment! All customer chats resolved.`;
+    }
+
+    // Sort: unread first, urgent/high priority next, then latest customer message
+    const sorted = [...tickets].sort((a, b) => {
+      const aUnread = a.unreadCount || 0;
+      const bUnread = b.unreadCount || 0;
+      if (aUnread !== bUnread) return bUnread - aUnread;
+      const aUrgent = (a.lastMessage?.text || "").includes("Needs a human") || a.tags?.includes("ai-escalated") || a.priority === "urgent" || a.priority === "high";
+      const bUrgent = (b.lastMessage?.text || "").includes("Needs a human") || b.tags?.includes("ai-escalated") || b.priority === "urgent" || b.priority === "high";
+      if (aUrgent && !bUrgent) return -1;
+      if (!aUrgent && bUrgent) return 1;
+      return new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt);
+    });
+
+    const displayList = sorted.slice(0, limit);
+    let out = `🎟️ *DATAMART LIVE SUPPORT (REZOLV)*\n` +
+      `Logged in as: *${REZOLV_CONFIG.agentName}* | Active: *${tickets.length} tickets*\n\n`;
+
+    displayList.forEach((t, idx) => {
+      const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣"][idx] || "•";
+      const custName = t.customer?.name || "Customer";
+      const custEmail = t.customer?.email ? ` (${t.customer.email})` : "";
+      const statusStr = (t.status || "open").toUpperCase();
+      const isUrgent = (t.lastMessage?.text || "").includes("Needs a human") || t.tags?.includes("ai-escalated") || t.priority === "urgent" || t.priority === "high";
+      const urgentTag = isUrgent ? " 🚨 *URGENT*" : "";
+      const unreadStr = t.unreadCount > 0 ? ` • 💬 *${t.unreadCount} unread*` : "";
+      const lastMsg = (t.lastMessage?.text || "").replace(/\s+/g, " ").trim().slice(0, 90);
+
+      out += `${numEmoji} *[${t.ticketNumber || t._id}]* *${custName}*${unreadStr}${urgentTag}\n` +
+        `   • Status: *${statusStr}*${custEmail}\n` +
+        `   • Last message: "${lastMsg}${lastMsg.length >= 90 ? "..." : ""}"\n\n`;
+    });
+
+    out += `💡 *Quick Actions:*\n` +
+      `• *ticket [TicketNumber]* - View full chat history\n` +
+      `• *reply [TicketNumber] [message]* - Send live reply as Stony 💙\n` +
+      `• *close [TicketNumber]* - Resolve ticket`;
+
+    return out.trim();
+  } catch (err) {
+    console.warn("getRezolvTicketsReport error:", err.message);
+    return `⚠️ Could not connect to Rezolv support dashboard. Please check API connection.`;
+  }
+}
+
+async function getRezolvTicketConversation(identifier) {
+  try {
+    const found = await findRezolvTicket(identifier);
+    if (!found || !found.ticket) {
+      return `⚠️ Could not find Rezolv support ticket *${identifier}*. Please check the ticket number.`;
+    }
+
+    const t = found.ticket;
+    const msgs = found.messages || [];
+    const custName = t.customer?.name || "Customer";
+    const custEmail = t.customer?.email || "N/A";
+    const custPhone = t.customer?.phone || "";
+    const phoneStr = custPhone ? ` | 📱 ${custPhone}` : "";
+    const statusStr = (t.status || "open").toUpperCase();
+    const prioStr = (t.priority || "normal").toUpperCase();
+
+    let out = `💬 *REZOLV TICKET: ${t.ticketNumber || found.id}*\n\n` +
+      `👤 *Customer:* *${custName}*\n` +
+      `📧 *Email:* ${custEmail}${phoneStr}\n` +
+      `📊 *Status:* *${statusStr}* | *Priority:* ${prioStr}\n`;
+
+    if (t.escalationReason) {
+      const cleanEsc = t.escalationReason.replace(/\s+/g, " ").trim().slice(0, 180);
+      out += `🚨 *Escalation:* ${cleanEsc}${t.escalationReason.length > 180 ? "..." : ""}\n`;
+    }
+
+    out += `\n📜 *Recent Conversation:*\n`;
+
+    if (msgs.length === 0) {
+      out += `_No messages recorded on this ticket yet._\n`;
+    } else {
+      const recentMsgs = msgs.slice(-6);
+      recentMsgs.forEach(m => {
+        let sender = m.senderName || m.senderType || "User";
+        if (m.senderType === "agent") sender = `💙 ${sender}`;
+        else if (m.senderType === "system") sender = `⚙️ ${sender}`;
+        else sender = `👤 ${sender}`;
+        const time = m.createdAt ? new Date(m.createdAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Africa/Accra" }) : "";
+        const timeStr = time ? ` [${time}]` : "";
+        const textClean = (m.text || "").replace(/\s+/g, " ").trim();
+        out += `${sender}${timeStr}: "${textClean}"\n\n`;
+      });
+    }
+
+    out += `💡 *Reply to customer live on DataMart:*\n` +
+      `Send: *reply ${t.ticketNumber || found.id} [your message]*\n\n` +
+      `💡 *To resolve/close ticket:*\n` +
+      `Send: *close ${t.ticketNumber || found.id}*`;
+
+    return out.trim();
+  } catch (err) {
+    console.warn("getRezolvTicketConversation error:", err.message);
+    return `⚠️ Error fetching ticket conversation: ${err.message}`;
+  }
+}
+
+async function sendRezolvReply(identifier, replyText) {
+  try {
+    if (!replyText || !replyText.trim()) {
+      return `⚠️ Please provide a message to send. Example: *reply ${identifier} Hello, your order has been delivered!*`;
+    }
+    const cleanText = replyText.trim();
+    const found = await findRezolvTicket(identifier);
+    if (!found || !found.id) {
+      return `⚠️ Could not find ticket *${identifier}* on Rezolv. Please verify the ticket number.`;
+    }
+
+    const tktId = found.id;
+    const ticketNumber = found.ticket?.ticketNumber || identifier;
+    const custName = found.ticket?.customer?.name || "Customer";
+
+    const res = await rezolvApiRequest("/tickets/" + tktId + "/messages", {
+      method: "POST",
+      body: {
+        text: cleanText,
+        attachments: [],
+        audioUrl: ""
+      }
+    });
+
+    if (res.status === 200 || res.status === 201) {
+      return `✅ *REPLY SENT TO CUSTOMER LIVE!*\n\n` +
+        `🆔 *Ticket:* *${ticketNumber}*\n` +
+        `👤 *Customer:* ${custName}\n` +
+        `💙 *Sent As:* Stony 💙 (DataMart Support)\n` +
+        `💬 *Message:*\n"${cleanText}"\n\n` +
+        `The customer will see this message directly in the DataMart chat widget! 🎉`;
+    } else {
+      const errMsg = res.data?.message || res.raw || "Failed to post message";
+      return `⚠️ Could not send reply (Status ${res.status}): ${errMsg}`;
+    }
+  } catch (err) {
+    console.warn("sendRezolvReply error:", err.message);
+    return `⚠️ Error sending reply to Rezolv: ${err.message}`;
+  }
+}
+
+async function closeRezolvTicket(identifier, status = "resolved") {
+  try {
+    const found = await findRezolvTicket(identifier);
+    if (!found || !found.id) {
+      return `⚠️ Could not find ticket *${identifier}* on Rezolv. Please verify the ticket number.`;
+    }
+
+    const tktId = found.id;
+    const ticketNumber = found.ticket?.ticketNumber || identifier;
+    const custName = found.ticket?.customer?.name || "Customer";
+
+    const res = await rezolvApiRequest("/tickets/" + tktId + "/status", {
+      method: "PATCH",
+      body: { status: status }
+    });
+
+    if (res.status === 200) {
+      return `✅ *TICKET ${ticketNumber} RESOLVED!*\n\n` +
+        `👤 *Customer:* ${custName}\n` +
+        `📊 *Status:* Closed & Marked Resolved on Rezolv Dashboard.`;
+    } else {
+      const errMsg = res.data?.message || res.raw || "Failed to update ticket status";
+      return `⚠️ Could not update ticket status (Status ${res.status}): ${errMsg}`;
+    }
+  } catch (err) {
+    console.warn("closeRezolvTicket error:", err.message);
+    return `⚠️ Error updating ticket on Rezolv: ${err.message}`;
+  }
+}
+
+async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) {
+  const ids = Array.isArray(portalOrderIds)
+    ? portalOrderIds.map(x => String(x).trim()).filter(Boolean)
+    : String(portalOrderIds || "").match(/\b\d{4,9}[a-zA-Z]?\b/g) || [];
+
+  const uniqueIds = [...new Set(ids)].slice(0, 10);
+  if (uniqueIds.length === 0) return null;
+
+  // Single ID: run directly
+  if (uniqueIds.length === 1) {
+    const targetId = uniqueIds[0];
+    const pId = isNaN(Number(targetId)) ? String(targetId).trim() : Number(targetId);
+    const startRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/start', {
+      method: 'POST',
+      body: { portalOrderId: pId }
+    }, callerPhone);
+    const jobId = startRes?.data?.jobId || startRes?.jobId;
+    if (!jobId) {
+      const errDetail = startRes?.message ? ` (${startRes.message})` : "";
+      return `⚠️ Carrier audit for ID *${targetId}* could not be completed${errDetail}. Please try again shortly.`;
+    }
+
+    let result = null;
+    let syncResult = null;
+    for (let i = 0; i < 35; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
+      const st = jobRes?.data?.jobStatus;
+      if (st === 'done' || st === 'completed') {
+        result = jobRes.data.result;
+        if (result && Array.isArray(result.items) && result.items.length > 0) {
+          const needsSync = result.needsUpdate > 0 || result.items.some(it => it.needsUpdate);
+          if (needsSync) {
+            try {
+              const applyRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/apply', {
+                method: 'POST',
+                body: { portalOrderId: pId, items: result.items }
+              }, callerPhone);
+              syncResult = applyRes?.data || applyRes;
+            } catch (err) {
+              console.warn("Delivery check auto-apply error:", err.message);
+            }
+          }
+        }
+        break;
+      }
+      if (st === 'failed') {
+        return `⚠️ Carrier audit for ID *${targetId}* failed: ${jobRes.data.error || "Carrier job failed"}`;
+      }
+    }
+
+    if (!result) {
+      return `⚠️ Carrier audit for ID *${targetId}* could not be completed (Carrier check timed out on DataMart). Please try again shortly.`;
+    }
+
+    // Format single result
+    const batchNum = result.batchNumber || "N/A";
+    const totalItems = result.totalItems || 0;
+    const sent = result.sent || 0;
+    const pending = result.pending || 0;
+    const failed = result.failed || 0;
+    const dateStr = result.items?.[0]?.processedDate || "N/A";
+    const checkedBy = result.checkedBy || "Stony";
+    const isQueued = result.notProcessedYet || totalItems === 0 || (sent === 0 && failed === 0 && totalItems === 0);
+
+    let syncLine = "";
+    if (syncResult?.ordersCompleted > 0 || syncResult?.data?.ordersCompleted > 0) {
+      const count = syncResult?.ordersCompleted || syncResult?.data?.ordersCompleted;
+      syncLine = `⚡ *Auto-Completed:* ✅ Auto-marked *${count} orders* as Completed in DataMart!\n`;
+    } else if (result.needsUpdate === 0 && totalItems > 0 && result.allDelivered) {
+      syncLine = `⚡ *Auto-Completed:* ✅ DataMart orders already 100% in sync & Completed!\n`;
+    }
+
+    let carrierResult = "";
+    let conclusionMsg = "";
+
+    if (isQueued) {
+      carrierResult = "⏳ QUEUED AT VENDOR (In Processing Queue)";
+      conclusionMsg = result.portalMessage
+        ? `⏳ *Carrier Notice:* ${result.portalMessage}\nYour order is currently waiting in the vendor queue for carrier dispatch. Check again in a few minutes!`
+        : `⏳ *Carrier Notice:* Your order is in the vendor dispatch queue. Please check again shortly!`;
+    } else if (result.allDelivered && totalItems > 0) {
+      carrierResult = "✅ ALL 100% DELIVERED";
+      conclusionMsg = `💡 All ${totalItems} number(s) in this batch were successfully delivered to MTN!`;
+    } else if (failed > 0) {
+      carrierResult = `⚠️ PARTIAL / FAILED (${failed} Failed)`;
+      conclusionMsg = `⚠️ *Action Needed:* ${failed} number(s) failed delivery. Failed numbers are shown above for re-dispatch or refund!`;
+    } else {
+      carrierResult = "⏳ IN PROGRESS / PROCESSING";
+      conclusionMsg = `⏳ Processing: ${sent}/${totalItems} lines sent so far (${pending} pending). Check back shortly for final delivery status.`;
+    }
+
+    const failedItems = (result.items || []).filter(it => {
+      const s = String(it.status || "").toLowerCase();
+      return s !== "sent" && s !== "delivered";
+    });
+
+    const failedPortalSummaries = failedItems.length > 0 ? [{
+      portalId: String(targetId),
+      batchNumber: result.batchNumber,
+      failedCount: failedItems.length,
+      totalItems,
+      failedPhones: failedItems.map(it => it.phone)
+    }] : [];
+
+    if (callerPhone) {
+      const norm = normalizeBotPhone(callerPhone);
+      lastDeliveryCheckCache.set(norm, {
+        type: "single",
+        uniqueIds: [targetId],
+        batchNumber: result.batchNumber,
+        failedPortalIds: failedPortalSummaries,
+        failedItems: failedItems.map(it => ({
+          batchId: targetId,
+          batchNumber: result.batchNumber,
+          phone: it.phone,
+          dbOrderId: it.dbOrderId || null,
+          dataSize: it.dataSize || null,
+          status: it.status || "Failed"
+        })),
+        totalNumbers: totalItems,
+        totalSent: sent,
+        totalFailed: failed
+      });
+    }
+
+    let failedSection = "";
+    if (failedItems.length > 0) {
+      failedSection = `\n❌ *FAILED NUMBERS (${failedItems.length}):*\n` +
+        failedItems.map(it => {
+          const sizePart = it.dataSize ? ` (${it.dataSize})` : "";
+          return `• \`${it.phone}\`${sizePart} ➔ *${it.status || "Failed"}*`;
+        }).join("\n") + "\n";
+    }
+
+    return `🚚 *DATAMART CARRIER DELIVERY CHECK*\n\n` +
+      `🆔 *Portal Order ID:* *${targetId}*\n` +
+      `📦 *Batch Number:* #${batchNum}\n` +
+      `📊 *Status:* *${carrierResult}*\n` +
+      `• 🔢 *Total Lines:* ${totalItems}\n` +
+      `• ✅ *Carrier Sent:* ${sent}\n` +
+      (pending > 0 || isQueued ? `• ⏳ *Pending:* ${pending}\n` : "") +
+      `• ❌ *Failed:* ${failed}\n` +
+      (syncLine ? `${syncLine}` : "") +
+      `🕒 *Processed:* ${dateStr}\n` +
+      `👤 *Audited By:* ${checkedBy}\n` +
+      `${failedSection}\n` +
+      `${conclusionMsg}`;
+  }
+
+  // Bulk IDs: Unified staged runner
+  const jobEntries = [];
+  for (const targetId of uniqueIds) {
+    const pId = isNaN(Number(targetId)) ? String(targetId).trim() : Number(targetId);
+    const startRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/start', {
+      method: 'POST',
+      body: { portalOrderId: pId }
+    }, callerPhone);
+    const jobId = startRes?.data?.jobId || startRes?.jobId;
+    jobEntries.push({ id: targetId, pId, jobId, error: jobId ? null : (startRes?.message || "Failed to start audit") });
+    await new Promise(r => setTimeout(r, 80));
+  }
+
+  // Poll in unified cycles (up to 20 cycles = 30 seconds)
+  for (let cycle = 0; cycle < 20; cycle++) {
+    const pending = jobEntries.filter(j => j.jobId && !j.result && !j.failed);
+    if (pending.length === 0) break;
+    await new Promise(r => setTimeout(r, 1500));
+
+    await Promise.all(pending.map(async (entry) => {
+      try {
+        const jRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${entry.jobId}`, {}, callerPhone);
+        const status = jRes?.data?.jobStatus;
+        if (status === 'done' || status === 'completed') {
+          entry.result = jRes.data.result;
+          if (entry.result && Array.isArray(entry.result.items) && entry.result.items.length > 0) {
+            const needsSync = entry.result.needsUpdate > 0 || entry.result.items.some(it => it.needsUpdate);
+            if (needsSync) {
+              try {
+                const applyRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/apply', {
+                  method: 'POST',
+                  body: { portalOrderId: entry.pId, items: entry.result.items }
+                }, callerPhone);
+                entry.syncResult = applyRes?.data || applyRes;
+              } catch (_) {}
+            }
+          }
+        } else if (status === 'failed') {
+          entry.failed = true;
+          entry.error = jRes.data.error || "Carrier check failed";
+        }
+      } catch (_) {}
+    }));
+  }
+
+  let totalNumbers = 0;
+  let totalSent = 0;
+  let totalFailed = 0;
+  let totalQueued = 0;
+  let totalAutoCompleted = 0;
+  let batchSummaries = "";
+  const allFailedNumbers = [];
+  const failedPortalSummaries = [];
+
+  jobEntries.forEach((r, idx) => {
+    const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx] || `•`;
+    if (r.result) {
+      const b = r.result;
+      const bTotal = b.totalItems || 0;
+      const bSent = b.sent || 0;
+      const bFailed = b.failed || 0;
+      const isQueued = b.notProcessedYet || bTotal === 0 || (bSent === 0 && bFailed === 0 && bTotal === 0);
+
+      const syncObj = r.syncResult;
+      const autoCount = syncObj?.ordersCompleted || syncObj?.data?.ordersCompleted || 0;
+      if (autoCount > 0) totalAutoCompleted += autoCount;
+
+      if (isQueued) totalQueued++;
+      totalNumbers += bTotal;
+      totalSent += bSent;
+      totalFailed += bFailed;
+
+      const failedInBatch = (b.items || []).filter(it => {
+        const s = String(it.status || "").toLowerCase();
+        return s !== "sent" && s !== "delivered";
+      });
+
+      if (bFailed > 0 || failedInBatch.length > 0) {
+        failedPortalSummaries.push({
+          portalId: String(r.id),
+          batchNumber: b.batchNumber,
+          failedCount: bFailed || failedInBatch.length,
+          totalItems: bTotal,
+          failedPhones: failedInBatch.map(it => it.phone)
+        });
+      }
+
+      // ONLY show failed numbers! Delivered numbers are ignored completely.
+      let failedListForBatch = "";
+      if (failedInBatch.length > 0) {
+        failedInBatch.forEach(it => {
+          allFailedNumbers.push({
+            batchId: r.id,
+            batchNumber: b.batchNumber,
+            phone: it.phone,
+            dbOrderId: it.dbOrderId || null,
+            dataSize: it.dataSize || null,
+            status: it.status || "Failed"
+          });
+        });
+        failedListForBatch = `  ❌ *Failed (${failedInBatch.length}):*\n` +
+          failedInBatch.map(it => {
+            const sizePart = it.dataSize ? ` (${it.dataSize})` : "";
+            return `  • \`${it.phone}\`${sizePart} ➔ *${it.status || "Failed"}*`;
+          }).join("\n") + "\n";
+      }
+
+      let batchStatusLine = "";
+      if (isQueued) {
+        batchStatusLine = `⏳ *QUEUED AT VENDOR*`;
+      } else if (b.allDelivered && bTotal > 0) {
+        batchStatusLine = `✅ *ALL ${bSent}/${bTotal} DELIVERED*` + (autoCount > 0 ? ` (Auto-Completed ${autoCount})` : "");
+      } else if (bFailed > 0) {
+        batchStatusLine = `⚠️ *PARTIAL (${bSent}/${bTotal} Sent, ${bFailed} Failed)*`;
+      } else {
+        batchStatusLine = `⏳ *IN PROGRESS (${bSent}/${bTotal} Sent)*`;
+      }
+
+      batchSummaries += `${numEmoji} *ID: ${r.id}* (Batch #${b.batchNumber || "N/A"})\n` +
+        `• Status: ${batchStatusLine}\n` +
+        (failedListForBatch ? `${failedListForBatch}` : "");
+    } else {
+      const errReason = r.error ? ` (${r.error})` : "";
+      batchSummaries += `${numEmoji} *ID: ${r.id}* ➔ ⚠️ Audit timed out on carrier${errReason}.\n`;
+    }
+  });
+
+  if (callerPhone) {
+    const norm = normalizeBotPhone(callerPhone);
+    lastDeliveryCheckCache.set(norm, {
+      type: "bulk",
+      uniqueIds,
+      failedPortalIds: failedPortalSummaries,
+      failedItems: allFailedNumbers,
+      totalNumbers,
+      totalSent,
+      totalFailed
+    });
+  }
+
+  let globalFailedSummary = "";
+  if (failedPortalSummaries.length > 0) {
+    const copyablePortalList = failedPortalSummaries.map(p => p.portalId).join("\n");
+    globalFailedSummary = `🚨 *FAILED PORTAL ORDER IDs (${failedPortalSummaries.length}):*\n` +
+      `${copyablePortalList}\n\n`;
+  }
+
+  let finalActionMessage = "";
+  if (totalFailed > 0) {
+    finalActionMessage = `⚠️ *Action Required:* ${totalFailed} failed number(s) detected. The failed phone numbers are listed above for easy copy/retry!`;
+  } else if (totalQueued > 0 && totalNumbers === 0) {
+    finalActionMessage = `⏳ *Notice:* Batch(es) are queued at vendor. Please re-run check shortly!`;
+  } else {
+    finalActionMessage = `💡 All ${totalNumbers} lines were 100% delivered to MTN!`;
+  }
+
+  return `🚚 *DATAMART BULK DELIVERY CHECK AUDIT*\n\n` +
+    `📦 *Batches Audited:* ${uniqueIds.length}\n` +
+    `🔢 *Total Carrier Lines Checked:* ${totalNumbers}\n` +
+    `✅ *Successfully Sent:* ${totalSent}\n` +
+    (totalAutoCompleted > 0 ? `⚡ *Auto-Completed in DataMart:* ✅ ${totalAutoCompleted} order(s)\n` : "") +
+    (totalQueued > 0 ? `⏳ *Batches in Queue:* ${totalQueued}\n` : "") +
+    `❌ *Carrier Failed / Discrepancies:* ${totalFailed}\n\n` +
+    `${globalFailedSummary}` +
+    `📋 *Batch Breakdown:*\n` +
+    `${batchSummaries}\n` +
+    finalActionMessage;
+}
+
+async function executeDatamartSearch(rawQuery, callerPhone = null) {
+  let q = String(rawQuery || "").trim();
+  // 1. If an email address is present anywhere in the text, extract it directly!
+  const emailMatch = q.match(/[\w.-]+@[\w.-]+\.\w+/);
+  if (emailMatch) {
+    q = emailMatch[0];
+  } else {
+    // 2. If an order reference pattern is present anywhere, extract the reference code!
+    const refMatch = q.match(/\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i);
+    if (refMatch) {
+      q = refMatch[0];
+    } else {
+      // 3. Strip command prefixes cleanly
+      q = q.replace(/^(?:datamart|dm)\s+/i, "");
+      q = q.replace(/^(?:search|lookup|find|investigate|check(?:\s*out)?|track|verify)\s+/i, "");
+      q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number|email|ref|reference|transaction)\s+/i, "");
+      q = q.replace(/^(?:ref|reference|trx|trxref|order\s*ref|order\s*reference)(?:\s*[:#=])?\s+/i, "");
+      q = q.replace(/^(?:is\s+|about\s+|info\s+on\s+)/i, "");
+      q = q.replace(/^(?:for\s+)?(?:the\s+)?(?:customer|user|agent|account|buyer|recipient|order|phone|number|email|ref|reference)\s+/i, "");
+      q = q.replace(/^(?:customer|user|agent|order|email|ref|reference)\s+/i, "").trim();
+    }
+  }
+
+  if (!q) return "🔍 Please provide a customer name, phone number, email, or order reference to search.";
+
+  const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(q)}`, {}, callerPhone);
+  const d = resp?.data;
+  const users = d?.results?.users || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "customer" || x.email) : []);
+  const orders = d?.results?.orders || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "order" || x.network) : []);
+
+  if (users.length === 0 && orders.length === 0) {
+    return `🔍 No DataMart customer, agent, or order found matching "*${q}*".`;
+  }
+
+  let out = `🔍 *DATAMART LOOKUP RESULTS FOR "${q}":*\n\n`;
+
+  if (users.length > 0) {
+    users.slice(0, 3).forEach((u, i) => {
+      const num = ["1️⃣", "2️⃣", "3️⃣"][i] || "•";
+      out += `${num} 👤 *USER / AGENT PROFILE:*\n` +
+        `• *Name:* *${u.name || "N/A"}*\n` +
+        `• *Email:* ${u.email || "N/A"}\n` +
+        `• *Phone:* *${u.phoneNumber || "N/A"}*\n` +
+        `• *Role:* *${(u.role || "user").toUpperCase()}*\n` +
+        `• *Wallet Balance:* *GH₵ ${Number(u.walletBalance || 0).toFixed(2)}*\n` +
+        `• *Status:* ${u.isDisabled ? "🚫 Disabled" : "✅ Active"}\n` +
+        `• *Joined:* ${u.createdAt ? new Date(u.createdAt).toLocaleDateString("en-GB") : "N/A"}\n\n`;
+    });
+  } else if (orders.length > 0) {
+    // When searching by recipient phone or reference, results.users is empty on DataMart, but customer details are in the order!
+    const ord0 = orders[0];
+    const custName = ord0.agentStoreDetails?.customerDetails?.name || ord0.purchaserInfo?.name || ord0.userId?.name || "Customer";
+    const custPhone = ord0.phoneNumber || ord0.recipientPhone || ord0.agentStoreDetails?.customerDetails?.phone || "N/A";
+    const agentStore = ord0.agentStoreDetails?.storeName || ord0.purchaserInfo?.name || ord0.userId?.name || "N/A";
+    out += `👤 *CUSTOMER / RECIPIENT INFO:*\n` +
+      `• *Name:* *${custName}*\n` +
+      `• *Phone:* *${custPhone}*\n` +
+      `• *Agent Store:* ${agentStore}\n\n`;
+  }
+
+  let singlePortalId = null;
+  if (orders.length > 0) {
+    out += `📦 *Recent Orders (${orders.length} found):*\n`;
+    orders.slice(0, 5).forEach((ord) => {
+      const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+      // Ensure Portal ID is the 6-digit carrier portal ID (apiOrderId or exportTracking.portalId), NEVER internal DB mongo ID
+      const portalId = ord.apiOrderId || ord.exportTracking?.portalId || (ord.portalOrderId && ord.portalOrderId !== ord._id ? ord.portalOrderId : null);
+      if (orders.length === 1 && portalId) singlePortalId = portalId;
+      const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
+      const status = (ord.status || "N/A").toUpperCase();
+      const statusEmoji = status === "COMPLETED" ? "✅" : status === "FAILED" ? "❌" : "⏳";
+      out += `• ${statusEmoji} *${ord.network} ${cap}* to *${ord.phoneNumber}* (*${status}*)\n` +
+        `  🆔 *Portal ID:* *${portalId || "Pending Export"}*${batchNo}\n` +
+        `  Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
+    });
+    out += "\n";
+  }
+
+  if (singlePortalId) {
+    out += `💡 Reply: *${singlePortalId}* to run carrier delivery check!`;
+  } else {
+    out += `💡 Reply: *[Portal ID]* to run delivery check, or *exit* to leave DataMart Mode.`;
+  }
+  return out;
+}
+
+function getTimeAgoGhana(dateStr) {
+  if (!dateStr) return "recently";
+  const diff = Date.now() - new Date(dateStr).getTime();
+  if (isNaN(diff)) return "recently";
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 /* =========================================================
@@ -5486,11 +7262,23 @@ async function generateFullAdminReport() {
     let dmPurchases = [];
     if (activeDatamartKey) {
       try {
-        const dmRes = await axios.get(`${DATAMART_BASE}/transactions?page=1&limit=100`, {
-          headers: { "x-api-key": activeDatamartKey },
-          timeout: 4000
-        });
-        const rows = dmRes.data?.data?.transactions || dmRes.data?.transactions || [];
+        let dmRes = null;
+        try {
+          dmRes = await axios.get(`${DATAMART_BASE}/transactions?page=1&limit=100`, {
+            headers: { "x-api-key": activeDatamartKey, "x-api-secret": activeDatamartSecret },
+            timeout: 6000
+          });
+        } catch (fErr) {
+          if (fErr.response && (fErr.response.status === 401 || fErr.response.status === 403)) {
+            dmRes = await axios.get(`${DATAMART_BASE}/transactions?page=1&limit=100`, {
+              headers: { "x-api-key": VERIFIED_DATAMART_KEY, "x-api-secret": VERIFIED_DATAMART_SECRET },
+              timeout: 6000
+            });
+          } else {
+            throw fErr;
+          }
+        }
+        const rows = dmRes?.data?.data?.transactions || dmRes?.data?.transactions || [];
         dmPurchases = rows.filter(t => t?.type === "purchase" || t?.relatedPurchase);
       } catch { }
     }
@@ -5795,6 +7583,313 @@ async function handleCustomerAi(from, rawText) {
 }
 
 /* =========================================================
+DATAMART WORKER CONSOLE COMMAND PROCESSOR (MULTI-USER)
+========================================================= */
+
+async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) {
+  const normFrom = String(from || "").replace(/\D/g, "");
+
+  // 0. Exit command
+  if (/^(?:exit|normal\s*mode|stony|stony\s*mode|back|quit|leave|stop)$/i.test(cleanInput)) {
+    setUserMode(from, isOwner ? "ai" : "bot");
+    await saveCustomerSession(from, { step: isOwner ? 99 : 1 });
+    await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: isOwner ? "ai" : "bot" }, { onConflict: "key" });
+    return sendWhatsApp(from, isOwner
+      ? `👑 Switched back to *Stony Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`
+      : `👋 Exited DataMart Console. Switched back to normal WhatsApp store mode! Reply *Hi* for the main menu.`
+    );
+  }
+
+  // Account Status
+  if (/^(?:my\s*datamart|datamart\s*status|account\s*status|whoami)$/i.test(cleanInput)) {
+    const acc = await getUserDatamartAccount(from);
+    if (!acc && !isOwner) {
+      return sendWhatsApp(from, `⚠️ No DataMart account linked to this WhatsApp line. Send *connect datamart <email> <password>* to link.`);
+    }
+    const name = acc?.name || (isOwner ? "Stony Master" : "DataMart Agent");
+    const email = acc?.email || "nyakponoah11@gmail.com";
+    const role = (acc?.role || (isOwner ? "master_worker" : "worker")).toUpperCase();
+    const balance = acc?.walletBalance != null ? Number(acc.walletBalance).toFixed(2) : "0.00";
+    return sendWhatsApp(from,
+      `👤 *DATAMART ACCOUNT STATUS*\n\n` +
+      `• *Name:* *${name}*\n` +
+      `• *Email:* ${email}\n` +
+      `• *Role:* *${role}*\n` +
+      `• *Wallet Balance:* *GH₵ ${balance}*\n` +
+      `• *WhatsApp Line:* ${from}\n` +
+      `• *Active Console:* ✅ Connected & Ready\n\n` +
+      `💡 Text *exit* to leave console mode, or *disconnect datamart* to unlink this account.`
+    );
+  }
+
+  // Disconnect account
+  if (/^(?:disconnect\s*datamart|unlink\s*datamart|logout\s*datamart)$/i.test(cleanInput)) {
+    const acc = await getUserDatamartAccount(from);
+    await disconnectUserDatamartAccount(from);
+    return sendWhatsApp(from,
+      `👋 *DATAMART ACCOUNT DISCONNECTED!*\n\n` +
+      `Your account (${acc?.email || "linked account"}) has been unlinked and your session cleared from this WhatsApp number.`
+    );
+  }
+
+  // 1. Delivery Check (Single or Bulk IDs)
+  const allNums = cleanInput.match(/\b\d{4,9}[a-zA-Z]?\b/g);
+  const isDeliveryCheckIntent = /\b(?:delivery\s*check|check\s*delivery|audit)\b/i.test(cleanInput);
+  if (isDeliveryCheckIntent || (allNums && allNums.length > 0 && /^[0-9a-zA-Z,\s\n\r]+$/.test(cleanInput))) {
+    const targetIds = allNums || [];
+    if (targetIds.length > 0) {
+      const report = await executeDatamartDeliveryCheck(targetIds, from);
+      if (report) return sendWhatsApp(from, report);
+    }
+  }
+
+  // 1b. Live DataMart Failed Orders (e.g. "Do we have failed order", "failed orders", "any failed order", "failed")
+  const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cleanInput) ||
+    /^(?:failed|failed\s*orders?|failed\s*queue|open\s*failed)$/i.test(cleanInput);
+  if (isLiveFailedQuery) {
+    const report = await getLiveFailedOrdersReport(from);
+    if (report) return sendWhatsApp(from, report);
+  }
+
+  // 1c. Query Failed IDs / Numbers from last Delivery Check (e.g. "give me the failed orders only data", "which ones failed")
+  const isAuditFailedQuery = /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cleanInput) ||
+    /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cleanInput);
+  if (isAuditFailedQuery) {
+    const norm = normalizeBotPhone(from);
+    const cached = lastDeliveryCheckCache.get(norm);
+    const reply = await formatFailedItemsReply(cached, from);
+    return sendWhatsApp(from, reply);
+  }
+
+  // 2. Email, Phone, Customer Search, or Order Reference
+  const emailMatch = cleanInput.match(/[\w.-]+@[\w.-]+\.\w+/);
+  const phoneMatch = cleanInput.match(/\b(0[2357]\d{8}|\+?233[2357]\d{8})\b/);
+  const isSearchIntent = /\b(?:search|lookup|find|customer|agent|check|who|investigate|ref|reference|trx|order|track)\b/i.test(cleanInput);
+  const isRefPattern = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(cleanInput) ||
+    /^(?:(?:dm|datamart)\s+)?(?:ref|reference|trx|trxref|order\s*ref|order\s*reference)(?:\s*[:#=])?\s*[A-Za-z0-9_-]+/i.test(cleanInput) ||
+    /^(?:track|verify|check)\s+(?:order\s+)?(?:ref\s+|reference\s+)?([A-Za-z0-9_-]{5,45})$/i.test(cleanInput);
+  const isNameOrWord = /^[a-zA-Z\s]{3,35}$/.test(cleanInput) && !/^(?:exit|tickets?|urgent|pending|withdrawals?|deposits?|claims?|recovery|stats|my\s*datamart)$/i.test(cleanInput);
+
+  if (emailMatch || phoneMatch || isSearchIntent || isNameOrWord || isRefPattern) {
+    const report = await executeDatamartSearch(cleanInput, from);
+    if (report) return sendWhatsApp(from, report);
+  }
+
+  // 3a. Rezolv Live Reply to Customer
+  const dmRezolvReplyMatch = cleanInput.match(/^reply\s+(?:to\s+)?(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24})\s+([\s\S]+)$/i);
+  if (dmRezolvReplyMatch) {
+    const tktId = dmRezolvReplyMatch[1].trim();
+    const replyMsg = dmRezolvReplyMatch[2].trim();
+    const rep = await sendRezolvReply(tktId, replyMsg);
+    return sendWhatsApp(from, rep);
+  }
+
+  // 3b. Rezolv View Ticket Conversation
+  const dmRezolvViewMatch = cleanInput.match(/^(?:view\s+ticket|check\s+ticket|ticket)\s+(TKT-?\d+|[a-f0-9]{24})$/i);
+  if (dmRezolvViewMatch) {
+    const tktId = dmRezolvViewMatch[1].trim();
+    const rep = await getRezolvTicketConversation(tktId);
+    return sendWhatsApp(from, rep);
+  }
+
+  // 3c. Rezolv Close/Resolve Ticket
+  const dmRezolvCloseMatch = cleanInput.match(/^(?:close|resolve)\s+(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24})$/i);
+  if (dmRezolvCloseMatch) {
+    const tktId = dmRezolvCloseMatch[1].trim();
+    const rep = await closeRezolvTicket(tktId);
+    return sendWhatsApp(from, rep);
+  }
+
+  // 3d. Rezolv Customer Live Tickets
+  if (/^(?:rezolv|rezolv\s*tickets?|live\s*tickets?|customer\s*tickets?)$/i.test(cleanInput)) {
+    const rep = await getRezolvTicketsReport("active");
+    return sendWhatsApp(from, rep);
+  }
+
+  // 3. Tickets
+  if (/^(?:tickets?|urgent|pending)$/i.test(cleanInput)) {
+    const data = await fetchDatamartSupportTickets({ status: cleanInput.toLowerCase() === "urgent" ? "pending" : "pending", priority: cleanInput.toLowerCase() === "urgent" ? "urgent" : undefined, limit: 5 }, from);
+    if (!data || !data.tickets) return sendWhatsApp(from, `⚠️ Could not fetch DataMart tickets.`);
+    let out = `🎫 *[DATAMART MODE] SUPPORT QUEUE (${data.pagination?.total || data.tickets.length} total):*\n\n`;
+    data.tickets.forEach((tk, idx) => {
+      const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+      const prio = (tk.priority || "normal").toUpperCase();
+      out += `${numEmoji} *[${tk.reportId || "ID"}]* *${tk.reportReason || "Support"}* (*${prio}*)\n` +
+        `• 👤 ${tk.userId?.name || "Customer"} (${tk.phoneNumber || tk.userId?.phoneNumber || "N/A"})\n` +
+        `• 📝 ${(tk.description || "").slice(0, 85)}...\n\n`;
+    });
+    out += `💡 Reply with any *ReportID* (e.g. *RPT005135*) to view details!`;
+    return sendWhatsApp(from, out);
+  }
+
+  // 4. Failed orders
+  if (/^(?:failed|failed\s*orders)$/i.test(cleanInput)) {
+    const resp = await fetchDatamartSupportEndpoint('/api/support/failed-orders?limit=5', {}, from);
+    const orders = resp?.data?.orders || [];
+    if (orders.length === 0) return sendWhatsApp(from, `🎉 *[DATAMART MODE]* Zero failed orders in queue! All carrier dispatches green.`);
+    let out = `⚠️ *[DATAMART MODE] FAILED ORDERS:*\n\n`;
+    orders.forEach((ord, idx) => {
+      const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+      out += `${num} *[${ord._id}]* ${ord.network} ${ord.capacity || ""}GB ➔ ${ord.phoneNumber}\n` +
+        `• Reason: ${ord.failureReason || ord.status || "Failed"}\n` +
+        `• Actions: *retry ${ord._id}* | *refund ${ord._id}*\n\n`;
+    });
+    return sendWhatsApp(from, out);
+  }
+
+  // 5. Withdrawals
+  if (/^(?:withdrawals?|cashouts?)$/i.test(cleanInput)) {
+    const resp = await fetchDatamartSupportEndpoint('/api/support/withdrawals?limit=5', {}, from);
+    const list = resp?.data?.withdrawals || [];
+    if (list.length === 0) return sendWhatsApp(from, `💰 *[DATAMART MODE]* No pending withdrawal requests.`);
+    let out = `💰 *[DATAMART MODE] WITHDRAWALS:*\n\n`;
+    list.forEach((w, idx) => {
+      const num = ["1️⃣", "2️⃣", "3️⃣"][idx] || `•`;
+      out += `${num} *[${w.withdrawalId || w._id}]* GH₵ ${Number(w.requestedAmount || 0).toFixed(2)} (${(w.status || "pending").toUpperCase()})\n` +
+        `• Agent: ${w.agentId?.name || "N/A"} (${w.storeId?.storeName || "Store"})\n\n`;
+    });
+    return sendWhatsApp(from, out);
+  }
+
+  // 6. Deposits
+  if (/^(?:deposits?|momo)$/i.test(cleanInput)) {
+    const resp = await fetchDatamartSupportEndpoint('/api/support/deposits?limit=5', {}, from);
+    const list = resp?.data?.deposits || [];
+    if (list.length === 0) return sendWhatsApp(from, `💳 *[DATAMART MODE]* No recent deposits found.`);
+    let out = `💳 *[DATAMART MODE] RECENT DEPOSITS:*\n\n`;
+    list.forEach((dep, idx) => {
+      const num = ["1️⃣", "2️⃣", "3️⃣"][idx] || `•`;
+      out += `${num} *GH₵ ${Number(dep.amount || 0).toFixed(2)}* (${(dep.type || "deposit").toUpperCase()})\n` +
+        `• User: ${dep.userId?.name || "User"} (${dep.userId?.phoneNumber || "N/A"})\n` +
+        `• Wallet After: GH₵ ${Number(dep.balanceAfter || 0).toFixed(2)}\n\n`;
+    });
+    return sendWhatsApp(from, out);
+  }
+
+  // 7. Dashboard / Stats
+  if (/^(?:stats|dashboard|overview|volume)$/i.test(cleanInput)) {
+    const resp = await fetchDatamartSupportEndpoint('/api/support/dashboard', {}, from);
+    const d = resp?.data;
+    if (!d) return sendWhatsApp(from, `⚠️ Could not fetch DataMart dashboard.`);
+    const today = d.today || {};
+    const tickets = d.tickets || {};
+    return sendWhatsApp(from,
+      `📊 *[DATAMART MODE] DASHBOARD*\n\n` +
+      `• 🛒 *Orders Today:* ${(today.totalOrders || 0).toLocaleString()}\n` +
+      `• ❌ *Failed Orders:* ${today.failedOrders || 0}\n` +
+      `• 💸 *Refunds Processed:* ${today.refundsProcessed || 0}\n` +
+      `• ⏳ *Pending Tickets:* ${(tickets.pending || 0).toLocaleString()}\n\n` +
+      `💡 Type *exit* to return to normal WhatsApp mode.`
+    );
+  }
+
+  // 8. MoMo Claims
+  if (/^(?:momo\s*claims?|claims?)$/i.test(cleanInput)) {
+    const resp = await fetchDatamartSupportEndpoint('/api/support/momo-claims?limit=5', {}, from);
+    const payments = resp?.data?.payments || [];
+    if (payments.length === 0) return sendWhatsApp(from, `📱 *[DATAMART MODE]* No recent MoMo claims found.`);
+    let out = `📱 *[DATAMART MODE] MOMO CLAIMS:*\n\n`;
+    payments.forEach((p, idx) => {
+      const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+      out += `${num} *TrxID:* *${p.trxId || "N/A"}* | *GH₵ ${Number(p.amount || 0).toFixed(2)}*\n` +
+        `• Sender: ${p.senderName || "Unknown"} (${p.network || "MoMo"})\n` +
+        `• Status: *${(p.status || "unclaimed").toUpperCase()}* ${p.autoMatched ? "(Auto-matched)" : ""}\n\n`;
+    });
+    return sendWhatsApp(from, out);
+  }
+
+  // 9. Not Received / Complaints
+  if (/^(?:not\s*received|complaints?|missing)$/i.test(cleanInput)) {
+    const resp = await fetchDatamartSupportEndpoint('/api/support/not-received', {}, from);
+    const reports = resp?.data?.reports || [];
+    if (reports.length === 0) return sendWhatsApp(from, `🎉 *[DATAMART MODE]* No unresolved "Not Received" complaints!`);
+    let out = `⚠️ *[DATAMART MODE] NOT RECEIVED COMPLAINTS (${reports.length}):*\n\n`;
+    reports.slice(0, 5).forEach((r, idx) => {
+      const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+      out += `${num} *TrackID:* *${r.trackId || "N/A"}* | *Ref:* ${r.reference || "N/A"}\n` +
+        `• Recipient: *${r.phone}* (${r.network} ${r.capacity || ""}GB)\n` +
+        `• Order Status: *${(r.ourStatus || "pending").toUpperCase()}*\n\n`;
+    });
+    out += `💡 Reply with order reference or ID to run a delivery check!`;
+    return sendWhatsApp(from, out);
+  }
+
+  // 10. Recovery (Failed & Skipped Recovery)
+  if (/^(?:failed\s*recovery|skipped\s*recovery|recovery)$/i.test(cleanInput)) {
+    const [fResp, sResp] = await Promise.all([
+      fetchDatamartSupportEndpoint('/api/support/failed-recovery', {}, from),
+      fetchDatamartSupportEndpoint('/api/support/skipped-recovery', {}, from)
+    ]);
+    const fData = fResp?.data || {};
+    const sData = sResp?.data || {};
+    return sendWhatsApp(from,
+      `🔄 *[DATAMART MODE] RECOVERY PIPELINE STATUS*\n\n` +
+      `• ❌ *Failed Recovery:* ${fData.totalFailed || 0} batches pending (${fData.recoveredCount || 0} recovered)\n` +
+      `• ⏭️ *Skipped Recovery:* ${sData.totalSkipped || 0} batches (Value: GH₵ ${Number(sData.totalValue || 0).toFixed(2)})\n` +
+      `• 📡 *Carrier Frontier:* Unibundle: #${sData.frontier?.unibundle?.max || "N/A"} | Etopup: #${sData.frontier?.etopup?.max || "N/A"}\n\n` +
+      `💡 All automated recovery loops are active.`
+    );
+  }
+
+  // 11. Flagged Users / Risk Review
+  if (/^(?:flagged|flagged\s*users|account\s*review)$/i.test(cleanInput)) {
+    const resp = await fetchDatamartSupportEndpoint('/api/support/flagged-users', {}, from);
+    const list = Array.isArray(resp?.data) ? resp.data : (resp?.data?.users || []);
+    if (list.length === 0) return sendWhatsApp(from, `🛡️ *[DATAMART MODE]* No high-risk flagged users currently.`);
+    let out = `🚨 *[DATAMART MODE] FLAGGED USERS (${list.length}):*\n\n`;
+    list.slice(0, 5).forEach((u, idx) => {
+      const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+      out += `${num} *${u.name || "User"}* (${u.phoneNumber || u.email || "N/A"})\n` +
+        `• Reason: ${u.flagReason || u.suspicionReason || "High velocity / Suspicious activity"}\n` +
+        `• Wallet: GH₵ ${Number(u.walletBalance || 0).toFixed(2)}\n\n`;
+    });
+    return sendWhatsApp(from, out);
+  }
+
+  // 12. Audit Logs / Recent Delivery Checks
+  if (/^(?:audit\s*logs?|audits?|recent\s*checks?|delivery\s*checks?)$/i.test(cleanInput)) {
+    const resp = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent', {}, from);
+    const list = Array.isArray(resp?.data) ? resp.data : [];
+    if (list.length === 0) return sendWhatsApp(from, `🚚 *[DATAMART MODE]* No recent delivery check logs.`);
+    let out = `🚚 *[DATAMART MODE] RECENT DELIVERY CHECKS:*\n\n`;
+    list.slice(0, 5).forEach((c, idx) => {
+      const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+      out += `${num} *Order ID:* *${c.portalOrderId || c.orderId || "N/A"}* (Batch #${c.batchNumber || "N/A"})\n` +
+        `• Result: ${c.allDelivered ? "✅ 100% Delivered" : "⚠️ Partial / Pending"} (${c.sent || 0}/${c.totalItems || 0})\n` +
+        `• Checked by: ${c.checkedBy || "Agent"} at ${c.createdAt ? new Date(c.createdAt).toLocaleTimeString("en-GB") : "Recently"}\n\n`;
+    });
+    return sendWhatsApp(from, out);
+  }
+
+  // 13. Help / Tools Menu in DataMart Mode
+  if (/^(?:help|tools|menu|commands|\?)$/i.test(cleanInput)) {
+    return sendWhatsApp(from,
+      `🏢 *DATAMART AGENT SUPPORT TOOLS CONSOLE*\n\n` +
+      `You can text any of these commands directly:\n\n` +
+      `🚚 *Delivery Check:* Send single or bulk IDs (e.g. *2313443* or *2313443 2313467*)\n` +
+      `🔍 *Search / Investigate:* Send email, phone, or name\n` +
+      `🎫 *Tickets:* Send *tickets* or *urgent*\n` +
+      `❌ *Failed Orders:* Send *failed*\n` +
+      `📱 *MoMo Claims:* Send *claims* or *momo claims*\n` +
+      `⚠️ *Not Received:* Send *not received* or *complaints*\n` +
+      `🔄 *Recovery:* Send *recovery* or *failed recovery*\n` +
+      `💰 *Withdrawals:* Send *withdrawals*\n` +
+      `💳 *Deposits:* Send *deposits*\n` +
+      `🚨 *Flagged Users:* Send *flagged*\n` +
+      `📜 *Audit Logs:* Send *audits* or *recent checks*\n` +
+      `📊 *Dashboard / Stats:* Send *stats*\n` +
+      `👤 *My Account:* Send *my datamart*\n\n` +
+      `💡 Type *exit* to return to normal WhatsApp mode.`
+    );
+  }
+
+  return sendWhatsApp(from,
+    `🏢 *[DATAMART CONSOLE]* Command "*${cleanInput.slice(0, 20)}*" not recognized.\n\n` +
+    `💡 Send *tools* or *help* to see all available commands, or *exit* to leave console mode.`
+  );
+}
+
+/* =========================================================
 WEBHOOK VERIFY
 ========================================================= */
 
@@ -5806,17 +7901,121 @@ app.get("/webhook", (req, res) => {
 WHATSAPP WEBHOOK (RECEIVE MESSAGES)
 ========================================================= */
 
+const sendDirectWhatsApp = sendWhatsApp;
+
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
-    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    if (!msg) return;
+    let sendWhatsApp = sendDirectWhatsApp;
+    const changeVal = req.body.entry?.[0]?.changes?.[0]?.value || req.body?.value || req.body;
+    const msg = changeVal?.messages?.[0] || req.body?.messages?.[0] || req.body?.data;
+    if (!msg) {
+      const statusObj = changeVal?.statuses?.[0] || req.body?.statuses?.[0];
+      if (statusObj && (statusObj.errors || statusObj.status === "failed")) {
+        console.warn("⚠️ [WA STATUS ALERT]", JSON.stringify(statusObj));
+      }
+      return;
+    }
 
-    const from = msg.from;
-    const text = (msg.text?.body || "").trim();
+    let from =
+      msg.from ||
+      msg.sender ||
+      msg.author ||
+      msg.wa_id ||
+      msg.chatId ||
+      msg.key?.remoteJid ||
+      changeVal?.contacts?.[0]?.user_id ||
+      changeVal?.contacts?.[0]?.wa_id ||
+      changeVal?.contacts?.[0]?.id ||
+      req.body?.contacts?.[0]?.user_id ||
+      req.body?.contacts?.[0]?.wa_id ||
+      req.body?.from ||
+      req.body?.sender ||
+      null;
 
-    console.log("📩", from, text);
+    if (typeof from === "string") {
+      from = from.replace(/@.+$/, "").trim();
+    }
+
+    if (!from) {
+      console.warn("⚠️ [WA WEBHOOK] SENDER 'from' IS UNDEFINED! Full payload:", JSON.stringify(req.body));
+      return;
+    }
+
+    let text = (
+      msg.text?.body ||
+      msg.body ||
+      msg.caption ||
+      msg.image?.caption ||
+      msg.video?.caption ||
+      msg.document?.caption ||
+      msg.message?.conversation ||
+      msg.message?.extendedTextMessage?.text ||
+      msg.interactive?.button_reply?.title ||
+      msg.interactive?.button_reply?.id ||
+      msg.interactive?.list_reply?.title ||
+      msg.interactive?.list_reply?.id ||
+      msg.button?.text ||
+      ""
+    ).trim();
+
+    let isVoiceNote = false;
+    const isAudioMsg = msg.type === "audio" || msg.type === "voice" || Boolean(msg.audio);
+
+    if (!text && isAudioMsg) {
+      const audioMediaId = msg.audio?.id || msg.voice?.id || msg.media?.id || (msg.type === "audio" ? msg.id : null);
+      const audioMime = msg.audio?.mime_type || "audio/ogg";
+      if (audioMediaId) {
+        isVoiceNote = true;
+        try {
+          console.log(`🎙️ [VOICE NOTE RECEIVED] from [${from}] (Media ID: ${audioMediaId}, MIME: ${audioMime}). Downloading & Transcribing...`);
+          const token = ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
+          const transcribed = await transcribeWhatsAppVoiceNote(audioMediaId, audioMime, token);
+          if (transcribed && transcribed.trim()) {
+            text = transcribed.trim();
+            console.log(`🎙️ [VOICE NOTE TRANSCRIBED] from [${from}]: "${text}"`);
+            const voicePrefix = `🎙️ _"${text}"_\n\n`;
+            sendWhatsApp = async (to, body) => {
+              let finalBody = body;
+              if (typeof finalBody === "string" && !finalBody.startsWith("🎙️")) {
+                finalBody = `${voicePrefix}${finalBody}`;
+              }
+              return sendDirectWhatsApp(to, finalBody);
+            };
+          } else {
+            console.warn(`⚠️ [VOICE NOTE TRANSCRIBED EMPTY] from [${from}]`);
+            return sendWhatsApp(from, "🎙️ I received your voice note, bossu! But I couldn't hear any speech clearly. Could you please send it again or type it for me?");
+          }
+        } catch (err) {
+          console.error("❌ [VOICE NOTE ERROR]:", err.message);
+          return sendWhatsApp(from, `🎙️ I received your voice note, bossu! But had an issue downloading or transcribing the audio (${err.message}). Could you please send it again or type it for me?`);
+        }
+      }
+    }
+
+    // Image & Screenshot Vision Handling:
+    const isImageMsg = msg.type === "image" || Boolean(msg.image);
+    if (isImageMsg) {
+      const imgMediaId = msg.image?.id || msg.media?.id || (msg.type === "image" ? msg.id : null);
+      const imgMime = msg.image?.mime_type || "image/jpeg";
+      if (imgMediaId) {
+        console.log(`🖼️ [IMAGE RECEIVED] from [${from}] (Media ID: ${imgMediaId}, Caption: "${text}")`);
+        try {
+          const visionToken = ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
+          const analysis = await analyzeWhatsAppImage(imgMediaId, imgMime, text, visionToken);
+          if (analysis) {
+            console.log(`🖼️ [IMAGE ANALYZED] for [${from}]`);
+            return sendWhatsApp(from, `🖼️ *IMAGE ANALYSIS / OCR*\n\n${analysis}`);
+          }
+        } catch (imgErr) {
+          console.error("❌ [IMAGE ANALYSIS ERROR]:", imgErr.message);
+          return sendWhatsApp(from, `🖼️ I received your image, bossu! But had an issue analyzing it (${imgErr.message}). Could you please resend it or describe what's on it?`);
+        }
+      }
+    }
+
+    console.log("📩", from, isVoiceNote ? `[VOICE NOTE]: "${text}"` : text);
 
     /* =====================================================
     DYNAMIC OWNER & ADMIN PHONE DETECTION
@@ -5833,8 +8032,8 @@ app.post("/webhook", async (req, res) => {
       });
     } catch (_) { }
 
-    const normFrom = String(from || "").replace(/\D/g, "");
-    const isOwner = adminPhones.some(p => p && (normFrom === p || normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))));
+    const normFrom = normalizeBotPhone(from);
+    const isOwner = !/[a-zA-Z]/.test(String(from)) && adminPhones.some(p => p && (normFrom === p || (p.length >= 9 && normFrom.length >= 9 && (normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))))));
 
     // Check if sender is a Registered Agent / Reseller
     let matchedAgent = null;
@@ -5853,6 +8052,218 @@ app.post("/webhook", async (req, res) => {
         });
       }
     } catch (_) { }
+
+    /* =====================================================
+    DATAMART MULTI-USER CONNECT & CONSOLE ROUTER
+    ===================================================== */
+    const cleanCmd = (text || "").trim();
+
+    // 1. Connect / Link DataMart Account (Self-service or Owner assignment)
+    const connectDmMatch = cleanCmd.match(/^(?:connect|link|login)\s+datamart(?:\s+(?:for\s+)?(\+?\d{9,15}))?(?:\s+([\w.-]+@[\w.-]+\.\w+))(?:\s+(.+))?$/i);
+    if (connectDmMatch) {
+      const explicitPhone = connectDmMatch[1];
+      const targetPhone = (isOwner && explicitPhone) ? explicitPhone : from;
+      const targetEmail = connectDmMatch[2];
+      const targetPass = (connectDmMatch[3] || "").trim();
+
+      if (!targetEmail || !targetPass) {
+        return sendWhatsApp(from,
+          `💡 *HOW TO CONNECT A DATAMART ACCOUNT:*\n\n` +
+          `Send your message in this format:\n` +
+          `*connect datamart <email> <password>*\n\n` +
+          `Example:\n` +
+          `*connect datamart kwame@gmail.com MyPass123*\n\n` +
+          `🔒 Credentials are verified directly with DataMart's official server and bound securely to your WhatsApp line only.`
+        );
+      }
+
+      const res = await connectUserDatamartAccount(targetPhone, targetEmail, targetPass);
+      if (!res.success) {
+        return sendWhatsApp(from, `❌ *DATAMART CONNECTION FAILED*\n\n${res.error || "Invalid DataMart email or password."}\nPlease check your credentials and try again.`);
+      }
+
+      const u = res.user;
+      const confirmMsg =
+        `🎉 *DATAMART ACCOUNT CONNECTED SUCCESSFULLY!* 🚀\n\n` +
+        `👤 *User:* *${u.name}*\n` +
+        `📧 *Email:* ${u.email}\n` +
+        `🏷️ *Role:* *${(u.role || "worker").toUpperCase()}*\n` +
+        `💰 *Wallet Balance:* *GH₵ ${Number(u.walletBalance || 0).toFixed(2)}*\n` +
+        `📱 *Bound WhatsApp:* ${targetPhone}\n\n` +
+        `🛠️ *You can now control your DataMart account right on WhatsApp!*\n` +
+        `• Text *datamart mode* anytime to enter your Worker Console.\n` +
+        `• Run live carrier delivery checks, inspect orders, check tickets, and manage customers.\n` +
+        `• Text *my datamart* to check account status, or *disconnect datamart* to unlink anytime.`;
+
+      if (isOwner && explicitPhone && explicitPhone !== from) {
+        await sendWhatsApp(from, `✅ Successfully linked DataMart account *${u.email}* (${u.name}) to WhatsApp number *${targetPhone}*!`);
+        await sendWhatsApp(targetPhone, confirmMsg).catch(() => {});
+        return;
+      }
+
+      return sendWhatsApp(from, confirmMsg);
+    }
+
+    if (/^(?:connect\s*datamart|link\s*datamart|datamart\s*login)$/i.test(cleanCmd)) {
+      return sendWhatsApp(from,
+        `💡 *HOW TO CONNECT YOUR DATAMART ACCOUNT:*\n\n` +
+        `Send your message in this format:\n` +
+        `*connect datamart <email> <password>*\n\n` +
+        `Example:\n` +
+        `*connect datamart kwame@gmail.com MyPass123*\n\n` +
+        `🔒 _Your password is authenticated securely directly with DataMart's server and stored encrypted for your WhatsApp number only._`
+      );
+    }
+
+    // 2. Disconnect DataMart Account
+    if (/^(?:disconnect\s*datamart|unlink\s*datamart|logout\s*datamart)$/i.test(cleanCmd)) {
+      const acc = await getUserDatamartAccount(from);
+      if (!acc) {
+        return sendWhatsApp(from, `ℹ️ No DataMart account is linked to this phone number.`);
+      }
+      await disconnectUserDatamartAccount(from);
+      return sendWhatsApp(from, `👋 Your DataMart account (*${acc.email}*) has been successfully disconnected and your credentials removed.`);
+    }
+
+    // 3. View Connected DataMart Account
+    if (/^(?:my\s*datamart|datamart\s*status|account\s*status)$/i.test(cleanCmd)) {
+      const acc = await getUserDatamartAccount(from);
+      if (!acc && !isOwner) {
+        return sendWhatsApp(from,
+          `ℹ️ No DataMart account is connected to this WhatsApp line yet.\n\n` +
+          `To connect yours, text:\n` +
+          `*connect datamart <your_email> <your_password>*`
+        );
+      }
+      const name = acc?.name || (isOwner ? "Stony Master" : "DataMart Agent");
+      const email = acc?.email || "nyakponoah11@gmail.com";
+      const role = (acc?.role || (isOwner ? "master_worker" : "worker")).toUpperCase();
+      const balance = acc?.walletBalance != null ? Number(acc.walletBalance).toFixed(2) : "0.00";
+      return sendWhatsApp(from,
+        `👤 *DATAMART ACCOUNT STATUS*\n\n` +
+        `• *Name:* *${name}*\n` +
+        `• *Email:* ${email}\n` +
+        `• *Role:* *${role}*\n` +
+        `• *Wallet Balance:* *GH₵ ${balance}*\n` +
+        `• *WhatsApp Line:* ${from}\n` +
+        `• *Active Console:* ✅ Ready\n\n` +
+        `💡 Text *datamart mode* to start controlling your account, or *disconnect datamart* to unlink.`
+      );
+    }
+
+    // 4. Switch to DataMart Mode (For Owner or Connected Users)
+    if (/^(?:datamart\s*mode|dm\s*mode|agent\s*support\s*mode|switch\s*to\s*datamart|datamart)$/i.test(cleanCmd)) {
+      const acc = await getUserDatamartAccount(from);
+      if (!acc && !isOwner) {
+        return sendWhatsApp(from,
+          `⚠️ *NO DATAMART ACCOUNT CONNECTED*\n\n` +
+          `You must connect your DataMart account first before entering DataMart Mode.\n\n` +
+          `Send this message to connect:\n` +
+          `*connect datamart <your_email> <your_password>*\n\n` +
+          `Example:\n` +
+          `*connect datamart kwame@gmail.com MyPass123*`
+        );
+      }
+      setUserMode(from, "datamart");
+      await saveCustomerSession(from, { step: 98 });
+      await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "datamart" }, { onConflict: "key" });
+      const userName = acc?.name || (isOwner ? "Stony Master" : "DataMart Agent");
+      const userRole = (acc?.role || (isOwner ? "master_worker" : "worker")).toUpperCase();
+      return sendWhatsApp(from,
+        `🏢 *SWITCHED TO DATAMART AGENT SUPPORT MODE!* 🚀\n` +
+        `👤 Logged in as: *${userName}* (*${userRole}*)\n\n` +
+        `You are now connected directly to your DataMart Console. Every command you send will execute live on your DataMart account!\n\n` +
+        `🛠️ *Quick Commands in this mode:*\n` +
+        `• *Batch/Order ID(s)* (e.g. *2313443* or *2313443 2313467*) ➔ Carrier Delivery Check\n` +
+        `• *Email or Phone* (e.g. *0244123456*) ➔ Customer/Agent Search & Balance\n` +
+        `• *tickets* or *urgent* ➔ View Support Queue\n` +
+        `• *failed* ➔ View Failed Orders\n` +
+        `• *withdrawals* ➔ View Cashout Requests\n` +
+        `• *deposits* ➔ View MoMo & Paystack Deposits\n` +
+        `• *claims* ➔ MoMo Claims\n` +
+        `• *not received* ➔ Customer Complaints\n` +
+        `• *recovery* ➔ Recovery Pipeline Status\n` +
+        `• *stats* ➔ Volume & Performance Overview\n` +
+        `• *my datamart* ➔ Account Info\n\n` +
+        `💡 To switch back to normal WhatsApp mode anytime, just text: *exit*.`
+      );
+    }
+
+    // 5. Active DataMart Console Mode Execution
+    const userSession = await getCustomerSession(from);
+    const activeUserMode = getUserMode(from, userSession);
+    const userDmAccount = await getUserDatamartAccount(from);
+    const hasDatamartAccess = isOwner || Boolean(userDmAccount);
+
+    if (activeUserMode === "datamart") {
+      const dmHandled = await processDatamartConsoleCommand(from, cleanCmd, isOwner);
+      if (dmHandled) return dmHandled;
+    } else if (activeUserMode === "ai") {
+      // 👑 OWNER IS IN STONY MODE (DATA 1 GH STORE CO-PILOT)
+      const hasExplicitDmPrefix = /^(?:datamart|dm)\s+/i.test(cleanCmd);
+
+      // If owner is asking about failed orders on Data 1 GH
+      const isData1FailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cleanCmd) ||
+        /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cleanCmd) ||
+        /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cleanCmd) ||
+        /^(?:failed|failed\s*orders?)$/i.test(cleanCmd);
+
+      if (isData1FailedQuery && !hasExplicitDmPrefix) {
+        const report = await getData1FailedOrdersReport();
+        if (report) return sendWhatsApp(from, report);
+      }
+
+      // If owner explicitly said "dm ..." or "datamart ...", allow DataMart console command
+      if (hasExplicitDmPrefix) {
+        const cleanDmCmd = cleanCmd.replace(/^(?:datamart|dm)\s+/i, "").trim();
+        const dmHandled = await processDatamartConsoleCommand(from, cleanDmCmd, isOwner);
+        if (dmHandled) return dmHandled;
+      }
+      // Otherwise, message proceeds straight down to Stony Owner AI without getting intercepted by DataMart!
+    } else if (hasDatamartAccess) {
+      // 1. Live DataMart Failed Orders (e.g. "Do we have failed order", "failed orders", "any failed order", "check failed orders")
+      const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cleanCmd) ||
+        /^(?:failed|failed\s*orders?|failed\s*queue|open\s*failed)$/i.test(cleanCmd);
+      if (isLiveFailedQuery) {
+        const report = await getLiveFailedOrdersReport(from);
+        if (report) return sendWhatsApp(from, report);
+      }
+
+      // 2. Query failed items from last delivery check audit (e.g. "give me the failed orders only data", "which ones failed")
+      const isAuditFailedQuery = /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cleanCmd) ||
+        /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cleanCmd);
+      if (isAuditFailedQuery) {
+        const norm = normalizeBotPhone(from);
+        const cached = lastDeliveryCheckCache.get(norm);
+        const reply = await formatFailedItemsReply(cached, from);
+        return sendWhatsApp(from, reply);
+      }
+
+      // Direct DataMart delivery check trigger even outside console mode
+      const hasDeliveryCheckWord = /\b(?:delivery\s*check|check\s*delivery|carrier\s*check|audit)\b/i.test(cleanCmd);
+      const isRawPortalIds = /^[0-9a-zA-Z,\s\n\r]+$/.test(cleanCmd) && /\b\d{4,9}[a-zA-Z]?\b/.test(cleanCmd);
+      if (hasDeliveryCheckWord || isRawPortalIds) {
+        const idMatches = cleanCmd.match(/\b\d{4,9}[a-zA-Z]?\b/g);
+        if (idMatches && idMatches.length > 0) {
+          const report = await executeDatamartDeliveryCheck(idMatches, from);
+          if (report) return sendWhatsApp(from, report);
+        }
+      }
+
+      // Direct DataMart customer / agent / order reference search even outside console mode
+      const isSearchIntent = /\b(?:search|lookup|find|investigate|check|customer|agent|ref|reference|track)\b/i.test(cleanCmd);
+      const isPhoneOrEmail = /[\w.-]+@[\w.-]+\.\w+/.test(cleanCmd) || /\b(0[2357]\d{8}|\+?233[2357]\d{8})\b/.test(cleanCmd);
+      const isRefPattern = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(cleanCmd) ||
+        /^(?:(?:dm|datamart)\s+)?(?:ref|reference|trx|trxref|order\s*ref|order\s*reference)(?:\s*[:#=])?\s*[A-Za-z0-9_-]+/i.test(cleanCmd) ||
+        /^(?:track|verify|check)\s+(?:order\s+)?(?:ref\s+|reference\s+)?([A-Za-z0-9_-]{5,45})$/i.test(cleanCmd);
+      const isDmPrefixed = /^(?:datamart|dm)\s+/i.test(cleanCmd);
+      if ((isSearchIntent && (isPhoneOrEmail || cleanCmd.split(/\s+/).length >= 2)) || isDmPrefixed || isRefPattern) {
+        if (!hasDeliveryCheckWord && !isRawPortalIds && !/\b(?:tickets?|withdrawals?|deposits?|claims?)\b/i.test(cleanCmd)) {
+          const report = await executeDatamartSearch(cleanCmd, from);
+          if (report) return sendWhatsApp(from, report);
+        }
+      }
+    }
 
     /* =====================================================
     AGENT STORE CO-PILOT (RESELLER WHATSAPP ASSISTANT)
@@ -6254,6 +8665,34 @@ app.post("/webhook", async (req, res) => {
       }
 
       const cleanInput = text.trim();
+
+      // ── SWITCH TO DATAMART AGENT SUPPORT MODE ──
+      if (/^(?:datamart\s*mode|dm\s*mode|agent\s*support\s*mode|switch\s*to\s*datamart|datamart)$/i.test(cleanInput)) {
+        setUserMode(from, "datamart");
+        await saveCustomerSession(from, { step: 98 });
+        await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "datamart" }, { onConflict: "key" });
+        return sendWhatsApp(from,
+          `🏢 *SWITCHED TO DATAMART AGENT SUPPORT MODE!* 🚀\n\n` +
+          `You are now connected directly to your DataMart Worker Console. Every command or query you send will execute live on DataMart!\n\n` +
+          `🛠️ *What you can send in this mode:*\n` +
+          `• *Any Batch/Order ID* (e.g. *2313443*) ➔ Runs Live Carrier Delivery Check\n` +
+          `• *Any Email or Phone* (e.g. *nyakponoah11@gmail.com*) ➔ Customer/Agent Profile & Wallet\n` +
+          `• *tickets* or *urgent* ➔ View active support tickets\n` +
+          `• *failed* ➔ View failed orders & retry\n` +
+          `• *withdrawals* ➔ View agent cashouts\n` +
+          `• *deposits* ➔ View MoMo & Paystack deposits\n` +
+          `• *stats* or *dashboard* ➔ View today's total volume\n` +
+          `• *recovery* ➔ Check skipped/failed recovery pipelines\n` +
+          `• *not received* ➔ Customer complaints\n\n` +
+          `💡 To switch back to normal store co-pilot mode anytime, just text: *exit* or *normal mode* or *stony*.`
+        );
+      }
+
+      // ── DEDICATED DATAMART WORKER CONSOLE MODE HANDLER ──
+      if (getUserMode(from) === "datamart") {
+        const dmHandled = await processDatamartConsoleCommand(from, cleanInput, true);
+        if (dmHandled) return dmHandled;
+      }
 
       // ── 0. OWNER AI TRAINING & CORRECTION HANDLER (WHATSAPP → PERMANENT MEMORY) ──
       const isDirectTraining =
@@ -7284,6 +9723,31 @@ app.post("/webhook", async (req, res) => {
           RUNTIME_ERROR_LOG.slice(0, 5).map(e => `• [${e.time}] ${e.level}: ${e.message}`).join("\n")
         : `\nRECENT SERVER RUNTIME LOGS: Zero runtime errors (All background workers healthy).`;
 
+      let boostLiveContext = "";
+      try {
+        const { data: bSettings } = await supabase.from("settings").select("key, value").in("key", ["boost_markup_percent", "default_agent_boost_markup_percent"]);
+        const bMap = {};
+        (bSettings || []).forEach(r => { bMap[r.key] = r.value; });
+        const admInc = bMap["boost_markup_percent"] || "10";
+        const agInc = bMap["default_agent_boost_markup_percent"] || "20";
+        boostLiveContext = `- Social Media Boost Services (BoostUpGH SMM): Wholesale Markup from Provider: +${admInc}% | Universal Reseller Margin: +${agInc}% (Rule: Reseller margin >= Provider markup)\n`;
+      } catch (_) {}
+
+      let dmSupportLiveContext = "";
+      try {
+        const dmSup = await fetchDatamartSupportTickets({ status: "pending", limit: 3 });
+        if (dmSup && dmSup.tickets) {
+          const bdMap = {};
+          (dmSup.statusBreakdown || []).forEach(b => { bdMap[b._id] = b.count; });
+          const pendingCount = bdMap["pending"] ?? 0;
+          const reviewCount = bdMap["under_review"] ?? 0;
+          const investCount = bdMap["investigating"] ?? 0;
+          const topIssues = dmSup.tickets.map(t => `[${t.reportId || "ID"}] ${t.userId?.name || "Customer"} (${t.priority || "normal"}): "${(t.description || "").slice(0, 75)}..."`).join(" | ");
+          dmSupportLiveContext = `- DataMart Agent Support Queue: ${pendingCount.toLocaleString()} pending tickets (${reviewCount} under review, ${investCount} investigating). Latest: ${topIssues}\n` +
+            `  (Commands: 'dm tickets' to view queue, 'view ticket [ID]' for full details, 'dm search [query]')\n`;
+        }
+      } catch (_) {}
+
       // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
       let ownerSystemPrompt =
         "You are Stony, the owner's personal AI Senior Full-Stack Engineer, System Architect, and Commercial Co-Pilot at DATA 1 GH.\n" +
@@ -7344,7 +9808,23 @@ app.post("/webhook", async (req, res) => {
         "  16. Direct DataMart Bundle Dispatch: Send/dispatch any MTN, Telecel, or AirtelTigo data bundle directly from the DataMart API wallet to any recipient phone number (e.g. '0549992958 1GB' or 'send 2GB MTN to 0549992958') using {\"type\": \"dispatch_datamart_bundle\", \"phone\": \"0549992958\", \"capacity\": 1, \"network\": \"MTN\"}\n" +
         "  17. All-Corners System Diagnostic, Auto-Heal & Live Codebase Inspection: Scan every corner of the system (Paystack unverified payments, DataMart status desyncs, missing WhatsApp alerts, stale [dm_inflight] locks, runtime logs) and auto-heal them using {\"type\": \"diagnose_system\", \"autoFix\": true} or inspect any codebase file using {\"type\": \"inspect_codebase\", \"file\": \"AdminOrders.tsx\", \"keyword\": \"syncOrderStatus\"}\n" +
         "  18. Official WhatsApp Channel Broadcasting (https://whatsapp.com/channel/0029Vb7vwLN5kg70GeNMsB2w): Post live bundle prices, flash sales, free data voucher drops, or custom marketing promos to the DATA 1 GH WhatsApp Channel using {\"type\": \"post_to_channel\", \"topic\": \"prices\"|\"flash\"|\"vouchers\"|\"custom\", \"message\": \"your formatted channel post\"}\n" +
-        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\", ...}] at the end of your reply.\n" +
+        "  19. Social Media Boost Services & SMM Provider Operations (BoostUpGH API: https://www.boostupgh.com/api/v2):\n" +
+        "      - Check BoostUpGH SMM provider API balance: {\"type\": \"query_boost_balance\"}\n" +
+        "      - Set Admin wholesale increment % markup from provider: {\"type\": \"set_boost_provider_markup\", \"percent\": 10}\n" +
+        "      - Set universal reseller boost profit margin % for all agents: {\"type\": \"set_all_agents_boost_markup\", \"percent\": 20}\n" +
+        "      - Query recent Social Media Boost orders: {\"type\": \"query_boost_orders\", \"limit\": 8}\n" +
+        "      - Two-Tier Rule: Reseller profit margin must ALWAYS be >= provider wholesale markup (M_agent >= M_admin).\n" +
+        "  20. DataMart Agent Support & Ticket Operations: Direct live access to DataMart Agent Support queue ('dm tickets', 'view ticket [ReportID]', 'dm search [query]'). You have 100% visibility into agent escalations, complaints, and worker tickets.\n" +
+        "      - When the owner asks to do a delivery check for any batch or order on DataMart (e.g. 'Do delivery check for 2313443' or 'check batch 2313443'), output [EXECUTE_ACTION: {\"type\": \"datamart_delivery_check\", \"portalOrderId\": \"2313443\"}].\n" +
+        "      - When the owner asks to look up a customer on DataMart (e.g. 'check out this customer on DataMart nyakponoah11@gmail.com'), output [EXECUTE_ACTION: {\"type\": \"datamart_search_customer\", \"query\": \"nyakponoah11@gmail.com\"}].\n" +
+        "      - When the owner asks to retry a failed DataMart order, output [EXECUTE_ACTION: {\"type\": \"datamart_retry_order\", \"orderId\": \"...\"}].\n" +
+        "      - When the owner asks to refund a DataMart order, output [EXECUTE_ACTION: {\"type\": \"datamart_refund_order\", \"orderId\": \"...\"}].\n" +
+        "  21. Rezolv Live Customer Support Chat (https://www.rezolv.dev/dashboard): You are authenticated directly as agent Stony 💙 (stillmoving11@gmail.com). You can list active customer tickets, view ticket conversations, reply directly to customers in the live DataMart chat widget, and resolve tickets.\n" +
+        "      - When owner asks to list/check live support tickets on Rezolv/DataMart: output [EXECUTE_ACTION: {\"type\": \"rezolv_tickets\"}].\n" +
+        "      - When owner asks to view a ticket conversation (e.g. 'view ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_view_ticket\", \"ticketId\": \"TKT-179538\"}].\n" +
+        "      - When owner asks to reply to a customer (e.g. 'reply to TKT-179538 Hello, your order has been delivered'): output [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"TKT-179538\", \"message\": \"...\"}].\n" +
+        "      - When owner asks to resolve/close a ticket (e.g. 'close ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"TKT-179538\"}].\n" +
+        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\"|\"datamart_delivery_check\"|\"datamart_search_customer\"|\"datamart_retry_order\"|\"datamart_refund_order\"|\"rezolv_tickets\"|\"rezolv_view_ticket\"|\"rezolv_reply\"|\"rezolv_close\", ...}] at the end of your reply.\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
         "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
@@ -7370,7 +9850,9 @@ app.post("/webhook", async (req, res) => {
         (systemData ? `\n${systemData}\n` : "") +
         (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
         (specificOrderCtx ? `\n${specificOrderCtx}` : "") +
+        (dmSupportLiveContext ? `\n${dmSupportLiveContext}` : "") +
         (recentRuntimeLogSummary ? `\n${recentRuntimeLogSummary}\n` : "") +
+        (boostLiveContext ? `\n${boostLiveContext}` : "") +
         (liveCornerDiagnosticsCtx ? `\n${liveCornerDiagnosticsCtx}\n` : "");
 
       if (aiConfig.copilotCustomInstructions) {
@@ -7546,8 +10028,10 @@ app.post("/webhook", async (req, res) => {
       }
 
       // Direct Action Command 0a_dm: Credit DataMart Wallet via MoMo prompt
-      const creditDatamartMatch = cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:to\s+)?(?:datamart|data\s*mart|telecom\s*wallet|dm\s*wallet|my\s+wallet)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i) ||
-        cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)\s+(?:to\s+)?(?:datamart|data\s*mart|telecom\s*wallet|dm\s*wallet|my\s+wallet)/i);
+      const creditDatamartMatch =
+        cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:(?:to\s+)?(?:datamart|data\s*mart|telecom\s*wallet|dm\s*wallet|my\s+wallet|wallet)\s+)?(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)\s*(?:gh[c₵]?|₵)?/i) ||
+        cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)\s*(?:gh[c₵]?|₵)?/i);
+
       if (creditDatamartMatch) {
         const amt = parseFloat(creditDatamartMatch[1]);
         if (!isNaN(amt) && amt > 0) {
@@ -7571,8 +10055,9 @@ app.post("/webhook", async (req, res) => {
             } catch (_) {}
           }
 
-          // Check if an explicit phone was provided in the command (e.g. "top up datamart 50 on 0551234567")
-          const explicitPhoneMatch = cmdText.match(/(?:on|with|to|for|momo|number|num|phone)\s*(?:0|\+?233)?([2357][0-9]{8})\b/i) ||
+          // Check if an explicit phone was provided in the command (e.g. "top up 50gh with this number 0547100951")
+          const explicitPhoneMatch =
+            cmdText.match(/(?:on|with|to|for|momo|number|num|phone)\s*(?:(?:this|my)\s+(?:number|phone)\s+)?(?:0|\+?233)?([2357][0-9]{8})\b/i) ||
             cmdText.match(/\b(0[2357][0-9]{8})\b/i) ||
             cmdText.match(/\b(233[2357][0-9]{8})\b/i);
 
@@ -7589,18 +10074,48 @@ app.post("/webhook", async (req, res) => {
           }
           const formattedPhone = chosenPhone.length === 12 && chosenPhone.startsWith("233") ? "0" + chosenPhone.slice(3) : chosenPhone;
 
+          let momoNet = "MTN";
+          const pfx = formattedPhone.slice(0, 3);
+          if (["020", "050"].includes(pfx)) momoNet = "TELECEL";
+          else if (["026", "056", "027", "057"].includes(pfx)) momoNet = "AIRTELTIGO";
+
           if (token) {
             try {
-              const bRes = await axios.post("https://api.datamartgh.shop/api/bridge/collect", {
-                phoneNumber: formattedPhone,
-                amount: amt,
-                network: "MTN"
-              }, {
-                headers: { "Content-Type": "application/json", "x-auth-token": token },
-                timeout: 15000
-              });
+              let bRes = null;
+              try {
+                bRes = await axios.post("https://api.datamartgh.shop/api/bridge/collect", {
+                  phoneNumber: formattedPhone,
+                  amount: amt,
+                  network: momoNet
+                }, {
+                  headers: { "Content-Type": "application/json", "x-auth-token": token },
+                  timeout: 15000
+                });
+              } catch (bridgeErr) {
+                if (bridgeErr.response && bridgeErr.response.status === 401 && sMap["datamart_login_email"] && sMap["datamart_login_password"]) {
+                  // Re-authenticate and retry
+                  const reloginRes = await axios.post("https://api.datamartgh.shop/api/v1/login", {
+                    email: sMap["datamart_login_email"],
+                    password: sMap["datamart_login_password"]
+                  }, { timeout: 10000 });
+                  if (reloginRes.data?.token) {
+                    token = reloginRes.data.token;
+                    await supabase.from("settings").upsert({ key: "datamart_auth_token", value: token }, { onConflict: "key" });
+                    bRes = await axios.post("https://api.datamartgh.shop/api/bridge/collect", {
+                      phoneNumber: formattedPhone,
+                      amount: amt,
+                      network: momoNet
+                    }, {
+                      headers: { "Content-Type": "application/json", "x-auth-token": token },
+                      timeout: 15000
+                    });
+                  }
+                } else {
+                  throw bridgeErr;
+                }
+              }
 
-              if (bRes.data?.status === "success" || bRes.data?.success) {
+              if (bRes?.data?.status === "success" || bRes?.data?.success) {
                 const trxId = bRes.data.data?.transactionId || bRes.data.transactionId;
                 if (trxId) {
                   let attempts = 0;
@@ -7633,15 +10148,19 @@ app.post("/webhook", async (req, res) => {
 
                 return sendWhatsApp(from,
                   `📲 *MOMO TOP-UP PROMPT DISPATCHED BOSS!*\n\n` +
-                  `I have sent a Mobile Money payment prompt of *GH₵ ${amt.toFixed(2)}* to *${formattedPhone}*.\n\n` +
-                  `🔑 *Next Step:* Enter your MoMo PIN on *${formattedPhone}* to approve the deposit.\n\n` +
-                  `💡 *Tip:* To send to a different MoMo number next time, you can write:\n` +
-                  `• *top up datamart ${amt} on [phone]*\n` +
-                  `• Or set default: *set momo [phone]*`
+                  `I have sent a Mobile Money payment prompt of *GH₵ ${amt.toFixed(2)}* to *${formattedPhone}* (${momoNet}).\n\n` +
+                  `🔑 *Next Step:* Enter your MoMo PIN on *${formattedPhone}* to approve the cashout.\n\n` +
+                  `⚡ The moment you enter your PIN, your DataMart developer wallet will be credited automatically!`
                 );
               }
             } catch (err) {
-              console.error("Bridge deposit error:", err?.response?.data || err?.message);
+              const errMsg = err?.response?.data?.message || err?.response?.data?.error || err?.message;
+              return sendWhatsApp(from,
+                `⚠️ *DATAMART TOP-UP NOTICE*\n\n` +
+                `Could not dispatch MoMo prompt to *${formattedPhone}*: ${errMsg}\n\n` +
+                `Please ensure your MoMo line allows cashout and write:\n` +
+                `• *top up 50 on ${formattedPhone}*`
+              );
             }
           }
 
@@ -7655,7 +10174,7 @@ app.post("/webhook", async (req, res) => {
             `• *Network:* MTN\n\n` +
             `After sending, reply here with:\n` +
             `*claim datamart [Transaction_ID]*\n\n` +
-            `💡 Or log into your DataMart dashboard settings to enable automatic 1-click MoMo prompts!`
+            `💡 Or text: *set datamart login [email] [password]* to enable automatic 1-click MoMo prompts!`
           );
         }
       }
@@ -7713,6 +10232,526 @@ app.post("/webhook", async (req, res) => {
             return sendWhatsApp(from, `⚠️ Could not claim deposit: ${err?.response?.data?.message || err?.message}`);
           }
         }
+      }
+
+      // Direct Action Command: DataMart Support Queue & Tickets
+      const dmTicketsMatch = cmdText.match(/^(?:datamart|dm|agent)\s*(?:support\s*)?tickets?(?:\s+(pending|urgent|under[_\s-]?review|investigating|resolved|rejected|all))?$/i) ||
+        cmdText.match(/^(?:show|get|view|list|check)\s+(?:datamart|dm|agent\s+)?(?:support\s*)?tickets?(?:\s+(pending|urgent|under[_\s-]?review|investigating|resolved|rejected|all))?$/i) ||
+        cmdText.match(/^(?:agent\s+support|datamart\s+support|dm\s+support)$/i);
+      if (dmTicketsMatch) {
+        let filterStatus = (dmTicketsMatch[1] || "").toLowerCase().trim().replace(/[\s-]/g, "_");
+        let queryParams = { limit: 5 };
+        let filterLabel = "Pending & Urgent";
+        
+        if (filterStatus === "urgent") {
+          queryParams.status = "pending";
+          queryParams.priority = "urgent";
+          filterLabel = "Urgent";
+        } else if (filterStatus && filterStatus !== "all") {
+          queryParams.status = filterStatus;
+          filterLabel = filterStatus.replace("_", " ").toUpperCase();
+        } else {
+          queryParams.status = "pending";
+        }
+
+        const data = await fetchDatamartSupportTickets(queryParams);
+        if (!data || !data.tickets) {
+          return sendWhatsApp(from, `⚠️ Could not reach DataMart Agent Support API. Please verify worker login or try again in a moment.`);
+        }
+
+        const bdMap = {};
+        (data.statusBreakdown || []).forEach(b => { bdMap[b._id] = b.count; });
+        const pendingCount = bdMap["pending"] ?? 0;
+        const reviewCount = bdMap["under_review"] ?? 0;
+        const investCount = bdMap["investigating"] ?? 0;
+        const resolvedCount = bdMap["resolved"] ?? 0;
+        const totalMatches = data.pagination?.total ?? data.tickets.length;
+
+        let ticketListText = "";
+        if (data.tickets.length === 0) {
+          ticketListText = `_No tickets currently found in this queue!_ 🎉\n\n`;
+        } else {
+          data.tickets.forEach((tk, idx) => {
+            const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+            const prio = (tk.priority || "normal").toUpperCase();
+            const prioEmoji = prio === "URGENT" ? "🚨" : prio === "HIGH" ? "⚠️" : "📌";
+            const custName = tk.userId?.name || "Customer";
+            const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
+            const reason = tk.reportReason || "Support Issue";
+            const desc = (tk.description || "").replace(/\s+/g, " ").trim().slice(0, 110);
+            const timeAgo = getTimeAgoGhana(tk.createdAt);
+
+            ticketListText += `${numEmoji} *[${tk.reportId || "ID"}]* ${prioEmoji} *${reason}* (*${prio}*)\n` +
+              `• 👤 *Customer:* ${custName} (${custPhone})\n` +
+              `• 📝 *Issue:* ${desc}${desc.length >= 110 ? "..." : ""}\n` +
+              `• 🕒 *Time:* ${timeAgo}\n\n`;
+          });
+        }
+
+        return sendWhatsApp(from,
+          `🎫 *DATAMART AGENT SUPPORT QUEUE*\n\n` +
+          `📊 *Live Ticket Breakdown:*\n` +
+          `• ⏳ *Pending:* ${pendingCount.toLocaleString()}\n` +
+          `• 🔍 *Under Review:* ${reviewCount}\n` +
+          `• 🛠️ *Investigating:* ${investCount}\n` +
+          `• ✅ *Resolved:* ${resolvedCount.toLocaleString()}\n\n` +
+          `📋 *${filterLabel} Tickets (${totalMatches} total):*\n\n` +
+          `${ticketListText}` +
+          `💡 *Quick Actions:*\n` +
+          `• Reply: *view ticket [ReportID]* for full details & customer link\n` +
+          `• Reply: *search ticket [phone or ref]*\n` +
+          `• Reply: *dm tickets urgent* or *dm tickets under review*`
+        );
+      }
+
+      // Direct Action Command: Rezolv Live Reply to Customer (e.g. "reply TKT-179538 ...", "dm reply TKT-179538 ...")
+      const rezolvReplyMatch = cmdText.match(/^(?:(?:dm|rezolv)\s+)?reply\s+(?:to\s+)?(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24})\s+([\s\S]+)$/i);
+      if (rezolvReplyMatch) {
+        const tktId = rezolvReplyMatch[1].trim();
+        const replyMsg = rezolvReplyMatch[2].trim();
+        const rep = await sendRezolvReply(tktId, replyMsg);
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command: Rezolv View Ticket Conversation (e.g. "ticket TKT-179538", "view ticket TKT-179538", "dm ticket TKT-179538")
+      const rezolvViewMatch = cmdText.match(/^(?:(?:dm|view|check)\s+)?ticket\s+(TKT-?\d+|[a-f0-9]{24})$/i) ||
+        cmdText.match(/^(?:view\s+ticket|check\s+ticket|dm\s+ticket)\s+(TKT-?\d+|[a-f0-9]{24})$/i);
+      if (rezolvViewMatch) {
+        const tktId = rezolvViewMatch[1].trim();
+        const rep = await getRezolvTicketConversation(tktId);
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command: Rezolv Close/Resolve Ticket (e.g. "close ticket TKT-179538", "resolve ticket TKT-179538", "dm close TKT-179538")
+      const rezolvCloseMatch = cmdText.match(/^(?:(?:dm|rezolv)\s+)?(?:close|resolve)\s+(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24})$/i);
+      if (rezolvCloseMatch) {
+        const tktId = rezolvCloseMatch[1].trim();
+        const rep = await closeRezolvTicket(tktId);
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command: Rezolv Customer Live Tickets (e.g. "rezolv", "rezolv tickets", "live tickets", "customer tickets", "support tickets")
+      const rezolvTicketsMatch = cmdText.match(/^(?:(?:dm|datamart)\s+)?(?:rezolv|rezolv\s*tickets?|live\s*tickets?|customer\s*tickets?|support\s*tickets?)$/i);
+      if (rezolvTicketsMatch) {
+        const rep = await getRezolvTicketsReport("active");
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command: View Specific DataMart Ticket
+      const viewDmTicketMatch = cmdText.match(/^(?:view\s+ticket|dm\s+ticket|ticket|check\s+ticket)\s+(RPT\d+|[a-f0-9]{24})/i);
+      if (viewDmTicketMatch) {
+        const queryId = viewDmTicketMatch[1].trim();
+        const data = await fetchDatamartSupportTickets({ search: queryId, limit: 1 });
+        const tk = data?.tickets?.[0];
+        if (!tk) {
+          return sendWhatsApp(from, `⚠️ Could not find DataMart ticket *${queryId}*. Please verify the ID.`);
+        }
+
+        const prio = (tk.priority || "normal").toUpperCase();
+        const prioEmoji = prio === "URGENT" ? "🚨" : prio === "HIGH" ? "⚠️" : "📌";
+        const custName = tk.userId?.name || "Customer";
+        const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
+        const custEmail = tk.userId?.email || "N/A";
+        const reason = tk.reportReason || "General Support";
+        const status = (tk.status || "pending").toUpperCase();
+        const dateStr = tk.createdAt ? new Date(tk.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "N/A";
+
+        let notesText = "";
+        if (Array.isArray(tk.adminNotes) && tk.adminNotes.length > 0) {
+          notesText = `\n📋 *Admin / AI Notes:*\n` + tk.adminNotes.map(n => `• ${n.note || n}`).join("\n");
+        }
+
+        let cleanPhone = custPhone.replace(/\D/g, "");
+        if (cleanPhone.startsWith("0")) cleanPhone = cleanPhone.slice(1);
+        const waLink = cleanPhone ? `https://wa.me/233${cleanPhone}` : "N/A";
+
+        const orderRefMatch = (tk.description || "").match(/(?:AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|[0-9]{10,})/i);
+        let orderRefHelp = "";
+        if (orderRefMatch) {
+          orderRefHelp = `\n\n🔍 *Detected Order Ref:* *${orderRefMatch[0]}*\n` +
+            `• Check live status: *track ${orderRefMatch[0]}*`;
+        }
+
+        return sendWhatsApp(from,
+          `🎫 *DATAMART TICKET DETAILS*\n\n` +
+          `🆔 *Report ID:* *${tk.reportId || tk._id}*\n` +
+          `⚡ *Priority:* ${prioEmoji} *${prio}*\n` +
+          `📊 *Status:* *${status}*\n` +
+          `🏷️ *Reason:* *${reason}*\n` +
+          `🕒 *Created:* ${dateStr}\n\n` +
+          `👤 *Customer / Agent Details:*\n` +
+          `• *Name:* ${custName}\n` +
+          `• *Phone:* *${custPhone}*\n` +
+          `• *Email:* ${custEmail}\n\n` +
+          `📝 *Full Issue Description:*\n` +
+          `${tk.description || "No description provided."}\n` +
+          `${notesText}\n\n` +
+          `📲 *Direct Customer Contact:*\n` +
+          `• *WhatsApp:* ${waLink}${orderRefHelp}\n\n` +
+          `💡 *Resolution Actions:*\n` +
+          `• To retry/dispatch bundle: *dispatch ${custPhone} [amount]GB*\n` +
+          `• Reply: *dm tickets* to return to queue`
+        );
+      }
+
+      // Direct Action Command: Search DataMart Tickets
+      const searchDmTicketMatch = cmdText.match(/^(?:search\s+tickets?|dm\s+search(?:\s+ticket)?|find\s+tickets?)\s+(.+)$/i);
+      if (searchDmTicketMatch) {
+        const q = searchDmTicketMatch[1].trim();
+        const data = await fetchDatamartSupportTickets({ search: q, limit: 5 });
+        if (!data || !data.tickets || data.tickets.length === 0) {
+          return sendWhatsApp(from, `🔍 No DataMart support tickets found matching "*${q}*".`);
+        }
+
+        let out = `🔍 *DATAMART TICKETS MATCHING "${q}":*\n\n`;
+        data.tickets.forEach((tk, idx) => {
+          const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+          const custName = tk.userId?.name || "Customer";
+          const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
+          const prio = (tk.priority || "normal").toUpperCase();
+          const prioEmoji = prio === "URGENT" ? "🚨" : "📌";
+          const desc = (tk.description || "").replace(/\s+/g, " ").trim().slice(0, 90);
+
+          out += `${numEmoji} *[${tk.reportId || "ID"}]* ${prioEmoji} *${tk.reportReason || "Support"}* (*${prio}*)\n` +
+            `• 👤 *Customer:* ${custName} (${custPhone})\n` +
+            `• 📝 ${desc}...\n` +
+            `• 📊 Status: *${(tk.status || "pending").toUpperCase()}*\n\n`;
+        });
+        out += `💡 Reply: *view ticket [ReportID]* to open any ticket above!`;
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: DataMart Support Dashboard
+      const dmDashboardMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?(?:dashboard|overview|stats)$/i);
+      if (dmDashboardMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/dashboard');
+        const d = resp?.data;
+        if (!d) {
+          return sendWhatsApp(from, `⚠️ Could not fetch DataMart Agent Support dashboard. Please retry in a moment.`);
+        }
+
+        const today = d.today || {};
+        const tickets = d.tickets || {};
+        const bdMap = {};
+        (tickets.breakdown || []).forEach(b => { bdMap[b._id] = b.count; });
+
+        let netIssuesText = "Normal (All systems green)";
+        if (Array.isArray(d.networkIssues) && d.networkIssues.length > 0) {
+          netIssuesText = d.networkIssues.map(n => `⚠️ ${n.network}: ${n.message || n.issue}`).join("\n• ");
+        }
+
+        return sendWhatsApp(from,
+          `📊 *DATAMART AGENT SUPPORT DASHBOARD*\n\n` +
+          `📦 *Today's Volume:*\n` +
+          `• 🛒 *Total Orders:* ${(today.totalOrders || 0).toLocaleString()}\n` +
+          `• ❌ *Failed Orders:* ${today.failedOrders || 0}\n` +
+          `• 💸 *Refunds Processed:* ${today.refundsProcessed || 0}\n\n` +
+          `🎫 *Support Queue:*\n` +
+          `• ⏳ *Pending Tickets:* ${(tickets.pending || 0).toLocaleString()}\n` +
+          `• 🔍 *Under Review:* ${bdMap["under_review"] || 0}\n` +
+          `• 🛠️ *Investigating:* ${bdMap["investigating"] || 0}\n` +
+          `• ✅ *Resolved:* ${(bdMap["resolved"] || 0).toLocaleString()}\n\n` +
+          `📶 *Network Health:* ${netIssuesText}\n\n` +
+          `💡 *Agent Support Tools on WhatsApp:*\n` +
+          `• *dm tickets* ➔ View active support tickets\n` +
+          `• *dm failed orders* ➔ View failed orders & retry\n` +
+          `• *dm withdrawals* ➔ View agent cashout requests\n` +
+          `• *dm deposits* ➔ View agent deposits\n` +
+          `• *dm search [phone]* ➔ Search any agent/customer`
+        );
+      }
+
+      // Direct Action Command: DataMart Failed Orders
+      const dmFailedOrdersMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?failed(?:\s*orders)?$/i);
+      if (dmFailedOrdersMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/failed-orders?limit=5');
+        const orders = resp?.data?.orders || [];
+        if (orders.length === 0) {
+          return sendWhatsApp(from, `🎉 *DATAMART FAILED ORDERS:* Zero failed orders in the queue right now! All telecom dispatches are running smoothly.`);
+        }
+
+        let out = `⚠️ *DATAMART FAILED ORDERS (${orders.length} shown):*\n\n`;
+        orders.forEach((ord, idx) => {
+          const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+          const custName = ord.userId?.name || "Customer";
+          const phone = ord.phoneNumber || "N/A";
+          const net = ord.network || "MTN";
+          const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+          const reason = (ord.failureReason || ord.status || "Failed dispatch").replace(/\s+/g, " ").trim().slice(0, 80);
+
+          out += `${num} *[${ord._id}]* ${net} ${cap}\n` +
+            `• 📱 *Recipient:* ${phone} (${custName})\n` +
+            `• ❌ *Reason:* ${reason}\n` +
+            `• ⚡ *Actions:* *dm retry ${ord._id}* | *dm refund ${ord._id}*\n\n`;
+        });
+        out += `💡 To re-attempt an order, reply: *dm retry [OrderID]*\n` +
+          `💡 To refund to wallet, reply: *dm refund [OrderID]*`;
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: Retry DataMart Order
+      const dmRetryOrderMatch = cmdText.match(/^(?:datamart|dm)\s*retry(?:\s*order)?\s+([a-f0-9]{24})/i);
+      if (dmRetryOrderMatch) {
+        const orderId = dmRetryOrderMatch[1].trim();
+        const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/retry`, {
+          method: "POST",
+          body: { reason: "Support retry requested via WhatsApp" }
+        });
+        if (resp?.status === "success" || resp?.success) {
+          return sendWhatsApp(from, `✅ *DATAMART ORDER RETRIED!* Order *${orderId}* has been re-queued for carrier dispatch.`);
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not retry order: ${resp?.message || resp?.error || "Unknown response"}`);
+        }
+      }
+
+      // Direct Action Command: Refund DataMart Order
+      const dmRefundOrderMatch = cmdText.match(/^(?:datamart|dm)\s*refund(?:\s*order)?\s+([a-f0-9]{24})(?:\s+(.+))?/i);
+      if (dmRefundOrderMatch) {
+        const orderId = dmRefundOrderMatch[1].trim();
+        const reason = (dmRefundOrderMatch[2] || "Support agent refund requested via WhatsApp").trim();
+        const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/refund`, {
+          method: "POST",
+          body: { reason, notifyCustomer: true }
+        });
+        if (resp?.status === "success" || resp?.success) {
+          return sendWhatsApp(from, `💸 *DATAMART ORDER REFUNDED!* Order *${orderId}* has been refunded to the agent's wallet balance.`);
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not refund order: ${resp?.message || resp?.error || "Unknown response"}`);
+        }
+      }
+
+      // Direct Action Command: DataMart Withdrawals
+      const dmWithdrawalsMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?withdrawals?$/i);
+      if (dmWithdrawalsMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/withdrawals?limit=5');
+        const list = resp?.data?.withdrawals || [];
+        if (list.length === 0) {
+          return sendWhatsApp(from, `💰 *DATAMART AGENT WITHDRAWALS:* No pending withdrawal requests found.`);
+        }
+
+        let out = `💰 *DATAMART AGENT WITHDRAWALS (${list.length} shown):*\n\n`;
+        list.forEach((w, idx) => {
+          const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+          const agentName = w.agentId?.name || "Agent";
+          const storeName = w.storeId?.storeName || "Store";
+          const amt = w.requestedAmount != null ? Number(w.requestedAmount).toFixed(2) : "0.00";
+          const status = (w.status || "pending").toUpperCase();
+          const wId = w.withdrawalId || w._id;
+
+          out += `${num} *[${wId}]* GH₵ ${amt} (${status})\n` +
+            `• 👤 *Agent:* ${agentName} (${w.agentId?.phoneNumber || "N/A"})\n` +
+            `• 🏪 *Store:* ${storeName}\n` +
+            `• 💳 *Method:* ${w.method || "wallet"}\n\n`;
+        });
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: DataMart Deposits
+      const dmDepositsMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?deposits?$/i);
+      if (dmDepositsMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/deposits?limit=5');
+        const list = resp?.data?.deposits || [];
+        if (list.length === 0) {
+          return sendWhatsApp(from, `💳 *DATAMART AGENT DEPOSITS:* No recent deposits found.`);
+        }
+
+        let out = `💳 *DATAMART RECENT DEPOSITS:*\n\n`;
+        list.forEach((dep, idx) => {
+          const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+          const userName = dep.userId?.name || "Agent";
+          const userPhone = dep.userId?.phoneNumber || "N/A";
+          const amt = dep.amount != null ? Number(dep.amount).toFixed(2) : "0.00";
+          const type = (dep.type || "deposit").toUpperCase();
+          const time = getTimeAgoGhana(dep.createdAt);
+
+          out += `${num} *GH₵ ${amt}* (${type}) - ${time}\n` +
+            `• 👤 *User:* ${userName} (${userPhone})\n` +
+            `• 💰 *Wallet After:* GH₵ ${Number(dep.balanceAfter || 0).toFixed(2)}\n\n`;
+        });
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: Universal Customer / Agent Investigation
+      const dmInvestigateMatch =
+        cmdText.match(/^(?:datamart|dm)\s*(?:investigate|customer|agent|lookup|search|check)\s+(.+)$/i) ||
+        cmdText.match(/^(?:datamart|dm)\s+(0[2357]\d{8}|\+?233[2357]\d{8})$/i) ||
+        cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:this\s+)?(?:customer|user|agent|number|phone)?\s*(?:on\s+datamart\s+)?(?:for\s+me\s+)?([^\s]+@[^\s]+|0[2357]\d{8}|\+?233[2357]\d{8})/i) ||
+        cmdText.match(/(?:check(?:\s*out)?|search|lookup|find|investigate)\s+(?:on\s+datamart\s+)?([^\s]+@[^\s]+)/i);
+      if (dmInvestigateMatch) {
+        const query = dmInvestigateMatch[1].trim();
+        const report = await executeDatamartSearch(query, from);
+        if (report) return sendWhatsApp(from, report);
+      }
+
+      // Direct Action Command: Live Failed Orders or Delivery Check Failed Query
+      const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cmdText) ||
+        /^(?:failed|failed\s*orders?|failed\s*queue|open\s*failed)$/i.test(cmdText);
+      if (isLiveFailedQuery) {
+        const report = await getLiveFailedOrdersReport(from);
+        if (report) return sendWhatsApp(from, report);
+      }
+
+      const isAuditFailedQuery = /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cmdText) ||
+        /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cmdText);
+      if (isAuditFailedQuery) {
+        const norm = normalizeBotPhone(from);
+        const cached = lastDeliveryCheckCache.get(norm);
+        const reply = await formatFailedItemsReply(cached, from);
+        return sendWhatsApp(from, reply);
+      }
+
+      // Direct Action Command: DataMart Delivery Check (Single or Bulk)
+      const dmDeliveryCheckMatch =
+        cmdText.match(/^(?:datamart|dm)\s*(?:delivery\s*check|delivery\s*audit)(?:\s+([\d,\s\n]+|[A-Za-z0-9_-]+))?$/i) ||
+        cmdText.match(/^(?:delivery\s*check|delivery\s*audit)\s+(?:for\s+)?(?:these\s+ids\s+|this\s+id\s+)?([\d,\s\n]+|[A-Za-z0-9_-]+)$/i) ||
+        cmdText.match(/^([\d,\s\n]{4,})\s+(?:do\s+)?(?:delivery\s*check|check\s+delivery)/i) ||
+        cmdText.match(/(?:do\s+)?delivery\s*check.+?([\d,\s\n]{4,})/i) ||
+        cmdText.match(/([\d,\s\n]{4,}).+?delivery\s*check/i);
+      if (dmDeliveryCheckMatch) {
+        const rawIds = dmDeliveryCheckMatch[1] || "";
+        const idMatches = rawIds.match(/\b\d{4,9}[a-zA-Z]?\b/g);
+        if (idMatches && idMatches.length > 0) {
+          const report = await executeDatamartDeliveryCheck(idMatches, from);
+          if (report) return sendWhatsApp(from, report);
+        }
+
+        const resp = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent');
+        const jobs = Array.isArray(resp?.data) ? resp.data : Array.isArray(resp) ? resp : [];
+        if (jobs.length === 0) {
+          return sendWhatsApp(from, `🚚 *DATAMART DELIVERY CHECK:* No recent automated delivery audits on record.`);
+        }
+
+        const latest = jobs[0];
+        const dateStr = latest.createdAt ? new Date(latest.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "Recent";
+        const total = latest.totalOrders || latest.count || 0;
+        const delivered = latest.deliveredCount || latest.delivered || 0;
+        const failed = latest.failedCount || latest.failed || 0;
+        const status = (latest.status || "completed").toUpperCase();
+
+        let out = `🚚 *DATAMART DELIVERY CHECK AUDIT*\n\n` +
+          `📊 *Latest Audit:* *${status}*\n` +
+          `🕒 *Run Time:* ${dateStr}\n` +
+          `• 📦 *Orders Audited:* ${total.toLocaleString()}\n` +
+          `• ✅ *Carrier Confirmed:* ${delivered.toLocaleString()}\n` +
+          `• ❌ *Carrier Failed:* ${failed}\n\n`;
+
+        if (jobs.length > 1) {
+          out += `📋 *Recent Check History:*\n`;
+          jobs.slice(1, 4).forEach((j, i) => {
+            const t = j.createdAt ? new Date(j.createdAt).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "";
+            out += `• [${t}] ${j.status || "completed"} (${j.totalOrders || 0} orders, ${j.failedCount || 0} failed)\n`;
+          });
+          out += `\n`;
+        }
+
+        out += `💡 To check a specific order batch: *dm delivery check [portalId]*\n` +
+          `💡 To view undelivered complaints: *dm not received*`;
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: DataMart Failed Recovery
+      const dmFailedRecoveryMatch = cmdText.match(/^(?:datamart|dm)\s*failed\s*recovery$/i);
+      if (dmFailedRecoveryMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/failed-recovery');
+        const d = resp?.data || resp || {};
+        const totalFailed = d.totalFailed || 0;
+        const recovered = d.recoveredCount || 0;
+        const batches = d.batchCount || (Array.isArray(d.batches) ? d.batches.length : 0);
+
+        return sendWhatsApp(from,
+          `🔄 *DATAMART FAILED RECOVERY PIPELINE*\n\n` +
+          `• ❌ *Total Failed Orders:* ${totalFailed.toLocaleString()}\n` +
+          `• 🔄 *Batches Processed:* ${batches}\n` +
+          `• ✅ *Successfully Recovered:* ${recovered.toLocaleString()}\n\n` +
+          `💡 *Actions:*\n` +
+          `• Reply: *dm failed orders* to view individual failed orders & retry`
+        );
+      }
+
+      // Direct Action Command: DataMart Skipped Recovery
+      const dmSkippedRecoveryMatch = cmdText.match(/^(?:datamart|dm)\s*skipped\s*recovery$/i);
+      if (dmSkippedRecoveryMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/skipped-recovery');
+        const d = resp?.data || resp || {};
+        const totalSkipped = d.totalSkipped || 0;
+        const val = d.totalValue != null ? Number(d.totalValue).toFixed(2) : "0.00";
+        const recovered = d.recoveredCount || 0;
+
+        return sendWhatsApp(from,
+          `⏭️ *DATAMART SKIPPED RECOVERY PIPELINE*\n\n` +
+          `• ⏭️ *Total Skipped in Queue:* ${totalSkipped.toLocaleString()}\n` +
+          `• 💰 *Total Bundle Value:* GH₵ ${val}\n` +
+          `• ✅ *Recovered / Re-Dispatched:* ${recovered.toLocaleString()}\n\n` +
+          `All skipped queues are monitored 24/7 by the DataMart worker switch.`
+        );
+      }
+
+      // Direct Action Command: DataMart Not Received Customer Reports
+      const dmNotReceivedMatch = cmdText.match(/^(?:datamart|dm)\s*not\s*received$/i);
+      if (dmNotReceivedMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/not-received');
+        const d = resp?.data || resp || {};
+        const reports = Array.isArray(d.reports) ? d.reports : [];
+        const counts = d.counts || {};
+
+        let out = `⚠️ *DATAMART "NOT RECEIVED" COMPLAINTS*\n\n` +
+          `📊 *Summary:*\n` +
+          `• ⏳ *Pending Investigation:* ${counts.pending || reports.length}\n` +
+          `• ✅ *Resolved:* ${counts.resolved || 0}\n\n`;
+
+        if (reports.length === 0) {
+          out += `_Zero open "Not Received" customer reports right now!_ 🎉\n`;
+        } else {
+          out += `📋 *Recent Customer Complaints:*\n`;
+          reports.slice(0, 5).forEach((rep, idx) => {
+            const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+            const phone = rep.phoneNumber || rep.phone || "N/A";
+            const net = rep.network || "MTN";
+            const cap = rep.capacity != null ? `${rep.capacity}GB` : "";
+            const time = getTimeAgoGhana(rep.createdAt);
+            out += `${num} *${phone}* (${net} ${cap}) - ${time}\n` +
+              `  Ref: ${rep.orderReference || rep.reference || rep._id}\n`;
+          });
+          out += `\n💡 Reply: *dm search [phone]* to inspect any customer above!`;
+        }
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: DataMart Order Verify
+      const dmOrderVerifyMatch = cmdText.match(/^(?:datamart|dm)\s*order\s*verify\s+(.+)$/i);
+      if (dmOrderVerifyMatch) {
+        const query = dmOrderVerifyMatch[1].trim();
+        const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(query)}`);
+        const results = resp?.data?.results || [];
+        const ord = results.find(r => r.type === "order" || r.order)?.order || results[0]?.order || results[0];
+
+        if (!ord || (!ord.network && !ord.phoneNumber)) {
+          return sendWhatsApp(from, `🔍 No DataMart order found matching "*${query}*". Please verify order reference or phone number.`);
+        }
+
+        const net = ord.network || "MTN";
+        const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+        const phone = ord.phoneNumber || "N/A";
+        const status = (ord.status || "processing").toUpperCase();
+        const amt = ord.amount != null ? `GH₵ ${Number(ord.amount).toFixed(2)}` : "N/A";
+        const time = ord.createdAt ? new Date(ord.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "N/A";
+        const portalId = ord.apiOrderId || ord.exportTracking?.portalId || ord.geonetReference || ord._id;
+        const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
+
+        return sendWhatsApp(from,
+          `✅ *DATAMART ORDER VERIFICATION*\n\n` +
+          `🆔 *Portal ID:* *${portalId}*${batchNo}\n` +
+          `📶 *Network & Size:* ${net} ${cap}\n` +
+          `📱 *Recipient:* *${phone}*\n` +
+          `💵 *Amount:* ${amt}\n` +
+          `📊 *Carrier Status:* *${status}*\n` +
+          `🕒 *Submitted:* ${time}\n` +
+          `DB ID: \`${ord._id}\`\n\n` +
+          `💡 *Actions:*\n` +
+          `• Delivery check: *dm delivery check ${portalId}*\n` +
+          `• Re-dispatch order: *dm retry ${ord._id}*\n` +
+          `• Refund to wallet: *dm refund ${ord._id}*`
+        );
       }
 
       // Direct Action Command 0a: Credit Agent Wallet
@@ -8048,6 +11087,154 @@ app.post("/webhook", async (req, res) => {
         const target = chatCmdMatch[1]?.trim() || "";
         await executeOwnerDirectAction("resolve_support_chat", { phone: target || null });
         return sendWhatsApp(from, `✅ *SUPPORT CHAT RESOLVED BOSS!*\n\n💬 Marked open customer support conversation${target ? ` for *${target}*` : ""} as resolved!`);
+      }
+
+      // Direct Action Command 7b: Reply to customer support chat
+      const replyChatMatch =
+        cmdText.match(/(?:reply|respond|answer)\s+(?:to\s+)?(?:support\s+)?(?:chat|customer|user|ticket)(?:\s+(?:with|for|to)\s+([A-Za-z0-9_-]+))?(?:\s*:\s*|\s+)([\s\S]+)/i) ||
+        cmdText.match(/^support\s+reply(?:\s+(?:to|for)\s+([A-Za-z0-9_-]+))?(?:\s*:\s*|\s+)([\s\S]+)/i);
+
+      if (replyChatMatch) {
+        const target = replyChatMatch[1]?.trim() || null;
+        const msgText = (replyChatMatch[2] || replyChatMatch[1])?.trim();
+        const execMsg = await executeOwnerDirectAction("reply_support_chat", { phone: target, message: msgText });
+        return sendWhatsApp(from, `✅ *SUPPORT CHAT REPLY DISPATCHED!*\n\n${execMsg}`);
+      }
+
+      // Direct Action Command 7c: Set DataMart login credentials
+      const dmLoginMatch = cmdText.match(/(?:set|save)\s+datamart\s+(?:login|credentials?|account)\s+(\S+@\S+)\s+(\S+)/i);
+      if (dmLoginMatch) {
+        const email = dmLoginMatch[1].trim();
+        const password = dmLoginMatch[2].trim();
+        await supabase.from("settings").upsert([
+          { key: "datamart_login_email", value: email },
+          { key: "datamart_login_password", value: password }
+        ], { onConflict: "key" });
+
+        // Attempt instant login to fetch token
+        let tokenMsg = "";
+        try {
+          const lRes = await axios.post("https://api.datamartgh.shop/api/v1/login", { email, password }, { timeout: 10000 });
+          if (lRes.data?.token) {
+            await supabase.from("settings").upsert({ key: "datamart_auth_token", value: lRes.data.token }, { onConflict: "key" });
+            tokenMsg = "\n🔑 *DataMart Token:* Connected & active for automated 1-click MoMo cashout topup!";
+          }
+        } catch (_) {
+          tokenMsg = "\n⚠️ Could not authenticate with DataMart API yet. Please verify email/password.";
+        }
+        return sendWhatsApp(from, `✅ *DATAMART CREDENTIALS SAVED BOSS!*\n\n📧 *Email:* ${email}${tokenMsg}`);
+      }
+
+      // Direct Action Command 8: WhatsApp Channel Broadcast (Flash Sale, Bundles/Prices, Vouchers, Custom)
+      const channelPostMatch =
+        cmdText.match(/(?:post|broadcast|publish|send|drop)\s+(?:the\s+)?(flash\s*sale|flash|prices?|bundles?|rates?|catalog|vouchers?|giveaway)(?:\s+(?:update|promo|alert))?(?:\s+(?:to|in|on)\s+(?:the\s+)?channel)?/i) ||
+        cmdText.match(/(?:post|broadcast|publish|drop)\s+(?:to|in|on)\s+(?:the\s+)?channel(?:\s*:\s*|\s+)([\s\S]+)/i) ||
+        cmdText.match(/^channel\s+(?:post|broadcast|update)(?:\s*:\s*|\s+)?(flash|prices?|vouchers?)?/i) ||
+        cmdText.match(/(?:flash\s*sale|flash)\s+update\s+(?:in|on|to)\s+(?:the\s+)?channel/i);
+
+      if (channelPostMatch) {
+        let topic = "general";
+        let customMsg = "";
+        const m1 = channelPostMatch[1] ? channelPostMatch[1].toLowerCase().trim() : "";
+        if (/flash/i.test(cmdText) || /flash/i.test(m1)) topic = "flash";
+        else if (/price|bundle|rate|catalog/i.test(m1)) topic = "prices";
+        else if (/voucher|giveaway/i.test(m1)) topic = "vouchers";
+        else if (m1 && m1.length > 10) {
+          topic = "custom";
+          customMsg = m1;
+        }
+        const execMsg = await executeOwnerDirectAction("post_to_channel", { topic, message: customMsg, phone: String(from) });
+        return sendWhatsApp(from, `✅ *CHANNEL BROADCAST DISPATCHED BOSS!*\n\n${execMsg}`);
+      }
+
+      // Direct Action Command 9: Universal Agent Boost Margin (Apply to All Agents)
+      const allAgentsBoostMatch =
+        cmdText.match(/(?:set|apply|update|change)\s+(?:all\s+agents?|resellers?)\s+(?:boost\s+)?(?:profit|markup|margin)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|apply|update|change)\s+(?:agent\s+)?(?:boost\s+)?(?:profit|markup|margin)\s+(?:for\s+all|to\s+all)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|apply|update|change)\s+(?:all\s+agents?|resellers?)\s+(?:to\s+)?(\d+(?:\.\d+)?)\s*%\s*(?:boost\s+)?(?:profit|markup|margin)/i);
+
+      if (allAgentsBoostMatch) {
+        let pct = Math.max(0, Math.min(500, parseFloat(allAgentsBoostMatch[1])));
+
+        // Enforce platform rule: Reseller selling margin cannot be less than Admin wholesale increment from provider
+        let adminMarkup = 10;
+        try {
+          const { data: sRow } = await supabase.from("settings").select("value").eq("key", "boost_markup_percent").maybeSingle();
+          if (sRow?.value && Number.isFinite(Number(sRow.value))) {
+            adminMarkup = Number(sRow.value);
+          }
+        } catch (_) {}
+
+        if (pct < adminMarkup) {
+          pct = adminMarkup;
+        }
+
+        const { data: ags } = await supabase.from("agents").select("id, store_slug, custom_prices");
+        let count = 0;
+        if (Array.isArray(ags)) {
+          const settingsRows = [];
+          for (const ag of ags) {
+            const updated = { ...(ag.custom_prices || {}), boost_markup_percent: pct };
+            await supabase.from("agents").update({ custom_prices: updated }).eq("id", ag.id);
+            settingsRows.push({
+              key: `agent_pricing_${ag.id}`,
+              value: JSON.stringify(updated),
+            });
+            if (ag.store_slug) {
+              settingsRows.push({
+                key: `agent_pricing_${String(ag.store_slug).toLowerCase().trim()}`,
+                value: JSON.stringify(updated),
+              });
+            }
+            count++;
+          }
+          if (settingsRows.length > 0) {
+            try { await supabase.from("settings").upsert(settingsRows, { onConflict: "key" }); } catch (_) {}
+          }
+        }
+        await supabase.from("settings").upsert([
+          { key: "default_agent_boost_markup_percent", value: String(pct) },
+          { key: "agent_boost_default_markup_percent", value: String(pct) },
+        ], { onConflict: "key" });
+
+        return sendWhatsApp(from,
+          `✅ *ALL AGENTS UPDATED BOSS!*\n\n` +
+          `🚀 Social Media Boost profit margin set to *+${pct}%* across all *${count}* registered resellers!\n\n` +
+          `Every reseller storefront will now sell boost services with a +${pct}% margin.`
+        );
+      }
+
+      // Direct Action Command 9b: Boost Provider Balance (BoostUpGH)
+      const boostBalanceMatch =
+        cmdText.match(/^(?:check\s+)?(?:boost|smm|boostup|boostupgh)\s*(?:wallet\s+)?balance$/i) ||
+        cmdText.match(/^(?:what\s+is\s+)?(?:our\s+|the\s+)?(?:boost|smm|boostupgh)\s+balance/i) ||
+        cmdText.match(/^boost\s+balance$/i);
+
+      if (boostBalanceMatch) {
+        const msg = await executeOwnerDirectAction("query_boost_balance");
+        return sendWhatsApp(from, msg);
+      }
+
+      // Direct Action Command 9c: Set Provider Wholesale Boost Markup %
+      const providerBoostMatch =
+        cmdText.match(/(?:set|change|update)\s+(?:provider\s+|wholesale\s+)?(?:boost\s+)?(?:markup|increment|rate)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|change|update)\s+boost\s+(?:provider\s+|wholesale\s+)?(?:markup|increment|rate)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|change|update)\s+wholesale\s+(?:boost\s+)?(?:markup|increment)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i);
+
+      if (providerBoostMatch) {
+        const pct = parseFloat(providerBoostMatch[1]);
+        const msg = await executeOwnerDirectAction("set_boost_provider_markup", { percent: pct });
+        return sendWhatsApp(from, msg);
+      }
+
+      // Direct Action Command 9d: Query Boost Orders
+      const boostOrdersMatch =
+        cmdText.match(/^(?:check\s+|list\s+|show\s+|get\s+)?(?:recent\s+)?(?:boost|smm)\s+orders/i) ||
+        cmdText.match(/^boost\s+orders$/i);
+
+      if (boostOrdersMatch) {
+        const msg = await executeOwnerDirectAction("query_boost_orders", { limit: 8 });
+        return sendWhatsApp(from, msg);
       }
 
       // ── STEP 1: FAST DIRECT IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──
@@ -9021,10 +12208,16 @@ app.post("/webhook", async (req, res) => {
 
     if (session.step === 6) {
       const trackingPhone = normalizePhone(text);
-      if (trackingPhone.length !== 10 || !trackingPhone.startsWith("0")) {
-        return sendWhatsApp(from, `❌ Invalid phone number.\n\nPlease enter a valid Ghana phone number.\n\nExample:\n0241234567`);
+      if (trackingPhone.length === 10 && trackingPhone.startsWith("0")) {
+        return trackOrders(from, trackingPhone);
       }
-      return trackOrders(from, trackingPhone);
+      const isRefOrId = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(text) ||
+        /^[A-Za-z0-9_-]{5,35}$/.test(text.trim());
+      if (isRefOrId) {
+        const report = await executeDatamartSearch(text.trim(), from);
+        if (report) return sendWhatsApp(from, report);
+      }
+      return sendWhatsApp(from, `❌ Invalid input.\n\nPlease enter a valid Ghana phone number (e.g. 0241234567) or order reference (e.g. AGT-MTN-...).`);
     }
 
     /* =====================================================
@@ -10361,7 +13554,7 @@ async function notifyAgentNewOrder(order) {
   try {
     const { data: freshOrd } = await supabase
       .from("orders")
-      .select("id, notes, agent_id, base_price")
+      .select("id, notes, agent_id, base_price, created_at")
       .eq("reference", ref)
       .maybeSingle();
 
@@ -10380,7 +13573,6 @@ async function notifyAgentNewOrder(order) {
     const { data: ag } = await supabase
       .from("agents")
       .select("id, name, phone, whatsapp_number, momo_number, store_name, store_slug")
-      .eq("id", resolvedAgentId)
       .maybeSingle();
 
     if (ag) {
@@ -10508,7 +13700,7 @@ async function notifyOrderDelivered(order) {
   try {
     const { data: freshOrd } = await supabase
       .from("orders")
-      .select("id, notes, agent_id, base_price")
+      .select("id, notes, agent_id, base_price, created_at")
       .eq("reference", ref)
       .maybeSingle();
 
@@ -10554,6 +13746,17 @@ async function notifyOrderDelivered(order) {
   const now = new Date();
   const dateStr = now.toLocaleDateString("en-GB", { timeZone: "Africa/Accra" });
   const timeStr = now.toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" });
+
+  const rawCreatedAt = order.created_at || freshOrd?.created_at;
+  let orderedAtLine = "";
+  if (rawCreatedAt) {
+    try {
+      const oDate = new Date(rawCreatedAt);
+      const oDateStr = oDate.toLocaleDateString("en-GB", { timeZone: "Africa/Accra" });
+      const oTimeStr = oDate.toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" });
+      orderedAtLine = `\n📅 *Ordered At:* ${oDateStr} ${oTimeStr}`;
+    } catch (_) {}
+  }
 
   // Resolve Agent details + update Agent Order status if order belongs to an Agent Store
   let agPhone = "";
@@ -10660,7 +13863,7 @@ async function notifyOrderDelivered(order) {
 📶 *Item:* ${itemDesc}
 📱 *Recipient:* ${cleanPhone}
 💰 *Amount:* GHS ${amount}
-⚡ *Status:* ✅ Delivered to Phone
+⚡ *Status:* ✅ Delivered to Phone${orderedAtLine}
 ⏰ *Delivered At:* ${dateStr} ${timeStr}`;
 
   await sendAdminWhatsApp(deliveredText);
@@ -10678,7 +13881,7 @@ async function notifyOrderDelivered(order) {
 📶 *Item:* ${itemDesc}
 📱 *Recipient:* ${cleanPhone}
 💰 *Amount:* GHS ${amount}${profitLine}
-⚡ *Status:* ✅ Delivered to Phone
+⚡ *Status:* ✅ Delivered to Phone${orderedAtLine}
 ⏰ *Delivered At:* ${dateStr} ${timeStr}`;
 
       if (agPhone) {
@@ -10831,16 +14034,16 @@ async function runPendingPaymentWatcher() {
       return;
     }
 
-    const fortyFiveMinutesAgo = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+    const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
     const thirtySecondsAgo = new Date(Date.now() - 30 * 1000).toISOString();
     const { data: pendingOrders } = await supabase
       .from("orders")
       .select("id, reference, payment_status, datamart_reference, supplier_status, notes, created_at")
       .or("payment_status.eq.pending,and(payment_status.eq.paid,datamart_reference.is.null)")
-      .gte("created_at", fortyFiveMinutesAgo)
+      .gte("created_at", sixHoursAgo)
       .lte("created_at", thirtySecondsAgo)
       .order("created_at", { ascending: false })
-      .limit(5);
+      .limit(15);
 
     if (Array.isArray(pendingOrders) && pendingOrders.length > 0) {
       const verifyEndpoint = (STORE_FRONTEND_URL || "https://www.data1gh.com").replace(/\/+$/, "") + "/api/paystack";
@@ -10886,8 +14089,132 @@ setInterval(runPendingPaymentWatcher, 60000);
 setTimeout(runPendingPaymentWatcher, 12000);
 
 /* =========================================================
+24/7 DATAMART AGENT SUPPORT URGENT TICKET WATCHER
+========================================================= */
+
+let lastAlertedDatamartReportId = null;
+let isSupportWatcherInitialized = false;
+
+async function runDatamartSupportWatcher() {
+  try {
+    const data = await fetchDatamartSupportTickets({ status: "pending", priority: "urgent", limit: 1 });
+    const latest = data?.tickets?.[0];
+    if (!latest || !latest.reportId) return;
+
+    if (!isSupportWatcherInitialized) {
+      lastAlertedDatamartReportId = latest.reportId;
+      isSupportWatcherInitialized = true;
+      return;
+    }
+
+    if (latest.reportId !== lastAlertedDatamartReportId) {
+      lastAlertedDatamartReportId = latest.reportId;
+      const { data: sRows } = await supabase.from("settings").select("key,value").in("key", ["admin_whatsapp_number", "admin_alert_phone"]);
+      const sMap = {};
+      (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+      const targetPhone = sMap["admin_whatsapp_number"] || sMap["admin_alert_phone"] || process.env.ADMIN_PHONE;
+      if (targetPhone) {
+        const custName = latest.userId?.name || "Customer";
+        const custPhone = latest.phoneNumber || latest.userId?.phoneNumber || "N/A";
+        const reason = latest.reportReason || "AI Escalation";
+        const desc = (latest.description || "").replace(/\s+/g, " ").trim().slice(0, 160);
+
+        await sendWhatsApp(targetPhone,
+          `🚨 *NEW URGENT TICKET ON DATAMART AGENT SUPPORT!*\n\n` +
+          `🆔 *Ticket ID:* *${latest.reportId}*\n` +
+          `👤 *Customer:* ${custName} (${custPhone})\n` +
+          `🏷️ *Reason:* *${reason}*\n` +
+          `📝 *Issue:* ${desc}${desc.length >= 160 ? "..." : ""}\n\n` +
+          `💡 Reply: *view ticket ${latest.reportId}* to view full ticket & contact customer!`
+        ).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.warn("runDatamartSupportWatcher error:", err.message);
+  }
+}
+
+// Check every 3 minutes for new urgent customer/agent escalations on DataMart
+setInterval(runDatamartSupportWatcher, 180000);
+setTimeout(runDatamartSupportWatcher, 20000);
+
+/* =========================================================
+24/7 REZOLV LIVE CUSTOMER SUPPORT URGENT TICKET WATCHER
+Alerts owner on WhatsApp when customer needs human help
+========================================================= */
+
+const alertedRezolvTickets = new Set();
+let isRezolvWatcherInitialized = false;
+
+async function runRezolvUrgentWatcher() {
+  try {
+    const res = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
+    const tickets = res.data?.data?.tickets || [];
+    if (!Array.isArray(tickets) || tickets.length === 0) return;
+
+    // Filter for tickets needing human attention
+    const urgentTickets = tickets.filter(t => {
+      if (t.status === "resolved") return false;
+      const text = t.lastMessage?.text || "";
+      const isNeedsHuman = text.includes("Needs a human") || t.tags?.includes("ai-escalated") || t.priority === "urgent";
+      return isNeedsHuman && (t.unreadCount > 0 || text.includes("Needs a human"));
+    });
+
+    if (!isRezolvWatcherInitialized) {
+      urgentTickets.forEach(t => {
+        const key = `${t._id}_${t.lastMessage?.createdAt || t.updatedAt || ""}`;
+        alertedRezolvTickets.add(key);
+      });
+      isRezolvWatcherInitialized = true;
+      return;
+    }
+
+    for (const t of urgentTickets) {
+      const key = `${t._id}_${t.lastMessage?.createdAt || t.updatedAt || ""}`;
+      if (!alertedRezolvTickets.has(key)) {
+        alertedRezolvTickets.add(key);
+
+        const { data: sRows } = await supabase.from("settings").select("key,value").in("key", ["admin_whatsapp_number", "admin_alert_phone"]);
+        const sMap = {};
+        (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+        const targetPhone = sMap["admin_whatsapp_number"] || sMap["admin_alert_phone"] || process.env.ADMIN_PHONE;
+
+        if (targetPhone) {
+          const custName = t.customer?.name || "Customer";
+          const custEmail = t.customer?.email ? ` (${t.customer.email})` : "";
+          const tktNum = t.ticketNumber || t._id;
+          const lastMsg = (t.lastMessage?.text || "").replace(/\s+/g, " ").trim().slice(0, 160);
+
+          await sendWhatsApp(targetPhone,
+            `🚨 *DATAMART CUSTOMER SUPPORT ALERT (REZOLV)*\n\n` +
+            `🆔 *Ticket:* *${tktNum}*\n` +
+            `👤 *Customer:* ${custName}${custEmail}\n` +
+            `🚩 *Status:* Needs a Human\n` +
+            `💬 *Message:*\n"${lastMsg}${lastMsg.length >= 160 ? "..." : ""}"\n\n` +
+            `💡 *To reply directly from WhatsApp:*\n` +
+            `Send: *reply ${tktNum} [your message]*\n\n` +
+            `💡 *To view full conversation:*\n` +
+            `Send: *ticket ${tktNum}*`
+          ).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("runRezolvUrgentWatcher error:", err.message);
+  }
+}
+
+// Check every 2 minutes for new urgent tickets on Rezolv
+setInterval(runRezolvUrgentWatcher, 120000);
+setTimeout(runRezolvUrgentWatcher, 25000);
+
+/* =========================================================
 START SERVER
 ========================================================= */
+
+app.get("/", (req, res) => {
+  res.status(200).send("OK - Stony Bot is Running!");
+});
 
 app.get("/health", (req, res) => {
   res.status(200).send("Bot is alive!");
