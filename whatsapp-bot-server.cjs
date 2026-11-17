@@ -4808,7 +4808,9 @@ async function executeOwnerDirectAction(type, payload = {}) {
     // 30. DataMart Retry Order
     if (cleanType === "datamart_retry_order") {
       const orderId = payload.orderId || payload.id;
-      if (!orderId) return "⚠️ Missing orderId to retry.";
+      if (!orderId || /[^0-9a-zA-Z_-]/.test(orderId) || /^(prince|amehati|customer|support|ticket|reply|him|her)/i.test(orderId)) {
+        return null;
+      }
       const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/retry`, {
         method: "POST",
         body: { reason: payload.reason || "Support retry via WhatsApp" }
@@ -4819,7 +4821,9 @@ async function executeOwnerDirectAction(type, payload = {}) {
     // 31. DataMart Refund Order
     if (cleanType === "datamart_refund_order") {
       const orderId = payload.orderId || payload.id;
-      if (!orderId) return "⚠️ Missing orderId to refund.";
+      if (!orderId || /[^0-9a-zA-Z_-]/.test(orderId) || /^(prince|amehati|customer|support|ticket|reply|him|her)/i.test(orderId)) {
+        return null;
+      }
       const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/refund`, {
         method: "POST",
         body: { reason: payload.reason || "Support refund via WhatsApp", notifyCustomer: true }
@@ -4852,6 +4856,79 @@ async function executeOwnerDirectAction(type, payload = {}) {
       const tId = payload.ticketId || payload.ticket || payload.id;
       if (!tId) return "⚠️ Missing ticketId to close.";
       return await closeRezolvTicket(tId, payload.status || "resolved");
+    }
+
+    // 36. Send Customer Message / Reply across DataMart RPT, Rezolv, or Direct WhatsApp
+    if (cleanType === "send_customer_message" || cleanType === "message_customer" || cleanType === "reply_customer") {
+      const rawTarget = payload.target || payload.customer || payload.phone || payload.ticketId || payload.reportId || payload.recipient;
+      const msg = payload.message || payload.text || payload.reply;
+      if (!rawTarget || !msg) {
+        return "⚠️ Please provide recipient/target and message to send.";
+      }
+
+      const targetStr = String(rawTarget).trim();
+      const cleanMsg = String(msg).replace(/^to\s+/i, "").replace(/^that\s+/i, "").trim();
+
+      // A. Is target a phone number directly? (e.g. 054..., 233...)
+      const digitsOnly = targetStr.replace(/\D/g, "");
+      if (digitsOnly.length === 10 || (digitsOnly.startsWith("233") && digitsOnly.length === 12)) {
+        await sendWhatsApp(digitsOnly, cleanMsg).catch(() => {});
+        await sendAdminSms(cleanMsg, digitsOnly).catch(() => {});
+        const cleanWa = digitsOnly.startsWith("0") ? digitsOnly.slice(1) : (digitsOnly.startsWith("233") ? digitsOnly.slice(3) : digitsOnly);
+        return `✅ Message dispatched directly via WhatsApp to *${digitsOnly}*!\n\n💬 "${cleanMsg}"\n\n👉 *Chat link:*\nhttps://wa.me/233${cleanWa}`;
+      }
+
+      // B. Is it a DataMart ticket (RPT...) or a customer name on DataMart?
+      if (/^RPT\d+$/i.test(targetStr) || !/^TKT-\d+$/i.test(targetStr)) {
+        try {
+          const dmData = await fetchDatamartSupportTickets({ search: targetStr, limit: 3 });
+          const dmTk = dmData?.tickets?.[0];
+          if (dmTk) {
+            const custName = (dmTk.userId?.name || dmTk.name || "Customer").trim();
+            const custPhone = (dmTk.phoneNumber || dmTk.userId?.phoneNumber || "").replace(/\D/g, "");
+            const reportId = dmTk.reportId || dmTk._id;
+
+            if (custPhone) {
+              const fullMsg = `Hello ${custName.split(" ")[0]}, regarding your DataMart ticket ${reportId}: ${cleanMsg}. - DataMart Support`;
+              await sendWhatsApp(custPhone, fullMsg).catch(() => {});
+              await sendAdminSms(fullMsg, custPhone).catch(() => {});
+              const cleanWa = custPhone.startsWith("0") ? custPhone.slice(1) : custPhone;
+
+              return `✅ *MESSAGE DISPATCHED TO ${custName.toUpperCase()}!*\n\n` +
+                `📱 *Recipient:* ${custName} (*${custPhone}*)\n` +
+                `🆔 *DataMart Ticket:* *${reportId}*\n` +
+                `💬 *Message Sent via WhatsApp:*\n"${fullMsg}"\n\n` +
+                `👉 *Chat directly with customer on WhatsApp:*\nhttps://wa.me/233${cleanWa}`;
+            }
+          }
+        } catch (e) {
+          console.warn("send_customer_message dm lookup error:", e.message);
+        }
+      }
+
+      // C. Is it Rezolv ticket (TKT-...) or customer name on Rezolv?
+      try {
+        const rezResp = await sendRezolvReply(targetStr, cleanMsg);
+        return rezResp;
+      } catch (e) {
+        console.warn("send_customer_message rezolv error:", e.message);
+      }
+
+      // D. Fallback: check Supabase chat_conversations
+      try {
+        const { data: conv } = await supabase.from("chat_conversations").select("*").or(`customer_name.ilike.%${targetStr}%,customer_phone.ilike.%${targetStr}%`).limit(1).maybeSingle();
+        if (conv) {
+          await supabase.from("chat_messages").insert({
+            conversation_id: conv.id,
+            sender: "support",
+            message: cleanMsg,
+            created_at: new Date().toISOString()
+          });
+          return `✅ Reply posted in website Live Chat for *${conv.customer_name || conv.customer_phone}*!`;
+        }
+      } catch (_) {}
+
+      return `⚠️ Could not find an active ticket or customer contact matching "${targetStr}".`;
     }
   } catch (e) {
     console.warn("executeOwnerDirectAction error:", e.message);
@@ -5976,11 +6053,51 @@ async function closeRezolvTicket(identifier, status = "resolved") {
   }
 }
 
-async function generateRezolvDraftReply(identifier) {
+async function generateSupportDraftReply(identifier) {
   try {
+    let cleanId = String(identifier || "").trim();
+
+    // 1. Is it a DataMart ticket ID (RPT...) or customer name on DataMart?
+    let dmTk = null;
+    if (cleanId && (/^RPT\d+$/i.test(cleanId) || !/^TKT-\d+$/i.test(cleanId))) {
+      const dmData = await fetchDatamartSupportTickets({ search: cleanId, limit: 3 });
+      dmTk = dmData?.tickets?.[0];
+    }
+
+    if (dmTk) {
+      const custFullName = (dmTk.userId?.name || dmTk.name || "Customer").trim();
+      const firstName = custFullName.split(" ")[0] || "there";
+      const cleanPhone = (dmTk.phoneNumber || dmTk.userId?.phoneNumber || "").replace(/\D/g, "");
+      const reportId = dmTk.reportId || dmTk._id;
+      const desc = `${dmTk.issueType || ""} ${dmTk.issueDescription || ""} ${dmTk.description || ""}`.toLowerCase();
+
+      let draft = "";
+      if (desc.includes("deposit") || desc.includes("momo") || desc.includes("wallet") || desc.includes("uncredited") || desc.includes("credit")) {
+        const amtMatch = desc.match(/(?:gh[c₵]?\s*|amt\s*|amount\s*)(\d+(?:\.\d{2})?)/i) || (dmTk.issueDescription || "").match(/(\d+(?:\.\d{2})?)/);
+        const amtStr = amtMatch ? ` of GH₵ ${amtMatch[1]}` : "";
+        draft = `Hello ${firstName}, thank you for contacting DataMart support. We have received your MoMo deposit verification request${amtStr} for ticket ${reportId}. Our finance team is reconciling it with the network and your wallet will be credited shortly. Thank you for your patience!`;
+      } else if (desc.includes("refund")) {
+        draft = `Hello ${firstName}, thank you for reaching out. Regarding your DataMart ticket ${reportId}, your refund has been approved and processed to your wallet balance. Kindly refresh your account to verify. Thank you!`;
+      } else if (desc.includes("order") || desc.includes("bundle") || desc.includes("fail") || desc.includes("delay")) {
+        draft = `Hello ${firstName}, thank you for contacting DataMart support regarding ticket ${reportId}. We are tracking your bundle delivery with the network and ensuring it reflects on your phone shortly. We apologize for any delay!`;
+      } else {
+        draft = `Hello ${firstName}, thank you for reaching out to DataMart support regarding ticket ${reportId}. We are actively attending to your request right now to resolve it for you. Thank you!`;
+      }
+
+      return {
+        ok: true,
+        platform: "datamart",
+        ticketId: reportId,
+        customerName: custFullName,
+        phone: cleanPhone,
+        draftMessage: draft
+      };
+    }
+
+    // 2. Check Rezolv (live web chat widget)
     let found = null;
-    if (identifier) {
-      found = await findRezolvTicket(identifier);
+    if (cleanId) {
+      found = await findRezolvTicket(cleanId);
     }
     if (!found) {
       const activeRes = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
@@ -5992,44 +6109,54 @@ async function generateRezolvDraftReply(identifier) {
       }
     }
 
-    if (!found || !found.ticket) {
-      return { ok: false, error: "No active customer ticket found to draft a reply for." };
+    if (found && found.ticket) {
+      const t = found.ticket;
+      const msgs = found.messages || [];
+      const custFullName = t.customer?.name || "Customer";
+      const firstName = custFullName.split(" ")[0] || "there";
+      const lastCustomerMsg = [...(msgs || [])].reverse().find(m => m.senderType === "customer")?.text || t.lastMessage?.text || "";
+      const escReason = t.escalationReason || "";
+      const combinedContext = (lastCustomerMsg + " " + escReason).toLowerCase();
+
+      const orderMatch = (escReason + " " + lastCustomerMsg).match(/\b(MN-[A-Z0-9]+|AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|\d{8,12})\b/i);
+      const orderRefStr = orderMatch ? ` for order ${orderMatch[0]}` : "";
+
+      let draft = "";
+      if (combinedContext.includes("refund") || combinedContext.includes("wallet") || combinedContext.includes("money")) {
+        draft = `Hello ${firstName}, thank you for waiting. We have verified your transaction${orderRefStr} and your refund has been processed to your wallet balance. Kindly refresh your account to check. Thank you for your patience!`;
+      } else if (combinedContext.includes("delay") || combinedContext.includes("waiting") || combinedContext.includes("not come") || combinedContext.includes("haven't received") || combinedContext.includes("not delivered")) {
+        draft = `Hello ${firstName}, thank you for reaching out. We are currently tracking your delivery${orderRefStr} with the telecom network. It is in progress and will reflect shortly. We sincerely apologize for the delay!`;
+      } else if (combinedContext.includes("failed")) {
+        draft = `Hello ${firstName}, we have investigated the failed delivery${orderRefStr}. We are reprocessing your dispatch right now so it credits to your phone. Thank you for your patience!`;
+      } else {
+        draft = `Hello ${firstName}, thank you for contacting DataMart support. I am attending to your request right now and resolving this for you immediately!`;
+      }
+
+      return {
+        ok: true,
+        platform: "rezolv",
+        ticket: t,
+        ticketId: t.ticketNumber || found.id,
+        customerName: custFullName,
+        draftMessage: draft
+      };
     }
 
-    const t = found.ticket;
-    const msgs = found.messages || [];
-    const custFullName = t.customer?.name || "Customer";
-    const firstName = custFullName.split(" ")[0] || "there";
-    const lastCustomerMsg = [...(msgs || [])].reverse().find(m => m.senderType === "customer")?.text || t.lastMessage?.text || "";
-    const escReason = t.escalationReason || "";
-    const combinedContext = (lastCustomerMsg + " " + escReason).toLowerCase();
-
-    const orderMatch = (escReason + " " + lastCustomerMsg).match(/\b(MN-[A-Z0-9]+|AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|\d{8,12})\b/i);
-    const orderRefStr = orderMatch ? ` for order ${orderMatch[0]}` : "";
-
-    let draft = "";
-    if (combinedContext.includes("refund") || combinedContext.includes("wallet") || combinedContext.includes("money")) {
-      draft = `Hello ${firstName}, thank you for waiting. We have verified your transaction${orderRefStr} and your refund has been processed to your wallet balance. Kindly refresh your account to check. Thank you for your patience!`;
-    } else if (combinedContext.includes("delay") || combinedContext.includes("waiting") || combinedContext.includes("not come") || combinedContext.includes("haven't received") || combinedContext.includes("not delivered")) {
-      draft = `Hello ${firstName}, thank you for reaching out. We are currently tracking your delivery${orderRefStr} with the telecom network. It is in progress and will reflect shortly. We sincerely apologize for the delay!`;
-    } else if (combinedContext.includes("failed")) {
-      draft = `Hello ${firstName}, we have investigated the failed delivery${orderRefStr}. We are reprocessing your dispatch right now so it credits to your phone. Thank you for your patience!`;
-    } else {
-      draft = `Hello ${firstName}, thank you for contacting DataMart support. I am attending to your request right now and resolving this for you immediately!`;
+    // 3. Fallback: Check DataMart pending tickets without filter
+    const dmPending = await fetchDatamartSupportTickets({ status: "pending", limit: 3 });
+    const fallbackDm = dmPending?.tickets?.[0];
+    if (fallbackDm) {
+      return await generateSupportDraftReply(fallbackDm.reportId || fallbackDm._id);
     }
 
-    return {
-      ok: true,
-      ticket: t,
-      ticketId: t.ticketNumber || found.id,
-      customerName: custFullName,
-      draftMessage: draft
-    };
+    return { ok: false, error: "No active customer ticket found across DataMart or Rezolv to draft a reply for." };
   } catch (err) {
-    console.warn("generateRezolvDraftReply error:", err.message);
+    console.warn("generateSupportDraftReply error:", err.message);
     return { ok: false, error: err.message };
   }
 }
+
+const generateRezolvDraftReply = generateSupportDraftReply;
 
 async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) {
   const ids = Array.isArray(portalOrderIds)
@@ -8920,6 +9047,12 @@ app.post("/webhook", async (req, res) => {
           return sendWhatsApp(from, res);
         }
 
+        // 0b. UNIFIED CUSTOMER MESSAGE / DATAMART REPLY CONFIRMATION
+        if (type === "send_customer_message" || type === "reply_customer" || type === "message_customer") {
+          const res = await executeOwnerDirectAction("send_customer_message", pendingAction);
+          return sendWhatsApp(from, res);
+        }
+
         // Gather all target references from pendingAction
         let targetRefs = [];
         if (Array.isArray(pendingAction.orders)) targetRefs.push(...pendingAction.orders);
@@ -9964,16 +10097,19 @@ app.post("/webhook", async (req, res) => {
         "      - Query recent Social Media Boost orders: {\"type\": \"query_boost_orders\", \"limit\": 8}\n" +
         "      - Two-Tier Rule: Reseller profit margin must ALWAYS be >= provider wholesale markup (M_agent >= M_admin).\n" +
         "  20. DataMart Agent Support & Ticket Operations: Direct live access to DataMart Agent Support queue ('dm tickets', 'view ticket [ReportID]', 'dm search [query]'). You have 100% visibility into agent escalations, complaints, and worker tickets.\n" +
+        "      - When the owner asks to reply, message, or text a customer on a DataMart ticket (e.g. 'reply him to text me on 0547100951', 'reply Prince Boachie', 'message customer'):\n" +
+        "        NEVER retry orders, NEVER mark orders failed, and NEVER mark chats resolved! NEVER say you cannot reply or don't have a reply button! You dispatch messages directly to the customer's phone via WhatsApp and SMS!\n" +
+        "        Output: [EXECUTE_ACTION: {\"type\": \"send_customer_message\", \"target\": \"[CustomerName or RPT ID]\", \"message\": \"[message]\"}].\n" +
         "      - When the owner asks to do a delivery check for any batch or order on DataMart (e.g. 'Do delivery check for 2313443' or 'check batch 2313443'), output [EXECUTE_ACTION: {\"type\": \"datamart_delivery_check\", \"portalOrderId\": \"2313443\"}].\n" +
         "      - When the owner asks to look up a customer on DataMart (e.g. 'check out this customer on DataMart nyakponoah11@gmail.com'), output [EXECUTE_ACTION: {\"type\": \"datamart_search_customer\", \"query\": \"nyakponoah11@gmail.com\"}].\n" +
-        "      - When the owner asks to retry a failed DataMart order, output [EXECUTE_ACTION: {\"type\": \"datamart_retry_order\", \"orderId\": \"...\"}].\n" +
-        "      - When the owner asks to refund a DataMart order, output [EXECUTE_ACTION: {\"type\": \"datamart_refund_order\", \"orderId\": \"...\"}].\n" +
+        "      - When the owner EXPLICITLY asks to retry an order, output [EXECUTE_ACTION: {\"type\": \"datamart_retry_order\", \"orderId\": \"...\"}]. NEVER output this for customer support replies!\n" +
+        "      - When the owner EXPLICITLY asks to refund an order, output [EXECUTE_ACTION: {\"type\": \"datamart_refund_order\", \"orderId\": \"...\"}].\n" +
         "  21. Rezolv Live Customer Support Chat (https://www.rezolv.dev/dashboard): You are authenticated directly as agent Stony 💙 (stillmoving11@gmail.com). You can list active customer tickets, view ticket conversations, reply directly to customers in the live DataMart chat widget, and resolve tickets.\n" +
         "      - When owner asks to list/check live support tickets on Rezolv/DataMart: output [EXECUTE_ACTION: {\"type\": \"rezolv_tickets\"}].\n" +
         "      - When owner asks to view a ticket conversation (e.g. 'view ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_view_ticket\", \"ticketId\": \"TKT-179538\"}].\n" +
-        "      - When owner asks to reply to a customer (e.g. 'reply to TKT-179538 Hello, your order has been delivered'): output [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"TKT-179538\", \"message\": \"...\"}].\n" +
+        "      - When owner asks to reply to a customer on Rezolv (e.g. 'reply to TKT-179538 Hello, your order has been delivered'): output [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"TKT-179538\", \"message\": \"...\"}].\n" +
         "      - When owner asks to resolve/close a ticket (e.g. 'close ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"TKT-179538\"}].\n" +
-        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\"|\"datamart_delivery_check\"|\"datamart_search_customer\"|\"datamart_retry_order\"|\"datamart_refund_order\"|\"rezolv_tickets\"|\"rezolv_view_ticket\"|\"rezolv_reply\"|\"rezolv_close\", ...}] at the end of your reply.\n" +
+        "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\"|\"datamart_delivery_check\"|\"datamart_search_customer\"|\"datamart_retry_order\"|\"datamart_refund_order\"|\"rezolv_tickets\"|\"rezolv_view_ticket\"|\"rezolv_reply\"|\"rezolv_close\"|\"send_customer_message\", ...}] at the end of your reply.\n" +
         "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
         "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
         "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
@@ -10454,21 +10590,25 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // Direct Query: "can you reply them", "reply them", "how to reply", "can you reply"
-      const replyThemMatch = cmdText.match(/^(?:can\s+you\s+)?reply\s+(?:to\s+)?(?:them|the\s+tickets?|the\s+customers?|customers?|tickets?)\??$/i) ||
-        cmdText.match(/^(?:can\s+you\s+)?reply\s+(?:them|customers?|tickets?)\??$/i) ||
-        cmdText.match(/^(?:can\s+you\s+reply\??|reply\s+to\s+who\??)$/i);
-      if (replyThemMatch) {
-        const rzReport = await getRezolvTicketsReport("active", 5);
+      // Direct Query: "can you reply them", "reply them", "how to reply", "can you reply", "can draft reply himself"
+      if (/^(?:can\s+(?:you\s+)?(?:reply|message|text)(?:\s+(?:them|him|her|customer|tickets?))?|can\s+(?:you\s+)?draft(?:\s+reply)?(?:\s+himself)?|how\s+(?:do\s+i|can\s+i|to)\s+reply)/i.test(cmdText)) {
+        let rzReport = "";
+        try { rzReport = await getRezolvTicketsReport("active", 3); } catch (_) {}
         return sendWhatsApp(from,
-          `Yes bossu! I can reply to them directly live on DataMart as *Stony 💙*.\n\n` +
-          `${rzReport}\n\n` +
-          `💡 *How to reply right now:*\n` +
-          `• Send: *reply [TicketNumber or Name] [your message]*\n\n` +
-          `*Examples:*\n` +
-          `• *reply TKT-176279 Hello Emmanuel, we have credited your wallet!*\n` +
-          `• *reply Emmanuel Hello, your refund is ready!*\n\n` +
-          `Or ask me: *"Draft reply for Emmanuel"* and I will write a complete professional response for you to review and send!`
+          `Yes bossu! I can reply directly to ANY customer or ticket right now! 🚀\n\n` +
+          `1️⃣ *DataMart Tickets (RPT... / Agents)*:\n` +
+          `• *reply Prince to text me on 0547100951*\n` +
+          `• *reply him [your message]*\n` +
+          `• *reply RPT005281 [your message]*\n` +
+          `I dispatch a direct WhatsApp message to their phone, attempt SMS, and send you a 1-tap WhatsApp chat link!\n\n` +
+          `2️⃣ *Rezolv Live Customer Chat (TKT-...)*:\n` +
+          `• *reply TKT-179978 [your message]*\n` +
+          `• *reply Emmanuel [your message]*\n` +
+          `I post directly into their live chat widget as *Stony 💙*!\n\n` +
+          `3️⃣ *AI Auto-Draft Replies (I draft it myself!)*:\n` +
+          `• Just say: *draft reply* or *draft reply for Prince*\n` +
+          `I generate the best professional reply, and you just tap *YES* or *SEND* to dispatch live!\n\n` +
+          (rzReport ? `${rzReport}` : "")
         );
       }
 
@@ -10476,96 +10616,125 @@ app.post("/webhook", async (req, res) => {
       const draftReplyMatch = cmdText.match(/^(?:(?:can\s+you\s+)?draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply|help\s+me\s+reply|what\s+should\s+i\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i);
       if (draftReplyMatch) {
         const targetId = (draftReplyMatch[1] || "").trim();
-        const draftRes = await generateRezolvDraftReply(targetId);
+        const draftRes = await generateSupportDraftReply(targetId);
         if (!draftRes.ok) {
           return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find a ticket to draft a reply for."}`);
         }
 
         await setOwnerPendingAction(from, {
-          type: "rezolv_reply",
+          type: draftRes.platform === "datamart" ? "send_customer_message" : "rezolv_reply",
+          target: draftRes.phone || draftRes.ticketId,
           ticketId: draftRes.ticketId,
+          customerName: draftRes.customerName,
           message: draftRes.draftMessage
         });
+
+        const platformLabel = draftRes.platform === "datamart" ? "DataMart Ticket (WhatsApp/SMS)" : "Rezolv Live Chat Widget (Stony 💙)";
 
         return sendWhatsApp(from,
           `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
           `"${draftRes.draftMessage}"\n\n` +
-          `💡 *Ready to dispatch this live as Stony 💙?*\n` +
+          `🌐 *Destination:* ${platformLabel}\n` +
+          `💡 *Ready to dispatch this live?*\n` +
           `👉 Reply: *YES* or *SEND* to dispatch right now!\n` +
           `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
         );
       }
 
-      // Unified Live Reply Handler (Rezolv live tickets, DataMart RPT tickets, and pronouns "him/her/them")
-      const unifiedReplyMatch =
-        cmdText.match(/^(?:(?:dm|rezolv)\s+)?(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?(him|her|them|the\s+customer|customer|TKT-?\d+|RPT\d+|[a-f0-9]{24}|[A-Za-z]{3,25})\s+([\s\S]+)$/i) ||
-        cmdText.match(/^(?:reply|tell)\s+(him|her|them|the\s+customer|customer)\s+([\s\S]+)$/i);
+      // Unified Live Reply Handler (Rezolv live tickets, DataMart RPT tickets, customer names, phone numbers, and pronouns)
+      const unifiedReplyPrefixMatch =
+        cmdText.match(/^(?:(?:dm|rezolv)\s+)?(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?([\s\S]+)$/i);
 
-      if (unifiedReplyMatch) {
-        let rawTarget = unifiedReplyMatch[1].trim();
-        let replyMsg = unifiedReplyMatch[2].trim();
+      if (unifiedReplyPrefixMatch) {
+        let remainder = unifiedReplyPrefixMatch[1].trim();
+        let rawTarget = "";
+        let replyMsg = "";
 
-        // Strip leading "to " if user said "reply him to text me..."
-        if (/^to\s+/i.test(replyMsg)) {
-          replyMsg = replyMsg.replace(/^to\s+/i, "").trim();
+        // Case A: Pronouns (him, her, them, the customer, etc.)
+        const pronounMatch = remainder.match(/^(him|her|them|the\s+customer|customer|client|user)\b(?:\s+(?:to|that|saying|:)?\s*)?([\s\S]*)$/i);
+        if (pronounMatch) {
+          rawTarget = pronounMatch[1].trim();
+          replyMsg = pronounMatch[2].trim();
         }
+        // Case B: Ticket ID (RPT005281, TKT-179978, mongoId)
+        else if (/^(RPT\d+|TKT-?\d+|[a-f0-9]{24})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i.test(remainder)) {
+          const tMatch = remainder.match(/^(RPT\d+|TKT-?\d+|[a-f0-9]{24})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i);
+          rawTarget = tMatch[1].trim();
+          replyMsg = tMatch[2].trim();
+        }
+        // Case C: Phone Number (054..., 233...)
+        else if (/^(0[2357]\d{8}|233\d{9})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i.test(remainder)) {
+          const pMatch = remainder.match(/^(0[2357]\d{8}|233\d{9})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i);
+          rawTarget = pMatch[1].trim();
+          replyMsg = pMatch[2].trim();
+        }
+        // Case D: Separator words like " to ", " that ", " saying ", or ": "
+        else if (/^(.+?)\s+(?:to|that|saying|:)\s+([\s\S]+)$/i.test(remainder)) {
+          const sepMatch = remainder.match(/^(.+?)\s+(?:to|that|saying|:)\s+([\s\S]+)$/i);
+          rawTarget = sepMatch[1].trim();
+          replyMsg = sepMatch[2].trim();
+        }
+        // Case E: Customer name followed by text (e.g. "Prince Boachie text me on...", "Emmanuel we refunded you")
+        else {
+          const words = remainder.split(/\s+/);
+          if (words.length >= 3) {
+            rawTarget = words.slice(0, 2).join(" ");
+            replyMsg = words.slice(2).join(" ");
+          } else if (words.length === 2) {
+            rawTarget = words[0];
+            replyMsg = words[1];
+          } else {
+            rawTarget = remainder;
+            replyMsg = "";
+          }
+        }
+
+        // Clean up message
+        if (/^to\s+/i.test(replyMsg)) replyMsg = replyMsg.replace(/^to\s+/i, "").trim();
+        if (/^that\s+/i.test(replyMsg)) replyMsg = replyMsg.replace(/^that\s+/i, "").trim();
 
         // If target is pronoun "him", "her", "them", "the customer"
         if (/^(?:him|her|them|the\s+customer|customer|client|user)$/i.test(rawTarget)) {
           const historyTexts = (history || []).slice(-5).map(h => h.text).reverse();
-          let resolvedFromHistory = null;
-
           for (const ht of historyTexts) {
             const rptMatch = ht.match(/RPT\d+/i);
-            if (rptMatch) {
-              resolvedFromHistory = { type: "rpt", id: rptMatch[0] };
-              break;
-            }
+            if (rptMatch) { rawTarget = rptMatch[0]; break; }
             const tktMatch = ht.match(/TKT-\d+/i);
-            if (tktMatch) {
-              resolvedFromHistory = { type: "tkt", id: tktMatch[0] };
-              break;
-            }
+            if (tktMatch) { rawTarget = tktMatch[0]; break; }
             const nameMatch = ht.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+))\b/);
             if (nameMatch && !/^(DataMart|Stony|Rezolv|Admin|Understood)/i.test(nameMatch[0])) {
-              resolvedFromHistory = { type: "name", id: nameMatch[0] };
+              rawTarget = nameMatch[0];
               break;
             }
           }
-
-          if (resolvedFromHistory) {
-            rawTarget = resolvedFromHistory.id;
-          }
         }
 
-        // 1. Is it a DataMart RPT ticket (e.g. RPT005281 or named customer like Prince Boachie)?
-        if (/^RPT\d+$/i.test(rawTarget) || !/^TKT-\d+$/i.test(rawTarget)) {
-          const dmData = await fetchDatamartSupportTickets({ search: rawTarget, limit: 1 });
-          const dmTk = dmData?.tickets?.[0];
-          if (dmTk) {
-            const custName = (dmTk.userId?.name || "Customer").trim();
-            const custPhone = dmTk.phoneNumber || dmTk.userId?.phoneNumber || "";
-            const cleanPhone = custPhone.replace(/\D/g, "");
-            const reportId = dmTk.reportId || dmTk._id;
-
-            if (cleanPhone) {
-              const smsText = `Hello ${custName.split(" ")[0]}, regarding your DataMart ticket ${reportId}: ${replyMsg}. - DataMart Support`;
-              await sendAdminSms(smsText, cleanPhone);
-              const waLink = `https://wa.me/233${cleanPhone.startsWith("0") ? cleanPhone.slice(1) : cleanPhone}`;
-
-              return sendWhatsApp(from,
-                `✅ *MESSAGE DISPATCHED TO ${custName.toUpperCase()}!*\n\n` +
-                `📱 *Recipient:* ${custName} (*${cleanPhone}*)\n` +
-                `🆔 *DataMart Ticket:* *${reportId}*\n` +
-                `💬 *SMS Sent via Arkesel (D_1Gh):*\n"${smsText}"\n\n` +
-                `👉 *Chat directly with customer on WhatsApp:*\n${waLink}`
-              );
-            }
+        // If no message was provided, auto-draft a reply!
+        if (!replyMsg) {
+          const draftRes = await generateSupportDraftReply(rawTarget);
+          if (!draftRes.ok) {
+            return sendWhatsApp(from, `⚠️ ${draftRes.error || "Please include the message to send: e.g. *reply " + rawTarget + " [message]*"}`);
           }
+          await setOwnerPendingAction(from, {
+            type: draftRes.platform === "datamart" ? "send_customer_message" : "rezolv_reply",
+            target: draftRes.phone || draftRes.ticketId,
+            ticketId: draftRes.ticketId,
+            customerName: draftRes.customerName,
+            message: draftRes.draftMessage
+          });
+          const platformLabel = draftRes.platform === "datamart" ? "DataMart Ticket (WhatsApp/SMS)" : "Rezolv Live Chat Widget (Stony 💙)";
+          return sendWhatsApp(from,
+            `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
+            `"${draftRes.draftMessage}"\n\n` +
+            `🌐 *Destination:* ${platformLabel}\n` +
+            `💡 *Ready to dispatch this live?*\n` +
+            `👉 Reply: *YES* or *SEND* to dispatch right now!\n` +
+            `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
+          );
         }
 
-        // 2. Otherwise route to Rezolv live chat widget
-        const rep = await sendRezolvReply(rawTarget, replyMsg);
+        // We have rawTarget and replyMsg: dispatch directly
+        const rep = await executeOwnerDirectAction("send_customer_message", { target: rawTarget, message: replyMsg });
         return sendWhatsApp(from, rep);
       }
 
