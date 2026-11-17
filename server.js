@@ -6267,50 +6267,63 @@ async function closeRezolvTicket(identifier, status = "resolved") {
   }
 }
 
-async function cleanRezolvIdleGreetingTickets(maxToClean = 25) {
+async function cleanRezolvIdleGreetingTickets(maxToClean = 35) {
   try {
-    const res = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
-    const tickets = res.data?.tickets || res.data?.data?.tickets || [];
-    if (!Array.isArray(tickets) || tickets.length === 0) {
+    let allTickets = [];
+    for (let p = 1; p <= 5; p++) {
+      const res = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&page=${p}&limit=50`);
+      const list = res.data?.data?.tickets || res.data?.tickets || [];
+      if (!Array.isArray(list) || list.length === 0) break;
+      allTickets.push(...list);
+    }
+
+    if (allTickets.length === 0) {
       return "⚠️ Could not retrieve tickets from Rezolv.";
     }
 
-    const idleTickets = tickets.filter(t => {
-      if (t.status === "resolved" || t.status === "closed") return false;
+    const idleTickets = allTickets.filter(t => {
+      // Don't re-delete already closed tickets
+      if (t.status === "closed") return false;
       const txt = (t.lastMessage?.text || "").trim().toLowerCase();
-      const isBotGreeting = txt.startsWith("hi there!") || txt.includes("thanks for reaching out");
+      const isBotGreeting = txt.startsWith("hi there!") || txt.includes("thanks for reaching out") || txt.startsWith("bot: hi there");
       const isShortGreeting = /^(?:hi|hello|hey|good\s*(?:morning|afternoon|evening)|yo)\W*$/i.test(txt);
-      const isVisitorOrEmpty = (t.customer?.name || "").toLowerCase() === "visitor" || !t.customer?.phone || !t.customer?.email;
+      const isVisitorOrEmpty = (t.customer?.name || "").toLowerCase() === "visitor" || !t.customer?.phone;
       return isBotGreeting || (isShortGreeting && isVisitorOrEmpty);
     });
 
     if (idleTickets.length === 0) {
-      return "✨ *All clean bossu!* No idle greeting or visitor tickets found in your Rezolv inbox.";
+      return "✨ *All clean bossu!* No idle greeting or visitor tickets found in your Rezolv inbox. All cleared!";
     }
 
-    const toResolve = idleTickets.slice(0, maxToClean);
-    const resolvedList = [];
+    const toClean = idleTickets.slice(0, maxToClean);
+    const cleanedList = [];
 
-    for (const tkt of toResolve) {
+    for (const tkt of toClean) {
       try {
-        const patchRes = await rezolvApiRequest("/tickets/" + tkt._id + "/status", {
-          method: "PATCH",
-          body: { status: "resolved" }
-        });
-        if (patchRes.status === 200) {
+        // Permanently purge from Rezolv so it completely disappears from the dashboard
+        const delRes = await rezolvApiRequest("/tickets/" + tkt._id, { method: "DELETE" });
+        if (delRes.status === 200 || delRes.status === 204) {
           const cust = tkt.customer?.name || "Visitor";
-          resolvedList.push(`• *${tkt.ticketNumber || tkt._id}* (${cust})`);
+          cleanedList.push(`• *${tkt.ticketNumber || tkt._id}* (${cust})`);
+        } else {
+          // Fallback to closing
+          await rezolvApiRequest("/tickets/" + tkt._id + "/status", {
+            method: "PATCH",
+            body: { status: "closed" }
+          });
+          const cust = tkt.customer?.name || "Visitor";
+          cleanedList.push(`• *${tkt.ticketNumber || tkt._id}* (${cust}) [closed]`);
         }
       } catch (e) {
-        console.warn(`Failed to resolve ${tkt.ticketNumber}:`, e.message);
+        console.warn(`Failed to clean ${tkt.ticketNumber}:`, e.message);
       }
     }
 
     return (
-      `🧹 *REZOLV INBOX CLEANUP COMPLETED!* ✨\n\n` +
-      `Closed & marked resolved *${resolvedList.length}* idle greeting chat(s):\n` +
-      resolvedList.join("\n") +
-      `\n\n🎯 Refreshed in *https://www.rezolv.dev/dashboard* — your inbox is clear!`
+      `🧹 *REZOLV INBOX PURGED & CLEANED!* ✨\n\n` +
+      `Permanently removed *${cleanedList.length}* idle greeting / empty visitor chat(s):\n` +
+      cleanedList.join("\n") +
+      `\n\n🎯 Refreshed in *https://www.rezolv.dev/dashboard* — they are completely gone from your inbox!`
     );
   } catch (err) {
     console.warn("cleanRezolvIdleGreetingTickets error:", err.message);
