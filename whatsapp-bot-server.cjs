@@ -3531,6 +3531,7 @@ function getUserMode(phone, session) {
   const norm = String(phone || "").replace(/\D/g, "");
   if (userModes.has(norm)) return userModes.get(norm);
   if (userModes.has(String(phone))) return userModes.get(String(phone));
+  if (session?.step === 97) return "support";
   if (session?.step === 98) return "datamart";
   if (session?.step === 99) return "ai";
   return "bot";
@@ -6502,16 +6503,68 @@ async function executeDatamartSearch(rawQuery, callerPhone = null) {
 
   if (!q) return "🔍 Please provide a customer name, phone number, email, or order reference to search.";
 
-  const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(q)}`, {}, callerPhone);
-  const d = resp?.data;
+  // 1. Check DataMart Support Tickets first (e.g. Prince Boachie, Amehati Prince, RPT005281)
+  let foundTickets = [];
+  try {
+    const tkRes = await fetchDatamartSupportTickets({ search: q, limit: 3 }, callerPhone);
+    if (tkRes?.tickets && tkRes.tickets.length > 0) {
+      foundTickets = tkRes.tickets;
+    }
+  } catch (_) {}
+
+  // 2. Check Rezolv Tickets (live web chat widget)
+  let rezolvFound = null;
+  try {
+    rezolvFound = await findRezolvTicket(q);
+  } catch (_) {}
+
+  // 3. Search DataMart Users & Orders
+  let d = null;
+  try {
+    const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(q)}`, {}, callerPhone);
+    d = resp?.data;
+  } catch (_) {}
   const users = d?.results?.users || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "customer" || x.email) : []);
   const orders = d?.results?.orders || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "order" || x.network) : []);
 
-  if (users.length === 0 && orders.length === 0) {
-    return `🔍 No DataMart customer, agent, or order found matching "*${q}*".`;
+  if (foundTickets.length === 0 && !rezolvFound && users.length === 0 && orders.length === 0) {
+    return `🔍 No DataMart support ticket, customer, agent, or order found matching "*${q}*".`;
   }
 
-  let out = `🔍 *DATAMART LOOKUP RESULTS FOR "${q}":*\n\n`;
+  let out = `🔍 *LOOKUP RESULTS FOR "${q}":*\n\n`;
+
+  // Display Open Support Tickets if found
+  if (foundTickets.length > 0) {
+    out += `🎫 *OPEN DATAMART SUPPORT TICKETS (${foundTickets.length}):*\n`;
+    foundTickets.forEach((tk) => {
+      const custName = (tk.userId?.name || "Customer").trim();
+      const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
+      const cleanPhone = custPhone.replace(/\D/g, "");
+      const prio = (tk.priority || "normal").toUpperCase();
+      const status = (tk.status || "pending").toUpperCase();
+      const desc = (tk.issueDescription || tk.description || "").replace(/\s+/g, " ").trim();
+      out += `• *[${tk.reportId}]* *${tk.reportReason || tk.issueType || "Support"}* (*${prio}* - *${status}*)\n` +
+        `  👤 *Customer:* *${custName}* (*${custPhone}*)\n` +
+        `  📝 *Details:* "${desc.slice(0, 110)}${desc.length >= 110 ? "..." : ""}"\n`;
+      if (cleanPhone) {
+        const waLink = `https://wa.me/233${cleanPhone.startsWith("0") ? cleanPhone.slice(1) : cleanPhone}`;
+        out += `  👉 *WhatsApp Customer:* ${waLink}\n`;
+      }
+      out += `  💡 *Quick Reply:* *reply ${custName.split(" ")[0]} [your message]*\n` +
+        `  💡 *AI Draft:* *draft reply for ${custName.split(" ")[0]}*\n\n`;
+    });
+  }
+
+  // Display Rezolv chat if found
+  if (rezolvFound && rezolvFound.ticket) {
+    const rt = rezolvFound.ticket;
+    out += `💬 *REZOLV LIVE CHAT TICKET:*\n` +
+      `• *ID:* *${rt.ticketNumber || rt._id}*\n` +
+      `• *Customer:* ${rt.customer?.name || "Customer"} (${rt.customer?.email || ""})\n` +
+      `• *Status:* ${(rt.status || "open").toUpperCase()}\n` +
+      `• *Last Message:* "${(rt.lastMessage?.text || "").slice(0, 90)}"\n` +
+      `💡 *Reply:* *reply ${rt.ticketNumber || rt._id} [your message]*\n\n`;
+  }
 
   if (users.length > 0) {
     users.slice(0, 3).forEach((u, i) => {
@@ -8901,33 +8954,46 @@ app.post("/webhook", async (req, res) => {
         );
       }
 
-      // ── SWITCH TO REZOLV LIVE CUSTOMER SUPPORT MODE ──
-      const isRezolvModeSwitch =
-        /\b(?:rezolv|resolv|rezolve|resovl)\b/i.test(cleanInput) ||
-        /^(?:support\s*mode|live\s*support(?:\s*mode)?)$/i.test(cleanInput);
+      // ── SWITCH TO FULLY LOCKED-IN SUPPORT MODE (REZOLV & DATAMART) ──
+      const isSupportModeSwitch =
+        /\b(?:rezolv|resolv|rezolve|resovl)\s*(?:mode)?\b/i.test(cleanInput) ||
+        /\b(?:support\s*mode|live\s*support(?:\s*mode)?|support\s*desk|customer\s*support\s*mode)\b/i.test(cleanInput) ||
+        /^(?:support|rezolv)$/i.test(cleanInput);
 
       const isSpecificRezolvAction = /^(?:reply|tell|close|resolve|ticket|view\s+ticket)\b/i.test(cleanInput);
 
-      if (isRezolvModeSwitch && !isSpecificRezolvAction) {
-        setUserMode(from, "datamart");
-        await saveCustomerSession(from, { step: 98 });
-        await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "datamart" }, { onConflict: "key" });
+      if (isSupportModeSwitch && !isSpecificRezolvAction) {
+        setUserMode(from, "support");
+        await saveCustomerSession(from, { step: 97 });
+        await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "support" }, { onConflict: "key" });
         const initialReport = await getRezolvTicketsReport("active", 5);
         return sendWhatsApp(from,
-          `🎟️ *SWITCHED TO REZOLV LIVE SUPPORT MODE!* 🚀\n` +
-          `Logged in as: *Stony 💙* (DataMart Support Desk)\n\n` +
+          `🔒 *SUPPORT MODE FULLY LOCKED IN!* ⚡\n` +
+          `Logged in as: *Stony 💙* (Live Support Desk)\n\n` +
+          `🚫 *DATA 1 GH store statistics, sales numbers, and marketing are MUTED.*\n` +
+          `I am now 100% focused strictly on customer support tickets, live chats, and issue resolutions!\n\n` +
           `${initialReport}\n\n` +
-          `💡 *Quick Commands in this Mode:*\n` +
-          `• *reply [TicketNumber or Name] [message]* - Send live reply\n` +
-          `• *draft reply [Name]* - Let me write the reply for you\n` +
-          `• *ticket [TicketNumber]* - View full chat history\n` +
-          `• *close [TicketNumber]* - Mark ticket resolved\n` +
-          `• *exit* - Return to normal Stony Store Co-Pilot mode.`
+          `💡 *Quick Commands in Support Mode:*\n` +
+          `• *reply [Name or Ticket] [message]* ➔ Send WhatsApp/SMS to customer or reply on Rezolv\n` +
+          `• *reply him to text me on 0547100951* ➔ Resolves pronoun from recent ticket & sends direct WhatsApp\n` +
+          `• *draft reply [Name or Ticket]* ➔ AI writes professional response, tap YES to send\n` +
+          `• *ticket [ReportID or TKT-ID]* ➔ View full chat history & issue details\n` +
+          `• *[Customer Name or Phone]* ➔ Look up tickets, complaints & orders\n` +
+          `• *tickets* or *urgent* ➔ Refresh ticket queue\n` +
+          `• *exit* or *normal mode* ➔ Return to normal DATA 1 GH store co-pilot.`
         );
       }
 
-      // ── DEDICATED DATAMART WORKER CONSOLE MODE HANDLER ──
-      if (getUserMode(from) === "datamart") {
+      // ── DEDICATED SUPPORT & DATAMART CONSOLE MODE HANDLER ──
+      const activeOwnerMode = getUserMode(from);
+      if (activeOwnerMode === "support" || activeOwnerMode === "datamart") {
+        if (/^(?:exit|normal\s*mode|stony|stony\s*mode|store\s*mode|back|quit|leave|stop)$/i.test(cleanInput)) {
+          setUserMode(from, "ai");
+          await saveCustomerSession(from, { step: 99 });
+          await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "ai" }, { onConflict: "key" });
+          return sendWhatsApp(from, `👑 Exited Support Mode. Switched back to *DATA 1 GH Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
+        }
+
         const dmHandled = await processDatamartConsoleCommand(from, cleanInput, true);
         if (dmHandled) return dmHandled;
       }
@@ -11588,11 +11654,42 @@ app.post("/webhook", async (req, res) => {
         return sendWhatsApp(from, msg);
       }
 
+      // Check if user is in Support Mode
+      const isSupportMode = getUserMode(from, currentSession) === "support" || currentSession?.step === 97;
+
+      let effectiveSystemPrompt = ownerSystemPrompt;
+      if (isSupportMode) {
+        effectiveSystemPrompt =
+          "You are Stony 💙, the Head of Live Customer Support & Support Desk Operations at DataMart and Rezolv.\n" +
+          "You are having a direct WhatsApp conversation with the business owner in LOCKED-IN SUPPORT MODE.\n\n" +
+          "STRICT SUPPORT MODE MANDATE (ZERO DATA 1 STORE PROMPT DUMPING):\n" +
+          "- You are 100% DEDICATED to customer support tickets, resolving agent/customer complaints, drafting replies, and tracking issue resolutions.\n" +
+          "- NEVER talk about DATA 1 GH store orders, today's store sales, revenue, marketing promos, campus reps, or failed store checkout orders!\n" +
+          "- NEVER talk about retrying store dispatches (like WS-MFDA8PM) or clearing store queue!\n" +
+          "- NEVER say you cannot reply or don't have a reply button! You can dispatch WhatsApp & SMS directly to customers, and reply directly on Rezolv!\n" +
+          "- Talk like an intelligent, sharp Ghanaian customer support lead ('bossu', 'chale', 'sharp', 'no wahala'). Keep replies crisp, direct, and focused strictly on the tickets and customer communications.\n\n" +
+          "CUSTOMER SUPPORT CAPABILITIES & ACTIONS:\n" +
+          "1. DataMart Tickets (RPT...): You dispatch WhatsApp and SMS directly to customer phones!\n" +
+          "   When owner asks to reply, tell, or message a customer on a DataMart ticket (e.g. 'reply him to text me on 0547100951' or 'reply Prince Boachie'):\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"send_customer_message\", \"target\": \"[name/phone/RPT]\", \"message\": \"[message]\"}]\n" +
+          "2. Rezolv Live Chat (TKT-...): You reply directly in the live web chat widget as Stony 💙.\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"[TKT-ID]\", \"message\": \"[message]\"}]\n" +
+          "3. Close/Resolve Ticket:\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"[TKT-ID]\"}]\n" +
+          "4. Carrier Delivery Check on Portal Order ID:\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"datamart_delivery_check\", \"portalOrderId\": \"[id]\"}]\n" +
+          "5. Search customer/agent on DataMart:\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"datamart_search_customer\", \"query\": \"[query]\"}]\n\n" +
+          "LIVE CUSTOMER SUPPORT QUEUES & TICKETS CONTEXT:\n" +
+          (rezolvLiveContext ? `${rezolvLiveContext}\n` : "") +
+          (dmSupportLiveContext ? `${dmSupportLiveContext}\n` : "");
+      }
+
       // ── STEP 1: FAST DIRECT IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──
       let aiReply = "";
       try {
         const aiResult = await executeBotAi({
-          systemPrompt: ownerSystemPrompt,
+          systemPrompt: effectiveSystemPrompt,
           userMessage: text,
           history,
           maxTokens: 2500,
@@ -11699,8 +11796,11 @@ app.post("/webhook", async (req, res) => {
 
       // ── SMART CONVERSATIONAL PERSONAL ASSISTANT FALLBACK ──
       if (!aiReply) {
+        if (isSupportMode) {
+          aiReply = `I dey with you bossu! 🎫 *Support Mode is fully locked in.*\nLet me know which customer ticket or complaint you'd like me to inspect, draft a reply for, or dispatch!`;
+        }
         // 1. Order Lookups (like WSF7AEZQA)
-        if (specificOrderCtx) {
+        else if (specificOrderCtx) {
           aiReply = `🔍 *Live Order Status:*\n${specificOrderCtx}\nIf payment just went through on MoMo, you can refresh or I can trigger delivery directly for you!`;
         }
 
