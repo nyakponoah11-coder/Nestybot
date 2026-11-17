@@ -6820,44 +6820,45 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
 
         async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
           try {
-            const res = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&page=${page}&limit=50`);
+            const res = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&page=${page}&limit=100`);
             const tickets = res.data?.data?.tickets || res.data?.tickets || [];
             if (!Array.isArray(tickets) || tickets.length === 0) {
               return `🎉 *DATAMART LIVE SUPPORT INBOX IS CLEAR!*\n\nNo active customer support tickets at the moment. All chats resolved!`;
             }
 
-            // Filter active tickets that are not resolved and not closed
-            const active = tickets.filter(t => t.status !== "resolved" && t.status !== "closed");
-            if (active.length === 0) {
-              return `🎉 *ALL CAUGHT UP!* No open support tickets waiting for reply in Rezolv inbox.`;
+            // Strictly filter tickets currently in the LIVE INBOX view:
+            // Must be open/in_progress (not resolved, not closed) AND have unread customer messages (the "Inbox" badge view)
+            const liveInbox = tickets.filter(t => t && t.status !== "resolved" && t.status !== "closed" && (t.unreadCount || 0) > 0);
+            if (liveInbox.length === 0) {
+              return `🎉 *ALL CAUGHT UP!* No open support tickets currently waiting for reply in Rezolv live inbox.`;
             }
 
             // Filter out tickets where the only message was a bot greeting from hours ago (idle visitors)
-            const validTickets = active.filter(t => {
+            const validTickets = liveInbox.filter(t => {
               const last = (t.lastMessage?.text || "").toLowerCase();
               const isOnlyGreeting = /^(?:hi\s+there|hello\s+there|welcome\s+to|bot:\s*hi)/i.test(last);
               const isOld = (Date.now() - new Date(t.updatedAt || t.createdAt).getTime()) > 20 * 60 * 1000;
               return !(isOnlyGreeting && isOld);
             });
 
-            const candidatePool = validTickets.length > 0 ? validTickets : active;
+            const candidatePool = validTickets.length > 0 ? validTickets : liveInbox;
             const now = Date.now();
 
-            // Calculate waiting time for each active candidate
+            // Calculate waiting time for each active inbox candidate
             const poolWithWaitTime = candidatePool.map(t => {
               const msgTime = new Date(t.lastCustomerMessageAt || t.updatedAt || t.createdAt).getTime();
               const waitMins = isNaN(msgTime) ? 0 : Math.max(0, Math.round((now - msgTime) / (60 * 1000)));
               return { ...t, _waitMins: waitMins, _msgTime: msgTime };
             });
 
-            // Filter tickets that have been waiting 10+ minutes
+            // Filter strictly for tickets that have been waiting 10+ minutes in the live inbox
             let currentInbox10mPlus = poolWithWaitTime.filter(t => t._waitMins >= 10);
 
             // FIRST COME FIRST SERVED: Sort strictly by HIGHEST waiting time first (oldest waiting customer first!)
             currentInbox10mPlus.sort((a, b) => b._waitMins - a._waitMins);
 
             if (currentInbox10mPlus.length === 0) {
-              return `🎉 *ALL CAUGHT UP!* No open support tickets currently waiting more than 10 minutes in Rezolv inbox.`;
+              return `🎉 *ALL CAUGHT UP!* No support tickets currently waiting more than 10 minutes in the live Rezolv inbox (${liveInbox.length} ticket(s) under 10m).`;
             }
 
             const listToProcess = currentInbox10mPlus.slice(0, limit);
