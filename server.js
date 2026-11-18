@@ -6410,7 +6410,8 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
           status: carrierAudit.status,
           rawStatus: carrierAudit.rawStatus,
           network: "MTN",
-          phone: phoneCandidate || q
+          phone: phoneCandidate || q,
+          items: carrierAudit.items || []
         };
       }
     } catch (_) { }
@@ -6469,7 +6470,8 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
           rawStatus: auditRes.rawStatus,
           network: dmOrder.network || "MTN",
           capacity: dmOrder.capacity || "",
-          phone: dmOrder.phoneNumber || dmOrder.recipientPhone || phoneCandidate || q
+          phone: dmOrder.phoneNumber || dmOrder.recipientPhone || phoneCandidate || q,
+          items: auditRes.items || []
         };
       }
     } catch (_) { }
@@ -6903,10 +6905,33 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
       if (st === "failed" || st === "cancelled" || (liveTrack.failed && liveTrack.failed > 0)) {
         portalId = detectedPortalId || refCode;
         if (portalId && /^\d{4,9}$/.test(String(portalId))) {
-          submitFailedPortalIdToGroup(portalId, { reason: "support_draft_failed" }).catch(() => { });
+          submitFailedPortalIdToGroup(portalId, { reason: "support_draft_failed", failedCount: liveTrack.failed || 1 }).catch(() => { });
         }
-        trackingDiagnostic = `❌ FAILED on DataMart · 🆔 *Portal ID:* *${portalId}*${liveTrack.failed ? ` (${liveTrack.failed} Failed)` : ""}`;
-        draftText = `Hello ${firstName}, we have checked your order on DataMart and noticed a delivery issue on the network. Don't worry at all, it will be fixed and reprocessed for you right away so your data delivers immediately. Thank you for your patience!`;
+
+        const batchItems = Array.isArray(liveTrack.items) ? liveTrack.items : [];
+        const norm9 = (num) => String(num || "").replace(/\D/g, "").slice(-9);
+        const targetCustPhone = norm9(phoneFound || liveTrack.phone || fullTicket?.customer?.phone || (typeof targetQuery === "string" && /^0[2357]\d{8}$/.test(targetQuery) ? targetQuery : null));
+
+        const failedBatchItems = batchItems.filter(it => {
+          const itSt = String(it.status || "").toLowerCase();
+          return itSt === "failed" || itSt === "cancelled" || itSt === "rejected" || (itSt !== "sent" && itSt !== "delivered");
+        });
+
+        const sentBatchItems = batchItems.filter(it => {
+          const itSt = String(it.status || "").toLowerCase();
+          return itSt === "sent" || itSt === "delivered" || itSt === "completed" || itSt === "success";
+        });
+
+        const isCustPhoneInFailed = targetCustPhone && targetCustPhone.length >= 9 && failedBatchItems.some(it => norm9(it.phone) === targetCustPhone);
+        const isCustPhoneInSent = targetCustPhone && targetCustPhone.length >= 9 && sentBatchItems.some(it => norm9(it.phone) === targetCustPhone);
+
+        if (batchItems.length > 0 && isCustPhoneInSent && !isCustPhoneInFailed) {
+          trackingDiagnostic = `✅ ALREADY SENT to customer line (${ph}) · 🆔 *Portal ID:* *${portalId}* (${liveTrack.failed || failedBatchItems.length} other lines failed in batch & submitted to team group)`;
+          draftText = `Hello ${firstName}, we have tracked your order on DataMart (Track ID: ${portalId}). Your data bundle has already been successfully sent and delivered to your number (${ph})! Kindly dial *124# or *126# to verify your main balance. Thank you!`;
+        } else {
+          trackingDiagnostic = `❌ FAILED on DataMart · 🆔 *Portal ID:* *${portalId}*${liveTrack.failed ? ` (${liveTrack.failed} Failed)` : ""}`;
+          draftText = `Hello ${firstName}, we have checked your order on DataMart and noticed a delivery issue on your phone number (${ph}). Don't worry at all, it has been flagged to our technical team and is being worked on / re-processed for you right away so your data delivers immediately. Thank you for your patience!`;
+        }
       } else if (st === "delivered" || st === "completed" || st === "success") {
         portalId = detectedPortalId || refCode;
         if (liveTrack.isCarrierAudit) {
@@ -7358,6 +7383,15 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       totalItems,
       failedPhones: failedItems.map(it => it.phone)
     }] : [];
+
+    if (failedItems.length > 0 && targetId && /^\d{4,9}$/.test(String(targetId))) {
+      submitFailedPortalIdToGroup(targetId, {
+        reason: "carrier_delivery_check_failed",
+        failedCount: failedItems.length,
+        totalItems,
+        failedPhones: failedItems.map(it => it.phone)
+      }).catch(() => { });
+    }
 
     if (callerPhone) {
       const norm = normalizeBotPhone(callerPhone);
