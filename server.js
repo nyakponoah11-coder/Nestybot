@@ -5101,7 +5101,7 @@ async function executeOwnerDirectAction(type, payload = {}) {
       const tId = payload.ticketId || payload.ticket || payload.id;
       const msg = payload.message || payload.text || payload.reply;
       if (!tId || !msg) return "⚠️ Missing ticketId or message to reply.";
-      return await sendRezolvReply(tId, msg);
+      return await sendRezolvReply(tId, msg, payload.from || payload.callerPhone || null);
     }
 
     // 35. Rezolv Resolve/Close Ticket
@@ -5161,7 +5161,7 @@ async function executeOwnerDirectAction(type, payload = {}) {
 
       // C. Is it Rezolv ticket (TKT-...) or customer name on Rezolv?
       try {
-        const rezResp = await sendRezolvReply(targetStr, cleanMsg);
+        const rezResp = await sendRezolvReply(targetStr, cleanMsg, payload.from || payload.callerPhone || null);
         return rezResp;
       } catch (e) {
         console.warn("send_customer_message rezolv error:", e.message);
@@ -6043,14 +6043,37 @@ async function loginRezolvUser(email, password, isDefault = false) {
         try {
           const json = JSON.parse(data);
           if (json.success && json.data?.accessToken) {
+            const token = json.data.accessToken;
+            const agent = json.data.agent || {};
+
             if (isDefault) {
               rezolvTokenCache = {
-                accessToken: json.data.accessToken,
+                accessToken: token,
                 refreshToken: json.data.refreshToken || null,
                 expiresAt: Date.now() + 12 * 60 * 1000
               };
             }
-            resolve({ token: json.data.accessToken, agent: json.data.agent });
+
+            // Also inspect /workspace to retrieve workspace brand/name
+            const wReq = https.request(REZOLV_CONFIG.apiBase + "/workspace", {
+              method: "GET",
+              headers: { "Authorization": `Bearer ${token}` }
+            }, wRes => {
+              let wd = "";
+              wRes.on("data", c => wd += c);
+              wRes.on("end", () => {
+                try {
+                  const wJson = JSON.parse(wd);
+                  if (wJson.data?.workspace) {
+                    agent.workspaceName = wJson.data.workspace.name || agent.workspaceName;
+                    agent.workspaceId = wJson.data.workspace._id || agent.workspaceId;
+                  }
+                } catch (_) { }
+                resolve({ token, agent });
+              });
+            });
+            wReq.on("error", () => resolve({ token, agent }));
+            wReq.end();
           } else {
             resolve({ error: json.message || "Rezolv login failed" });
           }
@@ -6067,16 +6090,46 @@ async function loginRezolvUser(email, password, isDefault = false) {
 
 async function getRezolvAuthToken(from = null) {
   if (from) {
-    const norm = String(from).replace(/\D/g, "");
+    if (typeof from === "object") {
+      if (from.token) return from.token;
+      from = from.from || from.callerPhone || from.phone || from.email || from.workspaceId || null;
+    }
+    const norm = String(from || "").replace(/\D/g, "");
+    if (norm) {
+      try {
+        const { data: setRow } = await supabase.from("settings").select("value").eq("key", `user_rezolv_${norm}`).maybeSingle();
+        if (setRow?.value) {
+          const uCreds = typeof setRow.value === "string" ? JSON.parse(setRow.value) : setRow.value;
+          if (uCreds?.email && uCreds?.password) {
+            const lRes = await loginRezolvUser(uCreds.email, uCreds.password);
+            if (lRes?.token) return lRes.token;
+          } else if (uCreds?.token) {
+            return uCreds.token;
+          }
+        }
+      } catch (_) { }
+    }
+
+    // Also match by email or workspaceId
     try {
-      const { data: setRow } = await supabase.from("settings").select("value").eq("key", `user_rezolv_${norm}`).maybeSingle();
-      if (setRow?.value) {
-        const uCreds = typeof setRow.value === "string" ? JSON.parse(setRow.value) : setRow.value;
-        if (uCreds?.email && uCreds?.password) {
-          const lRes = await loginRezolvUser(uCreds.email, uCreds.password);
-          if (lRes?.token) return lRes.token;
-        } else if (uCreds?.token) {
-          return uCreds.token;
+      const { data: allRezolv } = await supabase.from("settings").select("value").like("key", "user_rezolv_%");
+      if (allRezolv && allRezolv.length > 0) {
+        for (const row of allRezolv) {
+          if (!row.value) continue;
+          const uCreds = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+          const fromStr = String(from).toLowerCase().trim();
+          if (
+            (uCreds?.workspaceId && String(uCreds.workspaceId) === String(from)) ||
+            (uCreds?.email && String(uCreds.email).toLowerCase() === fromStr) ||
+            (fromStr === "datahustle" && (/datahustle/i.test(uCreds?.workspaceName || "") || /datahustle|habiba/i.test(uCreds?.email || "")))
+          ) {
+            if (uCreds?.email && uCreds?.password) {
+              const lRes = await loginRezolvUser(uCreds.email, uCreds.password);
+              if (lRes?.token) return lRes.token;
+            } else if (uCreds?.token) {
+              return uCreds.token;
+            }
+          }
         }
       }
     } catch (_) { }
@@ -6126,25 +6179,61 @@ async function rezolvApiRequest(path, options = {}, from = null) {
 
 async function getUserRezolvContext(from = null) {
   if (from) {
+    if (typeof from === "object") {
+      from = from.from || from.callerPhone || from.phone || from.email || from.workspaceId || null;
+    }
     const norm = normalizeBotPhone(from);
+    if (norm) {
+      try {
+        const { data: setRow } = await supabase.from("settings").select("value").eq("key", `user_rezolv_${norm}`).maybeSingle();
+        if (setRow?.value) {
+          const uCreds = typeof setRow.value === "string" ? JSON.parse(setRow.value) : setRow.value;
+          if (uCreds?.workspaceId || uCreds?.email) {
+            const rawWs = uCreds.workspaceName || "";
+            const isDataHustle = /datahustle/i.test(rawWs) || /datahustle|habiba/i.test(uCreds.email || "");
+            const brandName = isDataHustle ? "DataHustle" : (rawWs || "DataMart");
+            const workspaceName = isDataHustle ? "DATAHUSTLE" : (rawWs || "Custom Workspace");
+            return {
+              workspaceId: uCreds.workspaceId || REZOLV_CONFIG.workspaceId,
+              agentName: uCreds.name || "Agent",
+              agentId: uCreds.agentId || null,
+              email: uCreds.email,
+              workspaceName,
+              brandName,
+              isCustom: true
+            };
+          }
+        }
+      } catch (_) { }
+    }
+
+    // Match by workspaceId or email if norm did not match
     try {
-      const { data: setRow } = await supabase.from("settings").select("value").eq("key", `user_rezolv_${norm}`).maybeSingle();
-      if (setRow?.value) {
-        const uCreds = typeof setRow.value === "string" ? JSON.parse(setRow.value) : setRow.value;
-        if (uCreds?.workspaceId || uCreds?.email) {
-          const rawWs = uCreds.workspaceName || "";
-          const isDataHustle = /datahustle/i.test(rawWs) || /datahustle|habiba/i.test(uCreds.email || "");
-          const brandName = isDataHustle ? "DataHustle" : (rawWs || "DataMart");
-          const workspaceName = isDataHustle ? "DATAHUSTLE" : (rawWs || "Custom Workspace");
-          return {
-            workspaceId: uCreds.workspaceId || REZOLV_CONFIG.workspaceId,
-            agentName: uCreds.name || "Agent",
-            agentId: uCreds.agentId || null,
-            email: uCreds.email,
-            workspaceName,
-            brandName,
-            isCustom: true
-          };
+      const { data: allRezolv } = await supabase.from("settings").select("value").like("key", "user_rezolv_%");
+      if (allRezolv && allRezolv.length > 0) {
+        for (const row of allRezolv) {
+          if (!row.value) continue;
+          const uCreds = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+          const fromStr = String(from).toLowerCase().trim();
+          if (
+            (uCreds?.workspaceId && String(uCreds.workspaceId) === String(from)) ||
+            (uCreds?.email && String(uCreds.email).toLowerCase() === fromStr) ||
+            (fromStr === "datahustle" && (/datahustle/i.test(uCreds?.workspaceName || "") || /datahustle|habiba/i.test(uCreds?.email || "")))
+          ) {
+            const rawWs = uCreds.workspaceName || "";
+            const isDataHustle = /datahustle/i.test(rawWs) || /datahustle|habiba/i.test(uCreds.email || "");
+            const brandName = isDataHustle ? "DataHustle" : (rawWs || "DataMart");
+            const workspaceName = isDataHustle ? "DATAHUSTLE" : (rawWs || "Custom Workspace");
+            return {
+              workspaceId: uCreds.workspaceId || REZOLV_CONFIG.workspaceId,
+              agentName: uCreds.name || "Agent",
+              agentId: uCreds.agentId || null,
+              email: uCreds.email,
+              workspaceName,
+              brandName,
+              isCustom: true
+            };
+          }
         }
       }
     } catch (_) { }
@@ -6265,6 +6354,42 @@ async function findRezolvTicket(identifier, from = null) {
       messages: dData.messages || dData.ticket?.messages || []
     };
   }
+
+  // 3. Fallback: search across other linked workspaces in settings
+  try {
+    const { data: allRezolv } = await supabase.from("settings").select("value").like("key", "user_rezolv_%");
+    for (const row of (allRezolv || [])) {
+      if (!row.value) continue;
+      const uCreds = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+      const otherWsId = uCreds?.workspaceId;
+      if (otherWsId && otherWsId !== rezolvCtx.workspaceId) {
+        const otherRes = await rezolvApiRequest(`/tickets?workspaceId=${otherWsId}&page=1&limit=50`, {}, otherWsId);
+        const otherTkts = otherRes.data?.data?.tickets || otherRes.data?.tickets || [];
+        if (Array.isArray(otherTkts)) {
+          match = otherTkts.find(t => {
+            if (!t) return false;
+            if (t._id === rawId) return true;
+            const tn = (t.ticketNumber || "").toUpperCase();
+            if (tn === cleanNum) return true;
+            if (digitsOnly && digitsOnly.length >= 4 && tn.endsWith(digitsOnly)) return true;
+            const custName = (t.customer?.name || "").toLowerCase();
+            if (custName && (custName.includes(lowerId) || (words.length > 0 && words.every(w => custName.includes(w))))) return true;
+            return false;
+          });
+          if (match) {
+            const details = await rezolvApiRequest("/tickets/" + match._id, {}, otherWsId);
+            const dData = details.data?.data || details.data || {};
+            return {
+              id: match._id,
+              ticket: dData.ticket || match,
+              messages: dData.messages || dData.ticket?.messages || []
+            };
+          }
+        }
+      }
+    }
+  } catch (_) { }
+
   return null;
 }
 
@@ -6678,37 +6803,50 @@ async function sendRezolvReply(identifier, replyText, from = null) {
     let tktId = null;
     let ticketNumber = null;
     let custName = "Customer";
+    let targetWsId = null;
+    let targetBrand = null;
+    let callerFrom = from;
 
     if (identifier && typeof identifier === "object") {
       tktId = identifier.id || identifier.mongoId || identifier._id;
       ticketNumber = identifier.ticketId || identifier.ticketNumber || tktId;
       custName = identifier.customerName || identifier.name || "Customer";
+      targetWsId = identifier.workspaceId || null;
+      targetBrand = identifier.brandName || null;
+      if (!callerFrom && identifier.from) {
+        callerFrom = identifier.from;
+      }
     } else if (typeof identifier === "string" && /^[a-f\d]{24}$/i.test(identifier.trim())) {
       tktId = identifier.trim();
       ticketNumber = tktId;
     }
 
+    if (!callerFrom && targetWsId) {
+      if (targetWsId === "6a121e21d02c009bfec96895" || /datahustle/i.test(targetBrand || "")) {
+        callerFrom = "233551161012";
+      }
+    }
+
     if (!tktId) {
-      const found = await findRezolvTicket(identifier);
+      const found = await findRezolvTicket(identifier, callerFrom);
       if (!found || !found.id) {
         return `⚠️ Could not find ticket *${identifier}* on Rezolv. Please verify the ticket number.`;
       }
       tktId = found.id;
       ticketNumber = found.ticket?.ticketNumber || identifier;
       custName = found.ticket?.customer?.name || "Customer";
+      if (!targetWsId && found.ticket?.workspaceId) {
+        targetWsId = found.ticket.workspaceId;
+        if (!callerFrom && (targetWsId === "6a121e21d02c009bfec96895")) {
+          callerFrom = "233551161012";
+        }
+      }
     }
 
-    let sentAs = "Stony 💙 (DataMart Support)";
-    if (from) {
-      const normF = normalizeBotPhone(from);
-      try {
-        const { data: uRow } = await supabase.from("settings").select("value").eq("key", `user_rezolv_${normF}`).maybeSingle();
-        if (uRow?.value) {
-          const uObj = typeof uRow.value === "string" ? JSON.parse(uRow.value) : uRow.value;
-          if (uObj?.name) sentAs = `${uObj.name} (${uObj.email})`;
-        }
-      } catch (_) { }
-    }
+    const rezolvCtx = await getUserRezolvContext(callerFrom || targetWsId);
+    const sentBrand = rezolvCtx?.brandName || (targetWsId === "6a121e21d02c009bfec96895" ? "DataHustle" : "DataMart");
+    const activeAgentName = rezolvCtx?.agentName || "Stony 💙";
+    let sentAs = `${activeAgentName} (${sentBrand} Support)`;
 
     const res = await rezolvApiRequest("/tickets/" + tktId + "/messages", {
       method: "POST",
@@ -6717,7 +6855,7 @@ async function sendRezolvReply(identifier, replyText, from = null) {
         attachments: [],
         audioUrl: ""
       }
-    }, from);
+    }, callerFrom || targetWsId);
 
     if (res.status === 200 || res.status === 201) {
       return `✅ *REPLY SENT TO CUSTOMER LIVE!*\n\n` +
@@ -6725,7 +6863,7 @@ async function sendRezolvReply(identifier, replyText, from = null) {
         `👤 *Customer:* ${custName}\n` +
         `💙 *Sent As:* ${sentAs}\n` +
         `💬 *Message:*\n"${cleanText}"\n\n` +
-        `The customer will see this message directly in the DataMart chat widget! 🎉`;
+        `The customer will see this message directly in the ${sentBrand} chat widget! 🎉`;
     } else {
       const errMsg = res.data?.message || res.raw || "Failed to post message";
       return `⚠️ Could not send reply (Status ${res.status}): ${errMsg}`;
@@ -7305,7 +7443,11 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
           waitLabel,
           trackingDiagnostic,
           portalId: portalId || null,
-          draftMessage: draftText
+          draftMessage: draftText,
+          from: from,
+          workspaceId: rezolvCtx.workspaceId,
+          workspaceName: rezolvCtx.workspaceName,
+          brandName: rezolvCtx.brandName
         };
       } catch (err) {
         console.warn(`Draft error for ${t.ticketNumber}:`, err.message);
@@ -9566,7 +9708,7 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     const rawTarget = dmRezolvReplyMatch[1].trim();
     const tktId = cleanCustomerTarget(rawTarget);
     const replyMsg = dmRezolvReplyMatch[2].trim();
-    const rep = await sendRezolvReply(tktId, replyMsg);
+    const rep = await sendRezolvReply(tktId, replyMsg, from);
     return sendWhatsApp(from, rep);
   }
 
@@ -10199,7 +10341,7 @@ app.post("/webhook", async (req, res) => {
       const rawTarget = topReplyMatch[1].trim();
       const tktId = cleanCustomerTarget(rawTarget);
       const replyMsg = topReplyMatch[2].trim();
-      const rep = await sendRezolvReply(tktId, replyMsg);
+      const rep = await sendRezolvReply(tktId, replyMsg, from);
       return sendWhatsApp(from, rep);
     }
 
@@ -10209,7 +10351,7 @@ app.post("/webhook", async (req, res) => {
       const lastTkt = userLastViewedTicket.get(from) || (await getCustomerSession(from))?.bundle?.last_support_ticket;
       if (lastTkt) {
         const replyMsg = directReplyMatch[1].trim();
-        const rep = await sendRezolvReply(lastTkt.ticketNumber || lastTkt.id || lastTkt, replyMsg);
+        const rep = await sendRezolvReply(lastTkt.ticketNumber || lastTkt.id || lastTkt, replyMsg, from);
         return sendWhatsApp(from, rep);
       }
     }
@@ -10265,6 +10407,148 @@ app.post("/webhook", async (req, res) => {
     if (isBatchDraftIntent) {
       const batchRep = await buildSupportInboxBatchDraft(from, 5);
       return sendWhatsApp(from, batchRep);
+    }
+
+    // ── DISPATCH STAGED SUPPORT DRAFTS (SINGLE, EDIT, OR SEND ALL) ──
+    const supportSendSingleMatch = cleanCmd.match(/^(?:send|dispatch)(?:\s+draft)?\s*(\d+)$/i);
+    const supportEditSingleMatch = cleanCmd.match(/^(\d+)\s*[:,-]\s*([\s\S]+)$/);
+    const supportSendAllMatch = /^(?:send\s*all|dispatch\s*all|send\s*all\s*drafts|dispatch\s*all\s*drafts|send\s*drafts|reply\s*all)$/i.test(cleanCmd);
+    const isSupportModeActive = getUserMode(from) === "support";
+
+    if (supportSendSingleMatch || supportEditSingleMatch || supportSendAllMatch) {
+      // 1. Recover pending batch for this sender
+      let batchPending = ownerPendingActions.get(normFrom) || ownerPendingActions.get(String(from)) || null;
+      if (!batchPending || batchPending.type !== "batch_rezolv_reply" || !batchPending.drafts?.length) {
+        try {
+          const { data: setRows } = await supabase
+            .from("settings")
+            .select("key, value")
+            .in("key", [`latest_support_batch_${normFrom}`, `owner_pending_${normFrom}`, `owner_pending_${from}`]);
+          if (setRows && setRows.length > 0) {
+            const row = setRows.find(r => r.key === `latest_support_batch_${normFrom}`) || setRows.find(r => r.key === `owner_pending_${normFrom}`) || setRows[0];
+            if (row?.value) {
+              const parsed = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+              if (parsed) {
+                batchPending = parsed.type === "batch_rezolv_reply" || parsed.drafts
+                  ? (parsed.type ? parsed : { type: "batch_rezolv_reply", drafts: Array.isArray(parsed) ? parsed : (parsed.drafts || []) })
+                  : parsed;
+                ownerPendingActions.set(normFrom, batchPending);
+                ownerPendingActions.set(String(from), batchPending);
+              }
+            }
+          }
+        } catch (_) { }
+      }
+
+      // If user typed "Send 1" / "Send 2"
+      if (supportSendSingleMatch) {
+        if (batchPending && batchPending.type === "batch_rezolv_reply" && Array.isArray(batchPending.drafts) && batchPending.drafts.length > 0) {
+          const idx = parseInt(supportSendSingleMatch[1], 10) - 1;
+          const targetDraft = batchPending.drafts[idx];
+          if (targetDraft) {
+            const replyMsg = targetDraft.draftMessage || targetDraft.message || targetDraft.text;
+            const res = await sendRezolvReply(targetDraft, replyMsg, from);
+            batchPending.drafts.splice(idx, 1);
+            if (batchPending.drafts.length > 0) {
+              await setOwnerPendingAction(from, batchPending);
+              try {
+                await supabase.from("settings").upsert({
+                  key: `latest_support_batch_${normFrom}`,
+                  value: JSON.stringify(batchPending.drafts)
+                }, { onConflict: "key" });
+              } catch (_) { }
+            } else {
+              await clearOwnerPendingAction(from);
+              try {
+                await supabase.from("settings").delete().eq("key", `latest_support_batch_${normFrom}`);
+              } catch (_) { }
+            }
+
+            const rezolvCtx = await getUserRezolvContext(from);
+            const activeAgent = rezolvCtx?.agentName || "Stony 💙";
+            const custName = targetDraft.customerName || "Customer";
+            const tNum = targetDraft.ticketId || targetDraft.id || `#${idx + 1}`;
+            const isOk = res && !res.startsWith("⚠️") && !res.startsWith("❌");
+
+            let replyCard = isOk
+              ? `🚀 *DISPATCHED DRAFT #${idx + 1} LIVE AS ${activeAgent}!* ✅\n\n` +
+                `👤 *Customer:* *${custName}* ([${tNum}])\n` +
+                `💬 *Message Sent:*\n"${replyMsg}"\n\n` +
+                (batchPending.drafts.length > 0
+                  ? `💡 *${batchPending.drafts.length} draft(s) remaining in this batch.* Reply *SEND ALL* or *SEND [number]* to dispatch next!`
+                  : `🎉 *All staged drafts in this batch have been sent!* Reply *draft 5* to stage new tickets.`)
+              : `⚠️ *FAILED TO SEND DRAFT #${idx + 1}:* ${res}`;
+
+            return sendWhatsApp(from, replyCard);
+          } else {
+            const total = batchPending.drafts.length;
+            return sendWhatsApp(from, `⚠️ Draft #${idx + 1} not found in current batch (${total} available). Text *SEND ALL* to send all, or *draft 5* to refresh.`);
+          }
+        } else if (isSupportModeActive) {
+          return sendWhatsApp(from, `ℹ️ No pending support drafts found. Text *draft 5* or *inbox* to stage customer tickets for review!`);
+        }
+      }
+
+      // If user typed "1: Hello..."
+      if (supportEditSingleMatch) {
+        if (batchPending && batchPending.type === "batch_rezolv_reply" && Array.isArray(batchPending.drafts) && batchPending.drafts.length > 0) {
+          const idx = parseInt(supportEditSingleMatch[1], 10) - 1;
+          const targetDraft = batchPending.drafts[idx];
+          if (targetDraft) {
+            targetDraft.draftMessage = supportEditSingleMatch[2].trim();
+            targetDraft.message = targetDraft.draftMessage;
+            targetDraft.text = targetDraft.draftMessage;
+            await setOwnerPendingAction(from, batchPending);
+            try {
+              await supabase.from("settings").upsert({
+                key: `latest_support_batch_${normFrom}`,
+                value: JSON.stringify(batchPending.drafts)
+              }, { onConflict: "key" });
+            } catch (_) { }
+
+            const custName = targetDraft.customerName || "Customer";
+            const tNum = targetDraft.ticketId || targetDraft.id || `#${idx + 1}`;
+            return sendWhatsApp(from,
+              `📝 *UPDATED DRAFT #${idx + 1} FOR ${custName.toUpperCase()} ([${tNum}])!*\n\n` +
+              `*New Reply:*\n"${targetDraft.draftMessage}"\n\n` +
+              `👉 Reply *SEND ${idx + 1}* to dispatch this now, or *SEND ALL* to dispatch the whole batch!`
+            );
+          }
+        }
+      }
+
+      // If user typed "Send all"
+      if (supportSendAllMatch) {
+        if (batchPending && batchPending.type === "batch_rezolv_reply" && Array.isArray(batchPending.drafts) && batchPending.drafts.length > 0) {
+          const draftsToSend = [...batchPending.drafts];
+          const results = await Promise.all(draftsToSend.map(async (d) => {
+            try {
+              const replyText = d.draftMessage || d.message || d.text;
+              const res = await sendRezolvReply(d, replyText, from);
+              return { ticketId: d.ticketId || d.id, name: d.customerName, ok: res && !res.startsWith("⚠️") && !res.startsWith("❌"), res };
+            } catch (err) {
+              return { ticketId: d.ticketId || d.id, name: d.customerName, ok: false, res: err.message };
+            }
+          }));
+
+          await clearOwnerPendingAction(from);
+          try {
+            await supabase.from("settings").delete().eq("key", `latest_support_batch_${normFrom}`);
+          } catch (_) { }
+
+          const rezolvCtx = await getUserRezolvContext(from);
+          const activeAgent = rezolvCtx?.agentName || "Stony 💙";
+
+          let report = `🚀 *DISPATCHED ALL ${results.length} SUPPORT REPLIES LIVE AS ${activeAgent}!* ✅\n━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+          results.forEach(r => {
+            report += `${r.ok ? "✅" : "⚠️"} *[${r.ticketId}]* ${r.name || "Customer"}\n`;
+          });
+          report += `\n🎉 All customer tickets have been answered! Text *draft 5* or *inbox* to stage new tickets.`;
+          return sendWhatsApp(from, report);
+        } else if (isSupportModeActive) {
+          return sendWhatsApp(from, `ℹ️ No pending support drafts found. Text *draft 5* or *inbox* to stage customer tickets for review!`);
+        }
+      }
     }
 
     // ── IN SUPPORT MODE: HANDLE BARE CUSTOMER NAMES & TICKET IDS DIRECTLY ──
@@ -11111,7 +11395,7 @@ app.post("/webhook", async (req, res) => {
       const targetDraft = pendingAction.drafts?.[idx];
       if (targetDraft) {
         const replyMsg = targetDraft.draftMessage || targetDraft.message || targetDraft.text;
-        const res = await sendRezolvReply(targetDraft, replyMsg);
+        const res = await sendRezolvReply(targetDraft, replyMsg, from);
         pendingAction.drafts.splice(idx, 1);
         if (pendingAction.drafts.length > 0) {
           await setOwnerPendingAction(from, pendingAction);
@@ -11203,7 +11487,7 @@ app.post("/webhook", async (req, res) => {
     if (type === "rezolv_reply") {
       const tId = pendingAction.ticketId || pendingAction.ticket || pendingAction.id;
       const replyText = pendingAction.message || pendingAction.text;
-      const res = await sendRezolvReply(tId, replyText);
+      const res = await sendRezolvReply(tId, replyText, from);
       return sendWhatsApp(from, res);
     }
 
@@ -11215,7 +11499,7 @@ app.post("/webhook", async (req, res) => {
       const results = await Promise.all(drafts.map(async (d) => {
         try {
           const replyText = d.draftMessage || d.message || d.text;
-          const res = await sendRezolvReply(d, replyText);
+          const res = await sendRezolvReply(d, replyText, from);
           return { ticketId: d.ticketId || d.id, name: d.customerName, ok: !res.startsWith("⚠️"), res };
         } catch (err) {
           return { ticketId: d.ticketId || d.id, name: d.customerName, ok: false, error: err.message };
