@@ -7271,18 +7271,18 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
               date: orderDate
             }).catch(() => { });
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""} (Reported to team group)`;
-            draftText = `Hello ${firstName}, we have verified your order on ${brand} (Track ID: ${portalId}). It has been in the vendor dispatch queue for over 24 hours, so we have flagged and reported it directly to our technical team group to expedite and resolve immediately. Your data will land shortly. Thank you for your patience!`;
+            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please don't worry at all, our technical team is actively working on it right now to get it resolved and delivered for you as quickly as possible. Thank you for your patience!`;
           } else if (isOver24H) {
             // Over 24 hours but no numeric Portal ID assigned yet (Pending Export) -> Do NOT report to group
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on ${brand}. It is currently in the vendor queue awaiting network dispatch. Your data will land shortly. Kindly dial *124# to check. Thank you for your patience!`;
+            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please don't worry at all, our team is actively working on it right now and your data will land shortly. Thank you for your patience!`;
           } else {
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on ${brand}. It is currently in the vendor queue awaiting network dispatch. Your data will land shortly. Kindly dial *124# to check. Thank you for your patience!`;
+            draftText = `Hello ${firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing and will land on your number shortly. Kindly dial *124# or *126# to verify your balance. Thank you!`;
           }
         } else if (st === "processing") {
           trackingDiagnostic = `⏳ PROCESSING on ${net} · ${pidDisplay} (Ref: ${refCode})`;
-          draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on ${brand}. It is currently processing on the network. Your data will reflect shortly. Kindly dial *124# to check. Thank you!`;
+          draftText = `Hello ${firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing on the network and will land on your phone shortly. Kindly dial *124# or *126# to check. Thank you!`;
         } else {
           trackingDiagnostic = `🔍 Order Ref: ${refCode} · ${pidDisplay} (Status: ${st})`;
           draftText = `Hello ${firstName}, we are currently verifying your order (${refCode}) on ${brand}. Kindly dial *124# to check your balance, or let us know if it hasn't reflected yet. Thank you!`;
