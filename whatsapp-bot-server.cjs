@@ -1119,11 +1119,14 @@ async function getLiveFailedOrdersReport(callerPhone = null, limit = 10) {
       const phone = ord.phoneNumber || ord.recipientPhone || "N/A";
       const net = ord.network || "MTN";
       const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
-      const portalId = ord.apiOrderId || ord.exportTracking?.portalId;
-      const portalStr = portalId ? ` | Portal ID: *${portalId}*` : "";
+      const rawPid = extractDatamartPortalId(ord);
+      const portalId = (rawPid && /^\d{4,9}$/.test(String(rawPid))) ? String(rawPid) : null;
+      const portalStr = portalId ? ` | Portal ID: *${portalId}*` : ` | Portal ID: *Pending Export*`;
+      const refCode = ord.geonetReference || ord.reference || null;
+      const refStr = refCode ? ` | Ref: ${refCode}` : "";
       const reason = ord.exportTracking?.deliveryInfo || ord.apiResponse?.error || ord.failureReason || ord.status || "Failed";
       const time = typeof getTimeAgoGhana === "function" ? getTimeAgoGhana(ord.createdAt) : "recently";
-      out += `${num}. 📱 *${phone}* (${net} ${cap})${portalStr}\n` +
+      out += `${num}. 📱 *${phone}* (${net} ${cap})${portalStr}${refStr}\n` +
         `   ❌ *Reason:* ${reason}\n` +
         `   🕒 *Time:* ${time}\n` +
         `   🆔 *DB ID:* \`${ord._id}\`\n\n`;
@@ -6454,6 +6457,45 @@ async function getRezolvTicketsReport(filter = "active", limit = 6, from = null)
   }
 }
 
+function extractDatamartPortalId(ord) {
+  if (!ord) return null;
+  const ref = ord.geonetReference || ord.originalReference || ord.reference || ord.orderReference || ord.orderId;
+
+  // 1. Check exportTracking.portalId (must not equal the reference, and must not be 'pending')
+  const exportPid = ord.exportTracking?.portalId;
+  if (exportPid && exportPid !== ref && exportPid !== "pending") {
+    const clean = String(exportPid).trim();
+    if (!/^(?:AGT-|WS-|D1G|ORD-)/i.test(clean)) {
+      return clean;
+    }
+  }
+
+  // 2. Check apiOrderId (must not equal reference, must not start with store prefix AGT-, WS-, etc.)
+  const apiId = ord.apiOrderId;
+  if (apiId && apiId !== ref && apiId !== "pending") {
+    const clean = String(apiId).trim();
+    if (!/^(?:AGT-|WS-|D1G|ORD-|SPIN-)/i.test(clean)) {
+      return clean;
+    }
+  }
+
+  // 3. Check portalOrderId
+  const pOrdId = ord.portalOrderId;
+  if (pOrdId && pOrdId !== ref && pOrdId !== ord._id && pOrdId !== "pending") {
+    const clean = String(pOrdId).trim();
+    if (!/^(?:AGT-|WS-|D1G|ORD-)/i.test(clean)) {
+      return clean;
+    }
+  }
+
+  // 4. Check datamart_reference if numeric
+  if (ord.datamart_reference && /^\d{4,9}$/.test(String(ord.datamart_reference))) {
+    return String(ord.datamart_reference).trim();
+  }
+
+  return null;
+}
+
 function extractTicketTrackingInfo(ticket, messages = []) {
   const combined = [
     ticket.lastMessage?.text || "",
@@ -6464,12 +6506,18 @@ function extractTicketTrackingInfo(ticket, messages = []) {
   // 1. Look for Track ID: labeled (e.g. "Track ID: 561077", "Tracking #561077", "Track: 561077") or prefixed (e.g. MNG-9K3YMX, TRK-1234, TRACK-12345)
   const explicitTrackMatch = combined.match(/\b(?:track(?:ing)?\s*(?:id|#|number|code)?|portal\s*(?:id|#|order)?|batch\s*(?:id|#)?)\s*[:#=]?\s*([A-Za-z0-9_-]{4,15})\b/i);
   const prefixTrackMatch = combined.match(/\b(MNG-[A-Z0-9]+|TRK-[A-Z0-9-]+|TRACK-\d+|TRACK-[A-Z0-9]+)\b/i);
-  const trackId = explicitTrackMatch ? explicitTrackMatch[1] : (prefixTrackMatch ? prefixTrackMatch[0] : null);
+  let trackId = explicitTrackMatch ? explicitTrackMatch[1] : (prefixTrackMatch ? prefixTrackMatch[0] : null);
 
-  // 2. Look for Order Reference: labeled (e.g. "Ref: AGT-MTN-GW1013BF") or prefixed (e.g. AGT-MTN-GW1013BF, WS-123, D1G-123, ORD-123, MN-ZV5763NQ)
-  const explicitRefMatch = combined.match(/\b(?:ref(?:erence)?|order\s*(?:id|ref|reference)?)\s*[:#=]?\s*([A-Za-z0-9_-]{5,25})\b/i);
-  const prefixRefMatch = combined.match(/\b(AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|D1G[A-Z0-9-]+|ORD-[A-Z0-9-]+|MN-[A-Z0-9]+)\b/i);
-  const orderRef = explicitRefMatch ? explicitRefMatch[1] : (prefixRefMatch ? prefixRefMatch[0] : null);
+  // 2. Look for Order Reference: labeled (e.g. "Ref: AGT-MTN-GW1013BF") or prefixed (e.g. AGT-MTN-GW1013BF, WS-123, D1G-123, ORD-123, MN-ZV5763NQ, DHSB4026IO, SPIN-...)
+  const explicitRefMatch = combined.match(/\b(?:ref(?:erence)?|order\s*(?:id|ref|reference)?)\s*[:#=]?\s*([A-Za-z0-9_-]{5,30})\b/i);
+  const prefixRefMatch = combined.match(/\b(AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|D1G[A-Z0-9-]+|ORD-[A-Z0-9-]+|MN-[A-Z0-9]+|DHSB[A-Z0-9]+|SPIN-[A-Z0-9-]+)\b/i);
+  let orderRef = explicitRefMatch ? explicitRefMatch[1] : (prefixRefMatch ? prefixRefMatch[0] : null);
+
+  // If trackId was accidentally matched from a reference format, re-assign it to orderRef
+  if (trackId && /^(?:AGT-|WS-|D1G|ORD-|DHSB|SPIN-)/i.test(trackId)) {
+    if (!orderRef) orderRef = trackId;
+    trackId = null;
+  }
 
   // 3. Look for Phone Number (024, 054, 055, 059, 020, 050, 027, 057)
   const explicitPhoneMatch = combined.match(/\b(?:phone|number|recipient|line)\s*[:#=]?\s*(0[2357]\d{8})\b/i);
@@ -6660,21 +6708,21 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
     } catch (_) { }
   }
 
-  // 4. If dmOrder or matchedOrder contains a carrier portalId, run carrier check on it!
-  const rawDmPid = (dmOrder?.exportTracking?.portalId && /^\d{4,9}$/.test(String(dmOrder.exportTracking.portalId))) ? String(dmOrder.exportTracking.portalId)
-    : (dmOrder?.apiOrderId && /^\d{4,9}$/.test(String(dmOrder.apiOrderId))) ? String(dmOrder.apiOrderId)
-    : (dmOrder?.portalOrderId && /^\d{4,9}$/.test(String(dmOrder.portalOrderId))) ? String(dmOrder.portalOrderId)
-    : null;
-  const candidatePortalId = rawDmPid || (/^\d{4,9}$/.test(String(matchedOrder?.datamart_reference || "")) ? String(matchedOrder.datamart_reference) : null);
-  if (candidatePortalId && /^\d{4,9}$/.test(String(candidatePortalId))) {
+  // 4. Resolve the order's true Portal ID from DataMart / store order
+  const resolvedPortalId = extractDatamartPortalId(dmOrder) || extractDatamartPortalId(matchedOrder);
+  const refVal = dmOrder?.geonetReference || dmOrder?.originalReference || dmOrder?.reference || dmOrder?.orderId || matchedOrder?.reference || refCandidate || q;
+
+  // If a valid numeric or carrier portalId is found, use it to run live carrier check!
+  if (resolvedPortalId && /^\d{4,9}$/.test(String(resolvedPortalId))) {
     try {
-      const auditRes = await checkDatamartCarrierRaw(candidatePortalId, callerPhone);
+      const auditRes = await checkDatamartCarrierRaw(resolvedPortalId, callerPhone);
       if (auditRes && auditRes.found) {
         return {
           found: true,
           isCarrierAudit: true,
-          reference: dmOrder?.geonetReference || dmOrder?.originalReference || dmOrder?.orderId || matchedOrder?.reference || refCandidate || candidatePortalId,
-          trackId: candidatePortalId,
+          reference: refVal,
+          trackId: resolvedPortalId,
+          portalId: resolvedPortalId,
           batchNumber: auditRes.batchNumber || dmOrder?.exportTracking?.batchNumber,
           totalItems: auditRes.totalItems,
           sent: auditRes.sent,
@@ -6722,11 +6770,11 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
   const network = matchedOrder?.network || dmOrder?.network || "network";
   const capacity = matchedOrder?.capacity || dmOrder?.capacity || "";
   const phone = matchedOrder?.recipient_phone || dmOrder?.phoneNumber || dmOrder?.recipientPhone || phoneCandidate || q;
-  const ref = matchedOrder?.reference || dmOrder?.geonetReference || dmOrder?.originalReference || dmOrder?.orderId || dmOrder?.reference || refCandidate || q;
+  const ref = refVal;
 
   const rawCreatedAt = dmOrder?.createdAt || dmOrder?.date || matchedOrder?.created_at;
   const orderAgeMs = rawCreatedAt ? (Date.now() - new Date(rawCreatedAt).getTime()) : null;
-  const isQueued = finalStatus === "queued" || (dmOrder?.exportTracking?.portalStatus === "pending") || (dmOrder && !candidatePortalId && (finalStatus === "processing" || finalStatus === "queued"));
+  const isQueued = finalStatus === "queued" || (dmOrder?.exportTracking?.portalStatus === "pending") || (dmOrder && !resolvedPortalId && (finalStatus === "processing" || finalStatus === "queued"));
   const isQueuedOver24Hours = Boolean(isQueued && orderAgeMs && !isNaN(orderAgeMs) && orderAgeMs >= (24 * 60 * 60 * 1000));
   const queuedHours = orderAgeMs && !isNaN(orderAgeMs) ? (orderAgeMs / 3600000).toFixed(1) : null;
 
@@ -6734,7 +6782,8 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
     found: isConfirmedFound,
     isCarrierAudit: false,
     reference: ref,
-    trackId: null,
+    trackId: resolvedPortalId,
+    portalId: resolvedPortalId,
     network,
     capacity,
     phone,
@@ -8277,7 +8326,8 @@ async function executeDatamartBulkPhoneCheck(rawPhoneList, callerPhone = null) {
       const network = (primaryOrder.network || "MTN").toUpperCase();
       const capacity = primaryOrder.capacity ? `${primaryOrder.capacity}GB` : "";
       const rawStatus = String(primaryOrder.status || primaryOrder.delivery_status || "processing").toUpperCase();
-      const portalId = primaryOrder.apiOrderId || primaryOrder.exportTracking?.portalId || (primaryOrder.portalOrderId && primaryOrder.portalOrderId !== primaryOrder._id ? primaryOrder.portalOrderId : null) || primaryOrder.datamart_reference || null;
+      const rawPid = extractDatamartPortalId(primaryOrder);
+      const portalId = (rawPid && /^\d{4,9}$/.test(String(rawPid))) ? String(rawPid) : null;
       const batchNumber = primaryOrder.exportTracking?.batchNumber || null;
       const ref = primaryOrder.geonetReference || primaryOrder.originalReference || primaryOrder.reference || null;
       const createdAt = primaryOrder.createdAt || primaryOrder.created_at || null;
