@@ -6520,6 +6520,43 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
           submitFailedPortalIdToGroup(targetId, { reason: "carrier_check_failed", failedCount: failed }).catch(() => { });
         }
 
+        let orderCreatedAt = result.createdAt || result.orderDate || result.date || null;
+        let isQueuedOver24Hours = false;
+        let queuedHours = null;
+
+        if (isQueued && targetId) {
+          if (!orderCreatedAt) {
+            try {
+              const { data: dbOrd } = await supabase
+                .from("orders")
+                .select("created_at")
+                .or(`datamart_reference.eq.${targetId},reference.eq.${targetId}`)
+                .order("created_at", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+              if (dbOrd?.created_at) orderCreatedAt = dbOrd.created_at;
+            } catch (_) { }
+          }
+          if (!orderCreatedAt) {
+            try {
+              const dmSearch = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(targetId)}`, {}, callerPhone);
+              const dmOrders = dmSearch?.data?.results?.orders || (Array.isArray(dmSearch?.data?.results) ? dmSearch.data.results.filter(x => x.type === "order" || x.network) : []);
+              const foundOrd = dmOrders?.find(o => String(o.apiOrderId || o.exportTracking?.portalId || o.portalOrderId) === String(targetId) || String(o.reference || o.geonetReference) === String(targetId));
+              if (foundOrd) {
+                orderCreatedAt = foundOrd.createdAt || foundOrd.date || foundOrd.timestamp || null;
+              }
+            } catch (_) { }
+          }
+          if (orderCreatedAt) {
+            const ageMs = Date.now() - new Date(orderCreatedAt).getTime();
+            if (!isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)) {
+              isQueuedOver24Hours = true;
+              queuedHours = Math.floor(ageMs / (60 * 60 * 1000));
+              submitFailedPortalIdToGroup(targetId, { reason: "vendor_queue_over_24h", queuedHours, orderDate: orderCreatedAt }).catch(() => { });
+            }
+          }
+        }
+
         return {
           found: true,
           portalId: targetId,
@@ -6530,6 +6567,9 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
           failed,
           allDelivered,
           isQueued,
+          isQueuedOver24Hours,
+          queuedHours,
+          orderCreatedAt,
           portalMessage: result.portalMessage || null,
           status,
           rawStatus: status,
@@ -6570,6 +6610,9 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
           failed: carrierAudit.failed,
           allDelivered: carrierAudit.allDelivered,
           isQueued: carrierAudit.isQueued,
+          isQueuedOver24Hours: carrierAudit.isQueuedOver24Hours,
+          queuedHours: carrierAudit.queuedHours,
+          orderCreatedAt: carrierAudit.orderCreatedAt,
           portalMessage: carrierAudit.portalMessage,
           status: carrierAudit.status,
           rawStatus: carrierAudit.rawStatus,
@@ -6631,6 +6674,9 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
           failed: auditRes.failed,
           allDelivered: auditRes.allDelivered,
           isQueued: auditRes.isQueued,
+          isQueuedOver24Hours: auditRes.isQueuedOver24Hours,
+          queuedHours: auditRes.queuedHours,
+          orderCreatedAt: auditRes.orderCreatedAt || dmOrder?.createdAt || dmOrder?.date || matchedOrder?.created_at,
           status: auditRes.status,
           rawStatus: auditRes.rawStatus,
           network: dmOrder?.network || matchedOrder?.network || "MTN",
@@ -7144,8 +7190,18 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
           }
         } else if (st === "queued" || liveTrack.isQueued) {
           portalId = detectedPortalId || refCode;
-          trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE on ${brand} · 🆔 *Portal ID:* *${portalId}*${batchPart}`;
-          draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on ${brand}. It is currently in the vendor queue awaiting network dispatch. Your data will land shortly. Kindly dial *124# to check. Thank you for your patience!`;
+          const orderDate = liveTrack.orderCreatedAt;
+          const ageMs = orderDate ? (Date.now() - new Date(orderDate).getTime()) : (fullTicket?.createdAt ? (Date.now() - new Date(fullTicket.createdAt).getTime()) : null);
+          const isOver24H = liveTrack.isQueuedOver24Hours || (ageMs && !isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)) || /\b(?:24\s*hrs?|24\s*hours?|yesterday|days?|over\s*a\s*day|going\s*to\s*24)\b/i.test(lastMsg);
+
+          if (isOver24H && portalId && /^\d{4,9}$/.test(String(portalId))) {
+            submitFailedPortalIdToGroup(portalId, { reason: "vendor_queue_over_24h" }).catch(() => { });
+            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${batchPart} (Reported to team group)`;
+            draftText = `Hello ${firstName}, we have verified your order on ${brand} (Track ID: ${portalId}). It has been in the vendor dispatch queue for over 24 hours, so we have flagged and submitted it directly to our technical team group to expedite and resolve immediately. Your data will land shortly. Thank you for your patience!`;
+          } else {
+            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE on ${brand} · 🆔 *Portal ID:* *${portalId}*${batchPart}`;
+            draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on ${brand}. It is currently in the vendor queue awaiting network dispatch. Your data will land shortly. Kindly dial *124# to check. Thank you for your patience!`;
+          }
         } else if (st === "processing") {
           portalId = detectedPortalId || refCode;
           trackingDiagnostic = `⏳ PROCESSING on ${net} · 🆔 *Portal ID:* *${portalId}* (Ref: ${refCode})`;
@@ -7727,7 +7783,16 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       const autoCount = syncObj?.ordersCompleted || syncObj?.data?.ordersCompleted || 0;
       if (autoCount > 0) totalAutoCompleted += autoCount;
 
-      if (isQueued) totalQueued++;
+      if (isQueued) {
+        totalQueued++;
+        const qDate = b.createdAt || b.orderDate || b.date;
+        if (qDate) {
+          const ageMs = Date.now() - new Date(qDate).getTime();
+          if (!isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000) && r.id && /^\d{4,9}$/.test(String(r.id))) {
+            submitFailedPortalIdToGroup(r.id, { reason: "vendor_queue_over_24h", queuedHours: Math.floor(ageMs / 3600000) }).catch(() => { });
+          }
+        }
+      }
       totalNumbers += bTotal;
       totalSent += bSent;
       totalFailed += bFailed;
