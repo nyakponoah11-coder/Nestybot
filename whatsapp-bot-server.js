@@ -5004,6 +5004,12 @@ async function executeOwnerDirectAction(type, payload = {}) {
       return await executeDatamartSearch(q);
     }
 
+    // 29b. DataMart MoMo Claims Query
+    if (cleanType === "datamart_momo_claims" || cleanType === "datamart_claims" || cleanType === "momo_claims") {
+      const q = payload.query || payload.trxId || payload.search || payload.status || "";
+      return await executeDatamartMomoClaimsQuery(q);
+    }
+
     // 30. DataMart Retry Order
     if (cleanType === "datamart_retry_order") {
       const orderId = payload.orderId || payload.id;
@@ -7481,6 +7487,108 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
             finalActionMessage;
         }
 
+        async function executeDatamartMomoClaimsQuery(rawQuery, callerPhone = null) {
+          let q = String(rawQuery || "").trim();
+          q = q.replace(/^(?:datamart|dm)\s+/i, "");
+          q = q.replace(/^(?:momo\s*claims?|claims?|claim\s*search|momo\s*search|search\s*momo(?:\s*claim)?|check\s*momo(?:\s*claim)?|check\s*claim|find\s*claim|verify\s*claim)\s*/i, "");
+          q = q.replace(/^(?:trx|trxid|transaction(?:\s*id)?)(?:\s*[:#=])?\s*/i, "");
+          q = q.trim();
+
+          const isPendingQuery = /^(?:pending|unclaimed|open|waiting)$/i.test(q) || /\b(?:pending\s*claims?|unclaimed\s*(?:claims?|momo)?)\b/i.test(rawQuery);
+
+          let endpoint = '/api/support/momo-claims?limit=5';
+          if (isPendingQuery) {
+            endpoint = '/api/support/momo-claims?status=pending&limit=5';
+          } else if (q && !/^(?:momo\s*claims?|claims?|all|stats|summary|overview)$/i.test(q)) {
+            endpoint = `/api/support/momo-claims?search=${encodeURIComponent(q)}&limit=5`;
+          }
+
+          const resp = await fetchDatamartSupportEndpoint(endpoint, {}, callerPhone);
+          const data = resp?.data || {};
+          const payments = data.payments || [];
+          const summary = data.summary || {};
+
+          if (payments.length === 0) {
+            const cleanPhoneDigits = q.replace(/\D/g, "");
+            if (/^(?:0[2357]\d{8}|233[2357]\d{8})$/.test(cleanPhoneDigits)) {
+              try {
+                const phoneResp = await fetchDatamartSupportEndpoint(`/api/support/momo-claims/by-sender-phone/${encodeURIComponent(cleanPhoneDigits)}`, {}, callerPhone);
+                const pList = phoneResp?.data?.payments || phoneResp?.payments || [];
+                if (pList.length > 0) {
+                  return formatMomoPaymentsList(pList, q, phoneResp?.data?.summary || summary, isPendingQuery);
+                }
+              } catch (_) { }
+            }
+
+            return `📱 *[DATAMART MOMO CLAIMS]*\n\n` +
+              `No MoMo payment records found matching "*${q || "query"}*".\n\n` +
+              `💡 *Search Tips:*\n` +
+              `• *By Financial Transaction ID:* *claim 94077512211*\n` +
+              `• *By Sender Name:* *claim Solomon*\n` +
+              `• *View Pending (Unclaimed):* *pending claims*\n` +
+              `• *View Overview Stats:* *claims*`;
+          }
+
+          return formatMomoPaymentsList(payments, q, summary, isPendingQuery);
+        }
+
+        function formatMomoPaymentsList(payments, query = "", summary = null, isPending = false) {
+          let out = `📱 *DATAMART MOMO CLAIMS & INCOMING PAYMENTS*\n`;
+          if (summary && summary.pending) {
+            const pendCount = (summary.pending.count || 0).toLocaleString();
+            const pendAmt = Number(summary.pending.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            const claimCount = (summary.claimed?.count || 0).toLocaleString();
+            out += `📊 *Summary:* ⏳ *${pendCount} Pending* (GH₵ ${pendAmt}) | ✅ *${claimCount} Claimed*\n`;
+          }
+          if (query && !/^(?:momo\s*claims?|claims?|pending|all|stats|summary|overview)$/i.test(query)) {
+            out += `🔍 *Search:* \`${query}\` (${payments.length} result${payments.length > 1 ? "s" : ""})\n`;
+          } else if (isPending) {
+            out += `⏳ *Showing Recent Unclaimed Deposits Awaiting Claim*\n`;
+          }
+          out += `\n`;
+
+          payments.slice(0, 5).forEach((p, idx) => {
+            const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+            const amt = Number(p.amount || 0).toFixed(2);
+            const isClaimed = String(p.status || "").toLowerCase() === "claimed";
+            const isCancelled = String(p.status || "").toLowerCase() === "cancelled";
+            const statusIcon = isClaimed ? "✅" : (isCancelled ? "❌" : "⏳");
+            const statusLabel = isClaimed ? "*CLAIMED*" : (isCancelled ? "*CANCELLED*" : "*PENDING (UNCLAIMED)*");
+            const net = (p.network || "MTN").toUpperCase();
+            const trxId = p.trxId || "N/A";
+            const sender = p.senderName || "Unknown Sender";
+            const time = p.createdAt ? new Date(p.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "N/A";
+
+            out += `${num} ${statusIcon} *TrxID:* \`${trxId}\` | *GH₵ ${amt}* (${net})\n` +
+              `   👤 *Sender:* ${sender}\n` +
+              `   📊 *Status:* ${statusLabel} ${p.autoMatched ? "(Auto-matched)" : ""}\n` +
+              `   🕒 *Received:* ${time}\n`;
+
+            if (isClaimed && p.claimedBy) {
+              const cUser = p.claimedBy.name || p.claimedBy.email || "Agent";
+              const cPhone = p.claimedBy.phoneNumber && !p.claimedBy.phoneNumber.startsWith("GOOGLE") ? ` (${p.claimedBy.phoneNumber})` : "";
+              const cTime = p.claimedAt ? new Date(p.claimedAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Africa/Accra" }) : "";
+              out += `   🎯 *Claimed By:* ${cUser}${cPhone}${cTime ? ` at ${cTime}` : ""}\n`;
+            } else if (!isClaimed && !isCancelled) {
+              out += `   💡 _Ready to claim in Agent Support Hub_\n`;
+            }
+
+            if (p.rawSmsText) {
+              const cleanSms = p.rawSmsText.replace(/\s+/g, " ").trim();
+              out += `   📄 *SMS:* "${cleanSms.slice(0, 85)}${cleanSms.length > 85 ? "..." : ""}"\n`;
+            }
+            out += `\n`;
+          });
+
+          out += `💡 *Quick Commands:*\n` +
+            `• Search specific TrxID: *claim [TrxID]* (e.g. *claim 94077512211*)\n` +
+            `• Search by sender name: *claim [Name]* (e.g. *claim Solomon*)\n` +
+            `• View pending: *pending claims*\n` +
+            `• *To Assign/Credit Wallet:* Must be approved on web (*datamartgh.shop/agent_support/momo-claims*) because DataMart enforces admin 2FA OTP for fund security.`;
+
+          return out;
+        }
+
         async function executeDatamartSearch(rawQuery, callerPhone = null) {
           let q = String(rawQuery || "").trim();
           // 1. If an email address is present anywhere in the text, extract it directly!
@@ -7531,6 +7639,13 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
           const orders = d?.results?.orders || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "order" || x.network) : []);
 
           if (foundTickets.length === 0 && !rezolvFound && users.length === 0 && orders.length === 0) {
+            // Check MoMo claims before giving up
+            try {
+              const momoRes = await executeDatamartMomoClaimsQuery(q, callerPhone);
+              if (momoRes && !momoRes.includes("No MoMo payment records found matching")) {
+                return momoRes;
+              }
+            } catch (_) { }
             return `🔍 No DataMart support ticket, customer, agent, or order found matching "*${q}*".`;
           }
 
@@ -9323,19 +9438,16 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
             );
           }
 
-          // 8. MoMo Claims
-          if (/^(?:momo\s*claims?|claims?)$/i.test(cleanInput)) {
-            const resp = await fetchDatamartSupportEndpoint('/api/support/momo-claims?limit=5', {}, from);
-            const payments = resp?.data?.payments || [];
-            if (payments.length === 0) return sendWhatsApp(from, `📱 *[DATAMART MODE]* No recent MoMo claims found.`);
-            let out = `📱 *[DATAMART MODE] MOMO CLAIMS:*\n\n`;
-            payments.forEach((p, idx) => {
-              const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-              out += `${num} *TrxID:* *${p.trxId || "N/A"}* | *GH₵ ${Number(p.amount || 0).toFixed(2)}*\n` +
-                `• Sender: ${p.senderName || "Unknown"} (${p.network || "MoMo"})\n` +
-                `• Status: *${(p.status || "unclaimed").toUpperCase()}* ${p.autoMatched ? "(Auto-matched)" : ""}\n\n`;
-            });
-            return sendWhatsApp(from, out);
+          // 8. MoMo Claims (List, Pending, Stats, Search by TrxID, Sender Name, or 10-12 digit MoMo ID)
+          const isMomoClaimsCommand =
+            /^(?:momo\s*claims?|claims?|pending\s*claims?|unclaimed\s*(?:claims?|momo)|claims?\s*stats|claims?\s*summary)$/i.test(cleanInput) ||
+            /^(?:momo\s*claim|claim|trx|trxid|check\s*claim|search\s*claim|verify\s*claim|find\s*claim)\s+(.+)$/i.test(cleanInput);
+
+          const isDirectMomoTrxId = /^\d{10,13}$/.test(cleanInput.trim());
+
+          if (isMomoClaimsCommand || isDirectMomoTrxId) {
+            const report = await executeDatamartMomoClaimsQuery(cleanInput, from);
+            if (report) return sendWhatsApp(from, report);
           }
 
           // 9. Not Received / Complaints
