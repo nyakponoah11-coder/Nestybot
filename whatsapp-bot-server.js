@@ -6124,9 +6124,40 @@ async function rezolvApiRequest(path, options = {}, from = null) {
   });
 }
 
-async function getRezolvInboxStats() {
+async function getUserRezolvContext(from = null) {
+  if (from) {
+    const norm = normalizeBotPhone(from);
+    try {
+      const { data: setRow } = await supabase.from("settings").select("value").eq("key", `user_rezolv_${norm}`).maybeSingle();
+      if (setRow?.value) {
+        const uCreds = typeof setRow.value === "string" ? JSON.parse(setRow.value) : setRow.value;
+        if (uCreds?.workspaceId) {
+          return {
+            workspaceId: uCreds.workspaceId,
+            agentName: uCreds.name || "Agent",
+            agentId: uCreds.agentId || null,
+            email: uCreds.email,
+            workspaceName: uCreds.workspaceName || "Custom Workspace",
+            isCustom: true
+          };
+        }
+      }
+    } catch (_) { }
+  }
+  return {
+    workspaceId: REZOLV_CONFIG.workspaceId,
+    agentName: REZOLV_CONFIG.agentName,
+    agentId: REZOLV_CONFIG.agentId,
+    email: REZOLV_CONFIG.email,
+    workspaceName: "DataMart",
+    isCustom: false
+  };
+}
+
+async function getRezolvInboxStats(from = null) {
   try {
-    const res = await rezolvApiRequest("/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId);
+    const rezolvCtx = await getUserRezolvContext(from);
+    const res = await rezolvApiRequest("/tickets?workspaceId=" + rezolvCtx.workspaceId, {}, from);
     const tickets = res.data?.data?.tickets || res.data?.tickets || [];
     if (!Array.isArray(tickets)) return null;
     const active = tickets.filter(t => t.status !== "resolved" && t.status !== "closed");
@@ -6150,13 +6181,13 @@ async function getRezolvInboxStats() {
   }
 }
 
-async function findRezolvTicket(identifier) {
+async function findRezolvTicket(identifier, from = null) {
   if (!identifier) return null;
   const rawId = String(cleanCustomerTarget(identifier) || identifier).trim();
 
   // If already 24-char ObjectId
   if (/^[a-f\d]{24}$/i.test(rawId)) {
-    const res = await rezolvApiRequest("/tickets/" + rawId);
+    const res = await rezolvApiRequest("/tickets/" + rawId, {}, from);
     if (res.status === 200 && res.data?.data?.ticket) {
       return { id: rawId, ticket: res.data.data.ticket, messages: res.data.data.messages || [] };
     }
@@ -6166,11 +6197,12 @@ async function findRezolvTicket(identifier) {
   const digitsOnly = cleanNum.replace(/\D/g, "");
   const lowerId = rawId.toLowerCase();
   const words = lowerId.split(/\s+/).filter(w => w.length >= 3);
+  const rezolvCtx = await getUserRezolvContext(from);
 
   // 1. Search in active tickets across pages
   let match = null;
   for (let p = 1; p <= 6; p++) {
-    const activeRes = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&page=${p}&limit=50`);
+    const activeRes = await rezolvApiRequest(`/tickets?workspaceId=${rezolvCtx.workspaceId}&page=${p}&limit=50`, {}, from);
     const activeTickets = activeRes.data?.data?.tickets || activeRes.data?.tickets || [];
     if (!Array.isArray(activeTickets) || activeTickets.length === 0) break;
     match = activeTickets.find(t => {
@@ -6195,7 +6227,7 @@ async function findRezolvTicket(identifier) {
   // 2. If not found in active, search resolved across pages
   if (!match) {
     for (let p = 1; p <= 3; p++) {
-      const resRes = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&status=resolved&page=${p}&limit=50`);
+      const resRes = await rezolvApiRequest(`/tickets?workspaceId=${rezolvCtx.workspaceId}&status=resolved&page=${p}&limit=50`, {}, from);
       const resTickets = resRes.data?.data?.tickets || resRes.data?.tickets || [];
       if (!Array.isArray(resTickets) || resTickets.length === 0) break;
       match = resTickets.find(t => {
@@ -6219,7 +6251,7 @@ async function findRezolvTicket(identifier) {
   }
 
   if (match) {
-    const details = await rezolvApiRequest("/tickets/" + match._id);
+    const details = await rezolvApiRequest("/tickets/" + match._id, {}, from);
     const dData = details.data?.data || details.data || {};
     return {
       id: match._id,
@@ -6230,16 +6262,17 @@ async function findRezolvTicket(identifier) {
   return null;
 }
 
-async function getRezolvTicketsReport(filter = "active", limit = 6) {
+async function getRezolvTicketsReport(filter = "active", limit = 6, from = null) {
   try {
-    let url = "/tickets?workspaceId=" + REZOLV_CONFIG.workspaceId;
+    const rezolvCtx = await getUserRezolvContext(from);
+    let url = "/tickets?workspaceId=" + rezolvCtx.workspaceId;
     if (filter === "resolved") {
       url += "&status=resolved&limit=15";
     }
-    const res = await rezolvApiRequest(url);
+    const res = await rezolvApiRequest(url, {}, from);
     const tickets = res.data?.data?.tickets || [];
     if (tickets.length === 0) {
-      return `🎉 *DATAMART LIVE SUPPORT (REZOLV)*\n\nNo active customer support tickets at the moment! All customer chats resolved.`;
+      return `🎉 *${rezolvCtx.workspaceName.toUpperCase()} LIVE SUPPORT (REZOLV)*\n\nNo active customer support tickets at the moment! All customer chats resolved.`;
     }
 
     // Sort: unread first, urgent/high priority next, then latest customer message
@@ -6255,8 +6288,8 @@ async function getRezolvTicketsReport(filter = "active", limit = 6) {
     });
 
     const displayList = sorted.slice(0, limit);
-    let out = `🎟️ *DATAMART LIVE SUPPORT (REZOLV)*\n` +
-      `Logged in as: *${REZOLV_CONFIG.agentName}* | Active: *${tickets.length} tickets*\n\n`;
+    let out = `🎟️ *${rezolvCtx.workspaceName.toUpperCase()} LIVE SUPPORT (REZOLV)*\n` +
+      `Logged in as: *${rezolvCtx.agentName}* | Active: *${tickets.length} tickets*\n\n`;
 
     displayList.forEach((t, idx) => {
       const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣"][idx] || "•";
@@ -7147,10 +7180,11 @@ const generateRezolvDraftReply = generateSupportDraftReply;
 
 async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
   try {
-    const res = await rezolvApiRequest(`/tickets?workspaceId=${REZOLV_CONFIG.workspaceId}&page=${page}&limit=100`);
+    const rezolvCtx = await getUserRezolvContext(from);
+    const res = await rezolvApiRequest(`/tickets?workspaceId=${rezolvCtx.workspaceId}&page=${page}&limit=100`, {}, from);
     const tickets = res.data?.data?.tickets || res.data?.tickets || [];
     if (!Array.isArray(tickets) || tickets.length === 0) {
-      return `🎉 *DATAMART LIVE SUPPORT INBOX IS CLEAR!*\n\nNo active customer support tickets at the moment. All chats resolved!`;
+      return `🎉 *${rezolvCtx.workspaceName.toUpperCase()} LIVE SUPPORT INBOX IS CLEAR!*\n\nNo active customer support tickets at the moment. All chats resolved!`;
     }
 
     // Strictly filter tickets currently in the LIVE INBOX view:
@@ -7192,7 +7226,7 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
 
     const drafts = (await Promise.all(listToProcess.map(async (t) => {
       try {
-        const details = await rezolvApiRequest("/tickets/" + t._id);
+        const details = await rezolvApiRequest("/tickets/" + t._id, {}, from);
         const dData = details.data?.data || details.data || {};
         const fullTicket = dData.ticket || t;
         const msgs = dData.messages || fullTicket.messages || [];
@@ -9858,39 +9892,54 @@ app.post("/webhook", async (req, res) => {
 
     if (connectRezolvMatch) {
       const uEmail = connectRezolvMatch[1].trim();
-      const uPass = connectRezolvMatch[2].trim();
-      const normF = normalizeBotPhone(from);
+      let uPass = connectRezolvMatch[2].trim();
+      const forPhoneMatch = cleanCmd.match(/\s+for\s+(0[2357]\d{8}|233\d{9})\b/i);
+      if (forPhoneMatch) {
+        uPass = uPass.replace(/\s+for\s+.+$/i, "").trim();
+      }
+      const targetPhone = (isOwner && forPhoneMatch) ? normalizeBotPhone(forPhoneMatch[1]) : normalizeBotPhone(from);
 
       const loginResult = await loginRezolvUser(uEmail, uPass);
       if (loginResult && loginResult.token) {
         const ag = loginResult.agent || {};
         const agentName = ag.name || uEmail.split("@")[0];
+        const wsId = ag.workspaceId || ag.workspace?._id || REZOLV_CONFIG.workspaceId;
+        const wsName = ag.workspaceName || ag.workspace?.name || (/datahustle|habiba/i.test(uEmail) ? "DATAHUSTLE" : "DataMart");
+
         await supabase.from("settings").upsert({
-          key: `user_rezolv_${normF}`,
+          key: `user_rezolv_${targetPhone}`,
           value: JSON.stringify({
             email: uEmail,
             password: uPass,
             name: agentName,
             agentId: ag._id || null,
+            workspaceId: wsId,
+            workspaceName: wsName,
             token: loginResult.token,
             role: ag.role || "agent",
             updated_at: new Date().toISOString()
           })
         }, { onConflict: "key" });
 
-        setUserMode(from, "support");
-        await saveCustomerSession(from, { step: 97 });
-        await supabase.from("settings").upsert({ key: `owner_mode_${normF}`, value: "support" }, { onConflict: "key" });
+        setUserMode(targetPhone, "support");
+        await saveCustomerSession(targetPhone, { step: 97 });
+        await supabase.from("settings").upsert({ key: `owner_mode_${targetPhone}`, value: "support" }, { onConflict: "key" });
 
-        return sendWhatsApp(from,
+        const confirmText =
           `🎉 *CONNECTED TO YOUR REZOLV LIVE SUPPORT ACCOUNT!* 🚀\n\n` +
           `👤 *Agent Name:* *${agentName}*\n` +
           `📧 *Email:* ${uEmail}\n` +
+          `🏢 *Workspace:* *${wsName}*\n` +
           `📊 *Role:* ${(ag.role || "Agent").toUpperCase()}\n` +
           `🔗 *Dashboard:* https://www.rezolv.dev/dashboard\n\n` +
-          `✅ *All customer replies you dispatch will now be signed with YOUR name (*${agentName}*) instead of Stony 💙!*\n\n` +
-          `💡 Text *draft 5* or *inbox* to review live tickets waiting for attention, or *disconnect rezolv* to unlink.`
-        );
+          `✅ *All tickets, inboxes, and replies for line ${targetPhone} are now routed to ${wsName}! Customer replies will be signed with YOUR name (*${agentName}*).*\n\n` +
+          `💡 Text *draft 5* or *inbox* to review live tickets waiting in ${wsName}, or *disconnect rezolv* to unlink.`;
+
+        if (isOwner && forPhoneMatch && targetPhone !== normalizeBotPhone(from)) {
+          await sendWhatsApp(targetPhone, confirmText).catch(() => { });
+          return sendWhatsApp(from, `✅ Successfully linked Rezolv account *${uEmail}* (${agentName} · ${wsName}) to WhatsApp line *${targetPhone}*!`);
+        }
+        return sendWhatsApp(from, confirmText);
       } else {
         return sendWhatsApp(from,
           `❌ *REZOLV LOGIN FAILED*\n\n` +
@@ -9898,7 +9947,7 @@ app.post("/webhook", async (req, res) => {
           `Please check:\n` +
           `1. Your email address (*${uEmail}*)\n` +
           `2. Your password (ensure it is the exact password you use to log into https://www.rezolv.dev)\n` +
-          `3. Ensure your account is registered/invited as an agent on Rezolv.`
+          `3. If you created your Rezolv account with "Sign in with Google", please set an email password in your Rezolv account profile settings, or verify your credentials.`
         );
       }
     }
