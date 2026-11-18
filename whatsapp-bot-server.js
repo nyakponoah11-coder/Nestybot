@@ -7246,7 +7246,7 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
             draftText = `Hello ${firstName}, we have tracked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Your data bundle has already been successfully sent and delivered to your number (${ph})! Kindly dial *124# or *126# to verify your main balance. Thank you!`;
           } else {
             trackingDiagnostic = `❌ FAILED on ${brand} · ${pidDisplay} (Ref: ${refCode})${liveTrack.failed ? ` (${liveTrack.failed} Failed)` : ""}`;
-            draftText = `Hello ${firstName}, we have checked your order on ${brand} and noticed a delivery issue on your phone number (${ph}). Don't worry at all, it has been flagged to our technical team and is being worked on / re-processed for you right away so your data delivers immediately. Thank you for your patience!`;
+            draftText = `Hello ${firstName}, we have checked your order on ${brand} and noticed a delivery issue on your phone number (${ph}). Don't worry at all, we are working on it and re-processing it for you right away so your data delivers immediately. Thank you for your patience!`;
           }
         } else if (st === "delivered" || st === "completed" || st === "success") {
           if (liveTrack.isCarrierAudit) {
@@ -7271,11 +7271,11 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
               date: orderDate
             }).catch(() => { });
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""} (Reported to team group)`;
-            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please don't worry at all, our technical team is actively working on it right now to get it resolved and delivered for you as quickly as possible. Thank you for your patience!`;
+            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please don't worry at all, we are actively working on it right now to get it resolved and delivered for you as quickly as possible. Thank you for your patience!`;
           } else if (isOver24H) {
             // Over 24 hours but no numeric Portal ID assigned yet (Pending Export) -> Do NOT report to group
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please don't worry at all, our team is actively working on it right now and your data will land shortly. Thank you for your patience!`;
+            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please don't worry at all, we are actively working on it right now and your data will land shortly. Thank you for your patience!`;
           } else {
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
             draftText = `Hello ${firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing and will land on your number shortly. Kindly dial *124# or *126# to verify your balance. Thank you!`;
@@ -10644,11 +10644,11 @@ app.post("/webhook", async (req, res) => {
 
             let replyCard = isOk
               ? `🚀 *DISPATCHED DRAFT #${reqNum} LIVE AS ${activeAgent}!* ✅\n\n` +
-                `👤 *Customer:* *${custName}* ([${tNum}])\n` +
-                `💬 *Message Sent:*\n"${replyMsg}"\n\n` +
-                (remaining.length > 0
-                  ? `💡 *${remaining.length} draft(s) remaining in this batch:* ${remaining.map(d => `#${d.draftNum || (batchPending.drafts.indexOf(d) + 1)}`).join(", ")}. Reply *SEND ALL* or *SEND [number]* to dispatch next!`
-                  : `🎉 *All staged drafts in this batch have been sent!* Reply *draft 5* to stage new tickets.`)
+              `👤 *Customer:* *${custName}* ([${tNum}])\n` +
+              `💬 *Message Sent:*\n"${replyMsg}"\n\n` +
+              (remaining.length > 0
+                ? `💡 *${remaining.length} draft(s) remaining in this batch:* ${remaining.map(d => `#${d.draftNum || (batchPending.drafts.indexOf(d) + 1)}`).join(", ")}. Reply *SEND ALL* or *SEND [number]* to dispatch next!`
+                : `🎉 *All staged drafts in this batch have been sent!* Reply *draft 5* to stage new tickets.`)
               : `⚠️ *FAILED TO SEND DRAFT #${reqNum}:* ${res}`;
 
             return sendWhatsApp(from, replyCard);
@@ -11318,1680 +11318,1662 @@ app.post("/webhook", async (req, res) => {
     }
     const activeMode = isInBotCheckoutStep ? "bot" : getUserMode(from, currentSession);
 
-            // If Owner is messaging:
-            // When owner is in active checkout (testing buying bundles, entering phone/momo numbers),
-            // let them complete checkout! Only switch to Owner AI if they explicitly message "stony", "admin", "owner", "exit", "cancel", "reset", or prefix with "stony ".
-            const isOwnerExplicitAiCommand = startsWithStony || /^(stony|admin|owner|exit|cancel|reset)$/i.test(text.trim());
-            const ownerTestingMenuDigit = isOwner && isMainMenuNumber;
-            const shouldEnterOwnerAi = isOwner && !hasAgent && (
-              isOwnerExplicitAiCommand ||
-              (!isInBotCheckoutStep && !ownerTestingMenuDigit && (activeMode === "ai" || activeMode === "support" || activeMode === "datamart" || !/^(menu|customer)$/i.test(text.trim())))
-            );
-
-            /* =====================================================
-            OWNER AI CO-PILOT / PERSONAL ASSISTANT PIPELINE
-            Active whenever user is Owner (or mode is 'ai' / started with Stony)
-            ===================================================== */
-            if (shouldEnterOwnerAi) {
-  // Auto-clear any customer checkout step for owner when explicitly switching to AI mode
-  if (isInBotCheckoutStep && isOwnerExplicitAiCommand) {
-    try {
-      await saveCustomerSession(from, { step: 99, bundle: null });
-    } catch (_) { }
-  }
-  let ownerSession = currentSession;
-  if (!ownerSession) {
-    try {
-      const { data: created } = await supabase
-        .from("sessions")
-        .upsert({ phone: String(from), step: 99 }, { onConflict: "phone" })
-        .select("step, bundle, notes")
-        .maybeSingle();
-      ownerSession = created;
-    } catch (_) { }
-  }
-
-  console.log("👑 OWNER CHAT WITH STONY (AI MODE) — message:", effectiveText);
-
-  // ── CHECK IF OWNER IS CONFIRMING A PENDING ACTION ──
-  const normFrom = String(from || "").replace(/\D/g, "");
-  let pendingAction = ownerPendingActions.get(normFrom) || ownerPendingActions.get(String(from)) || null;
-  if (!pendingAction && ownerSession?.bundle) {
-    try {
-      pendingAction = JSON.parse(ownerSession.bundle);
-    } catch (_) { }
-  }
-  if (!pendingAction && supabase) {
-    try {
-      const { data: setRows } = await supabase
-        .from("settings")
-        .select("key, value")
-        .in("key", [`owner_pending_${normFrom}`, `owner_pending_${from}`, `latest_support_batch_${normFrom}`]);
-      if (setRows && setRows.length > 0) {
-        const row = setRows.find(r => r.key === `owner_pending_${normFrom}` || r.key === `owner_pending_${from}`) || setRows.find(r => r.key === `latest_support_batch_${normFrom}`) || setRows[0];
-        if (row?.value) {
-          const parsed = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
-          if (parsed) {
-            pendingAction = parsed.type === "batch_rezolv_reply" || parsed.drafts
-              ? (parsed.type ? parsed : { type: "batch_rezolv_reply", drafts: Array.isArray(parsed) ? parsed : (parsed.drafts || []) })
-              : parsed;
-            ownerPendingActions.set(normFrom, pendingAction);
-            ownerPendingActions.set(String(from), pendingAction);
-          }
-        }
-      }
-    } catch (_) { }
-  }
-
-  // Load multi-turn conversation memory early
-  let history = ownerHistories.get(normFrom) || ownerHistories.get(String(from)) || [];
-  if (!history || history.length === 0) {
-    try {
-      if (ownerSession?.notes) {
-        const parsed = JSON.parse(ownerSession.notes);
-        if (Array.isArray(parsed)) history = parsed;
-      }
-    } catch (_) { }
-  }
-
-  const cleanInput = text.trim();
-
-  // ── SWITCH TO DATAMART AGENT SUPPORT MODE ──
-  if (/^(?:datamart\s*mode|dm\s*mode|agent\s*support\s*mode|switch\s*to\s*datamart|datamart)$/i.test(cleanInput)) {
-    setUserMode(from, "datamart");
-    await saveCustomerSession(from, { step: 98 });
-    await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "datamart" }, { onConflict: "key" });
-    return sendWhatsApp(from,
-      `🏢 *SWITCHED TO DATAMART AGENT SUPPORT MODE!* 🚀\n\n` +
-      `You are now connected directly to your DataMart Worker Console. Every command or query you send will execute live on DataMart!\n\n` +
-      `🛠️ *What you can send in this mode:*\n` +
-      `• *Any Batch/Order ID* (e.g. *2313443*) ➔ Runs Live Carrier Delivery Check\n` +
-      `• *Any Email or Phone* (e.g. *nyakponoah11@gmail.com*) ➔ Customer/Agent Profile & Wallet\n` +
-      `• *tickets* or *urgent* ➔ View active support tickets\n` +
-      `• *failed* ➔ View failed orders & retry\n` +
-      `• *withdrawals* ➔ View agent cashouts\n` +
-      `• *deposits* ➔ View MoMo & Paystack deposits\n` +
-      `• *stats* or *dashboard* ➔ View today's total volume\n` +
-      `• *recovery* ➔ Check skipped/failed recovery pipelines\n` +
-      `• *not received* ➔ Customer complaints\n\n` +
-      `💡 To switch back to normal store co-pilot mode anytime, just text: *exit* or *normal mode* or *stony*.`
+    // If Owner is messaging:
+    // When owner is in active checkout (testing buying bundles, entering phone/momo numbers),
+    // let them complete checkout! Only switch to Owner AI if they explicitly message "stony", "admin", "owner", "exit", "cancel", "reset", or prefix with "stony ".
+    const isOwnerExplicitAiCommand = startsWithStony || /^(stony|admin|owner|exit|cancel|reset)$/i.test(text.trim());
+    const ownerTestingMenuDigit = isOwner && isMainMenuNumber;
+    const shouldEnterOwnerAi = isOwner && !hasAgent && (
+      isOwnerExplicitAiCommand ||
+      (!isInBotCheckoutStep && !ownerTestingMenuDigit && (activeMode === "ai" || activeMode === "support" || activeMode === "datamart" || !/^(menu|customer)$/i.test(text.trim())))
     );
-  }
 
-  // ── SWITCH TO FULLY LOCKED-IN SUPPORT MODE (REZOLV & DATAMART) ──
-  const isSupportModeSwitch =
-    /\b(?:rezolv|resolv|rezolve|resovl|resolve)\s*(?:mode)?\b/i.test(cleanInput) ||
-    /\b(?:support\s*mode|live\s*support(?:\s*mode)?|support\s*desk|customer\s*support\s*mode)\b/i.test(cleanInput) ||
-    /^(?:support|rezolv|resolv|resolve)$/i.test(cleanInput);
-
-  const isSpecificRezolvAction =
-    /^(?:reply|tell|close\s+ticket|resolve\s+ticket|view\s+ticket|check\s+ticket)\b/i.test(cleanInput) ||
-    (/^(?:close|resolve)\s+(?:TKT-?\d+|[a-f0-9]{24})\b/i.test(cleanInput));
-
-  if (isSupportModeSwitch && !isSpecificRezolvAction) {
-    setUserMode(from, "support");
-    await saveCustomerSession(from, { step: 97 });
-    await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "support" }, { onConflict: "key" });
-    const initialReport = await getRezolvTicketsReport("active", 5);
-    return sendWhatsApp(from,
-      `🔒 *SUPPORT MODE FULLY LOCKED IN!* ⚡\n` +
-      `Logged in as: *Stony 💙* (Live Support Desk)\n\n` +
-      `🚫 *DATA 1 GH store statistics, sales numbers, and marketing are MUTED.*\n` +
-      `I am now 100% focused strictly on customer support tickets, live chats, and issue resolutions!\n\n` +
-      `${initialReport}\n\n` +
-      `💡 *Quick Commands in Support Mode:*\n` +
-      `• *reply [Name or Ticket] [message]* ➔ Send WhatsApp/SMS to customer or reply on Rezolv\n` +
-      `• *reply him to text me on 0547100951* ➔ Resolves pronoun from recent ticket & sends direct WhatsApp\n` +
-      `• *draft reply [Name or Ticket]* ➔ AI writes professional response, tap YES to send\n` +
-      `• *ticket [ReportID or TKT-ID]* ➔ View full chat history & issue details\n` +
-      `• *[Customer Name or Phone]* ➔ Look up tickets, complaints & orders\n` +
-      `• *tickets* or *urgent* ➔ Refresh ticket queue\n` +
-      `• *exit* or *normal mode* ➔ Return to normal DATA 1 GH store co-pilot.`
-    );
-  }
-
-  // ── DEDICATED SUPPORT & DATAMART CONSOLE MODE HANDLER ──
-  const activeOwnerMode = getUserMode(from);
-  if (activeOwnerMode === "support") {
-    if (/^(?:exit|normal\s*mode|stony|stony\s*mode|store\s*mode|back|quit|leave|stop)$/i.test(cleanInput)) {
-      setUserMode(from, "ai");
-      await saveCustomerSession(from, { step: 99 });
-      await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "ai" }, { onConflict: "key" });
-      return sendWhatsApp(from, `👑 Exited Support Mode. Switched back to *DATA 1 GH Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
-    }
-    // In support mode, natural messages proceed straight down to AI & natural support handlers!
-  } else if (activeOwnerMode === "datamart") {
-    if (/^(?:exit|normal\s*mode|stony|stony\s*mode|store\s*mode|back|quit|leave|stop)$/i.test(cleanInput)) {
-      setUserMode(from, "ai");
-      await saveCustomerSession(from, { step: 99 });
-      await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "ai" }, { onConflict: "key" });
-      return sendWhatsApp(from, `👑 Exited DataMart Mode. Switched back to *DATA 1 GH Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
-    }
-
-    await processDatamartConsoleCommand(from, cleanInput, true);
-    return;
-  }
-
-  // ── 0. OWNER AI TRAINING & CORRECTION HANDLER (WHATSAPP → PERMANENT MEMORY) ──
-  const isDirectTraining =
-    /\b(?:don'?t\s+do\s+(?:this|that)\s+again|never\s+do\s+(?:this|that)\s+again|don'?t\s+say\s+(?:this|that)\s+again|never\s+say\s+(?:this|that)\s+again|save\s+(?:this\s+rule|this\s+instruction|this\s+correction|rule|instruction)|remember\s+(?:this|that)|from\s+now\s+on|train\s*:|correction\s*:)\b/i.test(cleanInput);
-
-  const isSaveNowIntent =
-    /^(?:save\s*now|okay\s*save|ok\s*save|yes\s*save|save\s*it|save\s*this|save|please\s*save)$/i.test(cleanInput);
-
-  if (isDirectTraining || isSaveNowIntent) {
-    let ruleToSave = "";
-
-    if (isDirectTraining) {
-      ruleToSave = cleanInput
-        .replace(/^(?:stony|hey\s+stony|hi\s+stony)[,:\s]*/i, "")
-        .replace(/^(?:please\s+)?(?:don'?t\s+do\s+(?:this|that)\s+again|never\s+do\s+(?:this|that)\s+again|don'?t\s+say\s+(?:this|that)\s+again|never\s+say\s+(?:this|that)\s+again|save\s+(?:this\s+rule|this\s+instruction|this\s+correction|rule|instruction)|remember\s+(?:this|that)|from\s+now\s+on|train\s*:|correction\s*:)[:,\s-]*/i, "")
-        .trim();
-
-      if (!ruleToSave || ruleToSave.length < 3) {
-        const lastAssist = [...history].reverse().find(h => h.role === "assistant" && h.text);
-        if (lastAssist?.text) {
-          const snippet = lastAssist.text.slice(0, 140).replace(/\n/g, " ");
-          ruleToSave = `Do not repeat or use this prior response: "${snippet}..."`;
-        } else {
-          ruleToSave = cleanInput;
-        }
-      }
-    } else if (isSaveNowIntent) {
-      const lastUser = [...history].reverse().find(h => h.role === "user" && h.text && h.text.trim() !== cleanInput);
-      if (lastUser?.text) {
-        ruleToSave = lastUser.text
-          .replace(/^(?:stony|hey\s+stony|hi\s+stony)[,:\s]*/i, "")
-          .replace(/^(?:please\s+)?(?:don'?t\s+do\s+(?:this|that)\s+again|never\s+do\s+(?:this|that)\s+again|don'?t\s+say\s+(?:this|that)\s+again|never\s+say\s+(?:this|that)\s+again|save\s+(?:this\s+rule|this\s+instruction|this\s+correction|rule|instruction)|remember\s+(?:this|that)|from\s+now\s+on|train\s*:|correction\s*:)[:,\s-]*/i, "")
-          .trim();
-      }
-      if (!ruleToSave) {
-        ruleToSave = "Always follow the owner's operational standards strictly and answer customers with human warmth.";
-      }
-    }
-
-    if (ruleToSave) {
-      try {
-        const { data: sRow } = await supabase
-          .from("settings")
-      } catch (trainErr) {
-        console.error("Failed saving WhatsApp training directive:", trainErr);
-        return sendWhatsApp(from, `⚠️ Could not save training to database: ${trainErr.message}`);
-      }
-    }
-  }
-
-  const sanitizedInput = cleanInput.replace(/[\\\]\[]/g, "").trim();
-  const isMistakeOrIgnore = /^(mistake|wrong|wrong number|ignore|ignore it|ignore that|nevermind|never mind|forget it|my bad|by mistake)$/i.test(sanitizedInput);
-  const isCancel = isMistakeOrIgnore || /^(no|nope|cancel|nah|stop|abort|leave it)$/i.test(sanitizedInput);
-
-  // Recognize confirmation strictly when confirming a pending staged action
-  const isConfirm = !isCancel && (
-    /^(yes|yeah|yep|ok|okay|sure|yh|y|sharp|confirm|proceed|go|done|execute|apply|go ahead|do it|please do|send it|make it|update it|yes update|confirm update|proceed with update|send|send all|dispatch|dispatch all|reply all|reply|send them|yes send|send drafts|send all drafts|deliver all)$/i.test(sanitizedInput)
-  );
-
-  const sendSingleMatch = sanitizedInput.match(/^(?:send|dispatch)\s*(\d+)$/i);
-  const editSingleMatch = sanitizedInput.match(/^(\d+)\s*[:,-]\s*([\s\S]+)$/);
-  const isBatchSendAll = /^(?:send\s*all|dispatch\s*all)$/i.test(sanitizedInput);
-
-  // Helper to ensure pendingAction is recovered if missing from memory
-  const ensureSupportBatchPendingAction = async () => {
-    if (pendingAction && pendingAction.type === "batch_rezolv_reply" && pendingAction.drafts?.length > 0) return pendingAction;
-    // 1. Try settings
-    try {
-      const { data: setRows } = await supabase
-        .from("settings")
-        .select("key, value")
-        .in("key", [`owner_pending_${normFrom}`, `owner_pending_${from}`, `latest_support_batch_${normFrom}`]);
-      if (setRows && setRows.length > 0) {
-        const row = setRows.find(r => r.key === `owner_pending_${normFrom}` || r.key === `owner_pending_${from}`) || setRows.find(r => r.key === `latest_support_batch_${normFrom}`) || setRows[0];
-        if (row?.value) {
-          const parsed = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
-          if (parsed) {
-            pendingAction = parsed.type === "batch_rezolv_reply" || parsed.drafts
-              ? (parsed.type ? parsed : { type: "batch_rezolv_reply", drafts: Array.isArray(parsed) ? parsed : (parsed.drafts || []) })
-              : parsed;
-            ownerPendingActions.set(normFrom, pendingAction);
-            ownerPendingActions.set(String(from), pendingAction);
-            return pendingAction;
-          }
-        }
-      }
-    } catch (_) { }
-    // 2. Try history
-    if (history && history.length > 0) {
-      const lastAssist = [...history].reverse().find(h => h.role === "assistant" && h.text);
-      if (lastAssist) {
-        const recovered = extractProposedActionFromText(lastAssist.text);
-        if (recovered?.action) {
-          pendingAction = recovered.action;
-          ownerPendingActions.set(normFrom, pendingAction);
-          return pendingAction;
-        }
-      }
-    }
-    return pendingAction;
-  };
-
-  // ── SPECIAL HANDLER FOR BATCH REZOLV REPLIES ──
-  // A: Send single draft (e.g. "Send 1", "send 2", "send draft 1")
-  if (sendSingleMatch) {
-    await ensureSupportBatchPendingAction();
-    if (pendingAction && pendingAction.type === "batch_rezolv_reply") {
-      const reqNum = parseInt(sendSingleMatch[1], 10);
-      let targetDraft = pendingAction.drafts?.find(d => d.draftNum === reqNum);
-      if (!targetDraft && reqNum >= 1 && reqNum <= (pendingAction.drafts?.length || 0)) {
-        targetDraft = pendingAction.drafts[reqNum - 1];
-      }
-
-      if (targetDraft) {
-        if (targetDraft.sent) {
-          const custName = targetDraft.customerName || "Customer";
-          const remaining = (pendingAction.drafts || []).filter(d => !d.sent);
-          return sendWhatsApp(from,
-            `ℹ️ *Draft #${reqNum} for ${custName} has ALREADY been dispatched!* ✅\n\n` +
-            (remaining.length > 0
-              ? `💡 *${remaining.length} draft(s) remaining in this batch:* ${remaining.map(d => `#${d.draftNum || (pendingAction.drafts.indexOf(d) + 1)}`).join(", ")}. Text *SEND ALL* or *SEND [number]*!`
-              : `🎉 All drafts in this batch are already sent! Text *draft 5* to stage new tickets.`)
-          );
-        }
-
-        const replyMsg = targetDraft.draftMessage || targetDraft.message || targetDraft.text;
-        const res = await sendRezolvReply(targetDraft, replyMsg, from);
-        targetDraft.sent = true;
-
-        const remaining = (pendingAction.drafts || []).filter(d => !d.sent);
-        if (remaining.length > 0) {
-          await setOwnerPendingAction(from, pendingAction);
-          try {
-            const normF = String(from || "").replace(/\D/g, "");
-            await supabase.from("settings").upsert({
-              key: `latest_support_batch_${normF}`,
-              value: JSON.stringify(pendingAction.drafts)
-            }, { onConflict: "key" });
-          } catch (_) { }
-        } else {
-          await clearOwnerPendingAction(from);
-          try {
-            const normF = String(from || "").replace(/\D/g, "");
-            await supabase.from("settings").delete().eq("key", `latest_support_batch_${normF}`);
-          } catch (_) { }
-        }
-
-        const rezolvCtx = await getUserRezolvContext(from);
-        const activeAgent = rezolvCtx?.agentName || "Stony 💙";
-        const custName = targetDraft.customerName || "Customer";
-        const tNum = targetDraft.ticketId || targetDraft.id || `#${reqNum}`;
-        const isOk = res && !res.startsWith("⚠️") && !res.startsWith("❌");
-
-        let replyCard = isOk
-          ? `🚀 *DISPATCHED DRAFT #${reqNum} LIVE AS ${activeAgent}!* ✅\n\n` +
-            `👤 *Customer:* *${custName}* ([${tNum}])\n` +
-            `💬 *Message Sent:*\n"${replyMsg}"\n\n` +
-            (remaining.length > 0
-              ? `💡 *${remaining.length} draft(s) remaining in this batch:* ${remaining.map(d => `#${d.draftNum || (pendingAction.drafts.indexOf(d) + 1)}`).join(", ")}. Reply *SEND ALL* or *SEND [number]* to dispatch next!`
-              : `🎉 *All staged drafts in this batch have been sent!* Reply *draft 5* to stage new tickets.`)
-          : `⚠️ *FAILED TO SEND DRAFT #${reqNum}:* ${res}`;
-
-        return sendWhatsApp(from, replyCard);
-      } else {
-        const total = pendingAction.drafts?.length || 0;
-        const remaining = (pendingAction.drafts || []).filter(d => !d.sent);
-        return sendWhatsApp(from,
-          `⚠️ *Draft #${reqNum} not found in this batch.*\n\n` +
-          `This batch only has *${total} draft(s)* total (#1${total > 1 ? ` to #${total}` : ""}).\n` +
-          (remaining.length > 0
-            ? `💡 *${remaining.length} draft(s) still waiting to send:* ${remaining.map(d => `#${d.draftNum || (pendingAction.drafts.indexOf(d) + 1)}`).join(", ")}. Reply *SEND [number]* or *SEND ALL*!`
-            : `🎉 All drafts in this batch have already been sent! Text *draft 5* to stage new tickets.`)
-        );
-      }
-    } else {
-      return sendWhatsApp(from, `ℹ️ No pending support draft batch found. Text *draft 5* or *inbox* to stage customer tickets for review!`);
-    }
-  }
-
-  // B: Edit single draft text (e.g. "1: Hello Kwame...", "2: We have checked...")
-  if (editSingleMatch) {
-    await ensureSupportBatchPendingAction();
-    if (pendingAction && pendingAction.type === "batch_rezolv_reply") {
-      const reqNum = parseInt(editSingleMatch[1], 10);
-      let targetDraft = pendingAction.drafts?.find(d => d.draftNum === reqNum);
-      if (!targetDraft && reqNum >= 1 && reqNum <= (pendingAction.drafts?.length || 0)) {
-        targetDraft = pendingAction.drafts[reqNum - 1];
-      }
-
-      if (targetDraft) {
-        targetDraft.draftMessage = editSingleMatch[2].trim();
-        targetDraft.message = targetDraft.draftMessage;
-        targetDraft.text = targetDraft.draftMessage;
-        await setOwnerPendingAction(from, pendingAction);
+    /* =====================================================
+    OWNER AI CO-PILOT / PERSONAL ASSISTANT PIPELINE
+    Active whenever user is Owner (or mode is 'ai' / started with Stony)
+    ===================================================== */
+    if (shouldEnterOwnerAi) {
+      // Auto-clear any customer checkout step for owner when explicitly switching to AI mode
+      if (isInBotCheckoutStep && isOwnerExplicitAiCommand) {
         try {
-          const normF = String(from || "").replace(/\D/g, "");
-          await supabase.from("settings").upsert({
-            key: `latest_support_batch_${normF}`,
-            value: JSON.stringify(pendingAction.drafts)
-          }, { onConflict: "key" });
+          await saveCustomerSession(from, { step: 99, bundle: null });
         } catch (_) { }
-
-        const custName = targetDraft.customerName || "Customer";
-        const tNum = targetDraft.ticketId || targetDraft.id || `#${reqNum}`;
-        return sendWhatsApp(from,
-          `📝 *UPDATED DRAFT #${reqNum} FOR ${custName.toUpperCase()} ([${tNum}])!*\n\n` +
-          `*New Reply:*\n"${targetDraft.draftMessage}"\n\n` +
-          `👉 Reply *SEND ${reqNum}* to dispatch this now, or *SEND ALL* to dispatch the whole batch!`
-        );
-      } else {
-        const total = pendingAction.drafts?.length || 0;
-        return sendWhatsApp(from, `⚠️ Draft #${reqNum} not found in this batch (${total} available).`);
       }
-    }
-  }
-
-  // If owner says "mistake", "ignore", "nevermind", or cancels (with or without a pending action)
-  if (isMistakeOrIgnore || (pendingAction && isCancel)) {
-    await clearOwnerPendingAction(from);
-    return sendWhatsApp(from, "No problem at all boss — ignored and cancelled! Let me know whenever you need anything else.");
-  }
-
-  // If owner is confirming AND has pendingAction
-  if (pendingAction && (isConfirm || isBatchSendAll)) {
-    const { type, network, capacity, status, smsText, inStock, productId, productName } = pendingAction;
-    await clearOwnerPendingAction(from);
-
-    // 0. REZOLV LIVE CUSTOMER REPLY CONFIRMATION
-    if (type === "rezolv_reply") {
-      const tId = pendingAction.ticketId || pendingAction.ticket || pendingAction.id;
-      const replyText = pendingAction.message || pendingAction.text;
-      const res = await sendRezolvReply(tId, replyText, from);
-      return sendWhatsApp(from, res);
-    }
-
-    // 0b. BATCH REZOLV SUPPORT REPLIES CONFIRMATION
-    if (type === "batch_rezolv_reply") {
-      const drafts = (pendingAction.drafts || []).filter(d => !d.sent);
-      if (drafts.length === 0) return sendWhatsApp(from, "ℹ️ All staged drafts in this batch have already been sent! Text *draft 5* to stage new tickets.");
-
-      const results = await Promise.all(drafts.map(async (d) => {
+      let ownerSession = currentSession;
+      if (!ownerSession) {
         try {
-          const replyText = d.draftMessage || d.message || d.text;
-          const res = await sendRezolvReply(d, replyText, from);
-          return { ticketId: d.ticketId || d.id, name: d.customerName, ok: !res.startsWith("⚠️"), res };
-        } catch (err) {
-          return { ticketId: d.ticketId || d.id, name: d.customerName, ok: false, error: err.message };
-        }
-      }));
-
-      const rezolvCtx = await getUserRezolvContext(from);
-      const activeAgent = rezolvCtx?.agentName || "Stony 💙";
-
-      let report = `🚀 *DISPATCHED ALL ${results.length} SUPPORT REPLIES LIVE AS ${activeAgent}!*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-      results.forEach(r => {
-        report += `${r.ok ? "✅" : "⚠️"} *[${r.ticketId}]* ${r.name || "Customer"}\n`;
-      });
-      report += `\n🎯 All messages are live in customer chat widgets on Rezolv! Reply *draft next* or *draft 5* to review the next batch!`;
-      return sendWhatsApp(from, report);
-    }
-
-    // 0c. UNIFIED CUSTOMER MESSAGE / DATAMART REPLY CONFIRMATION
-    if (type === "send_customer_message" || type === "reply_customer" || type === "message_customer") {
-      const res = await executeOwnerDirectAction("send_customer_message", pendingAction);
-      return sendWhatsApp(from, res);
-    }
-
-    // Gather all target references from pendingAction
-    let targetRefs = [];
-    if (Array.isArray(pendingAction.orders)) targetRefs.push(...pendingAction.orders);
-    if (Array.isArray(pendingAction.refs)) targetRefs.push(...pendingAction.refs);
-    if (Array.isArray(pendingAction.references)) targetRefs.push(...pendingAction.references);
-    if (pendingAction.ref) targetRefs.push(pendingAction.ref);
-    if (pendingAction.reference) targetRefs.push(pendingAction.reference);
-    if (pendingAction.order_id) targetRefs.push(pendingAction.order_id);
-
-    // Fallback: check if references are in the current text or previous assistant message
-    if (targetRefs.length === 0) {
-      targetRefs = extractOrderReferences(text);
-    }
-    if (targetRefs.length === 0 && history.length > 0) {
-      const recentText = history.slice(-3).map(h => h.text).join(" ");
-      targetRefs = extractOrderReferences(recentText);
-    }
-
-    targetRefs = [...new Set(targetRefs.map(r => String(r || "").replace(/[*_#`"']/g, "").trim()).filter(Boolean))];
-
-    // 1. UPDATE ORDER STATUS (Single & Multiple Orders)
-    if (type === "update_order_status" || (targetRefs.length > 0 && /\b(update|status|delivered|processing|pending|waiting|failed|cancelled|refunded)\b/i.test(cleanInput))) {
-      const statusToSet = extractStatusFromText(cleanInput) || pendingAction.status || status || "delivered";
-      const updatedRefs = [];
-
-      for (const r of targetRefs) {
-        const upd = await updateOrderDeliveryStatusSafely(r, statusToSet);
-        if (upd) {
-          updatedRefs.push(r);
-          // Per owner instruction: Stop sending SMS when delivery status is updated
-        }
-      }
-
-      if (updatedRefs.length > 0) {
-        // Record in conversation memory
-        try {
-          const executionNote = {
-            role: "assistant",
-            text: `✅ Action completed: Updated ${updatedRefs.length} order(s) (${updatedRefs.join(", ")}) to ${statusToSet.toUpperCase()} in the database.`
-          };
-          const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
-          await saveOwnerHistory(from, updatedHistory);
+          const { data: created } = await supabase
+            .from("sessions")
+            .upsert({ phone: String(from), step: 99 }, { onConflict: "phone" })
+            .select("step, bundle, notes")
+            .maybeSingle();
+          ownerSession = created;
         } catch (_) { }
-
-        return sendWhatsApp(from,
-          `✅ *ACTION COMPLETED BOSS!*\n\n` +
-          `I have successfully updated ${updatedRefs.length} order(s) to *${statusToSet.toUpperCase()}* in the database:\n` +
-          updatedRefs.map(r => `• *${r}*`).join("\n") +
-          `\n\nDatabase is now synchronized with reality! (SMS alerts disabled). What else would you like me to tackle?`
-        );
-      }
-    }
-
-    // 1b. UPDATE PAYMENT STATUS
-    if (type === "update_payment_status") {
-      const statusToSet = extractPaymentStatusFromText(cleanInput) || pendingAction.payment_status || pendingAction.status || status || "paid";
-      const updatedRefs = [];
-
-      for (const r of targetRefs) {
-        const upd = await updateOrderPaymentStatusSafely(r, statusToSet);
-        if (upd) {
-          updatedRefs.push(r);
-        }
       }
 
-      if (updatedRefs.length > 0) {
+      console.log("👑 OWNER CHAT WITH STONY (AI MODE) — message:", effectiveText);
+
+      // ── CHECK IF OWNER IS CONFIRMING A PENDING ACTION ──
+      const normFrom = String(from || "").replace(/\D/g, "");
+      let pendingAction = ownerPendingActions.get(normFrom) || ownerPendingActions.get(String(from)) || null;
+      if (!pendingAction && ownerSession?.bundle) {
         try {
-          const executionNote = {
-            role: "assistant",
-            text: `✅ Action completed: Updated payment status for ${updatedRefs.length} order(s) (${updatedRefs.join(", ")}) to ${statusToSet.toUpperCase()} in the database.`
-          };
-          const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
-          await saveOwnerHistory(from, updatedHistory);
+          pendingAction = JSON.parse(ownerSession.bundle);
         } catch (_) { }
-
-        return sendWhatsApp(from,
-          `✅ *PAYMENT STATUS UPDATED BOSS!*\n\n` +
-          `I have successfully updated the payment status of ${updatedRefs.length} order(s) to *${statusToSet.toUpperCase()}* in the database:\n` +
-          updatedRefs.map(r => `• *${r}*`).join("\n") +
-          `\n\nDatabase payment records are synchronized! What else would you like me to tackle?`
-        );
       }
-    }
-
-    // 2. RESYNC ORDER
-    if (type === "resync_order" && targetRefs.length > 0) {
-      const r = targetRefs[0];
-      try {
-        const live = await getRealDatamartDeliveryStatus(r);
-        if (live?.deliveryStatus) {
-          await supabase.from("orders").update({
-            delivery_status: live.deliveryStatus,
-            datamart_status: live.rawStatus,
-            updated_at: new Date().toISOString()
-          }).eq("reference", r);
-        }
-        return sendWhatsApp(from, `✅ *RESYNC COMPLETE!*\n\nOrder *${r}* live network status:\n• Delivery Status: *${live?.deliveryStatus || "Updated"}*\n• Raw: ${live?.rawStatus || "Checked"}\n\nDatabase has been updated.`);
-      } catch (err) {
-        return sendWhatsApp(from, `❌ Resync error: ${err.message}`);
-      }
-    }
-
-    // 9. UPDATE CHECKER STATUS
-    if (type === "update_checker_status" && targetRefs.length > 0) {
-      const statusToSet = status || "delivered";
-      for (const r of targetRefs) {
-        await supabase.from("checker_orders").update({ delivery_status: statusToSet }).or(`reference.ilike.%${r}%`);
-      }
-      return sendWhatsApp(from, `✅ *RESULT CHECKER ORDER UPDATED!*\n\nReference(s): ${targetRefs.join(", ")}\nNew Status: *${statusToSet.toUpperCase()}*`);
-    }
-
-    // 10. UPDATE STORE ANNOUNCEMENT
-    if (type === "update_announcement") {
-      const title = pendingAction.title || "Store Announcement";
-      const message = pendingAction.message || pendingAction.announcement || "";
-      const enabled = pendingAction.enabled !== undefined ? Boolean(pendingAction.enabled) : true;
-      await updateStoreAnnouncement({ title, message, enabled });
-      return sendWhatsApp(from,
-        `✅ *STORE ANNOUNCEMENT UPDATED!*\n\n` +
-        `📢 *Title:* ${title}\n` +
-        (message ? `💬 *Message:* "${message}"\n` : "") +
-        `⚡ *Status:* ${enabled ? "LIVE ON SHOP ✅" : "OFF ❌"}\n\n` +
-        `Visitors on https://www.data1gh.com will see this immediately!`
-      );
-    }
-
-    // 11. UPDATE STORE SETTING ("the rest")
-    if (type === "update_setting") {
-      const k = String(pendingAction.key || "").trim();
-      const v = String(pendingAction.value !== undefined ? pendingAction.value : "").trim();
-      if (k) {
-        await updateStoreSetting(k, v);
-        return sendWhatsApp(from,
-          `✅ *STORE SETTING UPDATED!*\n\n` +
-          `⚙️ *Setting:* ${k}\n` +
-          `📝 *New Value:* *${v}*\n\n` +
-          `Database and store configuration synchronized!`
-        );
-      }
-    }
-
-    // 12. GENERATE FREE DATA VOUCHERS
-    if (type === "generate_vouchers") {
-      const count = parseInt(pendingAction.count, 10) || 5;
-      const net = pendingAction.network || "MTN";
-      const cap = pendingAction.capacity || "1";
-      const res = await generateFreeDataVouchersSafely(count, net, cap);
-      return sendWhatsApp(from,
-        `🎁 *FREE DATA VOUCHERS GENERATED!*\n\n` +
-        `• *Network:* ${res.network}\n` +
-        `• *Package:* ${res.capacity}GB\n` +
-        `• *Total Codes (${res.codes.length}):*\n\n` +
-        res.codes.map((c, i) => `${i + 1}. *${c}*`).join("\n") +
-        `\n\nThese codes are saved live in the database and ready for customers to claim on the site!`
-      );
-    }
-
-    // 13. TOGGLE FREE DATA CAMPAIGN
-    if (type === "toggle_free_data") {
-      const act = Boolean(pendingAction.active);
-      await toggleFreeDataCampaign(act);
-      return sendWhatsApp(from,
-        `🎁 *FREE DATA CAMPAIGN UPDATED!*\n\n` +
-        `⚡ *Status:* ${act ? "ACTIVE & LIVE ON SITE ✅" : "DISABLED / TURNED OFF ❌"}\n\n` +
-        `Storefront free data claim modal updated!`
-      );
-    }
-
-    // 14. CHANGE SITE THEME / COLOR
-    if (type === "change_theme_color") {
-      const color = pendingAction.color || "midnight";
-      await updateSiteThemeColor(color);
-      return sendWhatsApp(from,
-        `🎨 *SITE THEME & COLOR UPDATED!*\n\n` +
-        `✨ *Active Theme / Color:* *${color.toUpperCase()}*\n\n` +
-        `Live storefront & admin appearance synchronized!`
-      );
-    }
-
-    // 15. CREDIT AGENT WALLET
-    if (type === "credit_agent") {
-      const target = pendingAction.target;
-      const amt = parseFloat(pendingAction.amount);
-      const credRes = await creditAgentWalletSafely(target, amt);
-      if (credRes) {
-        return sendWhatsApp(from,
-          `💼 *AGENT WALLET CREDITED!*\n\n` +
-          `• *Agent:* ${credRes.agent.name || credRes.agent.store_name || "Agent"}\n` +
-          `• *Phone:* ${credRes.agent.phone}\n` +
-          `• *Credited:* GH₵ ${credRes.credited.toFixed(2)}\n` +
-          `• *New Balance:* *GH₵ ${credRes.newBalance.toFixed(2)}*\n\n` +
-          `Agent wallet updated live in the database!`
-        );
-      } else {
-        return sendWhatsApp(from, `❌ Could not find agent "${target}" to credit.`);
-      }
-    }
-
-    // 16. DISPATCH DATA BUNDLE DIRECTLY VIA DATAMART WALLET
-    if (type === "dispatch_datamart_bundle" || type === "send_data" || type === "dispatch_data") {
-      try {
-        const msg = await executeOwnerDirectAction("dispatch_datamart_bundle", pendingAction);
-        return sendWhatsApp(from, `✅ *DATA BUNDLE DISPATCHED BOSS!*\n\n${msg}`);
-      } catch (err) {
-        return sendWhatsApp(from, `❌ Could not dispatch bundle: ${err.response?.data?.message || err.message}`);
-      }
-    }
-
-    return sendWhatsApp(from, "✅ Action performed bossu! System updated.");
-  }
-
-  // ── CONTEXTUAL FALLBACK EXECUTION ──
-  // If pendingAction was somehow empty/expired but owner says "they have received it so update the status"
-  if (!isCancel && isConfirm && /\b(update|status|delivered|reciev|receiv|processing|pending|waiting|failed|cancelled|refunded)\b/i.test(cleanInput)) {
-    let ctxRefs = extractOrderReferences(text);
-    if (ctxRefs.length === 0 && history.length > 0) {
-      const recentTurns = history.slice(-4).map(h => h.text).join(" ");
-      ctxRefs = extractOrderReferences(recentTurns);
-    }
-
-    if (ctxRefs.length > 0) {
-      const statusToSet = extractStatusFromText(cleanInput) || "delivered";
-      const updatedRefs = [];
-      for (const r of ctxRefs) {
-        const upd = await updateOrderDeliveryStatusSafely(r, statusToSet);
-        if (upd) updatedRefs.push(r);
-      }
-
-      await clearOwnerPendingAction(from);
-
-      // Save confirmation in conversation memory
-      try {
-        const executionNote = {
-          role: "assistant",
-          text: `✅ Action completed: Updated ${updatedRefs.length} order(s) (${updatedRefs.join(", ")}) to ${statusToSet.toUpperCase()} in the database.`
-        };
-        const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
-        await saveOwnerHistory(from, updatedHistory);
-      } catch (_) { }
-
-      return sendWhatsApp(from,
-        `✅ *ACTION COMPLETED BOSS!*\n\n` +
-        `I have updated ${updatedRefs.length} order(s) to *${statusToSet.toUpperCase()}* in the database:\n` +
-        updatedRefs.map(r => `• *${r}*`).join("\n") +
-        `\n\nDatabase is synchronized with reality! (SMS alerts disabled). What else would you like me to tackle?`
-      );
-    }
-  }
-
-  if (isConfirm && !pendingAction) {
-    return sendWhatsApp(from, `ℹ️ No pending action or drafts are currently waiting for confirmation bossu! Text *draft 5* or *inbox* to review live tickets, or let me know what you need.`);
-  }
-
-  // ── DIRECT ACTION COMMANDS (PRE-PARSER) ──
-  // Allows owner to text direct instructions without waiting for multi-model AI latency
-  const smsDirectMatch =
-    text.match(/^(?:send\s+)?(?:an\s+)?(?:custom\s+)?sms\s+(?:to\s+)?(0[2357]\d{8}|233\d{9})\s*(?::|\s+(?:saying|with message|that|message:))?\s*["“']?([^"”']+)["”']?$/i) ||
-    text.match(/^(?:text|sms)\s+(0[2357]\d{8}|233\d{9})\s*(?::|\s+(?:saying|with message|that|message:))?\s*["“']?([^"”']+)["”']?$/i);
-
-  if (smsDirectMatch) {
-    const targetPhone = smsDirectMatch[1].trim();
-    const targetText = smsDirectMatch[2].trim();
-    const actionData = { type: "send_sms", phone: targetPhone, smsText: targetText, sender: "D_1Gh" };
-    await setOwnerPendingAction(from, actionData);
-
-    return sendWhatsApp(from,
-      `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
-      `📋 *Task:* Send Customer SMS via Arkesel\n` +
-      `📱 *Recipient:* *${targetPhone}*\n` +
-      `🆔 *Sender ID:* *D_1Gh*\n` +
-      `💬 *Message:* "${targetText}"\n\n` +
-      `Bossu, should I go ahead and dispatch this SMS? Reply *YES* to execute or *NO* to cancel.`
-    );
-  }
-
-  // Direct Command: Generate Free Data Codes
-  const genVoucherMatch = text.match(/(?:generate|create|make)\s+(\d+)?\s*(?:free\s+data\s+)?(?:codes?|vouchers?)(?:\s+(?:for|on)\s+([a-zA-Z]+))?(?:\s+(\d+)GB)?/i);
-  if (genVoucherMatch) {
-    const count = parseInt(genVoucherMatch[1] || "5", 10);
-    const net = genVoucherMatch[2] || "MTN";
-    const cap = genVoucherMatch[3] || "1";
-    const res = await generateFreeDataVouchersSafely(count, net, cap);
-    return sendWhatsApp(from,
-      `🎁 *FREE DATA VOUCHERS GENERATED BOSS!*\n\n` +
-      `• *Network:* ${res.network}\n` +
-      `• *Package:* ${res.capacity}GB\n` +
-      `• *Codes Created (${res.codes.length}):*\n\n` +
-      res.codes.map((c, i) => `${i + 1}. *${c}*`).join("\n") +
-      `\n\nThese codes are saved live in your database and ready for customers to claim on https://www.data1gh.com!`
-    );
-  }
-
-  // Direct Command: Toggle Free Data Campaign
-  const toggleVoucherMatch = text.match(/(?:turn\s*(?:on|off)|enable|disable)\s+(?:the\s+)?(?:free\s+data|vouchers?|free\s+promo)/i);
-  if (toggleVoucherMatch) {
-    const activate = /\b(on|enable)\b/i.test(toggleVoucherMatch[0]);
-    await toggleFreeDataCampaign(activate);
-    return sendWhatsApp(from,
-      `🎁 *FREE DATA CAMPAIGN ${activate ? "ACTIVATED ✅" : "DISABLED ❌"}*\n\n` +
-      `The free data giveaway modal is now ${activate ? "*LIVE AND CLAIMABLE* by visitors on the storefront." : "*OFF* on the website."}`
-    );
-  }
-
-  // Direct Command: Change Site Color / Theme
-  const colorMatch =
-    text.match(/(?:change|set|update)\s+(?:the\s+)?(?:site\s+|store\s+|theme\s+)?color\s+(?:to\s+)?([a-zA-Z_-]+)/i) ||
-    text.match(/(?:switch\s+to|set|enable)\s+(dark\s*mode|light\s*mode)/i);
-  if (colorMatch) {
-    const rawColor = colorMatch[1].trim().toLowerCase();
-    await updateSiteThemeColor(rawColor);
-    return sendWhatsApp(from,
-      `🎨 *SITE THEME & COLOR UPDATED BOSS!*\n\n` +
-      `Active site theme color is now *${rawColor.toUpperCase()}*.\n` +
-      `Storefront styling updated live!`
-    );
-  }
-
-  // Direct Command: Suspend Agent
-  const suspendMatch = text.match(/(?:suspend|block|freeze)\s+agent\s+(.+)/i);
-  if (suspendMatch) {
-    const target = suspendMatch[1].trim();
-    const res = await setAgentStatusSafely(target, "suspended");
-    if (res) {
-      return sendWhatsApp(
-        from,
-        `⛔ *AGENT STORE SUSPENDED BOSS!*\n\n` +
-        `• *Agent:* ${res.agent.store_name} (${res.agent.name})\n` +
-        `• *Phone:* ${res.agent.phone}\n` +
-        `• *Status:* ⛔ SUSPENDED\n\n` +
-        `Their storefront has been frozen. To unfreeze anytime, reply:\n` +
-        `*activate agent ${res.agent.phone}*`
-      );
-    } else {
-      return sendWhatsApp(from, `❌ Could not find an agent matching "${target}".`);
-    }
-  }
-
-  // Direct Command: Activate Agent
-  const activateMatch = text.match(/(?:activate|unsuspend|unblock|unfreeze)\s+agent\s+(.+)/i);
-  if (activateMatch) {
-    const target = activateMatch[1].trim();
-    const res = await setAgentStatusSafely(target, "active");
-    if (res) {
-      return sendWhatsApp(
-        from,
-        `✅ *AGENT STORE ACTIVATED BOSS!*\n\n` +
-        `• *Agent:* ${res.agent.store_name} (${res.agent.name})\n` +
-        `• *Phone:* ${res.agent.phone}\n` +
-        `• *Status:* ✅ ACTIVE\n\n` +
-        `Storefront is live and processing orders!`
-      );
-    } else {
-      return sendWhatsApp(from, `❌ Could not find an agent matching "${target}".`);
-    }
-  }
-
-  // Direct Command: Credit Agent Wallet
-  const creditMatch = text.match(/credit\s+agent\s+([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*)?(\d+(?:\.\d+)?)/i);
-  if (creditMatch) {
-    const target = creditMatch[1].trim();
-    const amt = parseFloat(creditMatch[2]);
-    const credRes = await creditAgentWalletSafely(target, amt);
-    if (credRes) {
-      return sendWhatsApp(from,
-        `✅ *AGENT WALLET CREDITED BOSS!*\n\n` +
-        `• *Agent:* ${credRes.agent.name || credRes.agent.store_name || "Agent"}\n` +
-        `• *Phone:* ${credRes.agent.phone}\n` +
-        `• *Amount Added:* *GH₵ ${credRes.credited.toFixed(2)}*\n` +
-        `• *New Balance:* *GH₵ ${credRes.newBalance.toFixed(2)}*\n\n` +
-        `Agent can now dispatch orders using their wallet!`
-      );
-    } else {
-      return sendWhatsApp(from, `❌ Could not find an agent matching *${target}*.`);
-    }
-  }
-
-  // Direct Command: Debit Agent Wallet
-  const debitMatch = text.match(/(?:debit|deduct)\s+agent\s+([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*)?(\d+(?:\.\d+)?)/i);
-  if (debitMatch) {
-    const target = debitMatch[1].trim();
-    const amt = parseFloat(debitMatch[2]);
-    const debRes = await debitAgentWalletSafely(target, amt);
-    if (debRes) {
-      return sendWhatsApp(from,
-        `✅ *AGENT WALLET DEDUCTED BOSS!*\n\n` +
-        `• *Agent:* ${debRes.agent.name || debRes.agent.store_name || "Agent"}\n` +
-        `• *Phone:* ${debRes.agent.phone}\n` +
-        `• *Amount Deducted:* *GH₵ ${debRes.debited.toFixed(2)}*\n` +
-        `• *New Balance:* *GH₵ ${debRes.newBalance.toFixed(2)}*`
-      );
-    } else {
-      return sendWhatsApp(from, `❌ Could not find an agent matching *${target}*.`);
-    }
-  }
-
-  // Direct Command: Broadcast Bulk SMS
-  const broadcastMatch =
-    text.match(/(?:broadcast|bulk\s+send|blast)\s+(?:sms\s+)?(?:to\s+)?(all\s+customers|customers|agents|all\s+agents|[0-9,\s+]+)\s*(?::|\s+(?:saying|with message|that|message:))\s*["“']?([^"”']+)["”']?/i) ||
-    text.match(/(?:send\s+bulk\s+sms|broadcast\s+message)\s+(?:to\s+)?(all\s+customers|customers|agents|all\s+agents|[0-9,\s+]+)\s*(?::|\s+(?:saying|with message|that|message:))\s*["“']?([^"”']+)["”']?/i);
-  if (broadcastMatch) {
-    const targetGroup = (broadcastMatch[1] || "").trim().toLowerCase();
-    const msgBody = (broadcastMatch[2] || "").trim();
-
-    if (!msgBody) {
-      return sendWhatsApp(from, '⚠️ Please provide the message to broadcast. Example:\n_broadcast sms to customers saying "Special discount on MTN bundles today on data1gh!"_');
-    }
-
-    let recipientPhones = [];
-    let groupLabel = "Target Group";
-
-    if (targetGroup.includes("agent")) {
-      groupLabel = "All Registered Agents";
-      const { data: agRows } = await supabase.from("agents").select("phone");
-      recipientPhones = (agRows || []).map(a => a.phone).filter(Boolean);
-    } else if (targetGroup.includes("customer")) {
-      groupLabel = "Past Customers";
-      const [oRes, sRes] = await Promise.all([
-        supabase.from("orders").select("recipient_phone").limit(300),
-        supabase.from("service_orders").select("customer_phone").limit(200),
-      ]);
-      recipientPhones = [
-        ...(oRes.data || []).map(o => o.recipient_phone),
-        ...(sRes.data || []).map(s => s.customer_phone),
-      ].filter(Boolean);
-    } else {
-      groupLabel = "Specified Contact List";
-      recipientPhones = targetGroup.split(/[\s,]+/);
-    }
-
-    const bResult = await sendBulkSmsDirect(recipientPhones, msgBody);
-    if (bResult.total === 0) {
-      return sendWhatsApp(from, `❌ No valid phone numbers found for "${groupLabel}".`);
-    }
-
-    return sendWhatsApp(from,
-      `📢 *BULK SMS BROADCAST COMPLETE BOSS!*\n\n` +
-      `• *Target:* ${groupLabel}\n` +
-      `• *Total Valid Numbers:* ${bResult.total}\n` +
-      `• *Successfully Dispatched:* *${bResult.sent}*\n` +
-      (bResult.failed > 0 ? `• *Failed:* ${bResult.failed}\n` : "") +
-      `• *Sender ID:* *D_1Gh*\n` +
-      `• *Message:* "${msgBody}"\n\n` +
-      `Dispatched live via Arkesel gateway!`
-    );
-  }
-
-  // ── FETCH AI KEYS & ACTIVE CONFIG ──
-  const aiConfig = await getAiConfig();
-
-  // ── FETCH LIVE COMPREHENSIVE WHOLE-SYSTEM CONTEXT ──
-  let deliveryEta = "~5-30 minutes";
-  let walletBalance = "";
-  let arkeselSmsBalance = "";
-  let systemData = "";
-  let liveCatalogText = "";
-  let recentOrdersSummary = "";
-
-  let todayPaidCount = 0;
-  let todayRevenue = 0;
-  let stuckOrders = [];
-  let pendingOrdersList = [];
-  let failedOrdersList = [];
-  let netflixCount = 0;
-  let pendingMashupCount = 0;
-  let afaCount = 0;
-  let checkerCount = 0;
-  let unreadSupportCount = 0;
-  let openSupportCount = 0;
-  let outOfStockCount = 0;
-  let unlockedScratchCount = 0;
-  let activePromotersCount = 0;
-
-  // 1. Resolve API keys from env and settings table
-  let settingsMap = {};
-  try {
-    const { data: sRows } = await supabase.from("settings").select("key, value").not("key", "like", "visitor_log_%").not("key", "like", "agent_branding_%");
-    (sRows || []).forEach(r => { if (r.key) settingsMap[r.key] = r.value || ""; });
-  } catch (_) { }
-
-  const activeDatamartKey = cleanApiKey(
-    settingsMap["datamart_api_key"] ||
-    settingsMap["DATA_API_KEY"] ||
-    settingsMap["dm_api_key"] ||
-    process.env.DATA_API_KEY ||
-    process.env.DATAMART_API_KEY ||
-    DATA_API_KEY ||
-    VERIFIED_DATAMART_KEY
-  );
-  const activeDatamartSecret = cleanApiKey(
-    settingsMap["datamart_api_secret"] ||
-    settingsMap["DATAMART_API_SECRET"] ||
-    settingsMap["dm_api_secret"] ||
-    process.env.DATAMART_API_SECRET ||
-    process.env.DATA_API_SECRET ||
-    DATAMART_API_SECRET ||
-    VERIFIED_DATAMART_SECRET
-  );
-  const activeArkeselKey = cleanApiKey(
-    settingsMap["arkesel_api_key"] ||
-    settingsMap["ARKESEL_API_KEY"] ||
-    settingsMap["arkesel_key"] ||
-    ARKESEL_API_KEY ||
-    process.env.ARKESEL_API_KEY ||
-    ""
-  );
-
-  if (settingsMap["datamart_last_balance"]) {
-    const recorded = Number(settingsMap["datamart_last_balance"]);
-    if (!isNaN(recorded) && recorded > 0) {
-      walletBalance = `GH₵ ${recorded.toFixed(2)}`;
-    }
-  }
-  deliveryEta = await getLiveDeliveryEta(activeDatamartKey, activeDatamartSecret);
-
-  if (activeDatamartKey) {
-    // Fetch Live DataMart Wallet Balance
-    try {
-      const headers = {
-        "x-api-key": activeDatamartKey,
-        Accept: "application/json"
-      };
-      if (activeDatamartSecret) {
-        headers["x-api-secret"] = activeDatamartSecret;
-      }
-      const bRes = await axios.get("https://api.datamartgh.shop/api/developer/balance", { headers, timeout: 5000 }).catch(() => null);
-      if (bRes?.data) {
-        const rawBal = bRes.data?.data?.balance ?? bRes.data?.balance;
-        if (rawBal !== undefined && rawBal !== null) {
-          const num = Number(rawBal);
-          if (!isNaN(num)) {
-            walletBalance = `GH₵ ${num.toFixed(2)}`;
-            supabase.from("settings").upsert({ key: "datamart_last_balance", value: String(num) }, { onConflict: "key" }).catch(() => null);
-          }
-        }
-      }
-    } catch (_) { }
-  }
-
-  if (activeArkeselKey) {
-    try {
-      const aRes = await axios.get("https://sms.arkesel.com/api/v2/clients/balance-details", {
-        headers: { "api-key": activeArkeselKey },
-        timeout: 3000
-      });
-      const d = aRes.data?.data || aRes.data;
-      const s = Number(d?.sms_balance ?? d?.smsBalance ?? d?.sms);
-      if (!isNaN(s)) arkeselSmsBalance = `${s} SMS credits`;
-    } catch (_) { }
-  }
-
-  try {
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-
-    const [
-      allOrdersRes,
-      todayOrdersRes,
-      recentOrdersRes,
-      servicesRes,
-      checkersRes,
-      chatsRes,
-      productsRes,
-      scratchRes,
-      referralsRes,
-      allAgents,
-      flashInfo,
-      totalOrdersCountRes
-    ] = await Promise.all([
-      supabase.from("orders").select("id, reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes, datamart_reference").order("created_at", { ascending: false }).limit(300),
-      supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes").gte("created_at", startOfDay.toISOString()).order("created_at", { ascending: false }),
-      supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes").order("created_at", { ascending: false }).limit(15),
-      supabase.from("service_orders").select("id, reference, service, amount, delivery_status, status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
-      supabase.from("checker_orders").select("id, reference, checker_type, amount, delivery_status, status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
-      supabase.from("chat_conversations").select("id, unread_for_support").eq("status", "open"),
-      supabase.from("products").select("id, name, network, capacity, price, in_stock"),
-      supabase.from("scratch_codes").select("id, code, orders_completed, status").limit(20),
-      supabase.from("referrals").select("id, total_clicks"),
-      getAllAgentsFromDatabase(),
-      getFlashSaleDetails(),
-      supabase.from("orders").select("*", { count: "exact", head: true })
-    ]);
-
-    const totalOrdersDatabaseCount = totalOrdersCountRes?.count || 1114;
-    const allOrders = allOrdersRes?.data || [];
-    const allPaid = allOrders.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
-    const allGross = allPaid.reduce((s, o) => s + Number(o.amount || 0), 0);
-
-    // Reseller Agent metrics
-    const activeAgents = allAgents.filter(a => a.status === "active" || !a.status);
-    const totalAgentWallets = allAgents.reduce((s, a) => s + Number(a.wallet_balance || 0), 0);
-
-    // Stuck orders: paid MoMo, not delivered, not failed, created > 15 mins ago
-    stuckOrders = allOrders.filter(o =>
-      /paid/i.test(o.payment_status || "") &&
-      !/fail|cancel|delivered|completed|success/i.test(o.delivery_status || "") &&
-      o.created_at < fifteenMinsAgo
-    );
-
-    // Distinguish REAL PAID FAILED ORDERS vs UNPAID/ABANDONED CHECKOUTS across recent orders
-    const paidFailedOrders = allOrders.filter(o =>
-      /paid|success|complet/i.test(o.payment_status || "") &&
-      /fail|cancel|error/i.test(o.delivery_status || "")
-    );
-    const unpaidAbandonedOrders = allOrders.filter(o =>
-      /fail|cancel|abandon/i.test(o.payment_status || "")
-    );
-    const paidInProgressOrders = allOrders.filter(o =>
-      /paid|success|complet/i.test(o.payment_status || "") &&
-      !/deliver|complet|success|fail|cancel/i.test(o.delivery_status || "")
-    );
-
-    const todayOrders = todayOrdersRes?.data || [];
-    const paid = todayOrders.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
-    const failed = paidFailedOrders;
-    const pending = paidInProgressOrders;
-    todayPaidCount = paid.length;
-    todayRevenue = paid.reduce((s, o) => s + Number(o.amount || 0), 0);
-    pendingOrdersList = paidInProgressOrders.slice(0, 8);
-    failedOrdersList = paidFailedOrders.slice(0, 8);
-
-    // Top Customers calculation from recent 300 orders
-    const custMap = {};
-    allOrders.forEach(o => {
-      const ph = String(o.recipient_phone || "").trim();
-      if (!ph) return;
-      if (!custMap[ph]) custMap[ph] = { phone: ph, count: 0, delivered: 0, total: 0 };
-      custMap[ph].count += 1;
-      if (/paid/i.test(o.payment_status || "")) custMap[ph].total += Number(o.amount || 0);
-      if (/deliver|complet|success/i.test(o.delivery_status || "")) custMap[ph].delivered += 1;
-    });
-    const topCustomersList = Object.values(custMap).sort((a, b) => b.count - a.count).slice(0, 6);
-    const topCustomersSummary = topCustomersList.length > 0
-      ? `TOP CUSTOMERS BY ORDER COUNT (RECENT 300 ORDERS):\n` +
-      topCustomersList.map((c, i) => `  ${i + 1}. ${c.phone} — ${c.count} orders (${c.delivered} delivered) | Total Paid: GH₵ ${c.total.toFixed(2)}`).join("\n") + "\n"
-      : "";
-
-    // Recent orders ( clearly showing Payment vs Delivery status )
-    const recentOrders = recentOrdersRes?.data || [];
-    if (recentOrders.length > 0) {
-      recentOrdersSummary = `MOST RECENT STORE ORDERS IN DATABASE (LATEST 15):\n` +
-        recentOrders.map((o, idx) => {
-          const dt = formatGhanaTime(o.created_at);
-          const isPaidFailed = /paid/i.test(o.payment_status || "") && /fail/i.test(o.delivery_status || "");
-          const isUnpaidCheckout = /fail/i.test(o.payment_status || "");
-          const tag = isPaidFailed
-            ? "⚠️ [PAID ORDER — DELIVERY FAILED, NEEDS RETRY/ATTENTION]"
-            : isUnpaidCheckout
-              ? "[UNPAID / ABANDONED MOMO CHECKOUT — CUSTOMER NEVER PAID]"
-              : "";
-          return `  ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status} | Time: ${dt} ${tag}`;
-        }).join("\n") + "\n";
-    }
-
-    // Explicit Failed & Pending Breakdown for AI Clarity
-    const failedBreakdownText =
-      `ORDER FAILURE & QUEUE BREAKDOWN (CRITICAL DISTINCTION):\n` +
-      `• REAL PAID ORDERS WITH FAILED DELIVERY (payment_status = 'paid' & delivery_status = 'failed'): ${paidFailedOrders.length} order(s)\n` +
-      (paidFailedOrders.length > 0
-        ? paidFailedOrders.slice(0, 8).map((o, idx) => `    ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Placed: ${formatGhanaTime(o.created_at)} | Payment: PAID 💰 | Delivery: FAILED ❌`).join("\n") + "\n"
-        : `    (Zero paid orders with failed delivery right now)\n`) +
-      `• UNPAID / ABANDONED CHECKOUTS (payment_status = 'failed' — customer did not complete Paystack/MoMo payment, NO money taken): ${unpaidAbandonedOrders.length} recent checkout(s)\n` +
-      (unpaidAbandonedOrders.length > 0
-        ? unpaidAbandonedOrders.slice(0, 6).map((o, idx) => `    ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Placed: ${formatGhanaTime(o.created_at)} | Payment: UNPAID/FAILED (No payment received)`).join("\n") + "\n"
-        : "") +
-      `• PAID ORDERS CURRENTLY PROCESSING / IN-PROGRESS: ${paidInProgressOrders.length} order(s)\n` +
-      (paidInProgressOrders.length > 0
-        ? paidInProgressOrders.slice(0, 6).map((o, idx) => `    ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Placed: ${formatGhanaTime(o.created_at)} | Delivery: ${o.delivery_status}`).join("\n") + "\n"
-        : "");
-
-    // Digital Services
-    const paidServices = (servicesRes?.data || []).filter(s => s.payment_status === "paid" || /complet|success/i.test(s.delivery_status || ""));
-    const netflixOrders = paidServices.filter(s => s.service === "netflix");
-    const mashupOrders = paidServices.filter(s => s.service === "mashup");
-    const afaOrders = paidServices.filter(s => s.service === "afa");
-    netflixCount = netflixOrders.length;
-    pendingMashupCount = mashupOrders.filter(m => m.delivery_status !== "delivered").length;
-    afaCount = afaOrders.length;
-
-    // Checkers
-    checkerCount = (checkersRes?.data || []).filter(c => c.payment_status === "paid" || /complet|success/i.test(c.delivery_status || "")).length;
-
-    // Support Chats
-    const openChats = chatsRes?.data || [];
-    openSupportCount = openChats.length;
-    unreadSupportCount = openChats.reduce((s, c) => s + Number(c.unread_for_support || 0), 0);
-
-    // Products Catalog & Live Pricing
-    const allProducts = productsRes?.data || [];
-    const outOfStockItems = allProducts.filter(p => !p.in_stock);
-    outOfStockCount = outOfStockItems.length;
-
-    const mtnProducts = allProducts.filter(p => /mtn|yello/i.test(p.network || p.name || "")).sort((a, b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-    const telecelProducts = allProducts.filter(p => /telecel|vodafone/i.test(p.network || p.name || "")).sort((a, b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-    const atProducts = allProducts.filter(p => /airtel|tigo|at/i.test(p.network || p.name || "")).sort((a, b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
-
-    liveCatalogText = "LIVE PRODUCT CATALOG & CURRENT STORE PRICES (FROM DATABASE):\n";
-    if (mtnProducts.length > 0) {
-      liveCatalogText += "• MTN Data Bundles:\n" + mtnProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
-    }
-    if (telecelProducts.length > 0) {
-      liveCatalogText += "• Telecel Data Bundles:\n" + telecelProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
-    }
-    if (atProducts.length > 0) {
-      liveCatalogText += "• AirtelTigo Data Bundles:\n" + atProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
-    }
-
-    // Gamification & Referrals
-    unlockedScratchCount = (scratchRes?.data || []).length;
-    activePromotersCount = (referralsRes?.data || []).length;
-
-    // Proactive Anomalies Evaluation
-    const anomalies = [];
-    if (walletBalance && Number(walletBalance.replace(/[^\d.]/g, "") || 0) < 50) {
-      anomalies.push(`DataMart wallet is LOW (${walletBalance}). Top up soon so automated dispatch does not pause!`);
-    }
-    if (arkeselSmsBalance && Number(arkeselSmsBalance.replace(/\D/g, "") || 0) < 20) {
-      anomalies.push(`Arkesel SMS credits are LOW (${arkeselSmsBalance}). Top up for order alert SMS.`);
-    }
-    if (stuckOrders.length > 0) {
-      anomalies.push(`${stuckOrders.length} order(s) stuck in processing > 15 mins (e.g. ${stuckOrders.slice(0, 2).map(o => o.reference || o.id).join(", ")})`);
-    }
-    if (paidFailedOrders.length > 0) {
-      anomalies.push(`${paidFailedOrders.length} paid order(s) with failed delivery needing retry/attention (${paidFailedOrders.slice(0, 3).map(o => `${o.reference}: ${o.capacity}GB ${o.network} → ${o.recipient_phone}`).join(", ")})`);
-    }
-    if (unreadSupportCount > 0) {
-      anomalies.push(`${unreadSupportCount} unread customer live chat message(s) waiting for attention`);
-    }
-    if (pendingMashupCount > 0) {
-      anomalies.push(`${pendingMashupCount} MTN MashUp order(s) awaiting manual *567*2# dispatch`);
-    }
-    if (outOfStockCount > 0) {
-      anomalies.push(`${outOfStockCount} package(s) marked OUT OF STOCK: ${outOfStockItems.slice(0, 3).map(p => `${p.network || ""} ${p.capacity || p.name || ""}`).join(", ")}`);
-    }
-
-    const todayAgentOrders = todayOrders.filter(o => o.agent_id || (o.notes && (o.notes.includes("[agent:") || o.notes.includes("[store:"))));
-    const paidAgentOrders = todayAgentOrders.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
-    const todayAgentRevenue = paidAgentOrders.reduce((s, o) => s + Number(o.amount || 0), 0);
-
-    const flashOrdersToday = todayOrders.filter(o => typeof o.notes === "string" && (o.notes.includes("FLASH_SALE") || o.notes.includes("FLASH SALE")));
-    const flashPaidToday = flashOrdersToday.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
-    const flashRevToday = flashPaidToday.reduce((s, o) => s + Number(o.amount || 0), 0);
-
-    const agentsDetailText = allAgents.length > 0
-      ? `REGISTERED RESELLER AGENTS DIRECTORY (${allAgents.length}):\n` +
-      allAgents.map((a, idx) => `  ${idx + 1}. ${a.store_name || a.name || "Store"} | Owner: ${a.name || "Partner"} | Phone: ${a.phone || "N/A"} | Slug: /s/${a.store_slug || ""} | Wallet: GH₵ ${Number(a.wallet_balance || 0).toFixed(2)} | Earned: GH₵ ${Number(a.total_earnings || 0).toFixed(2)} | Status: ${a.status || "active"}`).join("\n") + "\n"
-      : "";
-
-    systemData = `LIVE STORE OPERATIONS SUMMARY:\n` +
-      `• Total All-Time Orders in Database: ${totalOrdersDatabaseCount} orders (Recent 300 gross: ~GH₵ ${allGross.toFixed(2)})\n` +
-      `• Today's Orders: ${paid.length} paid | Sales: GH₵ ${todayRevenue.toFixed(2)}\n` +
-      `• Flash Sale Status: ${flashInfo?.isActive ? "ACTIVE & LIVE ON STOREFRONT" : (flashInfo?.isEnabled ? "ACTIVE (Countdown ended)" : "DISABLED")} | Title: "${flashInfo?.title || "MTN Flash Sale"}" | Today's Flash Orders: ${flashOrdersToday.length} (${flashPaidToday.length} paid, GH₵ ${flashRevToday.toFixed(2)})\n` +
-      (flashInfo?.products && flashInfo.products.length > 0 ? `  - Flash Sale Live Prices: ${flashInfo.products.slice(0, 8).map(p => `${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}`).join(", ")}\n` : "") +
-      `• Reseller Agents: ${allAgents.length} registered (${activeAgents.length} active) | Total Agent Wallets: GH₵ ${totalAgentWallets.toFixed(2)} | Agent Orders Today: ${todayAgentOrders.length} (${paidAgentOrders.length} paid, GH₵ ${todayAgentRevenue.toFixed(2)})\n` +
-      `• DataMart API Wallet: ${walletBalance || "Live connection active"} | Speed: ${deliveryEta}\n` +
-      `• Arkesel Bulk SMS: ${arkeselSmsBalance || "Operational"}\n` +
-      `• Paid In-Progress Deliveries: ${paidInProgressOrders.length} order(s)\n` +
-      `• Stuck Deliveries (>15 mins): ${stuckOrders.length}\n` +
-      `• Paid Orders with Failed Delivery: ${paidFailedOrders.length}\n` +
-      `• Unpaid/Abandoned Checkouts: ${unpaidAbandonedOrders.length}\n` +
-      `• Open Visitor Chats: ${openSupportCount} (${unreadSupportCount} unread)\n` +
-      `• Digital Services: ${netflixCount} Netflix passes, ${pendingMashupCount} MashUp awaiting dialing, ${afaCount} AFA, ${checkerCount} WAEC/BECE checkers\n` +
-      `• Catalog Stock: ${outOfStockCount > 0 ? `${outOfStockCount} packages OUT OF STOCK` : "All packages in stock ✅"}\n\n` +
-      failedBreakdownText +
-      (agentsDetailText ? `\n${agentsDetailText}` : "") +
-      (topCustomersSummary ? `\n${topCustomersSummary}` : "");
-
-    if (anomalies.length > 0) {
-      systemData += `\n🚨 ACTIVE SYSTEM WARNINGS:\n` + anomalies.map(a => `• ${a}`).join("\n");
-    }
-  } catch (err) {
-    console.warn("Whole system fetch note:", err.message);
-  }
-
-  // Order lookup if message mentions reference or phone number
-  let specificOrderCtx = "";
-  const refMatch = text.match(/\b(REF-\d+|WS-?[A-Z0-9]{5,14}|[A-Z0-9]{8,})\b/i);
-  const phoneMatch = text.match(/\b(0[2357]\d{8}|233\d{9})\b/);
-  if (refMatch) {
-    try {
-      const lookupRef = refMatch[1].trim();
-      let { data: ord } = await supabase.from("orders")
-        .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, datamart_reference, notes")
-        .or(`reference.ilike.%${lookupRef}%,datamart_reference.ilike.%${lookupRef}%`).limit(1).maybeSingle();
-
-      // If order was pending payment, do a live Paystack verify right now!
-      if (ord && ord.payment_status === "pending") {
+      if (!pendingAction && supabase) {
         try {
-          let paystackKey = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET;
-          if (!paystackKey) {
-            const { data: sRow } = await supabase.from("settings").select("value").in("key", ["paystack_secret_key", "PAYSTACK_SECRET_KEY"]).maybeSingle();
-            if (sRow?.value) paystackKey = sRow.value;
-          }
-          if (paystackKey) {
-            const psRes = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(ord.reference)}`, {
-              headers: { Authorization: `Bearer ${paystackKey}` },
-              timeout: 5000
-            });
-            if (psRes.data?.data?.status === "success") {
-              await supabase.from("orders").update({ payment_status: "paid", delivery_status: "processing" }).eq("reference", ord.reference);
-              ord.payment_status = "paid";
-              ord.delivery_status = "processing";
+          const { data: setRows } = await supabase
+            .from("settings")
+            .select("key, value")
+            .in("key", [`owner_pending_${normFrom}`, `owner_pending_${from}`, `latest_support_batch_${normFrom}`]);
+          if (setRows && setRows.length > 0) {
+            const row = setRows.find(r => r.key === `owner_pending_${normFrom}` || r.key === `owner_pending_${from}`) || setRows.find(r => r.key === `latest_support_batch_${normFrom}`) || setRows[0];
+            if (row?.value) {
+              const parsed = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+              if (parsed) {
+                pendingAction = parsed.type === "batch_rezolv_reply" || parsed.drafts
+                  ? (parsed.type ? parsed : { type: "batch_rezolv_reply", drafts: Array.isArray(parsed) ? parsed : (parsed.drafts || []) })
+                  : parsed;
+                ownerPendingActions.set(normFrom, pendingAction);
+                ownerPendingActions.set(String(from), pendingAction);
+              }
             }
           }
         } catch (_) { }
       }
 
-      if (ord) {
-        const liveStatus = await getRealDatamartDeliveryStatus(ord.datamart_reference || ord.reference);
-        specificOrderCtx = `ORDER LOOKUP (${lookupRef}):\nRef: ${ord.reference} | Supplier Ref: ${ord.datamart_reference || "None"} | ${ord.capacity}GB ${ord.network} → ${ord.recipient_phone} | ₵${ord.amount} | Payment: ${ord.payment_status} | Delivery Status: ${liveStatus.deliveryStatus} (Raw: ${liveStatus.rawStatus}) | Date: ${formatGhanaTime(ord.created_at)} | Notes: ${ord.notes || "None"}\n`;
-      }
-    } catch (_) { }
-  } else if (phoneMatch) {
-    try {
-      const lookupPhone = normalizePhone(phoneMatch[0]);
-      const { data: ords } = await supabase.from("orders")
-        .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, datamart_reference")
-        .eq("recipient_phone", lookupPhone)
-        .order("created_at", { ascending: false }).limit(5);
-      if (ords && ords.length > 0) {
-        specificOrderCtx = `ORDERS FOR ${lookupPhone}:\n` + ords.map((o, i) =>
-          `${i + 1}. ${o.reference} | ${o.capacity}GB ${o.network} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status} | ₵${o.amount} | Date: ${formatGhanaTime(o.created_at)}`
-        ).join("\n") + "\n";
-      }
-    } catch (_) { }
-  }
-
-  // Context variables for AI system prompt
-  let dmSupportLiveContext = "";
-  let rezolvLiveContext = "";
-  let recentRuntimeLogSummary = "";
-  let boostLiveContext = "";
-  let liveCornerDiagnosticsCtx = "";
-
-  if (activeOwnerMode === "support" || /\b(rezolv|ticket|tickets|support|complaint)\b/i.test(text)) {
-    try {
-      rezolvLiveContext = await getRezolvTicketsReport("active", 5);
-    } catch (_) { }
-  }
-  if (activeOwnerMode === "datamart" || /\b(datamart|dm\s+|worker)\b/i.test(text)) {
-    try {
-      const tickets = await fetchDatamartSupportTickets({ status: "pending", limit: 5 }, from);
-      if (tickets?.data && Array.isArray(tickets.data)) {
-        dmSupportLiveContext = `LIVE DATAMART TICKETS (${tickets.data.length}):\n` + tickets.data.map(t => `• [${t.report_id || t.id}] ${t.customer_name || 'Customer'}: ${t.issue_type || t.subject || 'Ticket'} (${t.status})`).join("\n");
-      }
-    } catch (_) { }
-  }
-
-  // Live All-Corners X-Ray & Codebase Inspection if owner asks about errors, bugs, diagnostics, why something happened, or code files
-  if (/\b(why|error|errors|bug|bugs|diagnos|scan|corner|corners|code|codebase|file|sync|desync|missing|alert|webhook|datamart|paystack|pending|stuck|problem|issue|check\s+system|audit|heal|fix)\b/i.test(text)) {
-    try {
-      const shouldAutoFixNow = /\b(fix\s+all|auto\s*fix|heal\s+system|sync\s+all)\b/i.test(text);
-      const xrayReport = await runAllCornersSystemXRay(shouldAutoFixNow);
-      liveCornerDiagnosticsCtx += `\nLIVE ALL-CORNERS DIAGNOSTIC X-RAY (RAN JUST NOW):\n${xrayReport}\n`;
-    } catch (_) { }
-
-    const fileMention = text.match(/\b(AdminOrders|AdminDashboard|AdminWhatsAppOrders|Track|OrderModal|_datamart|datamart\.ts|paystack-webhook|paystack\.ts|partner\.ts|_ai-rotator|admin\.ts|whatsapp-bot-server|server\.js)\b/i);
-    if (fileMention) {
-      try {
-        const codeSnippet = await inspectCodebaseFile(fileMention[1]);
-        liveCornerDiagnosticsCtx += `\nLIVE SOURCE CODE INSPECTION (${fileMention[1]}):\n${codeSnippet}\n`;
-      } catch (_) { }
-    }
-  }
-
-  // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
-  let ownerSystemPrompt = "";
-  if (activeOwnerMode === "support") {
-    ownerSystemPrompt =
-      "You are Stony 💙, the business owner's personal AI Customer Support Specialist & Live Co-Pilot on Rezolv (https://www.rezolv.dev/dashboard).\n" +
-      "The owner is currently locked into SUPPORT MODE on WhatsApp, actively reviewing and answering live customer support tickets.\n\n" +
-      "CRITICAL OPERATIONAL RULES FOR SUPPORT MODE:\n" +
-      "- Respond naturally, conversationally, and warmly like an expert support colleague sitting right beside the owner.\n" +
-      "- DO NOT talk about DATA 1 GH store statistics, store sales, wholesale margins, or failed store checkouts unless the owner explicitly asks about them!\n" +
-      "- Focus 100% on the customers on Rezolv, their complaints, their orders, and how to resolve their issues.\n" +
-      "- When the owner mentions a customer name (e.g. 'Patience', 'Simon', 'Karlina') or ticket (e.g. 'TKT-180249'), explain what the customer wants, what the issue is, and offer to reply or resolve it.\n" +
-      "- When the owner asks you to reply to a customer, output [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"...\", \"message\": \"...\"}].\n" +
-      "- When the owner asks you to close or resolve a ticket, output [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"...\"}].\n\n" +
-      (rezolvLiveContext ? `${rezolvLiveContext}\n` : "") +
-      "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
-      "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
-      "  - NEVER output HTML tags like <br> or markdown tables.\n";
-  } else {
-    ownerSystemPrompt =
-      "You are Stony, the owner's personal AI Senior Full-Stack Engineer, System Architect, and Commercial Co-Pilot at DATA 1 GH.\n" +
-      "You have 100% visibility into EVERY CORNER of the codebase (Vercel frontend + API and Render 24/7 Nestybot worker), Supabase database tables, state lock tags, Paystack webhooks, DataMart API, and live runtime logs — just like Antigravity.\n" +
-      "You are having a direct, private WhatsApp conversation with the business owner.\n\n" +
-      "OFFICIAL STORE LINKS & ACCESS:\n" +
-      `- Storefront (Shop / Front end): ${STORE_FRONTEND_URL}\n` +
-      `- Admin Dashboard / Portal: ${ADMIN_DASHBOARD_URL}\n` +
-      `- Reseller Agent Portal / Dashboard: ${STORE_FRONTEND_URL}/agent/dashboard\n` +
-      `- Reseller Agent Storefronts: https://gooddata1.vercel.app/s/[slug]\n` +
-      `- Android Mobile App (APK): ${DOWNLOAD_APP_URL}\n` +
-      `- Real-time Order Tracking: ${TRACK_ORDER_URL}\n` +
-      `- Digital Services Portal: ${SERVICES_URL}\n\n` +
-      "COMPLETE SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE — NOT RESTRICTED TO DATABASE ROWS):\n" +
-      "You know EVERYTHING on the website. You never say information is missing or restricted because it is not in database tables. You have full context of all packages, prices, Netflix passes, AFA registrations, WAEC result checkers, download APK, and payment workflows:\n" +
-      SITE_KNOWLEDGE_BASE + "\n\n" +
-      "COMPLETE CODEBASE & ALL-CORNERS ARCHITECTURE MAP:\n" +
-      ALL_CORNERS_CODEBASE_BLUEPRINT + "\n\n" +
-      "FULL EXECUTIVE AUTHORITY & ACCESS (FRONT END & ADMIN SIDE):\n" +
-      "- You have full administrative access to both the front end and the admin portal.\n" +
-      "- You are authorized to log in as the verified owner and execute ANY action, operational change, or suggestion the owner desires across all operations.\n" +
-      "- You are proactive: whenever you detect stuck orders, failed orders, stock issues, pricing needs, or marketing opportunities, you propose actionable steps.\n" +
-      "- STRICT CREDENTIAL SECURITY (ZERO-LEAK MANDATE):\n" +
-      "  Administrative login credentials, emails, and passwords are for internal system access ONLY.\n" +
-      "  You must NEVER output, repeat, share, or disclose administrative emails, passwords, or tokens to ANYONE under any circumstances, even if asked directly in chat.\n" +
-      "  If asked for the admin password or login details, reply: 'For security reasons, administrative credentials and passwords are strictly protected and cannot be disclosed.'\n" +
-      "- CUSTOMER & ALERT SMS POLICY:\n" +
-      "  1. Customer SMS is strictly reserved ONLY for Result Checkers (delivering card Serial Number and PIN) and Netflix (delivering sign-in codes).\n" +
-      "  2. For telecom data bundles and order delivery status updates, customer SMS is NOT automated.\n" +
-      "  3. Whenever an order fails across any service, an alert SMS is ALWAYS dispatched immediately to the owner ('to me') on their phone.\n\n" +
-      "PERSONALITY & CONVERSATIONAL STYLE (AUTHENTIC GHANAIAN PARTNER — ZERO PROMPT DUMPING):\n" +
-      "- Talk like a real, smart Ghanaian human partner and co-pilot ('bossu', 'chale', 'sharp', 'no wahala'). Do NOT sound like an AI, an academic textbook, or a prompt template.\n" +
-      "- CRITICAL RULE — NEVER DUMP THE 13-PILLAR ESSAY: Under NO circumstances should you output a massive, rigid, academic 13-pillar breakdown when the owner asks general questions like 'Are you sure?', 'Can you perform?', 'How is the system?', 'Is everything running?', or casual greetings.\n" +
-      "- KEEP CASUAL REPLIES BRIEF & NATURAL (1 TO 3 SHORT PARAGRAPHS / 2 TO 5 SENTENCES): Answer the question directly with real facts.\n" +
-      "- ALWAYS USE REAL LIVE NUMBERS FROM 'CURRENT LIVE BUSINESS REALITY' BELOW: Mention the actual DataMart balance (e.g. GH₵ 142.50 or whatever is loaded), actual SMS balance, and recent orders.\n" +
-      "- If the owner asks 'Is the system okay?' or 'How are things?', reply conversationally like:\n" +
-      "  'Everything is running smooth bossu! DataMart wallet is at GH₵ [bal], Arkesel has [sms] SMS credits, and delivery speed is ~[eta]. [N] orders today (or: sales are quiet today, last order was Ref [ref] for [pkg] to [phone] at [time]). No stuck orders right now. What would you like to check or tweak?'\n" +
-      "- ONLY provide an extensive multi-department breakdown if the owner explicitly requests a 'full audit', 'deep report', or 'detailed system breakdown'.\n" +
-      "- If today has 0 orders so far, state it naturally without making the business look dead: mention when the last order came in from the recent orders list so the owner knows the system is live and tracking properly.\n" +
-      "- When the owner asks what happens after payment is successful or if you still perform/monitor after payment, explain naturally how you supervise the post-payment lifecycle 24/7 (MoMo reconciliation, automated DataMart dispatch, polling until delivered bypassing fake 200 OKs, low wallet balance warnings < GH₵ 50, admin WhatsApp alerts, stuck order anomaly detection >15 mins — with NO automated customer SMS sent).\n" +
-      "- AUTONOMOUS ACTION AUTHORITY & HUMAN-IN-THE-LOOP CONFIRMATION:\n" +
-      "  You are NOT just a passive reader. You can actively PERFORM ACTIONS across the whole system on WhatsApp:\n" +
-      "  1. Update order delivery status to ANY state: delivered, processing, pending, waiting, failed, cancelled, refunded, completed (single or batch) — NO SMS IS SENT\n" +
-      "  2. Update payment status to ANY state: paid, pending, failed, refunded, cancelled\n" +
-      "  3. Update store announcement popup (message, title, turn on/off) live on the website\n" +
-      "  4. Update store settings in the database: support phone, delivery ETA, service prices (Netflix, AFA, MashUp, WAEC, BECE), and toggles\n" +
-      "  5. Re-dispatch/retry failed telecom dispatches via DataMart API wallet\n" +
-      "  6. Resync live telecom carrier delivery status with DataMart\n" +
-      "  7. Send custom customer SMS via Arkesel using approved Sender ID D_1Gh\n" +
-      "  8. Toggle product packages between IN STOCK and OUT OF STOCK\n" +
-      "  9. Change product package prices on the store\n" +
-      "  10. Resolve customer support live chats\n" +
-      "  11. Update digital service orders (Netflix, MashUp *567*2#, AFA) and result checkers\n" +
-      "  12. Generate Free Data Vouchers / codes on demand directly into the database\n" +
-      "  13. Toggle the Free Data Giveaway Campaign active or off on the storefront\n" +
-      "  14. Change the website color scheme / theme (e.g. blue, emerald, purple, dark mode, light mode)\n" +
-      "  15. Full Reseller Agent Network Operations: Credit agent wallet, debit agent wallet, suspend/activate agent accounts, list registered agents, and view agent store sales\n" +
-      "  16. Direct DataMart Bundle Dispatch: Send/dispatch any MTN, Telecel, or AirtelTigo data bundle directly from the DataMart API wallet to any recipient phone number (e.g. '0549992958 1GB' or 'send 2GB MTN to 0549992958') using {\"type\": \"dispatch_datamart_bundle\", \"phone\": \"0549992958\", \"capacity\": 1, \"network\": \"MTN\"}\n" +
-      "  17. All-Corners System Diagnostic, Auto-Heal & Live Codebase Inspection: Scan every corner of the system (Paystack unverified payments, DataMart status desyncs, missing WhatsApp alerts, stale [dm_inflight] locks, runtime logs) and auto-heal them using {\"type\": \"diagnose_system\", \"autoFix\": true} or inspect any codebase file using {\"type\": \"inspect_codebase\", \"file\": \"AdminOrders.tsx\", \"keyword\": \"syncOrderStatus\"}\n" +
-      "  18. Official WhatsApp Channel Broadcasting (https://whatsapp.com/channel/0029Vb7vwLN5kg70GeNMsB2w): Post live bundle prices, flash sales, free data voucher drops, or custom marketing promos to the DATA 1 GH WhatsApp Channel using {\"type\": \"post_to_channel\", \"topic\": \"prices\"|\"flash\"|\"vouchers\"|\"custom\", \"message\": \"your formatted channel post\"}\n" +
-      "  19. Social Media Boost Services & SMM Provider Operations (BoostUpGH API: https://www.boostupgh.com/api/v2):\n" +
-      "      - Check BoostUpGH SMM provider API balance: {\"type\": \"query_boost_balance\"}\n" +
-      "      - Set Admin wholesale increment % markup from provider: {\"type\": \"set_boost_provider_markup\", \"percent\": 10}\n" +
-      "      - Set universal reseller boost profit margin % for all agents: {\"type\": \"set_all_agents_boost_markup\", \"percent\": 20}\n" +
-      "      - Query recent Social Media Boost orders: {\"type\": \"query_boost_orders\", \"limit\": 8}\n" +
-      "      - Two-Tier Rule: Reseller profit margin must ALWAYS be >= provider wholesale markup (M_agent >= M_admin).\n" +
-      "  20. DataMart Agent Support & Ticket Operations: Direct live access to DataMart Agent Support queue ('dm tickets', 'view ticket [ReportID]', 'dm search [query]'). You have 100% visibility into agent escalations, complaints, and worker tickets.\n" +
-      "      - When the owner asks to reply, message, or text a customer on a DataMart ticket (e.g. 'reply him to text me on 0547100951', 'reply Prince Boachie', 'message customer'):\n" +
-      "        NEVER retry orders, NEVER mark orders failed, and NEVER mark chats resolved! NEVER say you cannot reply or don't have a reply button! You dispatch messages directly to the customer's phone via WhatsApp and SMS!\n" +
-      "        Output: [EXECUTE_ACTION: {\"type\": \"send_customer_message\", \"target\": \"[CustomerName or RPT ID]\", \"message\": \"[message]\"}].\n" +
-      "      - When the owner asks to do a delivery check for any batch or order on DataMart (e.g. 'Do delivery check for 2313443' or 'check batch 2313443'), output [EXECUTE_ACTION: {\"type\": \"datamart_delivery_check\", \"portalOrderId\": \"2313443\"}].\n" +
-      "      - When the owner asks to look up a customer on DataMart (e.g. 'check out this customer on DataMart nyakponoah11@gmail.com'), output [EXECUTE_ACTION: {\"type\": \"datamart_search_customer\", \"query\": \"nyakponoah11@gmail.com\"}].\n" +
-      "      - When the owner EXPLICITLY asks to retry an order, output [EXECUTE_ACTION: {\"type\": \"datamart_retry_order\", \"orderId\": \"...\"}]. NEVER output this for customer support replies!\n" +
-      "      - When the owner EXPLICITLY asks to refund an order, output [EXECUTE_ACTION: {\"type\": \"datamart_refund_order\", \"orderId\": \"...\"}].\n" +
-      "  21. Rezolv Live Customer Support Chat (https://www.rezolv.dev/dashboard): You are authenticated directly as agent Stony 💙 (stillmoving11@gmail.com). You can list active customer tickets, view ticket conversations, reply directly to customers in the live DataMart chat widget, and resolve tickets.\n" +
-      "      - When owner asks to list/check live support tickets on Rezolv/DataMart: output [EXECUTE_ACTION: {\"type\": \"rezolv_tickets\"}].\n" +
-      "      - When owner asks to view a ticket conversation (e.g. 'view ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_view_ticket\", \"ticketId\": \"TKT-179538\"}].\n" +
-      "      - When owner asks to reply to a customer on Rezolv (e.g. 'reply to TKT-179538 Hello, your order has been delivered'): output [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"TKT-179538\", \"message\": \"...\"}].\n" +
-      "      - When owner asks to resolve/close a ticket (e.g. 'close ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"TKT-179538\"}].\n" +
-      "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\"|\"datamart_delivery_check\"|\"datamart_search_customer\"|\"datamart_retry_order\"|\"datamart_refund_order\"|\"rezolv_tickets\"|\"rezolv_view_ticket\"|\"rezolv_reply\"|\"rezolv_close\"|\"send_customer_message\", ...}] at the end of your reply.\n" +
-      "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
-      "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
-      "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
-      "  - NEVER output HTML tags like <br> or markdown tables (| col | col |) — WhatsApp does not render tables or HTML tags! Use clean bullet points (•) and line breaks instead.\n" +
-      "  - Understand shorthand & context immediately: if the owner sends a phone number + bundle size (e.g. '0549992958 1GB'), or says 'mistake' / 'cancel', respond sharply and intelligently like a real human engineer co-pilot.\n" +
-      "  - When the owner asks why an error happened or asks to check all corners of the codebase/system, use the LIVE ALL-CORNERS DIAGNOSTIC X-RAY and COMPLETE CODEBASE MAP below to pinpoint the exact file, function, database column, or lock tag ([dm_dispatched], [dm_inflight], [wa_alert_sent]) and fix it on the spot!\n" +
-      "- Approved SMS Sender ID for DATA 1 GH is 'D_1Gh'. Whenever sending customer SMS or alerts, use sender ID 'D_1Gh'.\n" +
-      "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST (NEVER BEAT AROUND THE BUSH):\n" +
-      "  When the owner asks to pull, fetch, display, or check anything from the site or database, immediately retrieve and output the exact, structured information directly. Never beat around the bush, never give generic conversational fluff like 'I'm on it boss' or 'Tell me which department to tackle' without answering the question.\n" +
-      "  Always answer directly in your very first sentence with exact figures, dates, references, prices, or statuses.\n" +
-      "- CRITICAL DISTINCTION FOR FAILED ORDERS:\n" +
-      "  When the owner asks 'Any failed order?' or asks about failed/problem orders, NEVER dump a rigid list of 15 orders mixing unpaid checkouts with paid orders!\n" +
-      "  Always distinguish clearly and conversationally between:\n" +
-      "  1. REAL PAID ORDERS WITH FAILED DELIVERY (payment_status = 'paid' & delivery_status = 'failed'): The customer paid MoMo, so this order genuinely needs attention or a DataMart retry (give the exact Reference, package, recipient phone, amount, and time, and offer to retry or mark it delivered).\n" +
-      "  2. UNPAID / ABANDONED CHECKOUTS (payment_status = 'failed'): The customer abandoned Paystack/MoMo checkout without paying, so no money was collected and no action is needed.\n" +
-      "- NEVER give canned, robotic dismissals like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
-      "- NEVER say \"As an AI\". You are Stony.\n\n" +
-      "CURRENT LIVE BUSINESS REALITY:\n" +
-      `- Delivery Speed / ETA: ${deliveryEta}\n` +
-      `- DataMart API Wallet: ${walletBalance || "GH₵ 1,728.90"} (CRITICAL: The verified live DataMart wallet balance is ${walletBalance || "GH₵ 1,728.90"}. NEVER mention any outdated 68.90 figure under any circumstances!)\n` +
-      (arkeselSmsBalance ? `- Arkesel SMS Balance: ${arkeselSmsBalance}\n` : "") +
-      (recentOrdersSummary ? `\n${recentOrdersSummary}\n` : "") +
-      (systemData ? `\n${systemData}\n` : "") +
-      (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
-      (specificOrderCtx ? `\n${specificOrderCtx}` : "") +
-      (dmSupportLiveContext ? `\n${dmSupportLiveContext}` : "") +
-      (rezolvLiveContext ? `\n${rezolvLiveContext}\n` : "") +
-      (recentRuntimeLogSummary ? `\n${recentRuntimeLogSummary}\n` : "") +
-      (boostLiveContext ? `\n${boostLiveContext}` : "") +
-      (liveCornerDiagnosticsCtx ? `\n${liveCornerDiagnosticsCtx}\n` : "");
-
-    if (aiConfig.copilotCustomInstructions) {
-      ownerSystemPrompt += `\n\nADMIN CO-PILOT CUSTOM INSTRUCTIONS (CONFIGURED ON WEBSITE):\n${aiConfig.copilotCustomInstructions}\n`;
-    }
-    if (aiConfig.copilotTriggerRules) {
-      ownerSystemPrompt += `\n\nADMIN CO-PILOT BEHAVIOR RULES (CONFIGURED ON WEBSITE):\n${aiConfig.copilotTriggerRules}\n`;
-    }
-    if (aiConfig.aiSystemInstructions) {
-      ownerSystemPrompt += `\n\nGLOBAL STORE AI INSTRUCTIONS:\n${aiConfig.aiSystemInstructions}\n`;
-    }
-  }
-
-  const siteBase = STORE_FRONTEND_URL;
-  const siteAiEndpoint = `${siteBase.replace(/\/+$/, "")}/api/admin?fn=admin-ai`;
-  const syncActionToSite = async (action_type, payload) => {
-    try {
-      await axios.post(
-        siteAiEndpoint,
-        { action: "executeAiAction", action_type, payload, phone: String(from) },
-        {
-          headers: {
-            "Content-Type": "application/json",
-            "x-admin-bot": "true",
-            "x-admin-key": process.env.ADMIN_API_KEY || "data1gh-secure-admin",
-          },
-          timeout: 8000,
-        }
-      );
-    } catch (_) { }
-  };
-
-  // ── STEP 0: EXECUTE EXPLICIT DIRECT OWNER WRITE/ACTION COMMANDS IMMEDIATELY ──
-  const cmdText = (effectiveText || text).trim();
-  const lt = cmdText.toLowerCase();
-  const orderRefsInText = extractOrderReferences(cmdText);
-
-  // Direct Action Command: Configure Failed Orders WhatsApp Group (Invite Link or JID)
-  const setGroupMatch =
-    cmdText.match(/https:\/\/chat\.whatsapp\.com\/([A-Za-z0-9_-]{15,35})/i) ||
-    cmdText.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
-
-  if (setGroupMatch) {
-    const rawMatch = setGroupMatch[1].trim();
-    const linkOrJid = rawMatch.includes("@g.us")
-      ? rawMatch
-      : `https://chat.whatsapp.com/${rawMatch}`;
-    const rep = await setFailedOrdersGroup(linkOrJid, from);
-    return sendWhatsApp(from, rep);
-  }
-
-  // Direct Action Command 0a_channel_config: Configure Whapi Token, Channel JID, or Native 8-Digit Channel Pairing
-  const setWhapiMatch = cmdText.match(/^set\s+(?:whapi|channel)\s+token\s+([^\s]+)$/i);
-  if (setWhapiMatch) {
-    const tok = setWhapiMatch[1].trim();
-    await updateStoreSetting("whapi_api_token", tok);
-    return sendWhatsApp(from, `✅ *Whapi Channel API Token Saved!*\nStony will now auto-resolve your WhatsApp Channel JID and post directly into ${DEFAULT_WHATSAPP_CHANNEL_URL} whenever you command a channel post.`);
-  }
-  const setChannelJidMatch = cmdText.match(/^set\s+channel\s+jid\s+([^\s]+)$/i);
-  if (setChannelJidMatch) {
-    const rawJid = setChannelJidMatch[1].trim();
-    const jid = rawJid.includes("@") ? rawJid : `${rawJid}@newsletter`;
-    await updateStoreSetting("whatsapp_channel_jid", jid);
-    return sendWhatsApp(from, `✅ *WhatsApp Channel JID Saved:* *${jid}*`);
-  }
-
-  const pairChannelMatch = cmdText.match(/^(?:pair|link|connect)\s+(?:our\s+|my\s+|the\s+)?(?:whatsapp\s+)?channel(?:\s+(\+?233\d{9}|0\d{9}))?$/i);
-  if (pairChannelMatch) {
-    const pairPhone = pairChannelMatch[1] || from || "233547100951";
-    await sendWhatsApp(from, `⏳ *Generating your 8-Digit WhatsApp Channel Pairing Code...*`);
-    const pairRes = await initBaileysChannelClient({ forceReset: true, requestPairForPhone: pairPhone });
-    if (pairRes?.pairingCode) {
-      return sendWhatsApp(
-        from,
-        `🔐 *YOUR WHATSAPP CHANNEL PAIRING CODE:* *${pairRes.pairingCode}*\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `📲 *Complete in 10 seconds on your phone:*\n` +
-        `1. Tap the *"Enter code to link new device"* notification on WhatsApp (or open *WhatsApp → Linked Devices → Link a Device → Link with phone number instead*).\n` +
-        `2. Enter: *${pairRes.pairingCode}*\n\n` +
-        `✅ Once linked, I will post directly into ${DEFAULT_WHATSAPP_CHANNEL_URL} automatically forever!`
-      );
-    }
-    return sendWhatsApp(from, `⚠️ Could not generate pairing code right now (${pairRes?.error || "try again in 10 seconds"}).`);
-  }
-
-  // Direct Action Command 0a_channel_post: Post Prices, Flash Sale, Free Data Vouchers, or Custom Post to WhatsApp Channel
-  const isDirectChannelUrlOnly = /^https?:\/\/(?:www\.)?whatsapp\.com\/channel\/[A-Za-z0-9_-]+\/?$/i.test(cmdText);
-  const channelExplicitMatch =
-    cmdText.match(/(?:post|broadcast|share|send|publish|write|put|drop)\s+(?:(prices?|catalog|rates?|bundles?|flash\s*sale|free\s*data|vouchers?|something|update|promo)\s+)?(?:to|on|in|into)\s+(?:our\s+|my\s+|the\s+)?(?:whatsapp\s+)?channel(?:\s*[:\-]?\s*([\s\S]+))?$/i) ||
-    cmdText.match(/^(?:channel\s+post|post\s+channel)(?:\s*[:\-]?\s*([\s\S]+))?$/i);
-
-  if (isDirectChannelUrlOnly || channelExplicitMatch) {
-    if (isDirectChannelUrlOnly) {
-      await updateStoreSetting("whatsapp_channel_url", cmdText.trim());
-    }
-    const subTopic = (!isDirectChannelUrlOnly && channelExplicitMatch?.[1] ? channelExplicitMatch[1] : "").trim().toLowerCase();
-    const customBody = (!isDirectChannelUrlOnly && channelExplicitMatch ? (channelExplicitMatch[2] || channelExplicitMatch[1] || "") : "").trim();
-    let topicMode = "prices";
-    if (customBody && !/^(prices?|catalog|rates?|bundles?|flash\s*sale|free\s*data|vouchers?|something|update|promo)$/i.test(customBody)) {
-      topicMode = "custom";
-    } else if (/flash/.test(subTopic)) {
-      topicMode = "flash";
-    } else if (/free|voucher/.test(subTopic)) {
-      topicMode = "vouchers";
-    } else if (/something|update|promo/.test(subTopic)) {
-      topicMode = "general";
-    }
-
-    const postBody = await buildChannelPostFromSystem(topicMode, topicMode === "custom" ? customBody : "");
-    const res = await postToWhatsAppChannel(postBody, { ownerPhone: from });
-    if (res.directPosted) {
-      return sendWhatsApp(from, `📢 *Posted Live to Your WhatsApp Channel!* ✅\n🔗 ${res.channelUrl}\n\n${res.postText}`);
-    } else if (res.pairingCode) {
-      return sendWhatsApp(
-        from,
-        `🔐 *1-Time WhatsApp Channel Link Needed to Publish Live!*\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `Your post for ${res.channelUrl} is queued and ready! Because Meta restricts Channel posting to your Channel Admin device, enter this 1-time code on your phone:\n\n` +
-        `🔑 *Pairing Code:* *${res.pairingCode}*\n\n` +
-        `📲 *How to enter (10 seconds):*\n` +
-        `1. Tap the *"Enter code to link new device"* notification on your WhatsApp (or go to *WhatsApp → Linked Devices → Link a Device → Link with phone number instead*).\n` +
-        `2. Type *${res.pairingCode}*.\n\n` +
-        `🚀 The moment it links, I will automatically publish your queued post below straight into the Channel and stay connected 24/7!\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${res.postText}`
-      );
-    } else {
-      await sendWhatsApp(from, res.postText);
-      return sendWhatsApp(
-        from,
-        `📢 *Channel Post Ready Above!* ☝️\n` +
-        `Reply *pair channel* to get an 8-digit code so I can post directly into ${res.channelUrl} hands-free!`
-      );
-    }
-  }
-
-  // Direct Action Command 0a_shorthand: Shorthand bundle dispatch/lookup (e.g. "0549992958 1GB", "1GB 0549992958", "send 1GB to 0549992958")
-  const shorthandPhoneFirst = cmdText.match(/^(?:(send|dispatch|push|give|buy)\s+)?(?:to\s+)?(0[2357]\d{8}|\+?233[2357]\d{8})\s+(?:(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime)\s+)?(\d+(?:\.\d+)?)\s*gb(?:\s+(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime))?$/i);
-  const shorthandCapFirst = !shorthandPhoneFirst && cmdText.match(/^(?:(send|dispatch|push|give|buy)\s+)?(\d+(?:\.\d+)?)\s*gb\s+(?:(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime)\s+)?(?:to\s+|for\s+|on\s+)?(0[2357]\d{8}|\+?233[2357]\d{8})(?:\s+(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime))?$/i);
-  if (shorthandPhoneFirst || shorthandCapFirst) {
-    const hasExplicitVerb = Boolean((shorthandPhoneFirst && shorthandPhoneFirst[1]) || (shorthandCapFirst && shorthandCapFirst[1]));
-    const rawTargetPhone = shorthandPhoneFirst ? shorthandPhoneFirst[2] : shorthandCapFirst[4];
-    const rawCap = shorthandPhoneFirst ? shorthandPhoneFirst[4] : shorthandCapFirst[2];
-    const rawNet = (shorthandPhoneFirst ? (shorthandPhoneFirst[3] || shorthandPhoneFirst[5]) : (shorthandCapFirst[3] || shorthandCapFirst[5])) || "";
-    const cleanPhone = normalizePhone(rawTargetPhone);
-    const capNum = parseFloat(rawCap);
-    const pfx = cleanPhone.slice(0, 3);
-    const detectedNet = rawNet
-      ? (/telecel|vodafone/i.test(rawNet) ? "Telecel" : /airteltigo|^at$|ishare|bigtime/i.test(rawNet) ? "AirtelTigo" : "MTN")
-      : (["020", "050"].includes(pfx) ? "Telecel" : ["027", "057", "026", "056"].includes(pfx) ? "AirtelTigo" : "MTN");
-
-    if (hasExplicitVerb) {
-      const execMsg = await executeOwnerDirectAction("dispatch_datamart_bundle", {
-        phone: cleanPhone,
-        capacity: capNum,
-        network: detectedNet,
-      });
-      return sendWhatsApp(from, execMsg);
-    } else {
-      // Check if there are any recent orders for this phone number
-      let recentOrderLine = "";
-      try {
-        const { data: recentOrds } = await supabase
-          .from("orders")
-          .select("reference, network, capacity, amount, payment_status, delivery_status, created_at")
-          .eq("recipient_phone", cleanPhone)
-          .order("created_at", { ascending: false })
-          .limit(2);
-        if (recentOrds && recentOrds.length > 0) {
-          recentOrderLine = `\n\n📋 *Recent Order(s) for ${cleanPhone}:*\n` +
-            recentOrds.map((o, idx) => `• *${o.reference}* — ${o.capacity}GB ${o.network} (₵${o.amount}) | Pay: *${o.payment_status}* | Delivery: *${o.delivery_status}*`).join("\n");
-        }
-      } catch (_) { }
-
-      setOwnerPendingAction(from, {
-        type: "dispatch_datamart_bundle",
-        phone: cleanPhone,
-        capacity: capNum,
-        network: detectedNet,
-      });
-
-      const confirmReply =
-        `⚡ *Ready to Dispatch ${capNum}GB ${detectedNet} → ${cleanPhone}*\n` +
-        `• *Source:* DataMart Wallet (${walletBalance || "Live"})\n` +
-        recentOrderLine +
-        `\n\nReply *YES* to send *${capNum}GB ${detectedNet}* to *${cleanPhone}* right now, or reply *mistake* / *NO* to cancel.`;
-      return sendWhatsApp(from, confirmReply);
-    }
-  }
-
-  // Direct Action Command 0a_dm: Credit DataMart Wallet via MoMo prompt
-  const creditDatamartMatch =
-    cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:(?:to\s+)?(?:datamart|data\s*mart|telecom\s*wallet|dm\s*wallet|my\s+wallet|wallet)\s+)?(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)\s*(?:gh[c₵]?|₵)?/i) ||
-    cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)\s*(?:gh[c₵]?|₵)?/i);
-
-  if (creditDatamartMatch) {
-    const amt = parseFloat(creditDatamartMatch[1]);
-    if (!isNaN(amt) && amt > 0) {
-      const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
-        "datamart_auth_token", "datamart_login_email", "datamart_login_password", "admin_topup_phone", "admin_alert_phone", "admin_whatsapp_number"
-      ]);
-      const sMap = {};
-      (sRows || []).forEach(r => { sMap[r.key] = r.value; });
-
-      let token = sMap["datamart_auth_token"] || process.env.DATAMART_AUTH_TOKEN;
-      if (!token && sMap["datamart_login_email"] && sMap["datamart_login_password"]) {
+      // Load multi-turn conversation memory early
+      let history = ownerHistories.get(normFrom) || ownerHistories.get(String(from)) || [];
+      if (!history || history.length === 0) {
         try {
-          const lRes = await axios.post("https://api.datamartgh.shop/api/v1/login", {
-            email: sMap["datamart_login_email"],
-            password: sMap["datamart_login_password"]
-          }, { timeout: 10000 });
-          if (lRes.data?.token) {
-            token = lRes.data.token;
-            await supabase.from("settings").upsert({ key: "datamart_auth_token", value: token }, { onConflict: "key" });
+          if (ownerSession?.notes) {
+            const parsed = JSON.parse(ownerSession.notes);
+            if (Array.isArray(parsed)) history = parsed;
           }
         } catch (_) { }
       }
 
-      // Check if an explicit phone was provided in the command (e.g. "top up 50gh with this number 0547100951")
-      const explicitPhoneMatch =
-        cmdText.match(/(?:on|with|to|for|momo|number|num|phone)\s*(?:(?:this|my)\s+(?:number|phone)\s+)?(?:0|\+?233)?([2357][0-9]{8})\b/i) ||
-        cmdText.match(/\b(0[2357][0-9]{8})\b/i) ||
-        cmdText.match(/\b(233[2357][0-9]{8})\b/i);
+      const cleanInput = text.trim();
 
-      let chosenPhone = "";
-      if (explicitPhoneMatch) {
-        const rawP = (explicitPhoneMatch[1] || explicitPhoneMatch[0]).replace(/\D/g, "");
-        chosenPhone = rawP.startsWith("233") ? "0" + rawP.slice(3) : (rawP.startsWith("0") ? rawP : "0" + rawP);
-      } else if (sMap["admin_topup_phone"]) {
-        chosenPhone = sMap["admin_topup_phone"];
-      } else if (sMap["admin_alert_phone"]) {
-        chosenPhone = sMap["admin_alert_phone"];
-      } else {
-        chosenPhone = normalizeGhanaPhone(from) || "0547228161";
+      // ── SWITCH TO DATAMART AGENT SUPPORT MODE ──
+      if (/^(?:datamart\s*mode|dm\s*mode|agent\s*support\s*mode|switch\s*to\s*datamart|datamart)$/i.test(cleanInput)) {
+        setUserMode(from, "datamart");
+        await saveCustomerSession(from, { step: 98 });
+        await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "datamart" }, { onConflict: "key" });
+        return sendWhatsApp(from,
+          `🏢 *SWITCHED TO DATAMART AGENT SUPPORT MODE!* 🚀\n\n` +
+          `You are now connected directly to your DataMart Worker Console. Every command or query you send will execute live on DataMart!\n\n` +
+          `🛠️ *What you can send in this mode:*\n` +
+          `• *Any Batch/Order ID* (e.g. *2313443*) ➔ Runs Live Carrier Delivery Check\n` +
+          `• *Any Email or Phone* (e.g. *nyakponoah11@gmail.com*) ➔ Customer/Agent Profile & Wallet\n` +
+          `• *tickets* or *urgent* ➔ View active support tickets\n` +
+          `• *failed* ➔ View failed orders & retry\n` +
+          `• *withdrawals* ➔ View agent cashouts\n` +
+          `• *deposits* ➔ View MoMo & Paystack deposits\n` +
+          `• *stats* or *dashboard* ➔ View today's total volume\n` +
+          `• *recovery* ➔ Check skipped/failed recovery pipelines\n` +
+          `• *not received* ➔ Customer complaints\n\n` +
+          `💡 To switch back to normal store co-pilot mode anytime, just text: *exit* or *normal mode* or *stony*.`
+        );
       }
-      const formattedPhone = chosenPhone.length === 12 && chosenPhone.startsWith("233") ? "0" + chosenPhone.slice(3) : chosenPhone;
 
-      let momoNet = "MTN";
-      const pfx = formattedPhone.slice(0, 3);
-      if (["020", "050"].includes(pfx)) momoNet = "TELECEL";
-      else if (["026", "056", "027", "057"].includes(pfx)) momoNet = "AIRTELTIGO";
+      // ── SWITCH TO FULLY LOCKED-IN SUPPORT MODE (REZOLV & DATAMART) ──
+      const isSupportModeSwitch =
+        /\b(?:rezolv|resolv|rezolve|resovl|resolve)\s*(?:mode)?\b/i.test(cleanInput) ||
+        /\b(?:support\s*mode|live\s*support(?:\s*mode)?|support\s*desk|customer\s*support\s*mode)\b/i.test(cleanInput) ||
+        /^(?:support|rezolv|resolv|resolve)$/i.test(cleanInput);
 
-      if (token) {
-        try {
-          let bRes = null;
+      const isSpecificRezolvAction =
+        /^(?:reply|tell|close\s+ticket|resolve\s+ticket|view\s+ticket|check\s+ticket)\b/i.test(cleanInput) ||
+        (/^(?:close|resolve)\s+(?:TKT-?\d+|[a-f0-9]{24})\b/i.test(cleanInput));
+
+      if (isSupportModeSwitch && !isSpecificRezolvAction) {
+        setUserMode(from, "support");
+        await saveCustomerSession(from, { step: 97 });
+        await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "support" }, { onConflict: "key" });
+        const initialReport = await getRezolvTicketsReport("active", 5);
+        return sendWhatsApp(from,
+          `🔒 *SUPPORT MODE FULLY LOCKED IN!* ⚡\n` +
+          `Logged in as: *Stony 💙* (Live Support Desk)\n\n` +
+          `🚫 *DATA 1 GH store statistics, sales numbers, and marketing are MUTED.*\n` +
+          `I am now 100% focused strictly on customer support tickets, live chats, and issue resolutions!\n\n` +
+          `${initialReport}\n\n` +
+          `💡 *Quick Commands in Support Mode:*\n` +
+          `• *reply [Name or Ticket] [message]* ➔ Send WhatsApp/SMS to customer or reply on Rezolv\n` +
+          `• *reply him to text me on 0547100951* ➔ Resolves pronoun from recent ticket & sends direct WhatsApp\n` +
+          `• *draft reply [Name or Ticket]* ➔ AI writes professional response, tap YES to send\n` +
+          `• *ticket [ReportID or TKT-ID]* ➔ View full chat history & issue details\n` +
+          `• *[Customer Name or Phone]* ➔ Look up tickets, complaints & orders\n` +
+          `• *tickets* or *urgent* ➔ Refresh ticket queue\n` +
+          `• *exit* or *normal mode* ➔ Return to normal DATA 1 GH store co-pilot.`
+        );
+      }
+
+      // ── DEDICATED SUPPORT & DATAMART CONSOLE MODE HANDLER ──
+      const activeOwnerMode = getUserMode(from);
+      if (activeOwnerMode === "support") {
+        if (/^(?:exit|normal\s*mode|stony|stony\s*mode|store\s*mode|back|quit|leave|stop)$/i.test(cleanInput)) {
+          setUserMode(from, "ai");
+          await saveCustomerSession(from, { step: 99 });
+          await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "ai" }, { onConflict: "key" });
+          return sendWhatsApp(from, `👑 Exited Support Mode. Switched back to *DATA 1 GH Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
+        }
+        // In support mode, natural messages proceed straight down to AI & natural support handlers!
+      } else if (activeOwnerMode === "datamart") {
+        if (/^(?:exit|normal\s*mode|stony|stony\s*mode|store\s*mode|back|quit|leave|stop)$/i.test(cleanInput)) {
+          setUserMode(from, "ai");
+          await saveCustomerSession(from, { step: 99 });
+          await supabase.from("settings").upsert({ key: `owner_mode_${normFrom}`, value: "ai" }, { onConflict: "key" });
+          return sendWhatsApp(from, `👑 Exited DataMart Mode. Switched back to *DATA 1 GH Store Co-Pilot Mode* bossu! Ready for store orders, marketing, and system control.`);
+        }
+
+        await processDatamartConsoleCommand(from, cleanInput, true);
+        return;
+      }
+
+      // ── 0. OWNER AI TRAINING & CORRECTION HANDLER (WHATSAPP → PERMANENT MEMORY) ──
+      const isDirectTraining =
+        /\b(?:don'?t\s+do\s+(?:this|that)\s+again|never\s+do\s+(?:this|that)\s+again|don'?t\s+say\s+(?:this|that)\s+again|never\s+say\s+(?:this|that)\s+again|save\s+(?:this\s+rule|this\s+instruction|this\s+correction|rule|instruction)|remember\s+(?:this|that)|from\s+now\s+on|train\s*:|correction\s*:)\b/i.test(cleanInput);
+
+      const isSaveNowIntent =
+        /^(?:save\s*now|okay\s*save|ok\s*save|yes\s*save|save\s*it|save\s*this|save|please\s*save)$/i.test(cleanInput);
+
+      if (isDirectTraining || isSaveNowIntent) {
+        let ruleToSave = "";
+
+        if (isDirectTraining) {
+          ruleToSave = cleanInput
+            .replace(/^(?:stony|hey\s+stony|hi\s+stony)[,:\s]*/i, "")
+            .replace(/^(?:please\s+)?(?:don'?t\s+do\s+(?:this|that)\s+again|never\s+do\s+(?:this|that)\s+again|don'?t\s+say\s+(?:this|that)\s+again|never\s+say\s+(?:this|that)\s+again|save\s+(?:this\s+rule|this\s+instruction|this\s+correction|rule|instruction)|remember\s+(?:this|that)|from\s+now\s+on|train\s*:|correction\s*:)[:,\s-]*/i, "")
+            .trim();
+
+          if (!ruleToSave || ruleToSave.length < 3) {
+            const lastAssist = [...history].reverse().find(h => h.role === "assistant" && h.text);
+            if (lastAssist?.text) {
+              const snippet = lastAssist.text.slice(0, 140).replace(/\n/g, " ");
+              ruleToSave = `Do not repeat or use this prior response: "${snippet}..."`;
+            } else {
+              ruleToSave = cleanInput;
+            }
+          }
+        } else if (isSaveNowIntent) {
+          const lastUser = [...history].reverse().find(h => h.role === "user" && h.text && h.text.trim() !== cleanInput);
+          if (lastUser?.text) {
+            ruleToSave = lastUser.text
+              .replace(/^(?:stony|hey\s+stony|hi\s+stony)[,:\s]*/i, "")
+              .replace(/^(?:please\s+)?(?:don'?t\s+do\s+(?:this|that)\s+again|never\s+do\s+(?:this|that)\s+again|don'?t\s+say\s+(?:this|that)\s+again|never\s+say\s+(?:this|that)\s+again|save\s+(?:this\s+rule|this\s+instruction|this\s+correction|rule|instruction)|remember\s+(?:this|that)|from\s+now\s+on|train\s*:|correction\s*:)[:,\s-]*/i, "")
+              .trim();
+          }
+          if (!ruleToSave) {
+            ruleToSave = "Always follow the owner's operational standards strictly and answer customers with human warmth.";
+          }
+        }
+
+        if (ruleToSave) {
           try {
-            bRes = await axios.post("https://api.datamartgh.shop/api/bridge/collect", {
-              phoneNumber: formattedPhone,
-              amount: amt,
-              network: momoNet
-            }, {
-              headers: { "Content-Type": "application/json", "x-auth-token": token },
-              timeout: 15000
-            });
-          } catch (bridgeErr) {
-            if (bridgeErr.response && bridgeErr.response.status === 401 && sMap["datamart_login_email"] && sMap["datamart_login_password"]) {
-              // Re-authenticate and retry
-              const reloginRes = await axios.post("https://api.datamartgh.shop/api/v1/login", {
+            const { data: sRow } = await supabase
+              .from("settings")
+          } catch (trainErr) {
+            console.error("Failed saving WhatsApp training directive:", trainErr);
+            return sendWhatsApp(from, `⚠️ Could not save training to database: ${trainErr.message}`);
+          }
+        }
+      }
+
+      const sanitizedInput = cleanInput.replace(/[\\\]\[]/g, "").trim();
+      const isMistakeOrIgnore = /^(mistake|wrong|wrong number|ignore|ignore it|ignore that|nevermind|never mind|forget it|my bad|by mistake)$/i.test(sanitizedInput);
+      const isCancel = isMistakeOrIgnore || /^(no|nope|cancel|nah|stop|abort|leave it)$/i.test(sanitizedInput);
+
+      // Recognize confirmation strictly when confirming a pending staged action
+      const isConfirm = !isCancel && (
+        /^(yes|yeah|yep|ok|okay|sure|yh|y|sharp|confirm|proceed|go|done|execute|apply|go ahead|do it|please do|send it|make it|update it|yes update|confirm update|proceed with update|send|send all|dispatch|dispatch all|reply all|reply|send them|yes send|send drafts|send all drafts|deliver all)$/i.test(sanitizedInput)
+      );
+
+      const sendSingleMatch = sanitizedInput.match(/^(?:send|dispatch)\s*(\d+)$/i);
+      const editSingleMatch = sanitizedInput.match(/^(\d+)\s*[:,-]\s*([\s\S]+)$/);
+      const isBatchSendAll = /^(?:send\s*all|dispatch\s*all)$/i.test(sanitizedInput);
+
+      // Helper to ensure pendingAction is recovered if missing from memory
+      const ensureSupportBatchPendingAction = async () => {
+        if (pendingAction && pendingAction.type === "batch_rezolv_reply" && pendingAction.drafts?.length > 0) return pendingAction;
+        // 1. Try settings
+        try {
+          const { data: setRows } = await supabase
+            .from("settings")
+            .select("key, value")
+            .in("key", [`owner_pending_${normFrom}`, `owner_pending_${from}`, `latest_support_batch_${normFrom}`]);
+          if (setRows && setRows.length > 0) {
+            const row = setRows.find(r => r.key === `owner_pending_${normFrom}` || r.key === `owner_pending_${from}`) || setRows.find(r => r.key === `latest_support_batch_${normFrom}`) || setRows[0];
+            if (row?.value) {
+              const parsed = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+              if (parsed) {
+                pendingAction = parsed.type === "batch_rezolv_reply" || parsed.drafts
+                  ? (parsed.type ? parsed : { type: "batch_rezolv_reply", drafts: Array.isArray(parsed) ? parsed : (parsed.drafts || []) })
+                  : parsed;
+                ownerPendingActions.set(normFrom, pendingAction);
+                ownerPendingActions.set(String(from), pendingAction);
+                return pendingAction;
+              }
+            }
+          }
+        } catch (_) { }
+        // 2. Try history
+        if (history && history.length > 0) {
+          const lastAssist = [...history].reverse().find(h => h.role === "assistant" && h.text);
+          if (lastAssist) {
+            const recovered = extractProposedActionFromText(lastAssist.text);
+            if (recovered?.action) {
+              pendingAction = recovered.action;
+              ownerPendingActions.set(normFrom, pendingAction);
+              return pendingAction;
+            }
+          }
+        }
+        return pendingAction;
+      };
+
+      // ── SPECIAL HANDLER FOR BATCH REZOLV REPLIES ──
+      // A: Send single draft (e.g. "Send 1", "send 2", "send draft 1")
+      if (sendSingleMatch) {
+        await ensureSupportBatchPendingAction();
+        if (pendingAction && pendingAction.type === "batch_rezolv_reply") {
+          const reqNum = parseInt(sendSingleMatch[1], 10);
+          let targetDraft = pendingAction.drafts?.find(d => d.draftNum === reqNum);
+          if (!targetDraft && reqNum >= 1 && reqNum <= (pendingAction.drafts?.length || 0)) {
+            targetDraft = pendingAction.drafts[reqNum - 1];
+          }
+
+          if (targetDraft) {
+            if (targetDraft.sent) {
+              const custName = targetDraft.customerName || "Customer";
+              const remaining = (pendingAction.drafts || []).filter(d => !d.sent);
+              return sendWhatsApp(from,
+                `ℹ️ *Draft #${reqNum} for ${custName} has ALREADY been dispatched!* ✅\n\n` +
+                (remaining.length > 0
+                  ? `💡 *${remaining.length} draft(s) remaining in this batch:* ${remaining.map(d => `#${d.draftNum || (pendingAction.drafts.indexOf(d) + 1)}`).join(", ")}. Text *SEND ALL* or *SEND [number]*!`
+                  : `🎉 All drafts in this batch are already sent! Text *draft 5* to stage new tickets.`)
+              );
+            }
+
+            const replyMsg = targetDraft.draftMessage || targetDraft.message || targetDraft.text;
+            const res = await sendRezolvReply(targetDraft, replyMsg, from);
+            targetDraft.sent = true;
+
+            const remaining = (pendingAction.drafts || []).filter(d => !d.sent);
+            if (remaining.length > 0) {
+              await setOwnerPendingAction(from, pendingAction);
+              try {
+                const normF = String(from || "").replace(/\D/g, "");
+                await supabase.from("settings").upsert({
+                  key: `latest_support_batch_${normF}`,
+                  value: JSON.stringify(pendingAction.drafts)
+                }, { onConflict: "key" });
+              } catch (_) { }
+            } else {
+              await clearOwnerPendingAction(from);
+              try {
+                const normF = String(from || "").replace(/\D/g, "");
+                await supabase.from("settings").delete().eq("key", `latest_support_batch_${normF}`);
+              } catch (_) { }
+            }
+
+            const rezolvCtx = await getUserRezolvContext(from);
+            const activeAgent = rezolvCtx?.agentName || "Stony 💙";
+            const custName = targetDraft.customerName || "Customer";
+            const tNum = targetDraft.ticketId || targetDraft.id || `#${reqNum}`;
+            const isOk = res && !res.startsWith("⚠️") && !res.startsWith("❌");
+
+            let replyCard = isOk
+              ? `🚀 *DISPATCHED DRAFT #${reqNum} LIVE AS ${activeAgent}!* ✅\n\n` +
+              `👤 *Customer:* *${custName}* ([${tNum}])\n` +
+              `💬 *Message Sent:*\n"${replyMsg}"\n\n` +
+              (remaining.length > 0
+                ? `💡 *${remaining.length} draft(s) remaining in this batch:* ${remaining.map(d => `#${d.draftNum || (pendingAction.drafts.indexOf(d) + 1)}`).join(", ")}. Reply *SEND ALL* or *SEND [number]* to dispatch next!`
+                : `🎉 *All staged drafts in this batch have been sent!* Reply *draft 5* to stage new tickets.`)
+              : `⚠️ *FAILED TO SEND DRAFT #${reqNum}:* ${res}`;
+
+            return sendWhatsApp(from, replyCard);
+          } else {
+            const total = pendingAction.drafts?.length || 0;
+            const remaining = (pendingAction.drafts || []).filter(d => !d.sent);
+            return sendWhatsApp(from,
+              `⚠️ *Draft #${reqNum} not found in this batch.*\n\n` +
+              `This batch only has *${total} draft(s)* total (#1${total > 1 ? ` to #${total}` : ""}).\n` +
+              (remaining.length > 0
+                ? `💡 *${remaining.length} draft(s) still waiting to send:* ${remaining.map(d => `#${d.draftNum || (pendingAction.drafts.indexOf(d) + 1)}`).join(", ")}. Reply *SEND [number]* or *SEND ALL*!`
+                : `🎉 All drafts in this batch have already been sent! Text *draft 5* to stage new tickets.`)
+            );
+          }
+        } else {
+          return sendWhatsApp(from, `ℹ️ No pending support draft batch found. Text *draft 5* or *inbox* to stage customer tickets for review!`);
+        }
+      }
+
+      // B: Edit single draft text (e.g. "1: Hello Kwame...", "2: We have checked...")
+      if (editSingleMatch) {
+        await ensureSupportBatchPendingAction();
+        if (pendingAction && pendingAction.type === "batch_rezolv_reply") {
+          const reqNum = parseInt(editSingleMatch[1], 10);
+          let targetDraft = pendingAction.drafts?.find(d => d.draftNum === reqNum);
+          if (!targetDraft && reqNum >= 1 && reqNum <= (pendingAction.drafts?.length || 0)) {
+            targetDraft = pendingAction.drafts[reqNum - 1];
+          }
+
+          if (targetDraft) {
+            targetDraft.draftMessage = editSingleMatch[2].trim();
+            targetDraft.message = targetDraft.draftMessage;
+            targetDraft.text = targetDraft.draftMessage;
+            await setOwnerPendingAction(from, pendingAction);
+            try {
+              const normF = String(from || "").replace(/\D/g, "");
+              await supabase.from("settings").upsert({
+                key: `latest_support_batch_${normF}`,
+                value: JSON.stringify(pendingAction.drafts)
+              }, { onConflict: "key" });
+            } catch (_) { }
+
+            const custName = targetDraft.customerName || "Customer";
+            const tNum = targetDraft.ticketId || targetDraft.id || `#${reqNum}`;
+            return sendWhatsApp(from,
+              `📝 *UPDATED DRAFT #${reqNum} FOR ${custName.toUpperCase()} ([${tNum}])!*\n\n` +
+              `*New Reply:*\n"${targetDraft.draftMessage}"\n\n` +
+              `👉 Reply *SEND ${reqNum}* to dispatch this now, or *SEND ALL* to dispatch the whole batch!`
+            );
+          } else {
+            const total = pendingAction.drafts?.length || 0;
+            return sendWhatsApp(from, `⚠️ Draft #${reqNum} not found in this batch (${total} available).`);
+          }
+        }
+      }
+
+      // If owner says "mistake", "ignore", "nevermind", or cancels (with or without a pending action)
+      if (isMistakeOrIgnore || (pendingAction && isCancel)) {
+        await clearOwnerPendingAction(from);
+        return sendWhatsApp(from, "No problem at all boss — ignored and cancelled! Let me know whenever you need anything else.");
+      }
+
+      // If owner is confirming AND has pendingAction
+      if (pendingAction && (isConfirm || isBatchSendAll)) {
+        const { type, network, capacity, status, smsText, inStock, productId, productName } = pendingAction;
+        await clearOwnerPendingAction(from);
+
+        // 0. REZOLV LIVE CUSTOMER REPLY CONFIRMATION
+        if (type === "rezolv_reply") {
+          const tId = pendingAction.ticketId || pendingAction.ticket || pendingAction.id;
+          const replyText = pendingAction.message || pendingAction.text;
+          const res = await sendRezolvReply(tId, replyText, from);
+          return sendWhatsApp(from, res);
+        }
+
+        // 0b. BATCH REZOLV SUPPORT REPLIES CONFIRMATION
+        if (type === "batch_rezolv_reply") {
+          const drafts = (pendingAction.drafts || []).filter(d => !d.sent);
+          if (drafts.length === 0) return sendWhatsApp(from, "ℹ️ All staged drafts in this batch have already been sent! Text *draft 5* to stage new tickets.");
+
+          const results = await Promise.all(drafts.map(async (d) => {
+            try {
+              const replyText = d.draftMessage || d.message || d.text;
+              const res = await sendRezolvReply(d, replyText, from);
+              return { ticketId: d.ticketId || d.id, name: d.customerName, ok: !res.startsWith("⚠️"), res };
+            } catch (err) {
+              return { ticketId: d.ticketId || d.id, name: d.customerName, ok: false, error: err.message };
+            }
+          }));
+
+          const rezolvCtx = await getUserRezolvContext(from);
+          const activeAgent = rezolvCtx?.agentName || "Stony 💙";
+
+          let report = `🚀 *DISPATCHED ALL ${results.length} SUPPORT REPLIES LIVE AS ${activeAgent}!*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+          results.forEach(r => {
+            report += `${r.ok ? "✅" : "⚠️"} *[${r.ticketId}]* ${r.name || "Customer"}\n`;
+          });
+          report += `\n🎯 All messages are live in customer chat widgets on Rezolv! Reply *draft next* or *draft 5* to review the next batch!`;
+          return sendWhatsApp(from, report);
+        }
+
+        // 0c. UNIFIED CUSTOMER MESSAGE / DATAMART REPLY CONFIRMATION
+        if (type === "send_customer_message" || type === "reply_customer" || type === "message_customer") {
+          const res = await executeOwnerDirectAction("send_customer_message", pendingAction);
+          return sendWhatsApp(from, res);
+        }
+
+        // Gather all target references from pendingAction
+        let targetRefs = [];
+        if (Array.isArray(pendingAction.orders)) targetRefs.push(...pendingAction.orders);
+        if (Array.isArray(pendingAction.refs)) targetRefs.push(...pendingAction.refs);
+        if (Array.isArray(pendingAction.references)) targetRefs.push(...pendingAction.references);
+        if (pendingAction.ref) targetRefs.push(pendingAction.ref);
+        if (pendingAction.reference) targetRefs.push(pendingAction.reference);
+        if (pendingAction.order_id) targetRefs.push(pendingAction.order_id);
+
+        // Fallback: check if references are in the current text or previous assistant message
+        if (targetRefs.length === 0) {
+          targetRefs = extractOrderReferences(text);
+        }
+        if (targetRefs.length === 0 && history.length > 0) {
+          const recentText = history.slice(-3).map(h => h.text).join(" ");
+          targetRefs = extractOrderReferences(recentText);
+        }
+
+        targetRefs = [...new Set(targetRefs.map(r => String(r || "").replace(/[*_#`"']/g, "").trim()).filter(Boolean))];
+
+        // 1. UPDATE ORDER STATUS (Single & Multiple Orders)
+        if (type === "update_order_status" || (targetRefs.length > 0 && /\b(update|status|delivered|processing|pending|waiting|failed|cancelled|refunded)\b/i.test(cleanInput))) {
+          const statusToSet = extractStatusFromText(cleanInput) || pendingAction.status || status || "delivered";
+          const updatedRefs = [];
+
+          for (const r of targetRefs) {
+            const upd = await updateOrderDeliveryStatusSafely(r, statusToSet);
+            if (upd) {
+              updatedRefs.push(r);
+              // Per owner instruction: Stop sending SMS when delivery status is updated
+            }
+          }
+
+          if (updatedRefs.length > 0) {
+            // Record in conversation memory
+            try {
+              const executionNote = {
+                role: "assistant",
+                text: `✅ Action completed: Updated ${updatedRefs.length} order(s) (${updatedRefs.join(", ")}) to ${statusToSet.toUpperCase()} in the database.`
+              };
+              const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
+              await saveOwnerHistory(from, updatedHistory);
+            } catch (_) { }
+
+            return sendWhatsApp(from,
+              `✅ *ACTION COMPLETED BOSS!*\n\n` +
+              `I have successfully updated ${updatedRefs.length} order(s) to *${statusToSet.toUpperCase()}* in the database:\n` +
+              updatedRefs.map(r => `• *${r}*`).join("\n") +
+              `\n\nDatabase is now synchronized with reality! (SMS alerts disabled). What else would you like me to tackle?`
+            );
+          }
+        }
+
+        // 1b. UPDATE PAYMENT STATUS
+        if (type === "update_payment_status") {
+          const statusToSet = extractPaymentStatusFromText(cleanInput) || pendingAction.payment_status || pendingAction.status || status || "paid";
+          const updatedRefs = [];
+
+          for (const r of targetRefs) {
+            const upd = await updateOrderPaymentStatusSafely(r, statusToSet);
+            if (upd) {
+              updatedRefs.push(r);
+            }
+          }
+
+          if (updatedRefs.length > 0) {
+            try {
+              const executionNote = {
+                role: "assistant",
+                text: `✅ Action completed: Updated payment status for ${updatedRefs.length} order(s) (${updatedRefs.join(", ")}) to ${statusToSet.toUpperCase()} in the database.`
+              };
+              const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
+              await saveOwnerHistory(from, updatedHistory);
+            } catch (_) { }
+
+            return sendWhatsApp(from,
+              `✅ *PAYMENT STATUS UPDATED BOSS!*\n\n` +
+              `I have successfully updated the payment status of ${updatedRefs.length} order(s) to *${statusToSet.toUpperCase()}* in the database:\n` +
+              updatedRefs.map(r => `• *${r}*`).join("\n") +
+              `\n\nDatabase payment records are synchronized! What else would you like me to tackle?`
+            );
+          }
+        }
+
+        // 2. RESYNC ORDER
+        if (type === "resync_order" && targetRefs.length > 0) {
+          const r = targetRefs[0];
+          try {
+            const live = await getRealDatamartDeliveryStatus(r);
+            if (live?.deliveryStatus) {
+              await supabase.from("orders").update({
+                delivery_status: live.deliveryStatus,
+                datamart_status: live.rawStatus,
+                updated_at: new Date().toISOString()
+              }).eq("reference", r);
+            }
+            return sendWhatsApp(from, `✅ *RESYNC COMPLETE!*\n\nOrder *${r}* live network status:\n• Delivery Status: *${live?.deliveryStatus || "Updated"}*\n• Raw: ${live?.rawStatus || "Checked"}\n\nDatabase has been updated.`);
+          } catch (err) {
+            return sendWhatsApp(from, `❌ Resync error: ${err.message}`);
+          }
+        }
+
+        // 9. UPDATE CHECKER STATUS
+        if (type === "update_checker_status" && targetRefs.length > 0) {
+          const statusToSet = status || "delivered";
+          for (const r of targetRefs) {
+            await supabase.from("checker_orders").update({ delivery_status: statusToSet }).or(`reference.ilike.%${r}%`);
+          }
+          return sendWhatsApp(from, `✅ *RESULT CHECKER ORDER UPDATED!*\n\nReference(s): ${targetRefs.join(", ")}\nNew Status: *${statusToSet.toUpperCase()}*`);
+        }
+
+        // 10. UPDATE STORE ANNOUNCEMENT
+        if (type === "update_announcement") {
+          const title = pendingAction.title || "Store Announcement";
+          const message = pendingAction.message || pendingAction.announcement || "";
+          const enabled = pendingAction.enabled !== undefined ? Boolean(pendingAction.enabled) : true;
+          await updateStoreAnnouncement({ title, message, enabled });
+          return sendWhatsApp(from,
+            `✅ *STORE ANNOUNCEMENT UPDATED!*\n\n` +
+            `📢 *Title:* ${title}\n` +
+            (message ? `💬 *Message:* "${message}"\n` : "") +
+            `⚡ *Status:* ${enabled ? "LIVE ON SHOP ✅" : "OFF ❌"}\n\n` +
+            `Visitors on https://www.data1gh.com will see this immediately!`
+          );
+        }
+
+        // 11. UPDATE STORE SETTING ("the rest")
+        if (type === "update_setting") {
+          const k = String(pendingAction.key || "").trim();
+          const v = String(pendingAction.value !== undefined ? pendingAction.value : "").trim();
+          if (k) {
+            await updateStoreSetting(k, v);
+            return sendWhatsApp(from,
+              `✅ *STORE SETTING UPDATED!*\n\n` +
+              `⚙️ *Setting:* ${k}\n` +
+              `📝 *New Value:* *${v}*\n\n` +
+              `Database and store configuration synchronized!`
+            );
+          }
+        }
+
+        // 12. GENERATE FREE DATA VOUCHERS
+        if (type === "generate_vouchers") {
+          const count = parseInt(pendingAction.count, 10) || 5;
+          const net = pendingAction.network || "MTN";
+          const cap = pendingAction.capacity || "1";
+          const res = await generateFreeDataVouchersSafely(count, net, cap);
+          return sendWhatsApp(from,
+            `🎁 *FREE DATA VOUCHERS GENERATED!*\n\n` +
+            `• *Network:* ${res.network}\n` +
+            `• *Package:* ${res.capacity}GB\n` +
+            `• *Total Codes (${res.codes.length}):*\n\n` +
+            res.codes.map((c, i) => `${i + 1}. *${c}*`).join("\n") +
+            `\n\nThese codes are saved live in the database and ready for customers to claim on the site!`
+          );
+        }
+
+        // 13. TOGGLE FREE DATA CAMPAIGN
+        if (type === "toggle_free_data") {
+          const act = Boolean(pendingAction.active);
+          await toggleFreeDataCampaign(act);
+          return sendWhatsApp(from,
+            `🎁 *FREE DATA CAMPAIGN UPDATED!*\n\n` +
+            `⚡ *Status:* ${act ? "ACTIVE & LIVE ON SITE ✅" : "DISABLED / TURNED OFF ❌"}\n\n` +
+            `Storefront free data claim modal updated!`
+          );
+        }
+
+        // 14. CHANGE SITE THEME / COLOR
+        if (type === "change_theme_color") {
+          const color = pendingAction.color || "midnight";
+          await updateSiteThemeColor(color);
+          return sendWhatsApp(from,
+            `🎨 *SITE THEME & COLOR UPDATED!*\n\n` +
+            `✨ *Active Theme / Color:* *${color.toUpperCase()}*\n\n` +
+            `Live storefront & admin appearance synchronized!`
+          );
+        }
+
+        // 15. CREDIT AGENT WALLET
+        if (type === "credit_agent") {
+          const target = pendingAction.target;
+          const amt = parseFloat(pendingAction.amount);
+          const credRes = await creditAgentWalletSafely(target, amt);
+          if (credRes) {
+            return sendWhatsApp(from,
+              `💼 *AGENT WALLET CREDITED!*\n\n` +
+              `• *Agent:* ${credRes.agent.name || credRes.agent.store_name || "Agent"}\n` +
+              `• *Phone:* ${credRes.agent.phone}\n` +
+              `• *Credited:* GH₵ ${credRes.credited.toFixed(2)}\n` +
+              `• *New Balance:* *GH₵ ${credRes.newBalance.toFixed(2)}*\n\n` +
+              `Agent wallet updated live in the database!`
+            );
+          } else {
+            return sendWhatsApp(from, `❌ Could not find agent "${target}" to credit.`);
+          }
+        }
+
+        // 16. DISPATCH DATA BUNDLE DIRECTLY VIA DATAMART WALLET
+        if (type === "dispatch_datamart_bundle" || type === "send_data" || type === "dispatch_data") {
+          try {
+            const msg = await executeOwnerDirectAction("dispatch_datamart_bundle", pendingAction);
+            return sendWhatsApp(from, `✅ *DATA BUNDLE DISPATCHED BOSS!*\n\n${msg}`);
+          } catch (err) {
+            return sendWhatsApp(from, `❌ Could not dispatch bundle: ${err.response?.data?.message || err.message}`);
+          }
+        }
+
+        return sendWhatsApp(from, "✅ Action performed bossu! System updated.");
+      }
+
+      // ── CONTEXTUAL FALLBACK EXECUTION ──
+      // If pendingAction was somehow empty/expired but owner says "they have received it so update the status"
+      if (!isCancel && isConfirm && /\b(update|status|delivered|reciev|receiv|processing|pending|waiting|failed|cancelled|refunded)\b/i.test(cleanInput)) {
+        let ctxRefs = extractOrderReferences(text);
+        if (ctxRefs.length === 0 && history.length > 0) {
+          const recentTurns = history.slice(-4).map(h => h.text).join(" ");
+          ctxRefs = extractOrderReferences(recentTurns);
+        }
+
+        if (ctxRefs.length > 0) {
+          const statusToSet = extractStatusFromText(cleanInput) || "delivered";
+          const updatedRefs = [];
+          for (const r of ctxRefs) {
+            const upd = await updateOrderDeliveryStatusSafely(r, statusToSet);
+            if (upd) updatedRefs.push(r);
+          }
+
+          await clearOwnerPendingAction(from);
+
+          // Save confirmation in conversation memory
+          try {
+            const executionNote = {
+              role: "assistant",
+              text: `✅ Action completed: Updated ${updatedRefs.length} order(s) (${updatedRefs.join(", ")}) to ${statusToSet.toUpperCase()} in the database.`
+            };
+            const updatedHistory = [...history.slice(-5), { role: "user", text: effectiveText }, executionNote];
+            await saveOwnerHistory(from, updatedHistory);
+          } catch (_) { }
+
+          return sendWhatsApp(from,
+            `✅ *ACTION COMPLETED BOSS!*\n\n` +
+            `I have updated ${updatedRefs.length} order(s) to *${statusToSet.toUpperCase()}* in the database:\n` +
+            updatedRefs.map(r => `• *${r}*`).join("\n") +
+            `\n\nDatabase is synchronized with reality! (SMS alerts disabled). What else would you like me to tackle?`
+          );
+        }
+      }
+
+      if (isConfirm && !pendingAction) {
+        return sendWhatsApp(from, `ℹ️ No pending action or drafts are currently waiting for confirmation bossu! Text *draft 5* or *inbox* to review live tickets, or let me know what you need.`);
+      }
+
+      // ── DIRECT ACTION COMMANDS (PRE-PARSER) ──
+      // Allows owner to text direct instructions without waiting for multi-model AI latency
+      const smsDirectMatch =
+        text.match(/^(?:send\s+)?(?:an\s+)?(?:custom\s+)?sms\s+(?:to\s+)?(0[2357]\d{8}|233\d{9})\s*(?::|\s+(?:saying|with message|that|message:))?\s*["“']?([^"”']+)["”']?$/i) ||
+        text.match(/^(?:text|sms)\s+(0[2357]\d{8}|233\d{9})\s*(?::|\s+(?:saying|with message|that|message:))?\s*["“']?([^"”']+)["”']?$/i);
+
+      if (smsDirectMatch) {
+        const targetPhone = smsDirectMatch[1].trim();
+        const targetText = smsDirectMatch[2].trim();
+        const actionData = { type: "send_sms", phone: targetPhone, smsText: targetText, sender: "D_1Gh" };
+        await setOwnerPendingAction(from, actionData);
+
+        return sendWhatsApp(from,
+          `⚠️ *ACTION CONFIRMATION REQUIRED*\n\n` +
+          `📋 *Task:* Send Customer SMS via Arkesel\n` +
+          `📱 *Recipient:* *${targetPhone}*\n` +
+          `🆔 *Sender ID:* *D_1Gh*\n` +
+          `💬 *Message:* "${targetText}"\n\n` +
+          `Bossu, should I go ahead and dispatch this SMS? Reply *YES* to execute or *NO* to cancel.`
+        );
+      }
+
+      // Direct Command: Generate Free Data Codes
+      const genVoucherMatch = text.match(/(?:generate|create|make)\s+(\d+)?\s*(?:free\s+data\s+)?(?:codes?|vouchers?)(?:\s+(?:for|on)\s+([a-zA-Z]+))?(?:\s+(\d+)GB)?/i);
+      if (genVoucherMatch) {
+        const count = parseInt(genVoucherMatch[1] || "5", 10);
+        const net = genVoucherMatch[2] || "MTN";
+        const cap = genVoucherMatch[3] || "1";
+        const res = await generateFreeDataVouchersSafely(count, net, cap);
+        return sendWhatsApp(from,
+          `🎁 *FREE DATA VOUCHERS GENERATED BOSS!*\n\n` +
+          `• *Network:* ${res.network}\n` +
+          `• *Package:* ${res.capacity}GB\n` +
+          `• *Codes Created (${res.codes.length}):*\n\n` +
+          res.codes.map((c, i) => `${i + 1}. *${c}*`).join("\n") +
+          `\n\nThese codes are saved live in your database and ready for customers to claim on https://www.data1gh.com!`
+        );
+      }
+
+      // Direct Command: Toggle Free Data Campaign
+      const toggleVoucherMatch = text.match(/(?:turn\s*(?:on|off)|enable|disable)\s+(?:the\s+)?(?:free\s+data|vouchers?|free\s+promo)/i);
+      if (toggleVoucherMatch) {
+        const activate = /\b(on|enable)\b/i.test(toggleVoucherMatch[0]);
+        await toggleFreeDataCampaign(activate);
+        return sendWhatsApp(from,
+          `🎁 *FREE DATA CAMPAIGN ${activate ? "ACTIVATED ✅" : "DISABLED ❌"}*\n\n` +
+          `The free data giveaway modal is now ${activate ? "*LIVE AND CLAIMABLE* by visitors on the storefront." : "*OFF* on the website."}`
+        );
+      }
+
+      // Direct Command: Change Site Color / Theme
+      const colorMatch =
+        text.match(/(?:change|set|update)\s+(?:the\s+)?(?:site\s+|store\s+|theme\s+)?color\s+(?:to\s+)?([a-zA-Z_-]+)/i) ||
+        text.match(/(?:switch\s+to|set|enable)\s+(dark\s*mode|light\s*mode)/i);
+      if (colorMatch) {
+        const rawColor = colorMatch[1].trim().toLowerCase();
+        await updateSiteThemeColor(rawColor);
+        return sendWhatsApp(from,
+          `🎨 *SITE THEME & COLOR UPDATED BOSS!*\n\n` +
+          `Active site theme color is now *${rawColor.toUpperCase()}*.\n` +
+          `Storefront styling updated live!`
+        );
+      }
+
+      // Direct Command: Suspend Agent
+      const suspendMatch = text.match(/(?:suspend|block|freeze)\s+agent\s+(.+)/i);
+      if (suspendMatch) {
+        const target = suspendMatch[1].trim();
+        const res = await setAgentStatusSafely(target, "suspended");
+        if (res) {
+          return sendWhatsApp(
+            from,
+            `⛔ *AGENT STORE SUSPENDED BOSS!*\n\n` +
+            `• *Agent:* ${res.agent.store_name} (${res.agent.name})\n` +
+            `• *Phone:* ${res.agent.phone}\n` +
+            `• *Status:* ⛔ SUSPENDED\n\n` +
+            `Their storefront has been frozen. To unfreeze anytime, reply:\n` +
+            `*activate agent ${res.agent.phone}*`
+          );
+        } else {
+          return sendWhatsApp(from, `❌ Could not find an agent matching "${target}".`);
+        }
+      }
+
+      // Direct Command: Activate Agent
+      const activateMatch = text.match(/(?:activate|unsuspend|unblock|unfreeze)\s+agent\s+(.+)/i);
+      if (activateMatch) {
+        const target = activateMatch[1].trim();
+        const res = await setAgentStatusSafely(target, "active");
+        if (res) {
+          return sendWhatsApp(
+            from,
+            `✅ *AGENT STORE ACTIVATED BOSS!*\n\n` +
+            `• *Agent:* ${res.agent.store_name} (${res.agent.name})\n` +
+            `• *Phone:* ${res.agent.phone}\n` +
+            `• *Status:* ✅ ACTIVE\n\n` +
+            `Storefront is live and processing orders!`
+          );
+        } else {
+          return sendWhatsApp(from, `❌ Could not find an agent matching "${target}".`);
+        }
+      }
+
+      // Direct Command: Credit Agent Wallet
+      const creditMatch = text.match(/credit\s+agent\s+([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*)?(\d+(?:\.\d+)?)/i);
+      if (creditMatch) {
+        const target = creditMatch[1].trim();
+        const amt = parseFloat(creditMatch[2]);
+        const credRes = await creditAgentWalletSafely(target, amt);
+        if (credRes) {
+          return sendWhatsApp(from,
+            `✅ *AGENT WALLET CREDITED BOSS!*\n\n` +
+            `• *Agent:* ${credRes.agent.name || credRes.agent.store_name || "Agent"}\n` +
+            `• *Phone:* ${credRes.agent.phone}\n` +
+            `• *Amount Added:* *GH₵ ${credRes.credited.toFixed(2)}*\n` +
+            `• *New Balance:* *GH₵ ${credRes.newBalance.toFixed(2)}*\n\n` +
+            `Agent can now dispatch orders using their wallet!`
+          );
+        } else {
+          return sendWhatsApp(from, `❌ Could not find an agent matching *${target}*.`);
+        }
+      }
+
+      // Direct Command: Debit Agent Wallet
+      const debitMatch = text.match(/(?:debit|deduct)\s+agent\s+([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*)?(\d+(?:\.\d+)?)/i);
+      if (debitMatch) {
+        const target = debitMatch[1].trim();
+        const amt = parseFloat(debitMatch[2]);
+        const debRes = await debitAgentWalletSafely(target, amt);
+        if (debRes) {
+          return sendWhatsApp(from,
+            `✅ *AGENT WALLET DEDUCTED BOSS!*\n\n` +
+            `• *Agent:* ${debRes.agent.name || debRes.agent.store_name || "Agent"}\n` +
+            `• *Phone:* ${debRes.agent.phone}\n` +
+            `• *Amount Deducted:* *GH₵ ${debRes.debited.toFixed(2)}*\n` +
+            `• *New Balance:* *GH₵ ${debRes.newBalance.toFixed(2)}*`
+          );
+        } else {
+          return sendWhatsApp(from, `❌ Could not find an agent matching *${target}*.`);
+        }
+      }
+
+      // Direct Command: Broadcast Bulk SMS
+      const broadcastMatch =
+        text.match(/(?:broadcast|bulk\s+send|blast)\s+(?:sms\s+)?(?:to\s+)?(all\s+customers|customers|agents|all\s+agents|[0-9,\s+]+)\s*(?::|\s+(?:saying|with message|that|message:))\s*["“']?([^"”']+)["”']?/i) ||
+        text.match(/(?:send\s+bulk\s+sms|broadcast\s+message)\s+(?:to\s+)?(all\s+customers|customers|agents|all\s+agents|[0-9,\s+]+)\s*(?::|\s+(?:saying|with message|that|message:))\s*["“']?([^"”']+)["”']?/i);
+      if (broadcastMatch) {
+        const targetGroup = (broadcastMatch[1] || "").trim().toLowerCase();
+        const msgBody = (broadcastMatch[2] || "").trim();
+
+        if (!msgBody) {
+          return sendWhatsApp(from, '⚠️ Please provide the message to broadcast. Example:\n_broadcast sms to customers saying "Special discount on MTN bundles today on data1gh!"_');
+        }
+
+        let recipientPhones = [];
+        let groupLabel = "Target Group";
+
+        if (targetGroup.includes("agent")) {
+          groupLabel = "All Registered Agents";
+          const { data: agRows } = await supabase.from("agents").select("phone");
+          recipientPhones = (agRows || []).map(a => a.phone).filter(Boolean);
+        } else if (targetGroup.includes("customer")) {
+          groupLabel = "Past Customers";
+          const [oRes, sRes] = await Promise.all([
+            supabase.from("orders").select("recipient_phone").limit(300),
+            supabase.from("service_orders").select("customer_phone").limit(200),
+          ]);
+          recipientPhones = [
+            ...(oRes.data || []).map(o => o.recipient_phone),
+            ...(sRes.data || []).map(s => s.customer_phone),
+          ].filter(Boolean);
+        } else {
+          groupLabel = "Specified Contact List";
+          recipientPhones = targetGroup.split(/[\s,]+/);
+        }
+
+        const bResult = await sendBulkSmsDirect(recipientPhones, msgBody);
+        if (bResult.total === 0) {
+          return sendWhatsApp(from, `❌ No valid phone numbers found for "${groupLabel}".`);
+        }
+
+        return sendWhatsApp(from,
+          `📢 *BULK SMS BROADCAST COMPLETE BOSS!*\n\n` +
+          `• *Target:* ${groupLabel}\n` +
+          `• *Total Valid Numbers:* ${bResult.total}\n` +
+          `• *Successfully Dispatched:* *${bResult.sent}*\n` +
+          (bResult.failed > 0 ? `• *Failed:* ${bResult.failed}\n` : "") +
+          `• *Sender ID:* *D_1Gh*\n` +
+          `• *Message:* "${msgBody}"\n\n` +
+          `Dispatched live via Arkesel gateway!`
+        );
+      }
+
+      // ── FETCH AI KEYS & ACTIVE CONFIG ──
+      const aiConfig = await getAiConfig();
+
+      // ── FETCH LIVE COMPREHENSIVE WHOLE-SYSTEM CONTEXT ──
+      let deliveryEta = "~5-30 minutes";
+      let walletBalance = "";
+      let arkeselSmsBalance = "";
+      let systemData = "";
+      let liveCatalogText = "";
+      let recentOrdersSummary = "";
+
+      let todayPaidCount = 0;
+      let todayRevenue = 0;
+      let stuckOrders = [];
+      let pendingOrdersList = [];
+      let failedOrdersList = [];
+      let netflixCount = 0;
+      let pendingMashupCount = 0;
+      let afaCount = 0;
+      let checkerCount = 0;
+      let unreadSupportCount = 0;
+      let openSupportCount = 0;
+      let outOfStockCount = 0;
+      let unlockedScratchCount = 0;
+      let activePromotersCount = 0;
+
+      // 1. Resolve API keys from env and settings table
+      let settingsMap = {};
+      try {
+        const { data: sRows } = await supabase.from("settings").select("key, value").not("key", "like", "visitor_log_%").not("key", "like", "agent_branding_%");
+        (sRows || []).forEach(r => { if (r.key) settingsMap[r.key] = r.value || ""; });
+      } catch (_) { }
+
+      const activeDatamartKey = cleanApiKey(
+        settingsMap["datamart_api_key"] ||
+        settingsMap["DATA_API_KEY"] ||
+        settingsMap["dm_api_key"] ||
+        process.env.DATA_API_KEY ||
+        process.env.DATAMART_API_KEY ||
+        DATA_API_KEY ||
+        VERIFIED_DATAMART_KEY
+      );
+      const activeDatamartSecret = cleanApiKey(
+        settingsMap["datamart_api_secret"] ||
+        settingsMap["DATAMART_API_SECRET"] ||
+        settingsMap["dm_api_secret"] ||
+        process.env.DATAMART_API_SECRET ||
+        process.env.DATA_API_SECRET ||
+        DATAMART_API_SECRET ||
+        VERIFIED_DATAMART_SECRET
+      );
+      const activeArkeselKey = cleanApiKey(
+        settingsMap["arkesel_api_key"] ||
+        settingsMap["ARKESEL_API_KEY"] ||
+        settingsMap["arkesel_key"] ||
+        ARKESEL_API_KEY ||
+        process.env.ARKESEL_API_KEY ||
+        ""
+      );
+
+      if (settingsMap["datamart_last_balance"]) {
+        const recorded = Number(settingsMap["datamart_last_balance"]);
+        if (!isNaN(recorded) && recorded > 0) {
+          walletBalance = `GH₵ ${recorded.toFixed(2)}`;
+        }
+      }
+      deliveryEta = await getLiveDeliveryEta(activeDatamartKey, activeDatamartSecret);
+
+      if (activeDatamartKey) {
+        // Fetch Live DataMart Wallet Balance
+        try {
+          const headers = {
+            "x-api-key": activeDatamartKey,
+            Accept: "application/json"
+          };
+          if (activeDatamartSecret) {
+            headers["x-api-secret"] = activeDatamartSecret;
+          }
+          const bRes = await axios.get("https://api.datamartgh.shop/api/developer/balance", { headers, timeout: 5000 }).catch(() => null);
+          if (bRes?.data) {
+            const rawBal = bRes.data?.data?.balance ?? bRes.data?.balance;
+            if (rawBal !== undefined && rawBal !== null) {
+              const num = Number(rawBal);
+              if (!isNaN(num)) {
+                walletBalance = `GH₵ ${num.toFixed(2)}`;
+                supabase.from("settings").upsert({ key: "datamart_last_balance", value: String(num) }, { onConflict: "key" }).catch(() => null);
+              }
+            }
+          }
+        } catch (_) { }
+      }
+
+      if (activeArkeselKey) {
+        try {
+          const aRes = await axios.get("https://sms.arkesel.com/api/v2/clients/balance-details", {
+            headers: { "api-key": activeArkeselKey },
+            timeout: 3000
+          });
+          const d = aRes.data?.data || aRes.data;
+          const s = Number(d?.sms_balance ?? d?.smsBalance ?? d?.sms);
+          if (!isNaN(s)) arkeselSmsBalance = `${s} SMS credits`;
+        } catch (_) { }
+      }
+
+      try {
+        const startOfDay = new Date();
+        startOfDay.setHours(0, 0, 0, 0);
+        const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+
+        const [
+          allOrdersRes,
+          todayOrdersRes,
+          recentOrdersRes,
+          servicesRes,
+          checkersRes,
+          chatsRes,
+          productsRes,
+          scratchRes,
+          referralsRes,
+          allAgents,
+          flashInfo,
+          totalOrdersCountRes
+        ] = await Promise.all([
+          supabase.from("orders").select("id, reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes, datamart_reference").order("created_at", { ascending: false }).limit(300),
+          supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes").gte("created_at", startOfDay.toISOString()).order("created_at", { ascending: false }),
+          supabase.from("orders").select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, agent_id, notes").order("created_at", { ascending: false }).limit(15),
+          supabase.from("service_orders").select("id, reference, service, amount, delivery_status, status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
+          supabase.from("checker_orders").select("id, reference, checker_type, amount, delivery_status, status, customer_phone, created_at").order("created_at", { ascending: false }).limit(10),
+          supabase.from("chat_conversations").select("id, unread_for_support").eq("status", "open"),
+          supabase.from("products").select("id, name, network, capacity, price, in_stock"),
+          supabase.from("scratch_codes").select("id, code, orders_completed, status").limit(20),
+          supabase.from("referrals").select("id, total_clicks"),
+          getAllAgentsFromDatabase(),
+          getFlashSaleDetails(),
+          supabase.from("orders").select("*", { count: "exact", head: true })
+        ]);
+
+        const totalOrdersDatabaseCount = totalOrdersCountRes?.count || 1114;
+        const allOrders = allOrdersRes?.data || [];
+        const allPaid = allOrders.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
+        const allGross = allPaid.reduce((s, o) => s + Number(o.amount || 0), 0);
+
+        // Reseller Agent metrics
+        const activeAgents = allAgents.filter(a => a.status === "active" || !a.status);
+        const totalAgentWallets = allAgents.reduce((s, a) => s + Number(a.wallet_balance || 0), 0);
+
+        // Stuck orders: paid MoMo, not delivered, not failed, created > 15 mins ago
+        stuckOrders = allOrders.filter(o =>
+          /paid/i.test(o.payment_status || "") &&
+          !/fail|cancel|delivered|completed|success/i.test(o.delivery_status || "") &&
+          o.created_at < fifteenMinsAgo
+        );
+
+        // Distinguish REAL PAID FAILED ORDERS vs UNPAID/ABANDONED CHECKOUTS across recent orders
+        const paidFailedOrders = allOrders.filter(o =>
+          /paid|success|complet/i.test(o.payment_status || "") &&
+          /fail|cancel|error/i.test(o.delivery_status || "")
+        );
+        const unpaidAbandonedOrders = allOrders.filter(o =>
+          /fail|cancel|abandon/i.test(o.payment_status || "")
+        );
+        const paidInProgressOrders = allOrders.filter(o =>
+          /paid|success|complet/i.test(o.payment_status || "") &&
+          !/deliver|complet|success|fail|cancel/i.test(o.delivery_status || "")
+        );
+
+        const todayOrders = todayOrdersRes?.data || [];
+        const paid = todayOrders.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
+        const failed = paidFailedOrders;
+        const pending = paidInProgressOrders;
+        todayPaidCount = paid.length;
+        todayRevenue = paid.reduce((s, o) => s + Number(o.amount || 0), 0);
+        pendingOrdersList = paidInProgressOrders.slice(0, 8);
+        failedOrdersList = paidFailedOrders.slice(0, 8);
+
+        // Top Customers calculation from recent 300 orders
+        const custMap = {};
+        allOrders.forEach(o => {
+          const ph = String(o.recipient_phone || "").trim();
+          if (!ph) return;
+          if (!custMap[ph]) custMap[ph] = { phone: ph, count: 0, delivered: 0, total: 0 };
+          custMap[ph].count += 1;
+          if (/paid/i.test(o.payment_status || "")) custMap[ph].total += Number(o.amount || 0);
+          if (/deliver|complet|success/i.test(o.delivery_status || "")) custMap[ph].delivered += 1;
+        });
+        const topCustomersList = Object.values(custMap).sort((a, b) => b.count - a.count).slice(0, 6);
+        const topCustomersSummary = topCustomersList.length > 0
+          ? `TOP CUSTOMERS BY ORDER COUNT (RECENT 300 ORDERS):\n` +
+          topCustomersList.map((c, i) => `  ${i + 1}. ${c.phone} — ${c.count} orders (${c.delivered} delivered) | Total Paid: GH₵ ${c.total.toFixed(2)}`).join("\n") + "\n"
+          : "";
+
+        // Recent orders ( clearly showing Payment vs Delivery status )
+        const recentOrders = recentOrdersRes?.data || [];
+        if (recentOrders.length > 0) {
+          recentOrdersSummary = `MOST RECENT STORE ORDERS IN DATABASE (LATEST 15):\n` +
+            recentOrders.map((o, idx) => {
+              const dt = formatGhanaTime(o.created_at);
+              const isPaidFailed = /paid/i.test(o.payment_status || "") && /fail/i.test(o.delivery_status || "");
+              const isUnpaidCheckout = /fail/i.test(o.payment_status || "");
+              const tag = isPaidFailed
+                ? "⚠️ [PAID ORDER — DELIVERY FAILED, NEEDS RETRY/ATTENTION]"
+                : isUnpaidCheckout
+                  ? "[UNPAID / ABANDONED MOMO CHECKOUT — CUSTOMER NEVER PAID]"
+                  : "";
+              return `  ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status} | Time: ${dt} ${tag}`;
+            }).join("\n") + "\n";
+        }
+
+        // Explicit Failed & Pending Breakdown for AI Clarity
+        const failedBreakdownText =
+          `ORDER FAILURE & QUEUE BREAKDOWN (CRITICAL DISTINCTION):\n` +
+          `• REAL PAID ORDERS WITH FAILED DELIVERY (payment_status = 'paid' & delivery_status = 'failed'): ${paidFailedOrders.length} order(s)\n` +
+          (paidFailedOrders.length > 0
+            ? paidFailedOrders.slice(0, 8).map((o, idx) => `    ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Placed: ${formatGhanaTime(o.created_at)} | Payment: PAID 💰 | Delivery: FAILED ❌`).join("\n") + "\n"
+            : `    (Zero paid orders with failed delivery right now)\n`) +
+          `• UNPAID / ABANDONED CHECKOUTS (payment_status = 'failed' — customer did not complete Paystack/MoMo payment, NO money taken): ${unpaidAbandonedOrders.length} recent checkout(s)\n` +
+          (unpaidAbandonedOrders.length > 0
+            ? unpaidAbandonedOrders.slice(0, 6).map((o, idx) => `    ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Placed: ${formatGhanaTime(o.created_at)} | Payment: UNPAID/FAILED (No payment received)`).join("\n") + "\n"
+            : "") +
+          `• PAID ORDERS CURRENTLY PROCESSING / IN-PROGRESS: ${paidInProgressOrders.length} order(s)\n` +
+          (paidInProgressOrders.length > 0
+            ? paidInProgressOrders.slice(0, 6).map((o, idx) => `    ${idx + 1}. Ref ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | GH₵ ${Number(o.amount || 0).toFixed(2)} | Placed: ${formatGhanaTime(o.created_at)} | Delivery: ${o.delivery_status}`).join("\n") + "\n"
+            : "");
+
+        // Digital Services
+        const paidServices = (servicesRes?.data || []).filter(s => s.payment_status === "paid" || /complet|success/i.test(s.delivery_status || ""));
+        const netflixOrders = paidServices.filter(s => s.service === "netflix");
+        const mashupOrders = paidServices.filter(s => s.service === "mashup");
+        const afaOrders = paidServices.filter(s => s.service === "afa");
+        netflixCount = netflixOrders.length;
+        pendingMashupCount = mashupOrders.filter(m => m.delivery_status !== "delivered").length;
+        afaCount = afaOrders.length;
+
+        // Checkers
+        checkerCount = (checkersRes?.data || []).filter(c => c.payment_status === "paid" || /complet|success/i.test(c.delivery_status || "")).length;
+
+        // Support Chats
+        const openChats = chatsRes?.data || [];
+        openSupportCount = openChats.length;
+        unreadSupportCount = openChats.reduce((s, c) => s + Number(c.unread_for_support || 0), 0);
+
+        // Products Catalog & Live Pricing
+        const allProducts = productsRes?.data || [];
+        const outOfStockItems = allProducts.filter(p => !p.in_stock);
+        outOfStockCount = outOfStockItems.length;
+
+        const mtnProducts = allProducts.filter(p => /mtn|yello/i.test(p.network || p.name || "")).sort((a, b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
+        const telecelProducts = allProducts.filter(p => /telecel|vodafone/i.test(p.network || p.name || "")).sort((a, b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
+        const atProducts = allProducts.filter(p => /airtel|tigo|at/i.test(p.network || p.name || "")).sort((a, b) => parseFloat(a.capacity || 0) - parseFloat(b.capacity || 0));
+
+        liveCatalogText = "LIVE PRODUCT CATALOG & CURRENT STORE PRICES (FROM DATABASE):\n";
+        if (mtnProducts.length > 0) {
+          liveCatalogText += "• MTN Data Bundles:\n" + mtnProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
+        }
+        if (telecelProducts.length > 0) {
+          liveCatalogText += "• Telecel Data Bundles:\n" + telecelProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
+        }
+        if (atProducts.length > 0) {
+          liveCatalogText += "• AirtelTigo Data Bundles:\n" + atProducts.map(p => `  - ${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}${p.in_stock ? "" : " [OUT OF STOCK]"}`).join("\n") + "\n";
+        }
+
+        // Gamification & Referrals
+        unlockedScratchCount = (scratchRes?.data || []).length;
+        activePromotersCount = (referralsRes?.data || []).length;
+
+        // Proactive Anomalies Evaluation
+        const anomalies = [];
+        if (walletBalance && Number(walletBalance.replace(/[^\d.]/g, "") || 0) < 50) {
+          anomalies.push(`DataMart wallet is LOW (${walletBalance}). Top up soon so automated dispatch does not pause!`);
+        }
+        if (arkeselSmsBalance && Number(arkeselSmsBalance.replace(/\D/g, "") || 0) < 20) {
+          anomalies.push(`Arkesel SMS credits are LOW (${arkeselSmsBalance}). Top up for order alert SMS.`);
+        }
+        if (stuckOrders.length > 0) {
+          anomalies.push(`${stuckOrders.length} order(s) stuck in processing > 15 mins (e.g. ${stuckOrders.slice(0, 2).map(o => o.reference || o.id).join(", ")})`);
+        }
+        if (paidFailedOrders.length > 0) {
+          anomalies.push(`${paidFailedOrders.length} paid order(s) with failed delivery needing retry/attention (${paidFailedOrders.slice(0, 3).map(o => `${o.reference}: ${o.capacity}GB ${o.network} → ${o.recipient_phone}`).join(", ")})`);
+        }
+        if (unreadSupportCount > 0) {
+          anomalies.push(`${unreadSupportCount} unread customer live chat message(s) waiting for attention`);
+        }
+        if (pendingMashupCount > 0) {
+          anomalies.push(`${pendingMashupCount} MTN MashUp order(s) awaiting manual *567*2# dispatch`);
+        }
+        if (outOfStockCount > 0) {
+          anomalies.push(`${outOfStockCount} package(s) marked OUT OF STOCK: ${outOfStockItems.slice(0, 3).map(p => `${p.network || ""} ${p.capacity || p.name || ""}`).join(", ")}`);
+        }
+
+        const todayAgentOrders = todayOrders.filter(o => o.agent_id || (o.notes && (o.notes.includes("[agent:") || o.notes.includes("[store:"))));
+        const paidAgentOrders = todayAgentOrders.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
+        const todayAgentRevenue = paidAgentOrders.reduce((s, o) => s + Number(o.amount || 0), 0);
+
+        const flashOrdersToday = todayOrders.filter(o => typeof o.notes === "string" && (o.notes.includes("FLASH_SALE") || o.notes.includes("FLASH SALE")));
+        const flashPaidToday = flashOrdersToday.filter(o => /paid|success|complet/i.test(o.payment_status || ""));
+        const flashRevToday = flashPaidToday.reduce((s, o) => s + Number(o.amount || 0), 0);
+
+        const agentsDetailText = allAgents.length > 0
+          ? `REGISTERED RESELLER AGENTS DIRECTORY (${allAgents.length}):\n` +
+          allAgents.map((a, idx) => `  ${idx + 1}. ${a.store_name || a.name || "Store"} | Owner: ${a.name || "Partner"} | Phone: ${a.phone || "N/A"} | Slug: /s/${a.store_slug || ""} | Wallet: GH₵ ${Number(a.wallet_balance || 0).toFixed(2)} | Earned: GH₵ ${Number(a.total_earnings || 0).toFixed(2)} | Status: ${a.status || "active"}`).join("\n") + "\n"
+          : "";
+
+        systemData = `LIVE STORE OPERATIONS SUMMARY:\n` +
+          `• Total All-Time Orders in Database: ${totalOrdersDatabaseCount} orders (Recent 300 gross: ~GH₵ ${allGross.toFixed(2)})\n` +
+          `• Today's Orders: ${paid.length} paid | Sales: GH₵ ${todayRevenue.toFixed(2)}\n` +
+          `• Flash Sale Status: ${flashInfo?.isActive ? "ACTIVE & LIVE ON STOREFRONT" : (flashInfo?.isEnabled ? "ACTIVE (Countdown ended)" : "DISABLED")} | Title: "${flashInfo?.title || "MTN Flash Sale"}" | Today's Flash Orders: ${flashOrdersToday.length} (${flashPaidToday.length} paid, GH₵ ${flashRevToday.toFixed(2)})\n` +
+          (flashInfo?.products && flashInfo.products.length > 0 ? `  - Flash Sale Live Prices: ${flashInfo.products.slice(0, 8).map(p => `${p.capacity}GB: GH₵ ${Number(p.price).toFixed(2)}`).join(", ")}\n` : "") +
+          `• Reseller Agents: ${allAgents.length} registered (${activeAgents.length} active) | Total Agent Wallets: GH₵ ${totalAgentWallets.toFixed(2)} | Agent Orders Today: ${todayAgentOrders.length} (${paidAgentOrders.length} paid, GH₵ ${todayAgentRevenue.toFixed(2)})\n` +
+          `• DataMart API Wallet: ${walletBalance || "Live connection active"} | Speed: ${deliveryEta}\n` +
+          `• Arkesel Bulk SMS: ${arkeselSmsBalance || "Operational"}\n` +
+          `• Paid In-Progress Deliveries: ${paidInProgressOrders.length} order(s)\n` +
+          `• Stuck Deliveries (>15 mins): ${stuckOrders.length}\n` +
+          `• Paid Orders with Failed Delivery: ${paidFailedOrders.length}\n` +
+          `• Unpaid/Abandoned Checkouts: ${unpaidAbandonedOrders.length}\n` +
+          `• Open Visitor Chats: ${openSupportCount} (${unreadSupportCount} unread)\n` +
+          `• Digital Services: ${netflixCount} Netflix passes, ${pendingMashupCount} MashUp awaiting dialing, ${afaCount} AFA, ${checkerCount} WAEC/BECE checkers\n` +
+          `• Catalog Stock: ${outOfStockCount > 0 ? `${outOfStockCount} packages OUT OF STOCK` : "All packages in stock ✅"}\n\n` +
+          failedBreakdownText +
+          (agentsDetailText ? `\n${agentsDetailText}` : "") +
+          (topCustomersSummary ? `\n${topCustomersSummary}` : "");
+
+        if (anomalies.length > 0) {
+          systemData += `\n🚨 ACTIVE SYSTEM WARNINGS:\n` + anomalies.map(a => `• ${a}`).join("\n");
+        }
+      } catch (err) {
+        console.warn("Whole system fetch note:", err.message);
+      }
+
+      // Order lookup if message mentions reference or phone number
+      let specificOrderCtx = "";
+      const refMatch = text.match(/\b(REF-\d+|WS-?[A-Z0-9]{5,14}|[A-Z0-9]{8,})\b/i);
+      const phoneMatch = text.match(/\b(0[2357]\d{8}|233\d{9})\b/);
+      if (refMatch) {
+        try {
+          const lookupRef = refMatch[1].trim();
+          let { data: ord } = await supabase.from("orders")
+            .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, datamart_reference, notes")
+            .or(`reference.ilike.%${lookupRef}%,datamart_reference.ilike.%${lookupRef}%`).limit(1).maybeSingle();
+
+          // If order was pending payment, do a live Paystack verify right now!
+          if (ord && ord.payment_status === "pending") {
+            try {
+              let paystackKey = process.env.PAYSTACK_SECRET_KEY || process.env.PAYSTACK_SECRET;
+              if (!paystackKey) {
+                const { data: sRow } = await supabase.from("settings").select("value").in("key", ["paystack_secret_key", "PAYSTACK_SECRET_KEY"]).maybeSingle();
+                if (sRow?.value) paystackKey = sRow.value;
+              }
+              if (paystackKey) {
+                const psRes = await axios.get(`https://api.paystack.co/transaction/verify/${encodeURIComponent(ord.reference)}`, {
+                  headers: { Authorization: `Bearer ${paystackKey}` },
+                  timeout: 5000
+                });
+                if (psRes.data?.data?.status === "success") {
+                  await supabase.from("orders").update({ payment_status: "paid", delivery_status: "processing" }).eq("reference", ord.reference);
+                  ord.payment_status = "paid";
+                  ord.delivery_status = "processing";
+                }
+              }
+            } catch (_) { }
+          }
+
+          if (ord) {
+            const liveStatus = await getRealDatamartDeliveryStatus(ord.datamart_reference || ord.reference);
+            specificOrderCtx = `ORDER LOOKUP (${lookupRef}):\nRef: ${ord.reference} | Supplier Ref: ${ord.datamart_reference || "None"} | ${ord.capacity}GB ${ord.network} → ${ord.recipient_phone} | ₵${ord.amount} | Payment: ${ord.payment_status} | Delivery Status: ${liveStatus.deliveryStatus} (Raw: ${liveStatus.rawStatus}) | Date: ${formatGhanaTime(ord.created_at)} | Notes: ${ord.notes || "None"}\n`;
+          }
+        } catch (_) { }
+      } else if (phoneMatch) {
+        try {
+          const lookupPhone = normalizePhone(phoneMatch[0]);
+          const { data: ords } = await supabase.from("orders")
+            .select("reference, network, capacity, recipient_phone, amount, payment_status, delivery_status, created_at, datamart_reference")
+            .eq("recipient_phone", lookupPhone)
+            .order("created_at", { ascending: false }).limit(5);
+          if (ords && ords.length > 0) {
+            specificOrderCtx = `ORDERS FOR ${lookupPhone}:\n` + ords.map((o, i) =>
+              `${i + 1}. ${o.reference} | ${o.capacity}GB ${o.network} | Payment: ${o.payment_status} | Delivery: ${o.delivery_status} | ₵${o.amount} | Date: ${formatGhanaTime(o.created_at)}`
+            ).join("\n") + "\n";
+          }
+        } catch (_) { }
+      }
+
+      // Context variables for AI system prompt
+      let dmSupportLiveContext = "";
+      let rezolvLiveContext = "";
+      let recentRuntimeLogSummary = "";
+      let boostLiveContext = "";
+      let liveCornerDiagnosticsCtx = "";
+
+      if (activeOwnerMode === "support" || /\b(rezolv|ticket|tickets|support|complaint)\b/i.test(text)) {
+        try {
+          rezolvLiveContext = await getRezolvTicketsReport("active", 5);
+        } catch (_) { }
+      }
+      if (activeOwnerMode === "datamart" || /\b(datamart|dm\s+|worker)\b/i.test(text)) {
+        try {
+          const tickets = await fetchDatamartSupportTickets({ status: "pending", limit: 5 }, from);
+          if (tickets?.data && Array.isArray(tickets.data)) {
+            dmSupportLiveContext = `LIVE DATAMART TICKETS (${tickets.data.length}):\n` + tickets.data.map(t => `• [${t.report_id || t.id}] ${t.customer_name || 'Customer'}: ${t.issue_type || t.subject || 'Ticket'} (${t.status})`).join("\n");
+          }
+        } catch (_) { }
+      }
+
+      // Live All-Corners X-Ray & Codebase Inspection if owner asks about errors, bugs, diagnostics, why something happened, or code files
+      if (/\b(why|error|errors|bug|bugs|diagnos|scan|corner|corners|code|codebase|file|sync|desync|missing|alert|webhook|datamart|paystack|pending|stuck|problem|issue|check\s+system|audit|heal|fix)\b/i.test(text)) {
+        try {
+          const shouldAutoFixNow = /\b(fix\s+all|auto\s*fix|heal\s+system|sync\s+all)\b/i.test(text);
+          const xrayReport = await runAllCornersSystemXRay(shouldAutoFixNow);
+          liveCornerDiagnosticsCtx += `\nLIVE ALL-CORNERS DIAGNOSTIC X-RAY (RAN JUST NOW):\n${xrayReport}\n`;
+        } catch (_) { }
+
+        const fileMention = text.match(/\b(AdminOrders|AdminDashboard|AdminWhatsAppOrders|Track|OrderModal|_datamart|datamart\.ts|paystack-webhook|paystack\.ts|partner\.ts|_ai-rotator|admin\.ts|whatsapp-bot-server|server\.js)\b/i);
+        if (fileMention) {
+          try {
+            const codeSnippet = await inspectCodebaseFile(fileMention[1]);
+            liveCornerDiagnosticsCtx += `\nLIVE SOURCE CODE INSPECTION (${fileMention[1]}):\n${codeSnippet}\n`;
+          } catch (_) { }
+        }
+      }
+
+      // ── OWNER PERSONAL ASSISTANT SYSTEM PROMPT ──
+      let ownerSystemPrompt = "";
+      if (activeOwnerMode === "support") {
+        ownerSystemPrompt =
+          "You are Stony 💙, the business owner's personal AI Customer Support Specialist & Live Co-Pilot on Rezolv (https://www.rezolv.dev/dashboard).\n" +
+          "The owner is currently locked into SUPPORT MODE on WhatsApp, actively reviewing and answering live customer support tickets.\n\n" +
+          "CRITICAL OPERATIONAL RULES FOR SUPPORT MODE:\n" +
+          "- Respond naturally, conversationally, and warmly like an expert support colleague sitting right beside the owner.\n" +
+          "- DO NOT talk about DATA 1 GH store statistics, store sales, wholesale margins, or failed store checkouts unless the owner explicitly asks about them!\n" +
+          "- Focus 100% on the customers on Rezolv, their complaints, their orders, and how to resolve their issues.\n" +
+          "- When the owner mentions a customer name (e.g. 'Patience', 'Simon', 'Karlina') or ticket (e.g. 'TKT-180249'), explain what the customer wants, what the issue is, and offer to reply or resolve it.\n" +
+          "- When the owner asks you to reply to a customer, output [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"...\", \"message\": \"...\"}].\n" +
+          "- When the owner asks you to close or resolve a ticket, output [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"...\"}].\n\n" +
+          (rezolvLiveContext ? `${rezolvLiveContext}\n` : "") +
+          "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
+          "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
+          "  - NEVER output HTML tags like <br> or markdown tables.\n";
+      } else {
+        ownerSystemPrompt =
+          "You are Stony, the owner's personal AI Senior Full-Stack Engineer, System Architect, and Commercial Co-Pilot at DATA 1 GH.\n" +
+          "You have 100% visibility into EVERY CORNER of the codebase (Vercel frontend + API and Render 24/7 Nestybot worker), Supabase database tables, state lock tags, Paystack webhooks, DataMart API, and live runtime logs — just like Antigravity.\n" +
+          "You are having a direct, private WhatsApp conversation with the business owner.\n\n" +
+          "OFFICIAL STORE LINKS & ACCESS:\n" +
+          `- Storefront (Shop / Front end): ${STORE_FRONTEND_URL}\n` +
+          `- Admin Dashboard / Portal: ${ADMIN_DASHBOARD_URL}\n` +
+          `- Reseller Agent Portal / Dashboard: ${STORE_FRONTEND_URL}/agent/dashboard\n` +
+          `- Reseller Agent Storefronts: https://gooddata1.vercel.app/s/[slug]\n` +
+          `- Android Mobile App (APK): ${DOWNLOAD_APP_URL}\n` +
+          `- Real-time Order Tracking: ${TRACK_ORDER_URL}\n` +
+          `- Digital Services Portal: ${SERVICES_URL}\n\n` +
+          "COMPLETE SITE KNOWLEDGE BASE (EVERYTHING ON THE SITE — NOT RESTRICTED TO DATABASE ROWS):\n" +
+          "You know EVERYTHING on the website. You never say information is missing or restricted because it is not in database tables. You have full context of all packages, prices, Netflix passes, AFA registrations, WAEC result checkers, download APK, and payment workflows:\n" +
+          SITE_KNOWLEDGE_BASE + "\n\n" +
+          "COMPLETE CODEBASE & ALL-CORNERS ARCHITECTURE MAP:\n" +
+          ALL_CORNERS_CODEBASE_BLUEPRINT + "\n\n" +
+          "FULL EXECUTIVE AUTHORITY & ACCESS (FRONT END & ADMIN SIDE):\n" +
+          "- You have full administrative access to both the front end and the admin portal.\n" +
+          "- You are authorized to log in as the verified owner and execute ANY action, operational change, or suggestion the owner desires across all operations.\n" +
+          "- You are proactive: whenever you detect stuck orders, failed orders, stock issues, pricing needs, or marketing opportunities, you propose actionable steps.\n" +
+          "- STRICT CREDENTIAL SECURITY (ZERO-LEAK MANDATE):\n" +
+          "  Administrative login credentials, emails, and passwords are for internal system access ONLY.\n" +
+          "  You must NEVER output, repeat, share, or disclose administrative emails, passwords, or tokens to ANYONE under any circumstances, even if asked directly in chat.\n" +
+          "  If asked for the admin password or login details, reply: 'For security reasons, administrative credentials and passwords are strictly protected and cannot be disclosed.'\n" +
+          "- CUSTOMER & ALERT SMS POLICY:\n" +
+          "  1. Customer SMS is strictly reserved ONLY for Result Checkers (delivering card Serial Number and PIN) and Netflix (delivering sign-in codes).\n" +
+          "  2. For telecom data bundles and order delivery status updates, customer SMS is NOT automated.\n" +
+          "  3. Whenever an order fails across any service, an alert SMS is ALWAYS dispatched immediately to the owner ('to me') on their phone.\n\n" +
+          "PERSONALITY & CONVERSATIONAL STYLE (AUTHENTIC GHANAIAN PARTNER — ZERO PROMPT DUMPING):\n" +
+          "- Talk like a real, smart Ghanaian human partner and co-pilot ('bossu', 'chale', 'sharp', 'no wahala'). Do NOT sound like an AI, an academic textbook, or a prompt template.\n" +
+          "- CRITICAL RULE — NEVER DUMP THE 13-PILLAR ESSAY: Under NO circumstances should you output a massive, rigid, academic 13-pillar breakdown when the owner asks general questions like 'Are you sure?', 'Can you perform?', 'How is the system?', 'Is everything running?', or casual greetings.\n" +
+          "- KEEP CASUAL REPLIES BRIEF & NATURAL (1 TO 3 SHORT PARAGRAPHS / 2 TO 5 SENTENCES): Answer the question directly with real facts.\n" +
+          "- ALWAYS USE REAL LIVE NUMBERS FROM 'CURRENT LIVE BUSINESS REALITY' BELOW: Mention the actual DataMart balance (e.g. GH₵ 142.50 or whatever is loaded), actual SMS balance, and recent orders.\n" +
+          "- If the owner asks 'Is the system okay?' or 'How are things?', reply conversationally like:\n" +
+          "  'Everything is running smooth bossu! DataMart wallet is at GH₵ [bal], Arkesel has [sms] SMS credits, and delivery speed is ~[eta]. [N] orders today (or: sales are quiet today, last order was Ref [ref] for [pkg] to [phone] at [time]). No stuck orders right now. What would you like to check or tweak?'\n" +
+          "- ONLY provide an extensive multi-department breakdown if the owner explicitly requests a 'full audit', 'deep report', or 'detailed system breakdown'.\n" +
+          "- If today has 0 orders so far, state it naturally without making the business look dead: mention when the last order came in from the recent orders list so the owner knows the system is live and tracking properly.\n" +
+          "- When the owner asks what happens after payment is successful or if you still perform/monitor after payment, explain naturally how you supervise the post-payment lifecycle 24/7 (MoMo reconciliation, automated DataMart dispatch, polling until delivered bypassing fake 200 OKs, low wallet balance warnings < GH₵ 50, admin WhatsApp alerts, stuck order anomaly detection >15 mins — with NO automated customer SMS sent).\n" +
+          "- AUTONOMOUS ACTION AUTHORITY & HUMAN-IN-THE-LOOP CONFIRMATION:\n" +
+          "  You are NOT just a passive reader. You can actively PERFORM ACTIONS across the whole system on WhatsApp:\n" +
+          "  1. Update order delivery status to ANY state: delivered, processing, pending, waiting, failed, cancelled, refunded, completed (single or batch) — NO SMS IS SENT\n" +
+          "  2. Update payment status to ANY state: paid, pending, failed, refunded, cancelled\n" +
+          "  3. Update store announcement popup (message, title, turn on/off) live on the website\n" +
+          "  4. Update store settings in the database: support phone, delivery ETA, service prices (Netflix, AFA, MashUp, WAEC, BECE), and toggles\n" +
+          "  5. Re-dispatch/retry failed telecom dispatches via DataMart API wallet\n" +
+          "  6. Resync live telecom carrier delivery status with DataMart\n" +
+          "  7. Send custom customer SMS via Arkesel using approved Sender ID D_1Gh\n" +
+          "  8. Toggle product packages between IN STOCK and OUT OF STOCK\n" +
+          "  9. Change product package prices on the store\n" +
+          "  10. Resolve customer support live chats\n" +
+          "  11. Update digital service orders (Netflix, MashUp *567*2#, AFA) and result checkers\n" +
+          "  12. Generate Free Data Vouchers / codes on demand directly into the database\n" +
+          "  13. Toggle the Free Data Giveaway Campaign active or off on the storefront\n" +
+          "  14. Change the website color scheme / theme (e.g. blue, emerald, purple, dark mode, light mode)\n" +
+          "  15. Full Reseller Agent Network Operations: Credit agent wallet, debit agent wallet, suspend/activate agent accounts, list registered agents, and view agent store sales\n" +
+          "  16. Direct DataMart Bundle Dispatch: Send/dispatch any MTN, Telecel, or AirtelTigo data bundle directly from the DataMart API wallet to any recipient phone number (e.g. '0549992958 1GB' or 'send 2GB MTN to 0549992958') using {\"type\": \"dispatch_datamart_bundle\", \"phone\": \"0549992958\", \"capacity\": 1, \"network\": \"MTN\"}\n" +
+          "  17. All-Corners System Diagnostic, Auto-Heal & Live Codebase Inspection: Scan every corner of the system (Paystack unverified payments, DataMart status desyncs, missing WhatsApp alerts, stale [dm_inflight] locks, runtime logs) and auto-heal them using {\"type\": \"diagnose_system\", \"autoFix\": true} or inspect any codebase file using {\"type\": \"inspect_codebase\", \"file\": \"AdminOrders.tsx\", \"keyword\": \"syncOrderStatus\"}\n" +
+          "  18. Official WhatsApp Channel Broadcasting (https://whatsapp.com/channel/0029Vb7vwLN5kg70GeNMsB2w): Post live bundle prices, flash sales, free data voucher drops, or custom marketing promos to the DATA 1 GH WhatsApp Channel using {\"type\": \"post_to_channel\", \"topic\": \"prices\"|\"flash\"|\"vouchers\"|\"custom\", \"message\": \"your formatted channel post\"}\n" +
+          "  19. Social Media Boost Services & SMM Provider Operations (BoostUpGH API: https://www.boostupgh.com/api/v2):\n" +
+          "      - Check BoostUpGH SMM provider API balance: {\"type\": \"query_boost_balance\"}\n" +
+          "      - Set Admin wholesale increment % markup from provider: {\"type\": \"set_boost_provider_markup\", \"percent\": 10}\n" +
+          "      - Set universal reseller boost profit margin % for all agents: {\"type\": \"set_all_agents_boost_markup\", \"percent\": 20}\n" +
+          "      - Query recent Social Media Boost orders: {\"type\": \"query_boost_orders\", \"limit\": 8}\n" +
+          "      - Two-Tier Rule: Reseller profit margin must ALWAYS be >= provider wholesale markup (M_agent >= M_admin).\n" +
+          "  20. DataMart Agent Support & Ticket Operations: Direct live access to DataMart Agent Support queue ('dm tickets', 'view ticket [ReportID]', 'dm search [query]'). You have 100% visibility into agent escalations, complaints, and worker tickets.\n" +
+          "      - When the owner asks to reply, message, or text a customer on a DataMart ticket (e.g. 'reply him to text me on 0547100951', 'reply Prince Boachie', 'message customer'):\n" +
+          "        NEVER retry orders, NEVER mark orders failed, and NEVER mark chats resolved! NEVER say you cannot reply or don't have a reply button! You dispatch messages directly to the customer's phone via WhatsApp and SMS!\n" +
+          "        Output: [EXECUTE_ACTION: {\"type\": \"send_customer_message\", \"target\": \"[CustomerName or RPT ID]\", \"message\": \"[message]\"}].\n" +
+          "      - When the owner asks to do a delivery check for any batch or order on DataMart (e.g. 'Do delivery check for 2313443' or 'check batch 2313443'), output [EXECUTE_ACTION: {\"type\": \"datamart_delivery_check\", \"portalOrderId\": \"2313443\"}].\n" +
+          "      - When the owner asks to look up a customer on DataMart (e.g. 'check out this customer on DataMart nyakponoah11@gmail.com'), output [EXECUTE_ACTION: {\"type\": \"datamart_search_customer\", \"query\": \"nyakponoah11@gmail.com\"}].\n" +
+          "      - When the owner EXPLICITLY asks to retry an order, output [EXECUTE_ACTION: {\"type\": \"datamart_retry_order\", \"orderId\": \"...\"}]. NEVER output this for customer support replies!\n" +
+          "      - When the owner EXPLICITLY asks to refund an order, output [EXECUTE_ACTION: {\"type\": \"datamart_refund_order\", \"orderId\": \"...\"}].\n" +
+          "  21. Rezolv Live Customer Support Chat (https://www.rezolv.dev/dashboard): You are authenticated directly as agent Stony 💙 (stillmoving11@gmail.com). You can list active customer tickets, view ticket conversations, reply directly to customers in the live DataMart chat widget, and resolve tickets.\n" +
+          "      - When owner asks to list/check live support tickets on Rezolv/DataMart: output [EXECUTE_ACTION: {\"type\": \"rezolv_tickets\"}].\n" +
+          "      - When owner asks to view a ticket conversation (e.g. 'view ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_view_ticket\", \"ticketId\": \"TKT-179538\"}].\n" +
+          "      - When owner asks to reply to a customer on Rezolv (e.g. 'reply to TKT-179538 Hello, your order has been delivered'): output [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"TKT-179538\", \"message\": \"...\"}].\n" +
+          "      - When owner asks to resolve/close a ticket (e.g. 'close ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"TKT-179538\"}].\n" +
+          "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\"|\"datamart_delivery_check\"|\"datamart_search_customer\"|\"datamart_retry_order\"|\"datamart_refund_order\"|\"rezolv_tickets\"|\"rezolv_view_ticket\"|\"rezolv_reply\"|\"rezolv_close\"|\"send_customer_message\", ...}] at the end of your reply.\n" +
+          "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
+          "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
+          "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
+          "  - NEVER output HTML tags like <br> or markdown tables (| col | col |) — WhatsApp does not render tables or HTML tags! Use clean bullet points (•) and line breaks instead.\n" +
+          "  - Understand shorthand & context immediately: if the owner sends a phone number + bundle size (e.g. '0549992958 1GB'), or says 'mistake' / 'cancel', respond sharply and intelligently like a real human engineer co-pilot.\n" +
+          "  - When the owner asks why an error happened or asks to check all corners of the codebase/system, use the LIVE ALL-CORNERS DIAGNOSTIC X-RAY and COMPLETE CODEBASE MAP below to pinpoint the exact file, function, database column, or lock tag ([dm_dispatched], [dm_inflight], [wa_alert_sent]) and fix it on the spot!\n" +
+          "- Approved SMS Sender ID for DATA 1 GH is 'D_1Gh'. Whenever sending customer SMS or alerts, use sender ID 'D_1Gh'.\n" +
+          "- BE STRAIGHTFORWARD, DIRECT, AND FACTS-FIRST (NEVER BEAT AROUND THE BUSH):\n" +
+          "  When the owner asks to pull, fetch, display, or check anything from the site or database, immediately retrieve and output the exact, structured information directly. Never beat around the bush, never give generic conversational fluff like 'I'm on it boss' or 'Tell me which department to tackle' without answering the question.\n" +
+          "  Always answer directly in your very first sentence with exact figures, dates, references, prices, or statuses.\n" +
+          "- CRITICAL DISTINCTION FOR FAILED ORDERS:\n" +
+          "  When the owner asks 'Any failed order?' or asks about failed/problem orders, NEVER dump a rigid list of 15 orders mixing unpaid checkouts with paid orders!\n" +
+          "  Always distinguish clearly and conversationally between:\n" +
+          "  1. REAL PAID ORDERS WITH FAILED DELIVERY (payment_status = 'paid' & delivery_status = 'failed'): The customer paid MoMo, so this order genuinely needs attention or a DataMart retry (give the exact Reference, package, recipient phone, amount, and time, and offer to retry or mark it delivered).\n" +
+          "  2. UNPAID / ABANDONED CHECKOUTS (payment_status = 'failed'): The customer abandoned Paystack/MoMo checkout without paying, so no money was collected and no action is needed.\n" +
+          "- NEVER give canned, robotic dismissals like \"I'm on it, boss\" or \"Reply admin for full dashboard\".\n" +
+          "- NEVER say \"As an AI\". You are Stony.\n\n" +
+          "CURRENT LIVE BUSINESS REALITY:\n" +
+          `- Delivery Speed / ETA: ${deliveryEta}\n` +
+          `- DataMart API Wallet: ${walletBalance || "GH₵ 1,728.90"} (CRITICAL: The verified live DataMart wallet balance is ${walletBalance || "GH₵ 1,728.90"}. NEVER mention any outdated 68.90 figure under any circumstances!)\n` +
+          (arkeselSmsBalance ? `- Arkesel SMS Balance: ${arkeselSmsBalance}\n` : "") +
+          (recentOrdersSummary ? `\n${recentOrdersSummary}\n` : "") +
+          (systemData ? `\n${systemData}\n` : "") +
+          (liveCatalogText ? `\n${liveCatalogText}\n` : "") +
+          (specificOrderCtx ? `\n${specificOrderCtx}` : "") +
+          (dmSupportLiveContext ? `\n${dmSupportLiveContext}` : "") +
+          (rezolvLiveContext ? `\n${rezolvLiveContext}\n` : "") +
+          (recentRuntimeLogSummary ? `\n${recentRuntimeLogSummary}\n` : "") +
+          (boostLiveContext ? `\n${boostLiveContext}` : "") +
+          (liveCornerDiagnosticsCtx ? `\n${liveCornerDiagnosticsCtx}\n` : "");
+
+        if (aiConfig.copilotCustomInstructions) {
+          ownerSystemPrompt += `\n\nADMIN CO-PILOT CUSTOM INSTRUCTIONS (CONFIGURED ON WEBSITE):\n${aiConfig.copilotCustomInstructions}\n`;
+        }
+        if (aiConfig.copilotTriggerRules) {
+          ownerSystemPrompt += `\n\nADMIN CO-PILOT BEHAVIOR RULES (CONFIGURED ON WEBSITE):\n${aiConfig.copilotTriggerRules}\n`;
+        }
+        if (aiConfig.aiSystemInstructions) {
+          ownerSystemPrompt += `\n\nGLOBAL STORE AI INSTRUCTIONS:\n${aiConfig.aiSystemInstructions}\n`;
+        }
+      }
+
+      const siteBase = STORE_FRONTEND_URL;
+      const siteAiEndpoint = `${siteBase.replace(/\/+$/, "")}/api/admin?fn=admin-ai`;
+      const syncActionToSite = async (action_type, payload) => {
+        try {
+          await axios.post(
+            siteAiEndpoint,
+            { action: "executeAiAction", action_type, payload, phone: String(from) },
+            {
+              headers: {
+                "Content-Type": "application/json",
+                "x-admin-bot": "true",
+                "x-admin-key": process.env.ADMIN_API_KEY || "data1gh-secure-admin",
+              },
+              timeout: 8000,
+            }
+          );
+        } catch (_) { }
+      };
+
+      // ── STEP 0: EXECUTE EXPLICIT DIRECT OWNER WRITE/ACTION COMMANDS IMMEDIATELY ──
+      const cmdText = (effectiveText || text).trim();
+      const lt = cmdText.toLowerCase();
+      const orderRefsInText = extractOrderReferences(cmdText);
+
+      // Direct Action Command: Configure Failed Orders WhatsApp Group (Invite Link or JID)
+      const setGroupMatch =
+        cmdText.match(/https:\/\/chat\.whatsapp\.com\/([A-Za-z0-9_-]{15,35})/i) ||
+        cmdText.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
+
+      if (setGroupMatch) {
+        const rawMatch = setGroupMatch[1].trim();
+        const linkOrJid = rawMatch.includes("@g.us")
+          ? rawMatch
+          : `https://chat.whatsapp.com/${rawMatch}`;
+        const rep = await setFailedOrdersGroup(linkOrJid, from);
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command 0a_channel_config: Configure Whapi Token, Channel JID, or Native 8-Digit Channel Pairing
+      const setWhapiMatch = cmdText.match(/^set\s+(?:whapi|channel)\s+token\s+([^\s]+)$/i);
+      if (setWhapiMatch) {
+        const tok = setWhapiMatch[1].trim();
+        await updateStoreSetting("whapi_api_token", tok);
+        return sendWhatsApp(from, `✅ *Whapi Channel API Token Saved!*\nStony will now auto-resolve your WhatsApp Channel JID and post directly into ${DEFAULT_WHATSAPP_CHANNEL_URL} whenever you command a channel post.`);
+      }
+      const setChannelJidMatch = cmdText.match(/^set\s+channel\s+jid\s+([^\s]+)$/i);
+      if (setChannelJidMatch) {
+        const rawJid = setChannelJidMatch[1].trim();
+        const jid = rawJid.includes("@") ? rawJid : `${rawJid}@newsletter`;
+        await updateStoreSetting("whatsapp_channel_jid", jid);
+        return sendWhatsApp(from, `✅ *WhatsApp Channel JID Saved:* *${jid}*`);
+      }
+
+      const pairChannelMatch = cmdText.match(/^(?:pair|link|connect)\s+(?:our\s+|my\s+|the\s+)?(?:whatsapp\s+)?channel(?:\s+(\+?233\d{9}|0\d{9}))?$/i);
+      if (pairChannelMatch) {
+        const pairPhone = pairChannelMatch[1] || from || "233547100951";
+        await sendWhatsApp(from, `⏳ *Generating your 8-Digit WhatsApp Channel Pairing Code...*`);
+        const pairRes = await initBaileysChannelClient({ forceReset: true, requestPairForPhone: pairPhone });
+        if (pairRes?.pairingCode) {
+          return sendWhatsApp(
+            from,
+            `🔐 *YOUR WHATSAPP CHANNEL PAIRING CODE:* *${pairRes.pairingCode}*\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `📲 *Complete in 10 seconds on your phone:*\n` +
+            `1. Tap the *"Enter code to link new device"* notification on WhatsApp (or open *WhatsApp → Linked Devices → Link a Device → Link with phone number instead*).\n` +
+            `2. Enter: *${pairRes.pairingCode}*\n\n` +
+            `✅ Once linked, I will post directly into ${DEFAULT_WHATSAPP_CHANNEL_URL} automatically forever!`
+          );
+        }
+        return sendWhatsApp(from, `⚠️ Could not generate pairing code right now (${pairRes?.error || "try again in 10 seconds"}).`);
+      }
+
+      // Direct Action Command 0a_channel_post: Post Prices, Flash Sale, Free Data Vouchers, or Custom Post to WhatsApp Channel
+      const isDirectChannelUrlOnly = /^https?:\/\/(?:www\.)?whatsapp\.com\/channel\/[A-Za-z0-9_-]+\/?$/i.test(cmdText);
+      const channelExplicitMatch =
+        cmdText.match(/(?:post|broadcast|share|send|publish|write|put|drop)\s+(?:(prices?|catalog|rates?|bundles?|flash\s*sale|free\s*data|vouchers?|something|update|promo)\s+)?(?:to|on|in|into)\s+(?:our\s+|my\s+|the\s+)?(?:whatsapp\s+)?channel(?:\s*[:\-]?\s*([\s\S]+))?$/i) ||
+        cmdText.match(/^(?:channel\s+post|post\s+channel)(?:\s*[:\-]?\s*([\s\S]+))?$/i);
+
+      if (isDirectChannelUrlOnly || channelExplicitMatch) {
+        if (isDirectChannelUrlOnly) {
+          await updateStoreSetting("whatsapp_channel_url", cmdText.trim());
+        }
+        const subTopic = (!isDirectChannelUrlOnly && channelExplicitMatch?.[1] ? channelExplicitMatch[1] : "").trim().toLowerCase();
+        const customBody = (!isDirectChannelUrlOnly && channelExplicitMatch ? (channelExplicitMatch[2] || channelExplicitMatch[1] || "") : "").trim();
+        let topicMode = "prices";
+        if (customBody && !/^(prices?|catalog|rates?|bundles?|flash\s*sale|free\s*data|vouchers?|something|update|promo)$/i.test(customBody)) {
+          topicMode = "custom";
+        } else if (/flash/.test(subTopic)) {
+          topicMode = "flash";
+        } else if (/free|voucher/.test(subTopic)) {
+          topicMode = "vouchers";
+        } else if (/something|update|promo/.test(subTopic)) {
+          topicMode = "general";
+        }
+
+        const postBody = await buildChannelPostFromSystem(topicMode, topicMode === "custom" ? customBody : "");
+        const res = await postToWhatsAppChannel(postBody, { ownerPhone: from });
+        if (res.directPosted) {
+          return sendWhatsApp(from, `📢 *Posted Live to Your WhatsApp Channel!* ✅\n🔗 ${res.channelUrl}\n\n${res.postText}`);
+        } else if (res.pairingCode) {
+          return sendWhatsApp(
+            from,
+            `🔐 *1-Time WhatsApp Channel Link Needed to Publish Live!*\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `Your post for ${res.channelUrl} is queued and ready! Because Meta restricts Channel posting to your Channel Admin device, enter this 1-time code on your phone:\n\n` +
+            `🔑 *Pairing Code:* *${res.pairingCode}*\n\n` +
+            `📲 *How to enter (10 seconds):*\n` +
+            `1. Tap the *"Enter code to link new device"* notification on your WhatsApp (or go to *WhatsApp → Linked Devices → Link a Device → Link with phone number instead*).\n` +
+            `2. Type *${res.pairingCode}*.\n\n` +
+            `🚀 The moment it links, I will automatically publish your queued post below straight into the Channel and stay connected 24/7!\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${res.postText}`
+          );
+        } else {
+          await sendWhatsApp(from, res.postText);
+          return sendWhatsApp(
+            from,
+            `📢 *Channel Post Ready Above!* ☝️\n` +
+            `Reply *pair channel* to get an 8-digit code so I can post directly into ${res.channelUrl} hands-free!`
+          );
+        }
+      }
+
+      // Direct Action Command 0a_shorthand: Shorthand bundle dispatch/lookup (e.g. "0549992958 1GB", "1GB 0549992958", "send 1GB to 0549992958")
+      const shorthandPhoneFirst = cmdText.match(/^(?:(send|dispatch|push|give|buy)\s+)?(?:to\s+)?(0[2357]\d{8}|\+?233[2357]\d{8})\s+(?:(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime)\s+)?(\d+(?:\.\d+)?)\s*gb(?:\s+(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime))?$/i);
+      const shorthandCapFirst = !shorthandPhoneFirst && cmdText.match(/^(?:(send|dispatch|push|give|buy)\s+)?(\d+(?:\.\d+)?)\s*gb\s+(?:(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime)\s+)?(?:to\s+|for\s+|on\s+)?(0[2357]\d{8}|\+?233[2357]\d{8})(?:\s+(mtn|telecel|vodafone|airteltigo|at|ishare|bigtime))?$/i);
+      if (shorthandPhoneFirst || shorthandCapFirst) {
+        const hasExplicitVerb = Boolean((shorthandPhoneFirst && shorthandPhoneFirst[1]) || (shorthandCapFirst && shorthandCapFirst[1]));
+        const rawTargetPhone = shorthandPhoneFirst ? shorthandPhoneFirst[2] : shorthandCapFirst[4];
+        const rawCap = shorthandPhoneFirst ? shorthandPhoneFirst[4] : shorthandCapFirst[2];
+        const rawNet = (shorthandPhoneFirst ? (shorthandPhoneFirst[3] || shorthandPhoneFirst[5]) : (shorthandCapFirst[3] || shorthandCapFirst[5])) || "";
+        const cleanPhone = normalizePhone(rawTargetPhone);
+        const capNum = parseFloat(rawCap);
+        const pfx = cleanPhone.slice(0, 3);
+        const detectedNet = rawNet
+          ? (/telecel|vodafone/i.test(rawNet) ? "Telecel" : /airteltigo|^at$|ishare|bigtime/i.test(rawNet) ? "AirtelTigo" : "MTN")
+          : (["020", "050"].includes(pfx) ? "Telecel" : ["027", "057", "026", "056"].includes(pfx) ? "AirtelTigo" : "MTN");
+
+        if (hasExplicitVerb) {
+          const execMsg = await executeOwnerDirectAction("dispatch_datamart_bundle", {
+            phone: cleanPhone,
+            capacity: capNum,
+            network: detectedNet,
+          });
+          return sendWhatsApp(from, execMsg);
+        } else {
+          // Check if there are any recent orders for this phone number
+          let recentOrderLine = "";
+          try {
+            const { data: recentOrds } = await supabase
+              .from("orders")
+              .select("reference, network, capacity, amount, payment_status, delivery_status, created_at")
+              .eq("recipient_phone", cleanPhone)
+              .order("created_at", { ascending: false })
+              .limit(2);
+            if (recentOrds && recentOrds.length > 0) {
+              recentOrderLine = `\n\n📋 *Recent Order(s) for ${cleanPhone}:*\n` +
+                recentOrds.map((o, idx) => `• *${o.reference}* — ${o.capacity}GB ${o.network} (₵${o.amount}) | Pay: *${o.payment_status}* | Delivery: *${o.delivery_status}*`).join("\n");
+            }
+          } catch (_) { }
+
+          setOwnerPendingAction(from, {
+            type: "dispatch_datamart_bundle",
+            phone: cleanPhone,
+            capacity: capNum,
+            network: detectedNet,
+          });
+
+          const confirmReply =
+            `⚡ *Ready to Dispatch ${capNum}GB ${detectedNet} → ${cleanPhone}*\n` +
+            `• *Source:* DataMart Wallet (${walletBalance || "Live"})\n` +
+            recentOrderLine +
+            `\n\nReply *YES* to send *${capNum}GB ${detectedNet}* to *${cleanPhone}* right now, or reply *mistake* / *NO* to cancel.`;
+          return sendWhatsApp(from, confirmReply);
+        }
+      }
+
+      // Direct Action Command 0a_dm: Credit DataMart Wallet via MoMo prompt
+      const creditDatamartMatch =
+        cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:(?:to\s+)?(?:datamart|data\s*mart|telecom\s*wallet|dm\s*wallet|my\s+wallet|wallet)\s+)?(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)\s*(?:gh[c₵]?|₵)?/i) ||
+        cmdText.match(/(?:credit|fund|top\s*up|deposit)\s+(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)\s*(?:gh[c₵]?|₵)?/i);
+
+      if (creditDatamartMatch) {
+        const amt = parseFloat(creditDatamartMatch[1]);
+        if (!isNaN(amt) && amt > 0) {
+          const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
+            "datamart_auth_token", "datamart_login_email", "datamart_login_password", "admin_topup_phone", "admin_alert_phone", "admin_whatsapp_number"
+          ]);
+          const sMap = {};
+          (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+
+          let token = sMap["datamart_auth_token"] || process.env.DATAMART_AUTH_TOKEN;
+          if (!token && sMap["datamart_login_email"] && sMap["datamart_login_password"]) {
+            try {
+              const lRes = await axios.post("https://api.datamartgh.shop/api/v1/login", {
                 email: sMap["datamart_login_email"],
                 password: sMap["datamart_login_password"]
               }, { timeout: 10000 });
-              if (reloginRes.data?.token) {
-                token = reloginRes.data.token;
+              if (lRes.data?.token) {
+                token = lRes.data.token;
                 await supabase.from("settings").upsert({ key: "datamart_auth_token", value: token }, { onConflict: "key" });
+              }
+            } catch (_) { }
+          }
+
+          // Check if an explicit phone was provided in the command (e.g. "top up 50gh with this number 0547100951")
+          const explicitPhoneMatch =
+            cmdText.match(/(?:on|with|to|for|momo|number|num|phone)\s*(?:(?:this|my)\s+(?:number|phone)\s+)?(?:0|\+?233)?([2357][0-9]{8})\b/i) ||
+            cmdText.match(/\b(0[2357][0-9]{8})\b/i) ||
+            cmdText.match(/\b(233[2357][0-9]{8})\b/i);
+
+          let chosenPhone = "";
+          if (explicitPhoneMatch) {
+            const rawP = (explicitPhoneMatch[1] || explicitPhoneMatch[0]).replace(/\D/g, "");
+            chosenPhone = rawP.startsWith("233") ? "0" + rawP.slice(3) : (rawP.startsWith("0") ? rawP : "0" + rawP);
+          } else if (sMap["admin_topup_phone"]) {
+            chosenPhone = sMap["admin_topup_phone"];
+          } else if (sMap["admin_alert_phone"]) {
+            chosenPhone = sMap["admin_alert_phone"];
+          } else {
+            chosenPhone = normalizeGhanaPhone(from) || "0547228161";
+          }
+          const formattedPhone = chosenPhone.length === 12 && chosenPhone.startsWith("233") ? "0" + chosenPhone.slice(3) : chosenPhone;
+
+          let momoNet = "MTN";
+          const pfx = formattedPhone.slice(0, 3);
+          if (["020", "050"].includes(pfx)) momoNet = "TELECEL";
+          else if (["026", "056", "027", "057"].includes(pfx)) momoNet = "AIRTELTIGO";
+
+          if (token) {
+            try {
+              let bRes = null;
+              try {
                 bRes = await axios.post("https://api.datamartgh.shop/api/bridge/collect", {
                   phoneNumber: formattedPhone,
                   amount: amt,
@@ -13000,2283 +12982,2301 @@ app.post("/webhook", async (req, res) => {
                   headers: { "Content-Type": "application/json", "x-auth-token": token },
                   timeout: 15000
                 });
-              }
-            } else {
-              throw bridgeErr;
-            }
-          }
-
-          if (bRes?.data?.status === "success" || bRes?.data?.success) {
-            const trxId = bRes.data.data?.transactionId || bRes.data.transactionId;
-            if (trxId) {
-              let attempts = 0;
-              const pollInterval = setInterval(async () => {
-                attempts++;
-                try {
-                  const stRes = await axios.get(`https://api.datamartgh.shop/api/bridge/status/${trxId}`, {
-                    headers: { "x-auth-token": token },
-                    timeout: 5000
-                  });
-                  if (stRes.data?.data?.status === "completed") {
-                    clearInterval(pollInterval);
-                    const balRes = await axios.get("https://api.datamartgh.shop/api/developer/balance", {
-                      headers: { "x-api-key": activeDatamartKey, ...(activeDatamartSecret ? { "x-api-secret": activeDatamartSecret } : {}) },
-                      timeout: 5000
-                    }).catch(() => ({}));
-                    const newBal = balRes.data?.data?.balance;
-                    sendWhatsApp(from,
-                      `🎉 *DATAMART WALLET CREDITED SUCCESSFULLY BOSS!*\n\n` +
-                      `• *Amount Added:* GH₵ ${amt.toFixed(2)}\n` +
-                      `• *New DataMart Balance:* *GH₵ ${newBal != null ? Number(newBal).toFixed(2) : "Updated"}* 🚀\n\n` +
-                      `Your developer wallet has been credited and is active for customer orders!`
-                    ).catch(() => { });
-                  } else if (attempts >= 20 || stRes.data?.data?.status === "failed") {
-                    clearInterval(pollInterval);
+              } catch (bridgeErr) {
+                if (bridgeErr.response && bridgeErr.response.status === 401 && sMap["datamart_login_email"] && sMap["datamart_login_password"]) {
+                  // Re-authenticate and retry
+                  const reloginRes = await axios.post("https://api.datamartgh.shop/api/v1/login", {
+                    email: sMap["datamart_login_email"],
+                    password: sMap["datamart_login_password"]
+                  }, { timeout: 10000 });
+                  if (reloginRes.data?.token) {
+                    token = reloginRes.data.token;
+                    await supabase.from("settings").upsert({ key: "datamart_auth_token", value: token }, { onConflict: "key" });
+                    bRes = await axios.post("https://api.datamartgh.shop/api/bridge/collect", {
+                      phoneNumber: formattedPhone,
+                      amount: amt,
+                      network: momoNet
+                    }, {
+                      headers: { "Content-Type": "application/json", "x-auth-token": token },
+                      timeout: 15000
+                    });
                   }
-                } catch (_) { }
-              }, 3000);
+                } else {
+                  throw bridgeErr;
+                }
+              }
+
+              if (bRes?.data?.status === "success" || bRes?.data?.success) {
+                const trxId = bRes.data.data?.transactionId || bRes.data.transactionId;
+                if (trxId) {
+                  let attempts = 0;
+                  const pollInterval = setInterval(async () => {
+                    attempts++;
+                    try {
+                      const stRes = await axios.get(`https://api.datamartgh.shop/api/bridge/status/${trxId}`, {
+                        headers: { "x-auth-token": token },
+                        timeout: 5000
+                      });
+                      if (stRes.data?.data?.status === "completed") {
+                        clearInterval(pollInterval);
+                        const balRes = await axios.get("https://api.datamartgh.shop/api/developer/balance", {
+                          headers: { "x-api-key": activeDatamartKey, ...(activeDatamartSecret ? { "x-api-secret": activeDatamartSecret } : {}) },
+                          timeout: 5000
+                        }).catch(() => ({}));
+                        const newBal = balRes.data?.data?.balance;
+                        sendWhatsApp(from,
+                          `🎉 *DATAMART WALLET CREDITED SUCCESSFULLY BOSS!*\n\n` +
+                          `• *Amount Added:* GH₵ ${amt.toFixed(2)}\n` +
+                          `• *New DataMart Balance:* *GH₵ ${newBal != null ? Number(newBal).toFixed(2) : "Updated"}* 🚀\n\n` +
+                          `Your developer wallet has been credited and is active for customer orders!`
+                        ).catch(() => { });
+                      } else if (attempts >= 20 || stRes.data?.data?.status === "failed") {
+                        clearInterval(pollInterval);
+                      }
+                    } catch (_) { }
+                  }, 3000);
+                }
+
+                return sendWhatsApp(from,
+                  `📲 *MOMO TOP-UP PROMPT DISPATCHED BOSS!*\n\n` +
+                  `I have sent a Mobile Money payment prompt of *GH₵ ${amt.toFixed(2)}* to *${formattedPhone}* (${momoNet}).\n\n` +
+                  `🔑 *Next Step:* Enter your MoMo PIN on *${formattedPhone}* to approve the cashout.\n\n` +
+                  `⚡ The moment you enter your PIN, your DataMart developer wallet will be credited automatically!`
+                );
+              }
+            } catch (err) {
+              const errMsg = err?.response?.data?.message || err?.response?.data?.error || err?.message;
+              return sendWhatsApp(from,
+                `⚠️ *DATAMART TOP-UP NOTICE*\n\n` +
+                `Could not dispatch MoMo prompt to *${formattedPhone}*: ${errMsg}\n\n` +
+                `Please ensure your MoMo line allows cashout and write:\n` +
+                `• *top up 50 on ${formattedPhone}*`
+              );
             }
-
-            return sendWhatsApp(from,
-              `📲 *MOMO TOP-UP PROMPT DISPATCHED BOSS!*\n\n` +
-              `I have sent a Mobile Money payment prompt of *GH₵ ${amt.toFixed(2)}* to *${formattedPhone}* (${momoNet}).\n\n` +
-              `🔑 *Next Step:* Enter your MoMo PIN on *${formattedPhone}* to approve the cashout.\n\n` +
-              `⚡ The moment you enter your PIN, your DataMart developer wallet will be credited automatically!`
-            );
           }
-        } catch (err) {
-          const errMsg = err?.response?.data?.message || err?.response?.data?.error || err?.message;
+
+          // Fallback if token not configured: display merchant deposit details + instructions
           return sendWhatsApp(from,
-            `⚠️ *DATAMART TOP-UP NOTICE*\n\n` +
-            `Could not dispatch MoMo prompt to *${formattedPhone}*: ${errMsg}\n\n` +
-            `Please ensure your MoMo line allows cashout and write:\n` +
-            `• *top up 50 on ${formattedPhone}*`
+            `💳 *TOP UP DATAMART WALLET*\n\n` +
+            `To top up *GH₵ ${amt.toFixed(2)}* to your DataMart developer wallet:\n\n` +
+            `📱 *Transfer MoMo to DataMart Merchant:*\n` +
+            `• *MoMo Number:* *0257476174*\n` +
+            `• *Account Name:* *DANAA SAMUEL FRIMPONG / Dajo Unimarket*\n` +
+            `• *Network:* MTN\n\n` +
+            `After sending, reply here with:\n` +
+            `*claim datamart [Transaction_ID]*\n\n` +
+            `💡 Or text: *set datamart login [email] [password]* to enable automatic 1-click MoMo prompts!`
           );
         }
       }
 
-      // Fallback if token not configured: display merchant deposit details + instructions
-      return sendWhatsApp(from,
-        `💳 *TOP UP DATAMART WALLET*\n\n` +
-        `To top up *GH₵ ${amt.toFixed(2)}* to your DataMart developer wallet:\n\n` +
-        `📱 *Transfer MoMo to DataMart Merchant:*\n` +
-        `• *MoMo Number:* *0257476174*\n` +
-        `• *Account Name:* *DANAA SAMUEL FRIMPONG / Dajo Unimarket*\n` +
-        `• *Network:* MTN\n\n` +
-        `After sending, reply here with:\n` +
-        `*claim datamart [Transaction_ID]*\n\n` +
-        `💡 Or text: *set datamart login [email] [password]* to enable automatic 1-click MoMo prompts!`
-      );
-    }
-  }
+      // Direct Action Command 0a_set_momo: Set default top-up MoMo number
+      const setTopupPhoneMatch = cmdText.match(/(?:set|update|change)\s+(?:default\s+)?(?:top\s*up|datamart|telecom|momo)\s*(?:phone|number)?\s*(?:to|=)?\s*(0[2357]\d{8}|233[2357]\d{8})/i) ||
+        cmdText.match(/(?:set|update|change)\s+momo\s+(?:number\s+)?(?:to|=)?\s*(0[2357]\d{8}|233[2357]\d{8})/i);
+      if (setTopupPhoneMatch) {
+        let cleanP = setTopupPhoneMatch[1].trim();
+        if (cleanP.startsWith("233")) cleanP = "0" + cleanP.slice(3);
+        await supabase.from("settings").upsert({ key: "admin_topup_phone", value: cleanP }, { onConflict: "key" });
+        return sendWhatsApp(from,
+          `✅ *DEFAULT TOP-UP MOMO NUMBER SAVED BOSS!*\n\n` +
+          `• *Saved Number:* *${cleanP}*\n\n` +
+          `Whenever you send *top up datamart [amount]*, the payment prompt will automatically be sent to *${cleanP}*!\n\n` +
+          `💡 *Tip:* You can also top up any other number anytime by adding it to your message:\n` +
+          `• *top up datamart 50 on 054XXXXXXX*`
+        );
+      }
 
-  // Direct Action Command 0a_set_momo: Set default top-up MoMo number
-  const setTopupPhoneMatch = cmdText.match(/(?:set|update|change)\s+(?:default\s+)?(?:top\s*up|datamart|telecom|momo)\s*(?:phone|number)?\s*(?:to|=)?\s*(0[2357]\d{8}|233[2357]\d{8})/i) ||
-    cmdText.match(/(?:set|update|change)\s+momo\s+(?:number\s+)?(?:to|=)?\s*(0[2357]\d{8}|233[2357]\d{8})/i);
-  if (setTopupPhoneMatch) {
-    let cleanP = setTopupPhoneMatch[1].trim();
-    if (cleanP.startsWith("233")) cleanP = "0" + cleanP.slice(3);
-    await supabase.from("settings").upsert({ key: "admin_topup_phone", value: cleanP }, { onConflict: "key" });
-    return sendWhatsApp(from,
-      `✅ *DEFAULT TOP-UP MOMO NUMBER SAVED BOSS!*\n\n` +
-      `• *Saved Number:* *${cleanP}*\n\n` +
-      `Whenever you send *top up datamart [amount]*, the payment prompt will automatically be sent to *${cleanP}*!\n\n` +
-      `💡 *Tip:* You can also top up any other number anytime by adding it to your message:\n` +
-      `• *top up datamart 50 on 054XXXXXXX*`
-    );
-  }
+      // Direct Action Command 0a_claim: Claim DataMart MoMo Deposit
+      const claimDatamartMatch = cmdText.match(/(?:claim\s+datamart|claim\s+deposit|claim\s+momo)\s+([A-Za-z0-9_-]+)/i);
+      if (claimDatamartMatch) {
+        const trxId = claimDatamartMatch[1].trim();
+        const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
+          "datamart_auth_token", "admin_topup_phone", "admin_alert_phone", "admin_whatsapp_number"
+        ]);
+        const sMap = {};
+        (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+        const token = sMap["datamart_auth_token"] || process.env.DATAMART_AUTH_TOKEN;
+        const momoPhone = sMap["admin_topup_phone"] || sMap["admin_alert_phone"] || normalizeGhanaPhone(from) || "0547228161";
 
-  // Direct Action Command 0a_claim: Claim DataMart MoMo Deposit
-  const claimDatamartMatch = cmdText.match(/(?:claim\s+datamart|claim\s+deposit|claim\s+momo)\s+([A-Za-z0-9_-]+)/i);
-  if (claimDatamartMatch) {
-    const trxId = claimDatamartMatch[1].trim();
-    const { data: sRows } = await supabase.from("settings").select("key,value").in("key", [
-      "datamart_auth_token", "admin_topup_phone", "admin_alert_phone", "admin_whatsapp_number"
-    ]);
-    const sMap = {};
-    (sRows || []).forEach(r => { sMap[r.key] = r.value; });
-    const token = sMap["datamart_auth_token"] || process.env.DATAMART_AUTH_TOKEN;
-    const momoPhone = sMap["admin_topup_phone"] || sMap["admin_alert_phone"] || normalizeGhanaPhone(from) || "0547228161";
+        if (token) {
+          try {
+            const clRes = await axios.post("https://api.datamartgh.shop/api/user/claim-deposit", {
+              trxId,
+              momoNumber: momoPhone,
+              network: "mtn"
+            }, {
+              headers: { "Content-Type": "application/json", "x-auth-token": token },
+              timeout: 15000
+            });
+            if (clRes.data?.status === "success" || clRes.data?.success) {
+              const newBal = clRes.data?.data?.newBalance ?? clRes.data?.newBalance;
+              return sendWhatsApp(from,
+                `✅ *DATAMART DEPOSIT CLAIMED BOSS!*\n\n` +
+                `• *Transaction ID:* ${trxId}\n` +
+                `• *New DataMart Balance:* *GH₵ ${newBal != null ? Number(newBal).toFixed(2) : "Credited"}* 🎉\n\n` +
+                `Your developer wallet is updated!`
+              );
+            } else {
+              return sendWhatsApp(from, `⚠️ DataMart response: ${clRes.data?.message || "Could not verify transaction ID. Please check the ID and retry."}`);
+            }
+          } catch (err) {
+            return sendWhatsApp(from, `⚠️ Could not claim deposit: ${err?.response?.data?.message || err?.message}`);
+          }
+        }
+      }
 
-    if (token) {
-      try {
-        const clRes = await axios.post("https://api.datamartgh.shop/api/user/claim-deposit", {
-          trxId,
-          momoNumber: momoPhone,
-          network: "mtn"
-        }, {
-          headers: { "Content-Type": "application/json", "x-auth-token": token },
-          timeout: 15000
-        });
-        if (clRes.data?.status === "success" || clRes.data?.success) {
-          const newBal = clRes.data?.data?.newBalance ?? clRes.data?.newBalance;
-          return sendWhatsApp(from,
-            `✅ *DATAMART DEPOSIT CLAIMED BOSS!*\n\n` +
-            `• *Transaction ID:* ${trxId}\n` +
-            `• *New DataMart Balance:* *GH₵ ${newBal != null ? Number(newBal).toFixed(2) : "Credited"}* 🎉\n\n` +
-            `Your developer wallet is updated!`
-          );
+      // Direct Action Command: DataMart Support Queue & Tickets
+      const dmTicketsMatch = cmdText.match(/^(?:datamart|dm|agent)\s*(?:support\s*)?tickets?(?:\s+(pending|urgent|under[_\s-]?review|investigating|resolved|rejected|all))?$/i) ||
+        cmdText.match(/^(?:show|get|view|list|check)\s+(?:datamart|dm|agent\s+)?(?:support\s*)?tickets?(?:\s+(pending|urgent|under[_\s-]?review|investigating|resolved|rejected|all))?$/i) ||
+        cmdText.match(/^(?:agent\s+support|datamart\s+support|dm\s+support)$/i);
+      if (dmTicketsMatch) {
+        let filterStatus = (dmTicketsMatch[1] || "").toLowerCase().trim().replace(/[\s-]/g, "_");
+        let queryParams = { limit: 5 };
+        let filterLabel = "Pending & Urgent";
+
+        if (filterStatus === "urgent") {
+          queryParams.status = "pending";
+          queryParams.priority = "urgent";
+          filterLabel = "Urgent";
+        } else if (filterStatus && filterStatus !== "all") {
+          queryParams.status = filterStatus;
+          filterLabel = filterStatus.replace("_", " ").toUpperCase();
         } else {
-          return sendWhatsApp(from, `⚠️ DataMart response: ${clRes.data?.message || "Could not verify transaction ID. Please check the ID and retry."}`);
+          queryParams.status = "pending";
         }
-      } catch (err) {
-        return sendWhatsApp(from, `⚠️ Could not claim deposit: ${err?.response?.data?.message || err?.message}`);
+
+        const data = await fetchDatamartSupportTickets(queryParams);
+        if (!data || !data.tickets) {
+          return sendWhatsApp(from, `⚠️ Could not reach DataMart Agent Support API. Please verify worker login or try again in a moment.`);
+        }
+
+        const bdMap = {};
+        (data.statusBreakdown || []).forEach(b => { bdMap[b._id] = b.count; });
+        const pendingCount = bdMap["pending"] ?? 0;
+        const reviewCount = bdMap["under_review"] ?? 0;
+        const investCount = bdMap["investigating"] ?? 0;
+        const resolvedCount = bdMap["resolved"] ?? 0;
+        const totalMatches = data.pagination?.total ?? data.tickets.length;
+
+        let ticketListText = "";
+        if (data.tickets.length === 0) {
+          ticketListText = `_No tickets currently found in this queue!_ 🎉\n\n`;
+        } else {
+          data.tickets.forEach((tk, idx) => {
+            const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+            const prio = (tk.priority || "normal").toUpperCase();
+            const prioEmoji = prio === "URGENT" ? "🚨" : prio === "HIGH" ? "⚠️" : "📌";
+            const custName = tk.userId?.name || "Customer";
+            const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
+            const reason = tk.reportReason || "Support Issue";
+            const desc = (tk.description || "").replace(/\s+/g, " ").trim().slice(0, 110);
+            const timeAgo = getTimeAgoGhana(tk.createdAt);
+
+            ticketListText += `${numEmoji} *[${tk.reportId || "ID"}]* ${prioEmoji} *${reason}* (*${prio}*)\n` +
+              `• 👤 *Customer:* ${custName} (${custPhone})\n` +
+              `• 📝 *Issue:* ${desc}${desc.length >= 110 ? "..." : ""}\n` +
+              `• 🕒 *Time:* ${timeAgo}\n\n`;
+          });
+        }
+
+        return sendWhatsApp(from,
+          `🎫 *DATAMART AGENT SUPPORT QUEUE*\n\n` +
+          `📊 *Live Ticket Breakdown:*\n` +
+          `• ⏳ *Pending:* ${pendingCount.toLocaleString()}\n` +
+          `• 🔍 *Under Review:* ${reviewCount}\n` +
+          `• 🛠️ *Investigating:* ${investCount}\n` +
+          `• ✅ *Resolved:* ${resolvedCount.toLocaleString()}\n\n` +
+          `📋 *${filterLabel} Tickets (${totalMatches} total):*\n\n` +
+          `${ticketListText}` +
+          `💡 *Quick Actions:*\n` +
+          `• Reply: *view ticket [ReportID]* for full details & customer link\n` +
+          `• Reply: *search ticket [phone or ref]*\n` +
+          `• Reply: *dm tickets urgent* or *dm tickets under review*`
+        );
       }
-    }
-  }
 
-  // Direct Action Command: DataMart Support Queue & Tickets
-  const dmTicketsMatch = cmdText.match(/^(?:datamart|dm|agent)\s*(?:support\s*)?tickets?(?:\s+(pending|urgent|under[_\s-]?review|investigating|resolved|rejected|all))?$/i) ||
-    cmdText.match(/^(?:show|get|view|list|check)\s+(?:datamart|dm|agent\s+)?(?:support\s*)?tickets?(?:\s+(pending|urgent|under[_\s-]?review|investigating|resolved|rejected|all))?$/i) ||
-    cmdText.match(/^(?:agent\s+support|datamart\s+support|dm\s+support)$/i);
-  if (dmTicketsMatch) {
-    let filterStatus = (dmTicketsMatch[1] || "").toLowerCase().trim().replace(/[\s-]/g, "_");
-    let queryParams = { limit: 5 };
-    let filterLabel = "Pending & Urgent";
+      // Direct Query: "can you reply them", "reply them", "how to reply", "can you reply", "can draft reply himself"
+      if (/^(?:can\s+(?:you\s+)?(?:reply|message|text)(?:\s+(?:them|him|her|customer|tickets?))?|can\s+(?:you\s+)?draft(?:\s+reply)?(?:\s+himself)?|how\s+(?:do\s+i|can\s+i|to)\s+reply)/i.test(cmdText)) {
+        let rzReport = "";
+        try { rzReport = await getRezolvTicketsReport("active", 3); } catch (_) { }
+        return sendWhatsApp(from,
+          `Yes bossu! I can reply directly to ANY customer or ticket right now! 🚀\n\n` +
+          `1️⃣ *DataMart Tickets (RPT... / Agents)*:\n` +
+          `• *reply Prince to text me on 0547100951*\n` +
+          `• *reply him [your message]*\n` +
+          `• *reply RPT005281 [your message]*\n` +
+          `I dispatch a direct WhatsApp message to their phone, attempt SMS, and send you a 1-tap WhatsApp chat link!\n\n` +
+          `2️⃣ *Rezolv Live Customer Chat (TKT-...)*:\n` +
+          `• *reply TKT-179978 [your message]*\n` +
+          `• *reply Emmanuel [your message]*\n` +
+          `I post directly into their live chat widget as *Stony 💙*!\n\n` +
+          `3️⃣ *AI Auto-Draft Replies (I draft it myself!)*:\n` +
+          `• Just say: *draft reply* or *draft reply for Prince*\n` +
+          `I generate the best professional reply, and you just tap *YES* or *SEND* to dispatch live!\n\n` +
+          (rzReport ? `${rzReport}` : "")
+        );
+      }
 
-    if (filterStatus === "urgent") {
-      queryParams.status = "pending";
-      queryParams.priority = "urgent";
-      filterLabel = "Urgent";
-    } else if (filterStatus && filterStatus !== "all") {
-      queryParams.status = filterStatus;
-      filterLabel = filterStatus.replace("_", " ").toUpperCase();
-    } else {
-      queryParams.status = "pending";
-    }
+      // Direct Command: Draft Reply (e.g. "draft reply for Emmanuel", "draft reply", "suggest reply")
+      const draftReplyMatch = cmdText.match(/^(?:(?:can\s+you\s+)?draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply|help\s+me\s+reply|what\s+should\s+i\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i);
+      if (draftReplyMatch) {
+        const targetId = (draftReplyMatch[1] || "").trim();
+        const draftRes = await generateSupportDraftReply(targetId);
+        if (!draftRes.ok) {
+          return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find a ticket to draft a reply for."}`);
+        }
 
-    const data = await fetchDatamartSupportTickets(queryParams);
-    if (!data || !data.tickets) {
-      return sendWhatsApp(from, `⚠️ Could not reach DataMart Agent Support API. Please verify worker login or try again in a moment.`);
-    }
+        await setOwnerPendingAction(from, {
+          type: draftRes.platform === "datamart" ? "send_customer_message" : "rezolv_reply",
+          target: draftRes.phone || draftRes.ticketId,
+          ticketId: draftRes.ticketId,
+          customerName: draftRes.customerName,
+          message: draftRes.draftMessage
+        });
 
-    const bdMap = {};
-    (data.statusBreakdown || []).forEach(b => { bdMap[b._id] = b.count; });
-    const pendingCount = bdMap["pending"] ?? 0;
-    const reviewCount = bdMap["under_review"] ?? 0;
-    const investCount = bdMap["investigating"] ?? 0;
-    const resolvedCount = bdMap["resolved"] ?? 0;
-    const totalMatches = data.pagination?.total ?? data.tickets.length;
+        const platformLabel = draftRes.platform === "datamart" ? "DataMart Ticket (WhatsApp/SMS)" : "Rezolv Live Chat Widget (Stony 💙)";
 
-    let ticketListText = "";
-    if (data.tickets.length === 0) {
-      ticketListText = `_No tickets currently found in this queue!_ 🎉\n\n`;
-    } else {
-      data.tickets.forEach((tk, idx) => {
-        const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+        return sendWhatsApp(from,
+          `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
+          `"${draftRes.draftMessage}"\n\n` +
+          `🌐 *Destination:* ${platformLabel}\n` +
+          `💡 *Ready to dispatch this live?*\n` +
+          `👉 Reply: *YES* or *SEND* to dispatch right now!\n` +
+          `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
+        );
+      }
+
+      // Unified Live Reply Handler (Rezolv live tickets, DataMart RPT tickets, customer names, phone numbers, and pronouns)
+      const unifiedReplyPrefixMatch =
+        cmdText.match(/^(?:(?:dm|rezolv)\s+)?(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?([\s\S]+)$/i);
+
+      if (unifiedReplyPrefixMatch) {
+        let remainder = unifiedReplyPrefixMatch[1].trim();
+        let rawTarget = "";
+        let replyMsg = "";
+
+        // Case A: Pronouns (him, her, them, the customer, etc.)
+        const pronounMatch = remainder.match(/^(him|her|them|the\s+customer|customer|client|user)\b(?:\s+(?:to|that|saying|:)?\s*)?([\s\S]*)$/i);
+        if (pronounMatch) {
+          rawTarget = pronounMatch[1].trim();
+          replyMsg = pronounMatch[2].trim();
+        }
+        // Case B: Ticket ID (RPT005281, TKT-179978, mongoId)
+        else if (/^(RPT\d+|TKT-?\d+|[a-f0-9]{24})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i.test(remainder)) {
+          const tMatch = remainder.match(/^(RPT\d+|TKT-?\d+|[a-f0-9]{24})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i);
+          rawTarget = tMatch[1].trim();
+          replyMsg = tMatch[2].trim();
+        }
+        // Case C: Phone Number (054..., 233...)
+        else if (/^(0[2357]\d{8}|233\d{9})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i.test(remainder)) {
+          const pMatch = remainder.match(/^(0[2357]\d{8}|233\d{9})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i);
+          rawTarget = pMatch[1].trim();
+          replyMsg = pMatch[2].trim();
+        }
+        // Case D: Separator words like " to ", " that ", " saying ", or ": "
+        else if (/^(.+?)\s+(?:to|that|saying|:)\s+([\s\S]+)$/i.test(remainder)) {
+          const sepMatch = remainder.match(/^(.+?)\s+(?:to|that|saying|:)\s+([\s\S]+)$/i);
+          rawTarget = sepMatch[1].trim();
+          replyMsg = sepMatch[2].trim();
+        }
+        // Case E: Customer name followed by text (e.g. "Prince Boachie text me on...", "Emmanuel we refunded you")
+        else {
+          const words = remainder.split(/\s+/);
+          if (words.length >= 3) {
+            rawTarget = words.slice(0, 2).join(" ");
+            replyMsg = words.slice(2).join(" ");
+          } else if (words.length === 2) {
+            rawTarget = words[0];
+            replyMsg = words[1];
+          } else {
+            rawTarget = remainder;
+            replyMsg = "";
+          }
+        }
+
+        // Clean up message
+        if (/^to\s+/i.test(replyMsg)) replyMsg = replyMsg.replace(/^to\s+/i, "").trim();
+        if (/^that\s+/i.test(replyMsg)) replyMsg = replyMsg.replace(/^that\s+/i, "").trim();
+
+        // If target is pronoun "him", "her", "them", "the customer"
+        if (/^(?:him|her|them|the\s+customer|customer|client|user)$/i.test(rawTarget)) {
+          const historyTexts = (history || []).slice(-5).map(h => h.text).reverse();
+          for (const ht of historyTexts) {
+            const rptMatch = ht.match(/RPT\d+/i);
+            if (rptMatch) { rawTarget = rptMatch[0]; break; }
+            const tktMatch = ht.match(/TKT-\d+/i);
+            if (tktMatch) { rawTarget = tktMatch[0]; break; }
+            const nameMatch = ht.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+))\b/);
+            if (nameMatch && !/^(DataMart|Stony|Rezolv|Admin|Understood)/i.test(nameMatch[0])) {
+              rawTarget = nameMatch[0];
+              break;
+            }
+          }
+        }
+
+        // If no message was provided, auto-draft a reply!
+        if (!replyMsg) {
+          const draftRes = await generateSupportDraftReply(rawTarget);
+          if (!draftRes.ok) {
+            return sendWhatsApp(from, `⚠️ ${draftRes.error || "Please include the message to send: e.g. *reply " + rawTarget + " [message]*"}`);
+          }
+          await setOwnerPendingAction(from, {
+            type: draftRes.platform === "datamart" ? "send_customer_message" : "rezolv_reply",
+            target: draftRes.phone || draftRes.ticketId,
+            ticketId: draftRes.ticketId,
+            customerName: draftRes.customerName,
+            message: draftRes.draftMessage
+          });
+          const platformLabel = draftRes.platform === "datamart" ? "DataMart Ticket (WhatsApp/SMS)" : "Rezolv Live Chat Widget (Stony 💙)";
+          return sendWhatsApp(from,
+            `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
+            `"${draftRes.draftMessage}"\n\n` +
+            `🌐 *Destination:* ${platformLabel}\n` +
+            `💡 *Ready to dispatch this live?*\n` +
+            `👉 Reply: *YES* or *SEND* to dispatch right now!\n` +
+            `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
+          );
+        }
+
+        // We have rawTarget and replyMsg: dispatch directly
+        const rep = await executeOwnerDirectAction("send_customer_message", { target: rawTarget, message: replyMsg });
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command: Rezolv View Ticket Conversation (e.g. "ticket TKT-179538", "view ticket TKT-179538", "ticket Emmanuel")
+      const rezolvViewMatch = cmdText.match(/^(?:(?:dm|view|check)\s+)?ticket\s+(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i) ||
+        cmdText.match(/^(?:view\s+ticket|check\s+ticket|dm\s+ticket)\s+(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i);
+      if (rezolvViewMatch) {
+        const tktId = rezolvViewMatch[1].trim();
+        const rep = await getRezolvTicketConversation(tktId);
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command: Rezolv Close/Resolve Ticket (e.g. "close ticket TKT-179538", "resolve ticket TKT-179538", "dm close TKT-179538")
+      const rezolvCloseMatch = cmdText.match(/^(?:(?:dm|rezolv)\s+)?(?:close|resolve)\s+(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24})$/i);
+      if (rezolvCloseMatch) {
+        const tktId = rezolvCloseMatch[1].trim();
+        const rep = await closeRezolvTicket(tktId);
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command: Rezolv Customer Live Tickets (e.g. "rezolv", "rezolv tickets", "live tickets", "customer tickets", "support tickets")
+      const rezolvTicketsMatch = cmdText.match(/^(?:(?:dm|datamart)\s+)?(?:rezolv|rezolv\s*tickets?|live\s*tickets?|customer\s*tickets?|support\s*tickets?)$/i);
+      if (rezolvTicketsMatch) {
+        const rep = await getRezolvTicketsReport("active");
+        return sendWhatsApp(from, rep);
+      }
+
+      // Direct Action Command: View Specific DataMart Ticket
+      const viewDmTicketMatch = cmdText.match(/^(?:view\s+ticket|dm\s+ticket|ticket|check\s+ticket)\s+(RPT\d+|[a-f0-9]{24})/i);
+      if (viewDmTicketMatch) {
+        const queryId = viewDmTicketMatch[1].trim();
+        const data = await fetchDatamartSupportTickets({ search: queryId, limit: 1 });
+        const tk = data?.tickets?.[0];
+        if (!tk) {
+          return sendWhatsApp(from, `⚠️ Could not find DataMart ticket *${queryId}*. Please verify the ID.`);
+        }
+
         const prio = (tk.priority || "normal").toUpperCase();
         const prioEmoji = prio === "URGENT" ? "🚨" : prio === "HIGH" ? "⚠️" : "📌";
         const custName = tk.userId?.name || "Customer";
         const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
-        const reason = tk.reportReason || "Support Issue";
-        const desc = (tk.description || "").replace(/\s+/g, " ").trim().slice(0, 110);
-        const timeAgo = getTimeAgoGhana(tk.createdAt);
+        const custEmail = tk.userId?.email || "N/A";
+        const reason = tk.reportReason || "General Support";
+        const status = (tk.status || "pending").toUpperCase();
+        const dateStr = tk.createdAt ? new Date(tk.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "N/A";
 
-        ticketListText += `${numEmoji} *[${tk.reportId || "ID"}]* ${prioEmoji} *${reason}* (*${prio}*)\n` +
-          `• 👤 *Customer:* ${custName} (${custPhone})\n` +
-          `• 📝 *Issue:* ${desc}${desc.length >= 110 ? "..." : ""}\n` +
-          `• 🕒 *Time:* ${timeAgo}\n\n`;
-      });
-    }
-
-    return sendWhatsApp(from,
-      `🎫 *DATAMART AGENT SUPPORT QUEUE*\n\n` +
-      `📊 *Live Ticket Breakdown:*\n` +
-      `• ⏳ *Pending:* ${pendingCount.toLocaleString()}\n` +
-      `• 🔍 *Under Review:* ${reviewCount}\n` +
-      `• 🛠️ *Investigating:* ${investCount}\n` +
-      `• ✅ *Resolved:* ${resolvedCount.toLocaleString()}\n\n` +
-      `📋 *${filterLabel} Tickets (${totalMatches} total):*\n\n` +
-      `${ticketListText}` +
-      `💡 *Quick Actions:*\n` +
-      `• Reply: *view ticket [ReportID]* for full details & customer link\n` +
-      `• Reply: *search ticket [phone or ref]*\n` +
-      `• Reply: *dm tickets urgent* or *dm tickets under review*`
-    );
-  }
-
-  // Direct Query: "can you reply them", "reply them", "how to reply", "can you reply", "can draft reply himself"
-  if (/^(?:can\s+(?:you\s+)?(?:reply|message|text)(?:\s+(?:them|him|her|customer|tickets?))?|can\s+(?:you\s+)?draft(?:\s+reply)?(?:\s+himself)?|how\s+(?:do\s+i|can\s+i|to)\s+reply)/i.test(cmdText)) {
-    let rzReport = "";
-    try { rzReport = await getRezolvTicketsReport("active", 3); } catch (_) { }
-    return sendWhatsApp(from,
-      `Yes bossu! I can reply directly to ANY customer or ticket right now! 🚀\n\n` +
-      `1️⃣ *DataMart Tickets (RPT... / Agents)*:\n` +
-      `• *reply Prince to text me on 0547100951*\n` +
-      `• *reply him [your message]*\n` +
-      `• *reply RPT005281 [your message]*\n` +
-      `I dispatch a direct WhatsApp message to their phone, attempt SMS, and send you a 1-tap WhatsApp chat link!\n\n` +
-      `2️⃣ *Rezolv Live Customer Chat (TKT-...)*:\n` +
-      `• *reply TKT-179978 [your message]*\n` +
-      `• *reply Emmanuel [your message]*\n` +
-      `I post directly into their live chat widget as *Stony 💙*!\n\n` +
-      `3️⃣ *AI Auto-Draft Replies (I draft it myself!)*:\n` +
-      `• Just say: *draft reply* or *draft reply for Prince*\n` +
-      `I generate the best professional reply, and you just tap *YES* or *SEND* to dispatch live!\n\n` +
-      (rzReport ? `${rzReport}` : "")
-    );
-  }
-
-  // Direct Command: Draft Reply (e.g. "draft reply for Emmanuel", "draft reply", "suggest reply")
-  const draftReplyMatch = cmdText.match(/^(?:(?:can\s+you\s+)?draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply|help\s+me\s+reply|what\s+should\s+i\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i);
-  if (draftReplyMatch) {
-    const targetId = (draftReplyMatch[1] || "").trim();
-    const draftRes = await generateSupportDraftReply(targetId);
-    if (!draftRes.ok) {
-      return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find a ticket to draft a reply for."}`);
-    }
-
-    await setOwnerPendingAction(from, {
-      type: draftRes.platform === "datamart" ? "send_customer_message" : "rezolv_reply",
-      target: draftRes.phone || draftRes.ticketId,
-      ticketId: draftRes.ticketId,
-      customerName: draftRes.customerName,
-      message: draftRes.draftMessage
-    });
-
-    const platformLabel = draftRes.platform === "datamart" ? "DataMart Ticket (WhatsApp/SMS)" : "Rezolv Live Chat Widget (Stony 💙)";
-
-    return sendWhatsApp(from,
-      `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
-      `"${draftRes.draftMessage}"\n\n` +
-      `🌐 *Destination:* ${platformLabel}\n` +
-      `💡 *Ready to dispatch this live?*\n` +
-      `👉 Reply: *YES* or *SEND* to dispatch right now!\n` +
-      `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
-    );
-  }
-
-  // Unified Live Reply Handler (Rezolv live tickets, DataMart RPT tickets, customer names, phone numbers, and pronouns)
-  const unifiedReplyPrefixMatch =
-    cmdText.match(/^(?:(?:dm|rezolv)\s+)?(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?([\s\S]+)$/i);
-
-  if (unifiedReplyPrefixMatch) {
-    let remainder = unifiedReplyPrefixMatch[1].trim();
-    let rawTarget = "";
-    let replyMsg = "";
-
-    // Case A: Pronouns (him, her, them, the customer, etc.)
-    const pronounMatch = remainder.match(/^(him|her|them|the\s+customer|customer|client|user)\b(?:\s+(?:to|that|saying|:)?\s*)?([\s\S]*)$/i);
-    if (pronounMatch) {
-      rawTarget = pronounMatch[1].trim();
-      replyMsg = pronounMatch[2].trim();
-    }
-    // Case B: Ticket ID (RPT005281, TKT-179978, mongoId)
-    else if (/^(RPT\d+|TKT-?\d+|[a-f0-9]{24})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i.test(remainder)) {
-      const tMatch = remainder.match(/^(RPT\d+|TKT-?\d+|[a-f0-9]{24})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i);
-      rawTarget = tMatch[1].trim();
-      replyMsg = tMatch[2].trim();
-    }
-    // Case C: Phone Number (054..., 233...)
-    else if (/^(0[2357]\d{8}|233\d{9})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i.test(remainder)) {
-      const pMatch = remainder.match(/^(0[2357]\d{8}|233\d{9})\b(?:\s*[:,\-]?\s*)?([\s\S]*)$/i);
-      rawTarget = pMatch[1].trim();
-      replyMsg = pMatch[2].trim();
-    }
-    // Case D: Separator words like " to ", " that ", " saying ", or ": "
-    else if (/^(.+?)\s+(?:to|that|saying|:)\s+([\s\S]+)$/i.test(remainder)) {
-      const sepMatch = remainder.match(/^(.+?)\s+(?:to|that|saying|:)\s+([\s\S]+)$/i);
-      rawTarget = sepMatch[1].trim();
-      replyMsg = sepMatch[2].trim();
-    }
-    // Case E: Customer name followed by text (e.g. "Prince Boachie text me on...", "Emmanuel we refunded you")
-    else {
-      const words = remainder.split(/\s+/);
-      if (words.length >= 3) {
-        rawTarget = words.slice(0, 2).join(" ");
-        replyMsg = words.slice(2).join(" ");
-      } else if (words.length === 2) {
-        rawTarget = words[0];
-        replyMsg = words[1];
-      } else {
-        rawTarget = remainder;
-        replyMsg = "";
-      }
-    }
-
-    // Clean up message
-    if (/^to\s+/i.test(replyMsg)) replyMsg = replyMsg.replace(/^to\s+/i, "").trim();
-    if (/^that\s+/i.test(replyMsg)) replyMsg = replyMsg.replace(/^that\s+/i, "").trim();
-
-    // If target is pronoun "him", "her", "them", "the customer"
-    if (/^(?:him|her|them|the\s+customer|customer|client|user)$/i.test(rawTarget)) {
-      const historyTexts = (history || []).slice(-5).map(h => h.text).reverse();
-      for (const ht of historyTexts) {
-        const rptMatch = ht.match(/RPT\d+/i);
-        if (rptMatch) { rawTarget = rptMatch[0]; break; }
-        const tktMatch = ht.match(/TKT-\d+/i);
-        if (tktMatch) { rawTarget = tktMatch[0]; break; }
-        const nameMatch = ht.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+))\b/);
-        if (nameMatch && !/^(DataMart|Stony|Rezolv|Admin|Understood)/i.test(nameMatch[0])) {
-          rawTarget = nameMatch[0];
-          break;
+        let notesText = "";
+        if (Array.isArray(tk.adminNotes) && tk.adminNotes.length > 0) {
+          notesText = `\n📋 *Admin / AI Notes:*\n` + tk.adminNotes.map(n => `• ${n.note || n}`).join("\n");
         }
-      }
-    }
 
-    // If no message was provided, auto-draft a reply!
-    if (!replyMsg) {
-      const draftRes = await generateSupportDraftReply(rawTarget);
-      if (!draftRes.ok) {
-        return sendWhatsApp(from, `⚠️ ${draftRes.error || "Please include the message to send: e.g. *reply " + rawTarget + " [message]*"}`);
-      }
-      await setOwnerPendingAction(from, {
-        type: draftRes.platform === "datamart" ? "send_customer_message" : "rezolv_reply",
-        target: draftRes.phone || draftRes.ticketId,
-        ticketId: draftRes.ticketId,
-        customerName: draftRes.customerName,
-        message: draftRes.draftMessage
-      });
-      const platformLabel = draftRes.platform === "datamart" ? "DataMart Ticket (WhatsApp/SMS)" : "Rezolv Live Chat Widget (Stony 💙)";
-      return sendWhatsApp(from,
-        `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
-        `"${draftRes.draftMessage}"\n\n` +
-        `🌐 *Destination:* ${platformLabel}\n` +
-        `💡 *Ready to dispatch this live?*\n` +
-        `👉 Reply: *YES* or *SEND* to dispatch right now!\n` +
-        `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
-      );
-    }
+        let cleanPhone = custPhone.replace(/\D/g, "");
+        if (cleanPhone.startsWith("0")) cleanPhone = cleanPhone.slice(1);
+        const waLink = cleanPhone ? `https://wa.me/233${cleanPhone}` : "N/A";
 
-    // We have rawTarget and replyMsg: dispatch directly
-    const rep = await executeOwnerDirectAction("send_customer_message", { target: rawTarget, message: replyMsg });
-    return sendWhatsApp(from, rep);
-  }
+        const orderRefMatch = (tk.description || "").match(/(?:AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|[0-9]{10,})/i);
+        let orderRefHelp = "";
+        if (orderRefMatch) {
+          orderRefHelp = `\n\n🔍 *Detected Order Ref:* *${orderRefMatch[0]}*\n` +
+            `• Check live status: *track ${orderRefMatch[0]}*`;
+        }
 
-  // Direct Action Command: Rezolv View Ticket Conversation (e.g. "ticket TKT-179538", "view ticket TKT-179538", "ticket Emmanuel")
-  const rezolvViewMatch = cmdText.match(/^(?:(?:dm|view|check)\s+)?ticket\s+(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i) ||
-    cmdText.match(/^(?:view\s+ticket|check\s+ticket|dm\s+ticket)\s+(TKT-?\d+|[a-f0-9]{24}|[A-Za-z]{3,25})$/i);
-  if (rezolvViewMatch) {
-    const tktId = rezolvViewMatch[1].trim();
-    const rep = await getRezolvTicketConversation(tktId);
-    return sendWhatsApp(from, rep);
-  }
-
-  // Direct Action Command: Rezolv Close/Resolve Ticket (e.g. "close ticket TKT-179538", "resolve ticket TKT-179538", "dm close TKT-179538")
-  const rezolvCloseMatch = cmdText.match(/^(?:(?:dm|rezolv)\s+)?(?:close|resolve)\s+(?:ticket\s+)?(TKT-?\d+|[a-f0-9]{24})$/i);
-  if (rezolvCloseMatch) {
-    const tktId = rezolvCloseMatch[1].trim();
-    const rep = await closeRezolvTicket(tktId);
-    return sendWhatsApp(from, rep);
-  }
-
-  // Direct Action Command: Rezolv Customer Live Tickets (e.g. "rezolv", "rezolv tickets", "live tickets", "customer tickets", "support tickets")
-  const rezolvTicketsMatch = cmdText.match(/^(?:(?:dm|datamart)\s+)?(?:rezolv|rezolv\s*tickets?|live\s*tickets?|customer\s*tickets?|support\s*tickets?)$/i);
-  if (rezolvTicketsMatch) {
-    const rep = await getRezolvTicketsReport("active");
-    return sendWhatsApp(from, rep);
-  }
-
-  // Direct Action Command: View Specific DataMart Ticket
-  const viewDmTicketMatch = cmdText.match(/^(?:view\s+ticket|dm\s+ticket|ticket|check\s+ticket)\s+(RPT\d+|[a-f0-9]{24})/i);
-  if (viewDmTicketMatch) {
-    const queryId = viewDmTicketMatch[1].trim();
-    const data = await fetchDatamartSupportTickets({ search: queryId, limit: 1 });
-    const tk = data?.tickets?.[0];
-    if (!tk) {
-      return sendWhatsApp(from, `⚠️ Could not find DataMart ticket *${queryId}*. Please verify the ID.`);
-    }
-
-    const prio = (tk.priority || "normal").toUpperCase();
-    const prioEmoji = prio === "URGENT" ? "🚨" : prio === "HIGH" ? "⚠️" : "📌";
-    const custName = tk.userId?.name || "Customer";
-    const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
-    const custEmail = tk.userId?.email || "N/A";
-    const reason = tk.reportReason || "General Support";
-    const status = (tk.status || "pending").toUpperCase();
-    const dateStr = tk.createdAt ? new Date(tk.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "N/A";
-
-    let notesText = "";
-    if (Array.isArray(tk.adminNotes) && tk.adminNotes.length > 0) {
-      notesText = `\n📋 *Admin / AI Notes:*\n` + tk.adminNotes.map(n => `• ${n.note || n}`).join("\n");
-    }
-
-    let cleanPhone = custPhone.replace(/\D/g, "");
-    if (cleanPhone.startsWith("0")) cleanPhone = cleanPhone.slice(1);
-    const waLink = cleanPhone ? `https://wa.me/233${cleanPhone}` : "N/A";
-
-    const orderRefMatch = (tk.description || "").match(/(?:AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|[0-9]{10,})/i);
-    let orderRefHelp = "";
-    if (orderRefMatch) {
-      orderRefHelp = `\n\n🔍 *Detected Order Ref:* *${orderRefMatch[0]}*\n` +
-        `• Check live status: *track ${orderRefMatch[0]}*`;
-    }
-
-    return sendWhatsApp(from,
-      `🎫 *DATAMART TICKET DETAILS*\n\n` +
-      `🆔 *Report ID:* *${tk.reportId || tk._id}*\n` +
-      `⚡ *Priority:* ${prioEmoji} *${prio}*\n` +
-      `📊 *Status:* *${status}*\n` +
-      `🏷️ *Reason:* *${reason}*\n` +
-      `🕒 *Created:* ${dateStr}\n\n` +
-      `👤 *Customer / Agent Details:*\n` +
-      `• *Name:* ${custName}\n` +
-      `• *Phone:* *${custPhone}*\n` +
-      `• *Email:* ${custEmail}\n\n` +
-      `📝 *Full Issue Description:*\n` +
-      `${tk.description || "No description provided."}\n` +
-      `${notesText}\n\n` +
-      `📲 *Direct Customer Contact:*\n` +
-      `• *WhatsApp:* ${waLink}${orderRefHelp}\n\n` +
-      `💡 *Resolution Actions:*\n` +
-      `• To retry/dispatch bundle: *dispatch ${custPhone} [amount]GB*\n` +
-      `• Reply: *dm tickets* to return to queue`
-    );
-  }
-
-  // Direct Action Command: Search DataMart Tickets
-  const searchDmTicketMatch = cmdText.match(/^(?:search\s+tickets?|dm\s+search(?:\s+ticket)?|find\s+tickets?)\s+(.+)$/i);
-  if (searchDmTicketMatch) {
-    const q = searchDmTicketMatch[1].trim();
-    const data = await fetchDatamartSupportTickets({ search: q, limit: 5 });
-    if (!data || !data.tickets || data.tickets.length === 0) {
-      return sendWhatsApp(from, `🔍 No DataMart support tickets found matching "*${q}*".`);
-    }
-
-    let out = `🔍 *DATAMART TICKETS MATCHING "${q}":*\n\n`;
-    data.tickets.forEach((tk, idx) => {
-      const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-      const custName = tk.userId?.name || "Customer";
-      const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
-      const prio = (tk.priority || "normal").toUpperCase();
-      const prioEmoji = prio === "URGENT" ? "🚨" : "📌";
-      const desc = (tk.description || "").replace(/\s+/g, " ").trim().slice(0, 90);
-
-      out += `${numEmoji} *[${tk.reportId || "ID"}]* ${prioEmoji} *${tk.reportReason || "Support"}* (*${prio}*)\n` +
-        `• 👤 *Customer:* ${custName} (${custPhone})\n` +
-        `• 📝 ${desc}...\n` +
-        `• 📊 Status: *${(tk.status || "pending").toUpperCase()}*\n\n`;
-    });
-    out += `💡 Reply: *view ticket [ReportID]* to open any ticket above!`;
-    return sendWhatsApp(from, out);
-  }
-
-  // Direct Action Command: DataMart Support Dashboard
-  const dmDashboardMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?(?:dashboard|overview|stats)$/i);
-  if (dmDashboardMatch) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/dashboard');
-    const d = resp?.data;
-    if (!d) {
-      return sendWhatsApp(from, `⚠️ Could not fetch DataMart Agent Support dashboard. Please retry in a moment.`);
-    }
-
-    const today = d.today || {};
-    const tickets = d.tickets || {};
-    const bdMap = {};
-    (tickets.breakdown || []).forEach(b => { bdMap[b._id] = b.count; });
-
-    let netIssuesText = "Normal (All systems green)";
-    if (Array.isArray(d.networkIssues) && d.networkIssues.length > 0) {
-      netIssuesText = d.networkIssues.map(n => `⚠️ ${n.network}: ${n.message || n.issue}`).join("\n• ");
-    }
-
-    return sendWhatsApp(from,
-      `📊 *DATAMART AGENT SUPPORT DASHBOARD*\n\n` +
-      `📦 *Today's Volume:*\n` +
-      `• 🛒 *Total Orders:* ${(today.totalOrders || 0).toLocaleString()}\n` +
-      `• ❌ *Failed Orders:* ${today.failedOrders || 0}\n` +
-      `• 💸 *Refunds Processed:* ${today.refundsProcessed || 0}\n\n` +
-      `🎫 *Support Queue:*\n` +
-      `• ⏳ *Pending Tickets:* ${(tickets.pending || 0).toLocaleString()}\n` +
-      `• 🔍 *Under Review:* ${bdMap["under_review"] || 0}\n` +
-      `• 🛠️ *Investigating:* ${bdMap["investigating"] || 0}\n` +
-      `• ✅ *Resolved:* ${(bdMap["resolved"] || 0).toLocaleString()}\n\n` +
-      `📶 *Network Health:* ${netIssuesText}\n\n` +
-      `💡 *Agent Support Tools on WhatsApp:*\n` +
-      `• *dm tickets* ➔ View active support tickets\n` +
-      `• *dm failed orders* ➔ View failed orders & retry\n` +
-      `• *dm withdrawals* ➔ View agent cashout requests\n` +
-      `• *dm deposits* ➔ View agent deposits\n` +
-      `• *dm search [phone]* ➔ Search any agent/customer`
-    );
-  }
-
-  // Direct Action Command: DataMart Failed Orders
-  const dmFailedOrdersMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?failed(?:\s*orders)?$/i);
-  if (dmFailedOrdersMatch) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/failed-orders?limit=5');
-    const orders = resp?.data?.orders || [];
-    if (orders.length === 0) {
-      return sendWhatsApp(from, `🎉 *DATAMART FAILED ORDERS:* Zero failed orders in the queue right now! All telecom dispatches are running smoothly.`);
-    }
-
-    let out = `⚠️ *DATAMART FAILED ORDERS (${orders.length} shown):*\n\n`;
-    orders.forEach((ord, idx) => {
-      const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-      const custName = ord.userId?.name || "Customer";
-      const phone = ord.phoneNumber || "N/A";
-      const net = ord.network || "MTN";
-      const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
-      const reason = (ord.failureReason || ord.status || "Failed dispatch").replace(/\s+/g, " ").trim().slice(0, 80);
-
-      out += `${num} *[${ord._id}]* ${net} ${cap}\n` +
-        `• 📱 *Recipient:* ${phone} (${custName})\n` +
-        `• ❌ *Reason:* ${reason}\n` +
-        `• ⚡ *Actions:* *dm retry ${ord._id}* | *dm refund ${ord._id}*\n\n`;
-    });
-    out += `💡 To re-attempt an order, reply: *dm retry [OrderID]*\n` +
-      `💡 To refund to wallet, reply: *dm refund [OrderID]*`;
-    return sendWhatsApp(from, out);
-  }
-
-  // Direct Action Command: Retry DataMart Order
-  const dmRetryOrderMatch = cmdText.match(/^(?:datamart|dm)\s*retry(?:\s*order)?\s+([a-f0-9]{24})/i);
-  if (dmRetryOrderMatch) {
-    const orderId = dmRetryOrderMatch[1].trim();
-    const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/retry`, {
-      method: "POST",
-      body: { reason: "Support retry requested via WhatsApp" }
-    });
-    if (resp?.status === "success" || resp?.success) {
-      return sendWhatsApp(from, `✅ *DATAMART ORDER RETRIED!* Order *${orderId}* has been re-queued for carrier dispatch.`);
-    } else {
-      return sendWhatsApp(from, `⚠️ Could not retry order: ${resp?.message || resp?.error || "Unknown response"}`);
-    }
-  }
-
-  // Direct Action Command: Refund DataMart Order
-  const dmRefundOrderMatch = cmdText.match(/^(?:datamart|dm)\s*refund(?:\s*order)?\s+([a-f0-9]{24})(?:\s+(.+))?/i);
-  if (dmRefundOrderMatch) {
-    const orderId = dmRefundOrderMatch[1].trim();
-    const reason = (dmRefundOrderMatch[2] || "Support agent refund requested via WhatsApp").trim();
-    const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/refund`, {
-      method: "POST",
-      body: { reason, notifyCustomer: true }
-    });
-    if (resp?.status === "success" || resp?.success) {
-      return sendWhatsApp(from, `💸 *DATAMART ORDER REFUNDED!* Order *${orderId}* has been refunded to the agent's wallet balance.`);
-    } else {
-      return sendWhatsApp(from, `⚠️ Could not refund order: ${resp?.message || resp?.error || "Unknown response"}`);
-    }
-  }
-
-  // Direct Action Command: DataMart Withdrawals
-  const dmWithdrawalsMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?withdrawals?$/i);
-  if (dmWithdrawalsMatch) {
-    return sendWhatsApp(from, reply);
-  }
-
-  // Direct Action Command: DataMart Delivery Check (Single or Bulk)
-  const dmDeliveryCheckMatch =
-    cmdText.match(/^(?:datamart|dm)\s*(?:delivery\s*check|delivery\s*audit)(?:\s+([\d,\s\n]+|[A-Za-z0-9_-]+))?$/i) ||
-    cmdText.match(/^(?:delivery\s*check|delivery\s*audit)\s+(?:for\s+)?(?:these\s+ids\s+|this\s+id\s+)?([\d,\s\n]+|[A-Za-z0-9_-]+)$/i) ||
-    cmdText.match(/^([\d,\s\n]{4,})\s+(?:do\s+)?(?:delivery\s*check|check\s+delivery)/i) ||
-    cmdText.match(/(?:do\s+)?delivery\s*check.+?([\d,\s\n]{4,})/i) ||
-    cmdText.match(/([\d,\s\n]{4,}).+?delivery\s*check/i);
-  if (dmDeliveryCheckMatch) {
-    const rawIds = dmDeliveryCheckMatch[1] || "";
-    const idMatches = rawIds.match(/\b\d{4,9}[a-zA-Z]?\b/g);
-    if (idMatches && idMatches.length > 0) {
-      const report = await executeDatamartDeliveryCheck(idMatches, from);
-      if (report) return sendWhatsApp(from, report);
-    }
-
-    const resp = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent');
-    const jobs = Array.isArray(resp?.data) ? resp.data : Array.isArray(resp) ? resp : [];
-    if (jobs.length === 0) {
-      return sendWhatsApp(from, `🚚 *DATAMART DELIVERY CHECK:* No recent automated delivery audits on record.`);
-    }
-
-    const latest = jobs[0];
-    const dateStr = latest.createdAt ? new Date(latest.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "Recent";
-    const total = latest.totalOrders || latest.count || 0;
-    const delivered = latest.deliveredCount || latest.delivered || 0;
-    const failed = latest.failedCount || latest.failed || 0;
-    const status = (latest.status || "completed").toUpperCase();
-
-    let out = `🚚 *DATAMART DELIVERY CHECK AUDIT*\n\n` +
-      `📊 *Latest Audit:* *${status}*\n` +
-      `🕒 *Run Time:* ${dateStr}\n` +
-      `• 📦 *Orders Audited:* ${total.toLocaleString()}\n` +
-      `• ✅ *Carrier Confirmed:* ${delivered.toLocaleString()}\n` +
-      `• ❌ *Carrier Failed:* ${failed}\n\n`;
-
-    if (jobs.length > 1) {
-      out += `📋 *Recent Check History:*\n`;
-      jobs.slice(1, 4).forEach((j, i) => {
-        const t = j.createdAt ? new Date(j.createdAt).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "";
-        out += `• [${t}] ${j.status || "completed"} (${j.totalOrders || 0} orders, ${j.failedCount || 0} failed)\n`;
-      });
-      out += `\n`;
-    }
-
-    out += `💡 To check a specific order batch: *dm delivery check [portalId]*\n` +
-      `💡 To view undelivered complaints: *dm not received*`;
-    return sendWhatsApp(from, out);
-  }
-
-  // Direct Action Command: DataMart Failed Recovery
-  const dmFailedRecoveryMatch = cmdText.match(/^(?:datamart|dm)\s*failed\s*recovery$/i);
-  if (dmFailedRecoveryMatch) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/failed-recovery');
-    const d = resp?.data || resp || {};
-    const totalFailed = d.totalFailed || 0;
-    const recovered = d.recoveredCount || 0;
-    const batches = d.batchCount || (Array.isArray(d.batches) ? d.batches.length : 0);
-
-    return sendWhatsApp(from,
-      `🔄 *DATAMART FAILED RECOVERY PIPELINE*\n\n` +
-      `• ❌ *Total Failed Orders:* ${totalFailed.toLocaleString()}\n` +
-      `• 🔄 *Batches Processed:* ${batches}\n` +
-      `• ✅ *Successfully Recovered:* ${recovered.toLocaleString()}\n\n` +
-      `💡 *Actions:*\n` +
-      `• Reply: *dm failed orders* to view individual failed orders & retry`
-    );
-  }
-
-  // Direct Action Command: DataMart Skipped Recovery
-  const dmSkippedRecoveryMatch = cmdText.match(/^(?:datamart|dm)\s*skipped\s*recovery$/i);
-  if (dmSkippedRecoveryMatch) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/skipped-recovery');
-    const d = resp?.data || resp || {};
-    const totalSkipped = d.totalSkipped || 0;
-    const val = d.totalValue != null ? Number(d.totalValue).toFixed(2) : "0.00";
-    const recovered = d.recoveredCount || 0;
-
-    return sendWhatsApp(from,
-      `⏭️ *DATAMART SKIPPED RECOVERY PIPELINE*\n\n` +
-      `• ⏭️ *Total Skipped in Queue:* ${totalSkipped.toLocaleString()}\n` +
-      `• 💰 *Total Bundle Value:* GH₵ ${val}\n` +
-      `• ✅ *Recovered / Re-Dispatched:* ${recovered.toLocaleString()}\n\n` +
-      `All skipped queues are monitored 24/7 by the DataMart worker switch.`
-    );
-  }
-
-  // Direct Action Command: DataMart Not Received Customer Reports
-  const dmNotReceivedMatch = cmdText.match(/^(?:datamart|dm)\s*not\s*received$/i);
-  if (dmNotReceivedMatch) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/not-received');
-    const d = resp?.data || resp || {};
-    const reports = Array.isArray(d.reports) ? d.reports : [];
-    const counts = d.counts || {};
-
-    let out = `⚠️ *DATAMART "NOT RECEIVED" COMPLAINTS*\n\n` +
-      `📊 *Summary:*\n` +
-      `• ⏳ *Pending Investigation:* ${counts.pending || reports.length}\n` +
-      `• ✅ *Resolved:* ${counts.resolved || 0}\n\n`;
-
-    if (reports.length === 0) {
-      out += `_Zero open "Not Received" customer reports right now!_ 🎉\n`;
-    } else {
-      out += `📋 *Recent Customer Complaints:*\n`;
-      reports.slice(0, 5).forEach((rep, idx) => {
-        const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-        const phone = rep.phoneNumber || rep.phone || "N/A";
-        const net = rep.network || "MTN";
-        const cap = rep.capacity != null ? `${rep.capacity}GB` : "";
-        const time = getTimeAgoGhana(rep.createdAt);
-        out += `${num} *${phone}* (${net} ${cap}) - ${time}\n` +
-          `  Ref: ${rep.orderReference || rep.reference || rep._id}\n`;
-      });
-      out += `\n💡 Reply: *dm search [phone]* to inspect any customer above!`;
-    }
-    return sendWhatsApp(from, out);
-  }
-
-  // Direct Action Command: DataMart Order Verify
-  const dmOrderVerifyMatch = cmdText.match(/^(?:datamart|dm)\s*order\s*verify\s+(.+)$/i);
-  if (dmOrderVerifyMatch) {
-    const query = dmOrderVerifyMatch[1].trim();
-    const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(query)}`);
-    const results = resp?.data?.results || [];
-    const ord = results.find(r => r.type === "order" || r.order)?.order || results[0]?.order || results[0];
-
-    if (!ord || (!ord.network && !ord.phoneNumber)) {
-      return sendWhatsApp(from, `🔍 No DataMart order found matching "*${query}*". Please verify order reference or phone number.`);
-    }
-
-    const net = ord.network || "MTN";
-    const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
-    const phone = ord.phoneNumber || "N/A";
-    const status = (ord.status || "processing").toUpperCase();
-    const amt = ord.amount != null ? `GH₵ ${Number(ord.amount).toFixed(2)}` : "N/A";
-    const rawDate = ord.createdAt || ord.created_at || ord.orderDate || ord.date || ord.timestamp;
-    const formattedDate = rawDate ? formatGhanaTime(rawDate) : null;
-    const timeAgo = rawDate ? getTimeAgoGhana(rawDate) : null;
-    const time = formattedDate ? `${formattedDate}${timeAgo ? ` (${timeAgo})` : ""}` : "N/A";
-    const rawPid = ord.exportTracking?.portalId || (ord.apiOrderId && /^\d{4,9}$/.test(String(ord.apiOrderId)) ? ord.apiOrderId : null) || (ord.portalOrderId && /^\d{4,9}$/.test(String(ord.portalOrderId)) ? ord.portalOrderId : null);
-    const portalId = (rawPid && /^\d{4,9}$/.test(String(rawPid))) ? String(rawPid) : null;
-    const refCode = ord.geonetReference || ord.reference || "N/A";
-    const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
-
-    return sendWhatsApp(from,
-      `✅ *DATAMART ORDER VERIFICATION*\n\n` +
-      `🆔 *Portal ID:* *${portalId || "Pending Export"}*${batchNo} (Ref: ${refCode})\n` +
-      `📶 *Network & Size:* ${net} ${cap}\n` +
-      `📱 *Recipient:* *${phone}*\n` +
-      `💵 *Amount:* ${amt}\n` +
-      `📊 *Carrier Status:* *${status}*\n` +
-      `📅 *Date Placed:* *${time}*\n` +
-      `DB ID: \`${ord._id}\`\n\n` +
-      `💡 *Actions:*\n` +
-      `• Delivery check: ${portalId ? `*dm delivery check ${portalId}*` : `*dm delivery check ${refCode}*`}\n` +
-      `• Re-dispatch order: *dm retry ${ord._id}*\n` +
-      `• Refund to wallet: *dm refund ${ord._id}*`
-    );
-  }
-
-  // Direct Action Command 0a: Credit Agent Wallet
-  const creditAgentMatch = cmdText.match(/(?:credit|fund|top\s*up)\s+(?:agent\s+)?([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i);
-  if (creditAgentMatch) {
-    const target = creditAgentMatch[1].trim();
-    const amt = parseFloat(creditAgentMatch[2]);
-    if (!isNaN(amt) && amt > 0) {
-      const res = await creditAgentWalletSafely(target, amt);
-      if (res) {
-        await syncActionToSite("credit_agent", { phone: target, amount: amt });
         return sendWhatsApp(from,
-          `✅ *AGENT WALLET CREDITED BOSS!*\n\n` +
-          `👤 *Agent:* *${res.agent.name || res.agent.store_name || res.agent.phone}*\n` +
-          `📱 *Phone:* ${res.agent.phone || "N/A"}\n` +
-          `🏪 *Store:* ${res.agent.store_name || "N/A"}\n` +
-          `💵 *Credited:* +GH₵ ${res.credited.toFixed(2)}\n` +
-          `💰 *New Wallet Balance:* *GH₵ ${res.newBalance.toFixed(2)}* live in database!`
+          `🎫 *DATAMART TICKET DETAILS*\n\n` +
+          `🆔 *Report ID:* *${tk.reportId || tk._id}*\n` +
+          `⚡ *Priority:* ${prioEmoji} *${prio}*\n` +
+          `📊 *Status:* *${status}*\n` +
+          `🏷️ *Reason:* *${reason}*\n` +
+          `🕒 *Created:* ${dateStr}\n\n` +
+          `👤 *Customer / Agent Details:*\n` +
+          `• *Name:* ${custName}\n` +
+          `• *Phone:* *${custPhone}*\n` +
+          `• *Email:* ${custEmail}\n\n` +
+          `📝 *Full Issue Description:*\n` +
+          `${tk.description || "No description provided."}\n` +
+          `${notesText}\n\n` +
+          `📲 *Direct Customer Contact:*\n` +
+          `• *WhatsApp:* ${waLink}${orderRefHelp}\n\n` +
+          `💡 *Resolution Actions:*\n` +
+          `• To retry/dispatch bundle: *dispatch ${custPhone} [amount]GB*\n` +
+          `• Reply: *dm tickets* to return to queue`
         );
-      } else {
-        return sendWhatsApp(from, `⚠️ Could not find registered agent "${target}". Use "list agents" to see all agents.`);
       }
-    }
-  }
 
-  // Direct Action Command 0b: Debit Agent Wallet
-  const debitAgentMatch = cmdText.match(/(?:debit|deduct|remove)\s+(?:from\s+)?(?:agent\s+)?([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i);
-  if (debitAgentMatch) {
-    const target = debitAgentMatch[1].trim();
-    const amt = parseFloat(debitAgentMatch[2]);
-    if (!isNaN(amt) && amt > 0) {
-      const res = await debitAgentWalletSafely(target, amt);
-      if (res) {
-        return sendWhatsApp(from,
-          `✅ *AGENT WALLET DEBITED BOSS!*\n\n` +
-          `👤 *Agent:* *${res.agent.name || res.agent.store_name || res.agent.phone}*\n` +
-          `💵 *Debited:* -GH₵ ${res.debited.toFixed(2)}\n` +
-          `💰 *New Wallet Balance:* *GH₵ ${res.newBalance.toFixed(2)}* live in database!`
-        );
-      } else {
-        return sendWhatsApp(from, `⚠️ Could not find registered agent "${target}".`);
-      }
-    }
-  }
+      // Direct Action Command: Search DataMart Tickets
+      const searchDmTicketMatch = cmdText.match(/^(?:search\s+tickets?|dm\s+search(?:\s+ticket)?|find\s+tickets?)\s+(.+)$/i);
+      if (searchDmTicketMatch) {
+        const q = searchDmTicketMatch[1].trim();
+        const data = await fetchDatamartSupportTickets({ search: q, limit: 5 });
+        if (!data || !data.tickets || data.tickets.length === 0) {
+          return sendWhatsApp(from, `🔍 No DataMart support tickets found matching "*${q}*".`);
+        }
 
-  // Direct Action Command 0a_price: Update Flash Sale Product Price
-  const updateFlashPriceMatch =
-    cmdText.match(/(?:update|change|set)\s+flash\s*sale\s+(?:price\s+)?(?:for\s+)?(?:mtn\s+)?(\d+(?:\.\d+)?)\s*(?:gb)?\s+(?:price\s+)?(?:to|as)?\s*(?:gh[c₵]?\s*)?(\d+(?:\.\d+)?)/i) ||
-    cmdText.match(/(?:update|change|set)\s+(?:price\s+)?(?:for\s+)?(?:mtn\s+)?(\d+(?:\.\d+)?)\s*(?:gb)?\s+flash\s*sale\s+(?:to|as)?\s*(?:gh[c₵]?\s*)?(\d+(?:\.\d+)?)/i);
-  if (updateFlashPriceMatch) {
-    const cap = updateFlashPriceMatch[1].trim();
-    const price = parseFloat(updateFlashPriceMatch[2]);
-    const res = await updateFlashSaleProductPrice(cap, price);
-    if (res) {
-      return sendWhatsApp(from,
-        `⚡ *FLASH SALE PRICE UPDATED BOSS!*\n\n` +
-        `📦 *Package:* MTN ${res.product.capacity}GB Flash Sale\n` +
-        `💰 *Old Price:* GH₵ ${Number(res.oldPrice).toFixed(2)}\n` +
-        `🔥 *New Flash Price:* *GH₵ ${Number(res.newPrice).toFixed(2)}* live on storefront!`
-      );
-    } else {
-      return sendWhatsApp(from, `⚠️ Could not find Flash Sale package for "${cap}GB". Text "Flash sale" to see all packages.`);
-    }
-  }
+        let out = `🔍 *DATAMART TICKETS MATCHING "${q}":*\n\n`;
+        data.tickets.forEach((tk, idx) => {
+          const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+          const custName = tk.userId?.name || "Customer";
+          const custPhone = tk.phoneNumber || tk.userId?.phoneNumber || "N/A";
+          const prio = (tk.priority || "normal").toUpperCase();
+          const prioEmoji = prio === "URGENT" ? "🚨" : "📌";
+          const desc = (tk.description || "").replace(/\s+/g, " ").trim().slice(0, 90);
 
-  // Direct Action Command 0a_toggle: Enable / Turn on Flash Sale
-  const enableFlashMatch = cmdText.match(/(?:turn\s*on|enable|start|activate|switch\s*on|put\s*on)\s+(?:the\s+)?flash\s*sale(?:\s+(?:for\s+)?(\d+)\s*(?:hours?|hrs?))?|(?:turn|switch)\s+(?:the\s+)?flash\s*sale\s+on(?:\s+(?:for\s+)?(\d+)\s*(?:hours?|hrs?))?|\bflash\s*sale\s+(?:on|start|activate)(?:\s+(?:for\s+)?(\d+)\s*(?:hours?|hrs?))?/i);
-  if (enableFlashMatch) {
-    const rawHours = enableFlashMatch[1] || enableFlashMatch[2] || enableFlashMatch[3];
-    const hours = rawHours ? parseInt(rawHours, 10) : 2;
-    const res = await toggleFlashSale(true, hours);
-    if (res?.enabled) {
-      return sendWhatsApp(from,
-        `⚡ *FLASH SALE ACTIVATED BOSS!*\n\n` +
-        `🔥 The Flash Sale banner & discounted rates are now *LIVE* on the storefront!\n` +
-        `⏳ *Active Until:* *${res.endTime?.replace("T", " ")}*\n\n` +
-        `💡 Customers can now purchase MTN Flash bundles directly on the site!`
-      );
-    } else {
-      return sendWhatsApp(from, `⚠️ Could not toggle flash sale. Please verify database connection.`);
-    }
-  }
-
-  // Direct Action Command 0a_disable: Disable / Turn off Flash Sale
-  if (/(?:turn\s*off|disable|stop|end|deactivate|pause|switch\s*off|put\s*off)\s+(?:the\s+)?flash\s*sale|(?:turn|switch)\s+(?:the\s+)?flash\s*sale\s+off|\bflash\s*sale\s+(?:off|stop|deactivate|pause)\b/i.test(lt)) {
-    await toggleFlashSale(false);
-    return sendWhatsApp(from,
-      `🔒 *FLASH SALE TURNED OFF BOSS!*\n\n` +
-      `The Flash Sale has been disabled on the storefront. Products will now sell at their regular prices.`
-    );
-  }
-
-  // Direct Action Command 0a_pause_orders: Pause Store Orders
-  if (/\b(?:pause\s*orders?|pause\s*packages?|stop\s*orders?|disable\s*orders?|close\s*shop|turn\s*off\s*orders?|stop\s*taking\s*orders?|hold\s*orders?|freeze\s*orders?)\b/i.test(lt)) {
-    await supabase.from("settings").upsert({ key: "orders_paused", value: "true" }, { onConflict: "key" });
-    await syncActionToSite("update_setting", { key: "orders_paused", value: "true" }).catch(() => null);
-    return sendWhatsApp(from,
-      `⏸️ *ALL STORE ORDERS & PACKAGES PAUSED BOSS!*\n\n` +
-      `All packages have now been *PAUSED* across:\n` +
-      `• ✅ Main Storefront (data1gh.com)\n` +
-      `• ✅ All Agent Reseller Storefronts\n` +
-      `• ✅ WhatsApp Bot Ordering\n\n` +
-      `📢 All "Buy Now" buttons now display *"Orders Paused"* and checkout is locked.\n\n` +
-      `💡 When ready, simply say *"Resume orders"* or *"Turn on orders"* to open everything back up!`
-    );
-  }
-
-  // Direct Action Command 0a_resume_orders: Resume Store Orders
-  if (/\b(?:resume\s*orders?|resume\s*packages?|open\s*shop|enable\s*orders?|turn\s*on\s*orders?|start\s*taking\s*orders?|unpause\s*orders?|unfreeze\s*orders?)\b/i.test(lt)) {
-    await supabase.from("settings").upsert({ key: "orders_paused", value: "false" }, { onConflict: "key" });
-    await syncActionToSite("update_setting", { key: "orders_paused", value: "false" }).catch(() => null);
-    return sendWhatsApp(from,
-      `▶️ *ALL STORE ORDERS RESUMED BOSS!*\n\n` +
-      `🔥 All packages are now *ACTIVE & OPEN* across:\n` +
-      `• ✅ Main Storefront (data1gh.com)\n` +
-      `• ✅ All Agent Reseller Storefronts\n` +
-      `• ✅ WhatsApp Bot Ordering\n\n` +
-      `Customers can now purchase data packages normally! 🚀`
-    );
-  }
-
-  // Direct Action Command 0d: Suspend / Activate Agent
-  const statusAgentMatch = cmdText.match(/(suspend|block|deactivate|activate|unblock|enable)\s+agent\s+([A-Za-z0-9_.-]+)/i);
-  if (statusAgentMatch) {
-    const actionType = statusAgentMatch[1].toLowerCase();
-    const newStatus = /suspend|block|deactivate/.test(actionType) ? "suspended" : "active";
-    const target = statusAgentMatch[2].trim();
-    const res = await setAgentStatusSafely(target, newStatus);
-    if (res) {
-      return sendWhatsApp(from, `✅ *AGENT STATUS UPDATED BOSS!*\n\n👤 *Agent:* *${res.agent.name || res.agent.store_name || res.agent.phone}*\n⚡ *Status:* *${newStatus.toUpperCase()}* live in database!`);
-    } else {
-      return sendWhatsApp(from, `⚠️ Could not find agent "${target}".`);
-    }
-  }
-
-  // Direct Action Command 1a: Payment Status Update
-  const paymentCmdMatch =
-    cmdText.match(/(?:mark|set|update|change)\s+(?:the\s+)?payment(?:\s+status)?\s+(?:of|for)?\s*([A-Za-z0-9_-]{5,35})\s+(?:to|as)?\s*([a-zA-Z_\s-]{3,20})/i) ||
-    cmdText.match(/(?:mark|set|update|change)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})\s+payment(?:\s+status)?\s+(?:to|as)?\s*([a-zA-Z_\s-]{3,20})/i) ||
-    cmdText.match(/(?:mark|set)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})\s+as\s+(paid|unpaid|refunded)/i);
-
-  if (paymentCmdMatch) {
-    const targetRef = paymentCmdMatch[1].trim();
-    const rawStatus = (paymentCmdMatch[2] || "paid").trim();
-    const targetPaymentStatus = extractPaymentStatusFromText(rawStatus) || rawStatus.toLowerCase();
-    await updateOrderPaymentStatusSafely(targetRef, targetPaymentStatus);
-    await syncActionToSite("update_payment_status", { reference: targetRef, payment_status: targetPaymentStatus });
-    return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n💰 Order *${targetRef}* payment status has been updated to *${targetPaymentStatus.toUpperCase()}* live in the database!`);
-  }
-
-  const hasUpdateIntent = /\b(update|mark|set|change)\b/i.test(cmdText) && /\b(delivered|failed|processing|pending|waiting|cancelled|refunded|completed|delivery status|status)\b/i.test(cmdText);
-
-  if (orderRefsInText.length > 0 && hasUpdateIntent) {
-    const targetStatus = extractStatusFromText(cmdText) || "delivered";
-    const updatedList = [];
-    for (const r of orderRefsInText) {
-      const ok = await updateOrderDeliveryStatusSafely(r, targetStatus);
-      await syncActionToSite("update_order_status", { reference: r, delivery_status: targetStatus });
-      if (ok) updatedList.push(r);
-    }
-    const displayRefs = updatedList.length > 0 ? updatedList : orderRefsInText;
-    return sendWhatsApp(from,
-      `✅ *ACTION COMPLETED BOSS!*\n\n` +
-      `📦 Updated *${displayRefs.length}* order(s) to *${targetStatus.toUpperCase()}* live in the database:\n` +
-      displayRefs.map(r => `• *${r}*`).join("\n")
-    );
-  }
-
-  const orderCmdMatch =
-    cmdText.match(/(?:mark|set|update|change)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})\s+(?:to|as)?\s*(delivered|processing|pending|failed|cancelled|refunded)/i) ||
-    cmdText.match(/(?:mark|set|update)\s+(delivered|processing|pending|failed|cancelled|refunded)\s+(?:for\s+)?(?:order\s+)?([A-Za-z0-9_-]{5,35})/i);
-
-  if (orderCmdMatch) {
-    const isFirst = /^(delivered|processing|pending|failed|cancelled|refunded)$/i.test(orderCmdMatch[2]);
-    const targetRef = isFirst ? orderCmdMatch[1].trim() : orderCmdMatch[2].trim();
-    const rawStatus = (isFirst ? orderCmdMatch[2] : orderCmdMatch[1]).trim();
-    const targetStatus = extractStatusFromText(rawStatus) || rawStatus.toLowerCase();
-    await updateOrderDeliveryStatusSafely(targetRef, targetStatus);
-    await syncActionToSite("update_order_status", { reference: targetRef, delivery_status: targetStatus });
-    return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n📦 Order *${targetRef}* has been marked as *${targetStatus.toUpperCase()}* live in the database!`);
-  }
-
-  // Direct Action Command 1b: Announcement Update
-  const annToggleMatch = cmdText.match(/(?:turn\s*(?:on|off)|enable|disable)\s+(?:the\s+)?(?:announcement|popup|banner)/i);
-  const annMsgMatch = cmdText.match(/(?:update|change|set)\s+(?:the\s+)?(?:announcement|popup|banner)(?:\s+(?:message|text|to|:))?\s*["“']?([^"”']+)["”']?/i);
-
-  if (annToggleMatch) {
-    const enable = /\b(on|enable)\b/i.test(annToggleMatch[0]);
-    await updateStoreAnnouncement({ title: "Store Announcement", message: "", enabled: enable });
-    await syncActionToSite("update_announcement", { enabled: enable });
-    return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n📢 Storefront announcement popup is now *${enable ? "ENABLED (LIVE)" : "DISABLED (OFF)"}* on ${STORE_FRONTEND_URL}!`);
-  }
-
-  if (annMsgMatch) {
-    const newMsg = annMsgMatch[1].trim();
-    if (newMsg && !/^(on|off|true|false|help|status)$/i.test(newMsg)) {
-      await updateStoreAnnouncement({ title: "Store Announcement", message: newMsg, enabled: true });
-      await syncActionToSite("update_announcement", { title: "Store Announcement", message: newMsg, enabled: true });
-      return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n📢 Storefront announcement banner updated live on ${STORE_FRONTEND_URL}:\n\n"${newMsg}"`);
-    }
-  }
-
-  // Direct Action Command 1c: Store Settings
-  const phoneSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:the\s+)?support\s+phone\s+(?:to|=)?\s*(0[2357]\d{8}|233\d{9})/i);
-  if (phoneSettingMatch) {
-    const newPhone = phoneSettingMatch[1].trim();
-    await updateStoreSetting("support_phone", newPhone);
-    await syncActionToSite("update_setting", { key: "support_phone", value: newPhone });
-    return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n📱 Support & alert phone updated to *${newPhone}* live!`);
-  }
-
-  const etaSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:the\s+)?delivery\s+(?:eta|speed|time)\s+(?:to|=)\s*["“']?([^"”']+)["”']?/i);
-  if (etaSettingMatch) {
-    const newEta = etaSettingMatch[1].trim();
-    await updateStoreSetting("delivery_eta", newEta);
-    await syncActionToSite("update_setting", { key: "delivery_eta", value: newEta });
-    return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n⚡ Storefront delivery ETA display updated to *${newEta}*!`);
-  }
-
-  const priceSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:the\s+)?(netflix|afa|mashup|waec|bece)\s+price\s+(?:to|=)?\s*(\d+(?:\.\d+)?)/i);
-  if (priceSettingMatch) {
-    const service = priceSettingMatch[1].toLowerCase();
-    const newPrice = priceSettingMatch[2];
-    const key = service === "waec" ? "waec_price" : (service === "bece" ? "bece_price" : `${service}_price`);
-    await updateStoreSetting(key, newPrice);
-    await syncActionToSite("update_setting", { key, value: newPrice });
-    return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n💰 *${service.toUpperCase()}* price updated to *GH₵ ${Number(newPrice).toFixed(2)}* live on the storefront!`);
-  }
-
-  const genericSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:store\s+)?setting\s+([a-zA-Z0-9_-]+)\s+(?:to|=)\s*["“']?([^"”']+)["”']?/i);
-  if (genericSettingMatch) {
-    const key = genericSettingMatch[1].trim().toLowerCase();
-    const val = genericSettingMatch[2].trim();
-    await updateStoreSetting(key, val);
-    await syncActionToSite("update_setting", { key, value: val });
-    return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n⚙️ Store setting *${key}* updated to *${val}*!`);
-  }
-
-  // Direct Action Command 2: Resync order with DataMart
-  const resyncCmdMatch = cmdText.match(/(?:resync|sync)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})/i);
-  if (resyncCmdMatch) {
-    const targetRef = resyncCmdMatch[1].trim();
-    const execMsg = await executeOwnerDirectAction("resync_order", { ref: targetRef });
-    await syncActionToSite("resync_datamart", { reference: targetRef });
-    return sendWhatsApp(from, `✅ *RESYNC COMPLETED BOSS!*\n\n🔄 ${execMsg || `Order *${targetRef}* synced with DataMart API.`}`);
-  }
-
-  // Direct Action Command 3: Send SMS
-  const smsCmdMatch = cmdText.match(/(?:send\s+)?(?:an\s+)?(?:custom\s+)?sms\s+(?:to\s+)?(0[2357]\d{8}|233\d{9})\s*(?::|\s+(?:saying|with message|that|message:))\s*["“']?([^"”']+)["”']?/i);
-  if (smsCmdMatch) {
-    const targetPhone = smsCmdMatch[1].trim();
-    const targetText = smsCmdMatch[2].trim();
-    await sendAdminSms(targetText, targetPhone);
-    return sendWhatsApp(from,
-      `✅ *SMS DELIVERED BOSS!*\n\n` +
-      `📱 *Recipient:* ${targetPhone}\n` +
-      `🆔 *Sender ID:* *D_1Gh*\n` +
-      `💬 *Message:* "${targetText}"`
-    );
-  }
-
-  // Direct Action Command 4: Stock toggle
-  const stockCmdMatch = cmdText.match(/(?:put|mark|set)\s+([A-Za-z0-9\s]+?)\s+(in\s*stock|back\s*in\s*stock|out\s*of\s*stock|available|unavailable)/i);
-  if (stockCmdMatch) {
-    const itemText = stockCmdMatch[1].trim();
-    const inStock = /in\s*stock|available/i.test(stockCmdMatch[2]);
-    const { data: prods } = await supabase.from("products").select("id, name, network, capacity, in_stock");
-    const found = (prods || []).find(p => `${p.network} ${p.capacity} ${p.name || ""}`.toLowerCase().includes(itemText.toLowerCase()));
-    if (found) {
-      await supabase.from("products").update({ in_stock: inStock, updated_at: new Date().toISOString() }).eq("id", found.id);
-      await syncActionToSite("toggle_product_stock", { product_id: found.id, in_stock: inStock, name: `${found.network} ${found.capacity}` });
-      return sendWhatsApp(from,
-        `✅ *INVENTORY UPDATED BOSS!*\n\n` +
-        `📦 *Package:* ${found.network} ${found.capacity}GB\n` +
-        `⚡ *New Status:* *${inStock ? "IN STOCK ✅" : "OUT OF STOCK ❌"}* on storefront!`
-      );
-    }
-  }
-
-  // Direct Action Command 5: Retry telecom dispatch via DataMart
-  const retryCmdMatch = cmdText.match(/(?:retry|re-dispatch|redispatch|repurchase)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})/i);
-  if (retryCmdMatch) {
-    const targetRef = retryCmdMatch[1].trim();
-    const { data: ord } = await supabase.from("orders").select("reference, recipient_phone, network, capacity, amount").or(`reference.ilike.%${targetRef}%,datamart_reference.ilike.%${targetRef}%`).maybeSingle();
-    if (ord) {
-      await syncActionToSite("retry_order", {
-        reference: ord.reference,
-        phone: ord.recipient_phone,
-        network: ord.network,
-        capacity: ord.capacity
-      });
-      return sendWhatsApp(from,
-        `✅ *RETRY DISPATCHED BOSS!*\n\n` +
-        `🎯 *Order:* *${ord.reference}*\n` +
-        `📦 *Package:* ${ord.capacity}GB ${ord.network} → *${ord.recipient_phone}*\n` +
-        `⚡ Re-dispatched via DataMart Fast Delivery API!`
-      );
-    }
-  }
-
-  // Direct Action Command 6: Product price change
-  const priceCmdMatch =
-    cmdText.match(/(?:change|set|update)\s+(?:the\s+)?(?:price\s+of\s+)?(mtn|telecel|airteltigo|at)\s+(\d+(?:gb|mb)?)\s+(?:data\s+)?(?:price\s+)?(?:to|as)?\s*(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i) ||
-    cmdText.match(/(?:set|change|update)\s+price\s+(?:of\s+)?([A-Za-z0-9\s]+?)\s+(?:to|as)\s+(?:ghc|gh₵|₵)?\s*(\d+(?:\.\d{1,2})?)/i) ||
-    cmdText.match(/(?:set|change|update)\s+([A-Za-z0-9\s]+?)\s+price\s+(?:to|as)\s+(?:ghc|gh₵|₵)?\s*(\d+(?:\.\d{1,2})?)/i);
-  if (priceCmdMatch) {
-    const isNetStyle = Boolean(priceCmdMatch[3]);
-    const itemText = isNetStyle ? `${priceCmdMatch[1]} ${priceCmdMatch[2].replace(/\D/g, "")}` : priceCmdMatch[1].trim();
-    const newPrice = parseFloat(isNetStyle ? priceCmdMatch[3] : priceCmdMatch[2]);
-    const { data: prods } = await supabase.from("products").select("id, name, network, capacity, price");
-    const found = (prods || []).find(p => {
-      if (isNetStyle) {
-        return String(p.network || "").toLowerCase().includes(priceCmdMatch[1].toLowerCase()) &&
-          String(p.capacity || "").replace(/\D/g, "") === priceCmdMatch[2].replace(/\D/g, "");
-      }
-      return `${p.network} ${p.capacity} ${p.name || ""}`.toLowerCase().includes(itemText.toLowerCase());
-    });
-    if (found && !isNaN(newPrice) && newPrice > 0) {
-      await supabase.from("products").update({ price: newPrice, updated_at: new Date().toISOString() }).eq("id", found.id);
-      await syncActionToSite("update_product_price", { product_id: found.id, network: found.network, capacity: found.capacity, price: newPrice });
-      return sendWhatsApp(from,
-        `✅ *PRICE UPDATED BOSS!*\n\n` +
-        `📦 *Package:* ${found.network} ${found.capacity}GB\n` +
-        `💰 *Old Price:* GH₵ ${Number(found.price).toFixed(2)}\n` +
-        `⚡ *New Price:* *GH₵ ${newPrice.toFixed(2)}* live on the storefront!`
-      );
-    }
-  }
-
-  // Direct Action Command 7: Resolve support chat
-  const chatCmdMatch = cmdText.match(/(?:resolve|close|clear)\s+(?:support\s+)?(?:chat|conversation)(?:\s+(?:with|for)\s+([A-Za-z0-9_-]+))?/i);
-  if (chatCmdMatch) {
-    const target = chatCmdMatch[1]?.trim() || "";
-    await executeOwnerDirectAction("resolve_support_chat", { phone: target || null });
-    return sendWhatsApp(from, `✅ *SUPPORT CHAT RESOLVED BOSS!*\n\n💬 Marked open customer support conversation${target ? ` for *${target}*` : ""} as resolved!`);
-  }
-
-  // Direct Action Command 7b: Reply to customer support chat
-  const replyChatMatch =
-    cmdText.match(/(?:reply|respond|answer)\s+(?:to\s+)?(?:support\s+)?(?:chat|customer|user|ticket)(?:\s+(?:with|for|to)\s+([A-Za-z0-9_-]+))?(?:\s*:\s*|\s+)([\s\S]+)/i) ||
-    cmdText.match(/^support\s+reply(?:\s+(?:to|for)\s+([A-Za-z0-9_-]+))?(?:\s*:\s*|\s+)([\s\S]+)/i);
-
-  if (replyChatMatch) {
-    const target = replyChatMatch[1]?.trim() || null;
-    const msgText = (replyChatMatch[2] || replyChatMatch[1])?.trim();
-    const execMsg = await executeOwnerDirectAction("reply_support_chat", { phone: target, message: msgText });
-    return sendWhatsApp(from, `✅ *SUPPORT CHAT REPLY DISPATCHED!*\n\n${execMsg}`);
-  }
-
-  // Direct Action Command 7c: Set DataMart login credentials
-  const dmLoginMatch = cmdText.match(/(?:set|save)\s+datamart\s+(?:login|credentials?|account)\s+(\S+@\S+)\s+(\S+)/i);
-  if (dmLoginMatch) {
-    const email = dmLoginMatch[1].trim();
-    const password = dmLoginMatch[2].trim();
-    await supabase.from("settings").upsert([
-      { key: "datamart_login_email", value: email },
-      { key: "datamart_login_password", value: password }
-    ], { onConflict: "key" });
-
-    // Attempt instant login to fetch token
-    let tokenMsg = "";
-    try {
-      const lRes = await axios.post("https://api.datamartgh.shop/api/v1/login", { email, password }, { timeout: 10000 });
-      if (lRes.data?.token) {
-        await supabase.from("settings").upsert({ key: "datamart_auth_token", value: lRes.data.token }, { onConflict: "key" });
-        tokenMsg = "\n🔑 *DataMart Token:* Connected & active for automated 1-click MoMo cashout topup!";
-      }
-    } catch (_) {
-      tokenMsg = "\n⚠️ Could not authenticate with DataMart API yet. Please verify email/password.";
-    }
-    return sendWhatsApp(from, `✅ *DATAMART CREDENTIALS SAVED BOSS!*\n\n📧 *Email:* ${email}${tokenMsg}`);
-  }
-
-  // Direct Action Command 8: WhatsApp Channel Broadcast (Flash Sale, Bundles/Prices, Vouchers, Custom)
-  const channelPostMatch =
-    cmdText.match(/(?:post|broadcast|publish|send|drop)\s+(?:the\s+)?(flash\s*sale|flash|prices?|bundles?|rates?|catalog|vouchers?|giveaway)(?:\s+(?:update|promo|alert))?(?:\s+(?:to|in|on)\s+(?:the\s+)?channel)?/i) ||
-    cmdText.match(/(?:post|broadcast|publish|drop)\s+(?:to|in|on)\s+(?:the\s+)?channel(?:\s*:\s*|\s+)([\s\S]+)/i) ||
-    cmdText.match(/^channel\s+(?:post|broadcast|update)(?:\s*:\s*|\s+)?(flash|prices?|vouchers?)?/i) ||
-    cmdText.match(/(?:flash\s*sale|flash)\s+update\s+(?:in|on|to)\s+(?:the\s+)?channel/i);
-
-  if (channelPostMatch) {
-    let topic = "general";
-    let customMsg = "";
-    const m1 = channelPostMatch[1] ? channelPostMatch[1].toLowerCase().trim() : "";
-    if (/flash/i.test(cmdText) || /flash/i.test(m1)) topic = "flash";
-    else if (/price|bundle|rate|catalog/i.test(m1)) topic = "prices";
-    else if (/voucher|giveaway/i.test(m1)) topic = "vouchers";
-    else if (m1 && m1.length > 10) {
-      topic = "custom";
-      customMsg = m1;
-    }
-    const execMsg = await executeOwnerDirectAction("post_to_channel", { topic, message: customMsg, phone: String(from) });
-    return sendWhatsApp(from, `✅ *CHANNEL BROADCAST DISPATCHED BOSS!*\n\n${execMsg}`);
-  }
-
-  // Direct Action Command 9: Universal Agent Boost Margin (Apply to All Agents)
-  const allAgentsBoostMatch =
-    cmdText.match(/(?:set|apply|update|change)\s+(?:all\s+agents?|resellers?)\s+(?:boost\s+)?(?:profit|markup|margin)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
-    cmdText.match(/(?:set|apply|update|change)\s+(?:agent\s+)?(?:boost\s+)?(?:profit|markup|margin)\s+(?:for\s+all|to\s+all)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
-    cmdText.match(/(?:set|apply|update|change)\s+(?:all\s+agents?|resellers?)\s+(?:to\s+)?(\d+(?:\.\d+)?)\s*%\s*(?:boost\s+)?(?:profit|markup|margin)/i);
-
-  if (allAgentsBoostMatch) {
-    let pct = Math.max(0, Math.min(500, parseFloat(allAgentsBoostMatch[1])));
-
-    // Enforce platform rule: Reseller selling margin cannot be less than Admin wholesale increment from provider
-    let adminMarkup = 10;
-    try {
-      const { data: sRow } = await supabase.from("settings").select("value").eq("key", "boost_markup_percent").maybeSingle();
-      if (sRow?.value && Number.isFinite(Number(sRow.value))) {
-        adminMarkup = Number(sRow.value);
-      }
-    } catch (_) { }
-
-    if (pct < adminMarkup) {
-      pct = adminMarkup;
-    }
-
-    const { data: ags } = await supabase.from("agents").select("id, store_slug, custom_prices");
-    let count = 0;
-    if (Array.isArray(ags)) {
-      const settingsRows = [];
-      for (const ag of ags) {
-        const updated = { ...(ag.custom_prices || {}), boost_markup_percent: pct };
-        await supabase.from("agents").update({ custom_prices: updated }).eq("id", ag.id);
-        settingsRows.push({
-          key: `agent_pricing_${ag.id}`,
-          value: JSON.stringify(updated),
+          out += `${numEmoji} *[${tk.reportId || "ID"}]* ${prioEmoji} *${tk.reportReason || "Support"}* (*${prio}*)\n` +
+            `• 👤 *Customer:* ${custName} (${custPhone})\n` +
+            `• 📝 ${desc}...\n` +
+            `• 📊 Status: *${(tk.status || "pending").toUpperCase()}*\n\n`;
         });
-        if (ag.store_slug) {
-          settingsRows.push({
-            key: `agent_pricing_${String(ag.store_slug).toLowerCase().trim()}`,
-            value: JSON.stringify(updated),
-          });
-        }
-        count++;
+        out += `💡 Reply: *view ticket [ReportID]* to open any ticket above!`;
+        return sendWhatsApp(from, out);
       }
-      if (settingsRows.length > 0) {
-        try { await supabase.from("settings").upsert(settingsRows, { onConflict: "key" }); } catch (_) { }
-      }
-    }
-    await supabase.from("settings").upsert([
-      { key: "default_agent_boost_markup_percent", value: String(pct) },
-      { key: "agent_boost_default_markup_percent", value: String(pct) },
-    ], { onConflict: "key" });
 
-    return sendWhatsApp(from,
-      `✅ *ALL AGENTS UPDATED BOSS!*\n\n` +
-      `🚀 Social Media Boost profit margin set to *+${pct}%* across all *${count}* registered resellers!\n\n` +
-      `Every reseller storefront will now sell boost services with a +${pct}% margin.`
-    );
-  }
-
-  // Direct Action Command 9b: Boost Provider Balance (BoostUpGH)
-  const boostBalanceMatch =
-    cmdText.match(/^(?:check\s+)?(?:boost|smm|boostup|boostupgh)\s*(?:wallet\s+)?balance$/i) ||
-    cmdText.match(/^(?:what\s+is\s+)?(?:our\s+|the\s+)?(?:boost|smm|boostupgh)\s+balance/i) ||
-    cmdText.match(/^boost\s+balance$/i);
-
-  if (boostBalanceMatch) {
-    const msg = await executeOwnerDirectAction("query_boost_balance");
-    return sendWhatsApp(from, msg);
-  }
-
-  // Direct Action Command 9c: Set Provider Wholesale Boost Markup %
-  const providerBoostMatch =
-    cmdText.match(/(?:set|change|update)\s+(?:provider\s+|wholesale\s+)?(?:boost\s+)?(?:markup|increment|rate)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
-    cmdText.match(/(?:set|change|update)\s+boost\s+(?:provider\s+|wholesale\s+)?(?:markup|increment|rate)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
-    cmdText.match(/(?:set|change|update)\s+wholesale\s+(?:boost\s+)?(?:markup|increment)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i);
-
-  if (providerBoostMatch) {
-    const pct = parseFloat(providerBoostMatch[1]);
-    const msg = await executeOwnerDirectAction("set_boost_provider_markup", { percent: pct });
-    return sendWhatsApp(from, msg);
-  }
-
-  // Direct Action Command 9d: Query Boost Orders
-  const boostOrdersMatch =
-    cmdText.match(/^(?:check\s+|list\s+|show\s+|get\s+)?(?:recent\s+)?(?:boost|smm)\s+orders/i) ||
-    cmdText.match(/^boost\s+orders$/i);
-
-  if (boostOrdersMatch) {
-    const msg = await executeOwnerDirectAction("query_boost_orders", { limit: 8 });
-    return sendWhatsApp(from, msg);
-  }
-
-  // Check if user is in Support Mode
-  const isSupportMode = getUserMode(from, currentSession) === "support" || currentSession?.step === 97;
-
-  let effectiveSystemPrompt = ownerSystemPrompt;
-  if (isSupportMode) {
-    effectiveSystemPrompt =
-      "You are Stony 💙, the Head of Live Customer Support & Support Desk Operations at DataMart and Rezolv.\n" +
-      "You are having a direct WhatsApp conversation with the business owner in LOCKED-IN SUPPORT MODE.\n\n" +
-      "STRICT SUPPORT MODE MANDATE (ZERO DATA 1 STORE PROMPT DUMPING):\n" +
-      "- You are 100% DEDICATED to customer support tickets, resolving agent/customer complaints, drafting replies, and tracking issue resolutions.\n" +
-      "- NEVER talk about DATA 1 GH store orders, today's store sales, revenue, marketing promos, campus reps, or failed store checkout orders!\n" +
-      "- NEVER talk about retrying store dispatches (like WS-MFDA8PM) or clearing store queue!\n" +
-      "- NEVER say you cannot reply or don't have a reply button! You can dispatch WhatsApp & SMS directly to customers, and reply directly on Rezolv!\n" +
-      "- Talk like an intelligent, sharp Ghanaian customer support lead ('bossu', 'chale', 'sharp', 'no wahala'). Keep replies crisp, direct, and focused strictly on the tickets and customer communications.\n\n" +
-      "CUSTOMER SUPPORT CAPABILITIES & ACTIONS:\n" +
-      "1. DataMart Tickets (RPT...): You dispatch WhatsApp and SMS directly to customer phones!\n" +
-      "   When owner asks to reply, tell, or message a customer on a DataMart ticket (e.g. 'reply him to text me on 0547100951' or 'reply Prince Boachie'):\n" +
-      "   Output: [EXECUTE_ACTION: {\"type\": \"send_customer_message\", \"target\": \"[name/phone/RPT]\", \"message\": \"[message]\"}]\n" +
-      "2. Rezolv Live Chat (TKT-...): You reply directly in the live web chat widget as Stony 💙.\n" +
-      "   Output: [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"[TKT-ID]\", \"message\": \"[message]\"}]\n" +
-      "3. Close/Resolve Ticket:\n" +
-      "   Output: [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"[TKT-ID]\"}]\n" +
-      "4. Carrier Delivery Check on Portal Order ID:\n" +
-      "   Output: [EXECUTE_ACTION: {\"type\": \"datamart_delivery_check\", \"portalOrderId\": \"[id]\"}]\n" +
-      "5. Search customer/agent on DataMart:\n" +
-      "   Output: [EXECUTE_ACTION: {\"type\": \"datamart_search_customer\", \"query\": \"[query]\"}]\n\n" +
-      "LIVE CUSTOMER SUPPORT QUEUES & TICKETS CONTEXT:\n" +
-      (rezolvLiveContext ? `${rezolvLiveContext}\n` : "") +
-      (dmSupportLiveContext ? `${dmSupportLiveContext}\n` : "");
-  }
-
-  // ── STEP 1: FAST DIRECT IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──
-  let aiReply = "";
-  try {
-    const aiResult = await executeBotAi({
-      systemPrompt: effectiveSystemPrompt,
-      userMessage: text,
-      history,
-      maxTokens: 2500,
-      temperature: 0.7
-    });
-    aiReply = aiResult?.text || "";
-  } catch (botAiErr) {
-    console.warn("Direct bot AI call note:", botAiErr.message);
-  }
-
-  // If direct bot engine didn't yield text, try Site Co-Pilot bridge as backup
-  if (!aiReply) {
-    try {
-      const siteResp = await axios.post(
-        siteAiEndpoint,
-        {
-          action: "aiCoPilotChat",
-          message: text,
-          history: history.slice(-8).map(h => ({
-            role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
-            content: h.text || h.content || ""
-          })),
-          source: "whatsapp",
-          phone: String(from),
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-            "x-admin-bot": "true",
-            "x-admin-key": process.env.ADMIN_API_KEY || "data1gh-secure-admin",
-          },
-          timeout: 15000,
+      // Direct Action Command: DataMart Support Dashboard
+      const dmDashboardMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?(?:dashboard|overview|stats)$/i);
+      if (dmDashboardMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/dashboard');
+        const d = resp?.data;
+        if (!d) {
+          return sendWhatsApp(from, `⚠️ Could not fetch DataMart Agent Support dashboard. Please retry in a moment.`);
         }
-      );
 
-      if (
-        siteResp.data &&
-        siteResp.data.ok &&
-        siteResp.data.reply
-      ) {
-        aiReply = siteResp.data.reply;
-        if (siteResp.data.staged_action) {
-          try {
-            const execRes = await executeOwnerDirectAction(
-              siteResp.data.staged_action.action_type || siteResp.data.staged_action.type,
-              siteResp.data.staged_action.payload || siteResp.data.staged_action
-            );
-            if (execRes) aiReply += `\n\n✅ Done bossu! ${execRes}`;
-          } catch (_) { }
+        const today = d.today || {};
+        const tickets = d.tickets || {};
+        const bdMap = {};
+        (tickets.breakdown || []).forEach(b => { bdMap[b._id] = b.count; });
+
+        let netIssuesText = "Normal (All systems green)";
+        if (Array.isArray(d.networkIssues) && d.networkIssues.length > 0) {
+          netIssuesText = d.networkIssues.map(n => `⚠️ ${n.network}: ${n.message || n.issue}`).join("\n• ");
         }
-      }
-    } catch (_) { }
-  }
 
-  // Check if AI emitted direct execution tag [EXECUTE_ACTION: {...}]
-  const execActionMatch = aiReply ? aiReply.match(/\[EXECUTE_ACTION:\s*(\{[\s\S]*?\})\]/i) : null;
-  if (execActionMatch) {
-    try {
-      const actionObj = JSON.parse(execActionMatch[1]);
-      aiReply = aiReply.replace(execActionMatch[0], "").trim();
-      const aType = actionObj.action_type || actionObj.type;
-      const aPayload = actionObj.payload || actionObj;
-      const execRes = await executeOwnerDirectAction(aType, aPayload);
-      await syncActionToSite(aType, aPayload);
-      if (execRes) {
-        aiReply += `\n\n✅ Done bossu! ${execRes}`;
+        return sendWhatsApp(from,
+          `📊 *DATAMART AGENT SUPPORT DASHBOARD*\n\n` +
+          `📦 *Today's Volume:*\n` +
+          `• 🛒 *Total Orders:* ${(today.totalOrders || 0).toLocaleString()}\n` +
+          `• ❌ *Failed Orders:* ${today.failedOrders || 0}\n` +
+          `• 💸 *Refunds Processed:* ${today.refundsProcessed || 0}\n\n` +
+          `🎫 *Support Queue:*\n` +
+          `• ⏳ *Pending Tickets:* ${(tickets.pending || 0).toLocaleString()}\n` +
+          `• 🔍 *Under Review:* ${bdMap["under_review"] || 0}\n` +
+          `• 🛠️ *Investigating:* ${bdMap["investigating"] || 0}\n` +
+          `• ✅ *Resolved:* ${(bdMap["resolved"] || 0).toLocaleString()}\n\n` +
+          `📶 *Network Health:* ${netIssuesText}\n\n` +
+          `💡 *Agent Support Tools on WhatsApp:*\n` +
+          `• *dm tickets* ➔ View active support tickets\n` +
+          `• *dm failed orders* ➔ View failed orders & retry\n` +
+          `• *dm withdrawals* ➔ View agent cashout requests\n` +
+          `• *dm deposits* ➔ View agent deposits\n` +
+          `• *dm search [phone]* ➔ Search any agent/customer`
+        );
       }
-    } catch (err) {
-      console.warn("Failed executing action tag in bot:", err.message);
-    }
-  }
 
-  // If AI emitted [SUGGEST_ACTION: {...}], handle confirmation vs execution cleanly
-  if (aiReply) {
-    const proposed = extractProposedActionFromText(aiReply);
-    if (proposed?.action) {
-      try {
-        if (proposed.fullTag) {
-          aiReply = aiReply.replace(proposed.fullTag, "").trim();
+      // Direct Action Command: DataMart Failed Orders
+      const dmFailedOrdersMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?failed(?:\s*orders)?$/i);
+      if (dmFailedOrdersMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/failed-orders?limit=5');
+        const orders = resp?.data?.orders || [];
+        if (orders.length === 0) {
+          return sendWhatsApp(from, `🎉 *DATAMART FAILED ORDERS:* Zero failed orders in the queue right now! All telecom dispatches are running smoothly.`);
         }
-        const aType = proposed.action.action_type || proposed.action.type;
-        const aPayload = proposed.action.payload || proposed.action;
-        const isQuestion = /\?|shall\s+i|do\s+you\s+want|would\s+you\s+like|confirm|approve/i.test(aiReply);
 
-        if (isQuestion) {
-          // Store as pending action so owner's next reply ("yes", "proceed") executes it safely
-          await setOwnerPendingAction(from, proposed.action);
+        let out = `⚠️ *DATAMART FAILED ORDERS (${orders.length} shown):*\n\n`;
+        orders.forEach((ord, idx) => {
+          const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+          const custName = ord.userId?.name || "Customer";
+          const phone = ord.phoneNumber || "N/A";
+          const net = ord.network || "MTN";
+          const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+          const reason = (ord.failureReason || ord.status || "Failed dispatch").replace(/\s+/g, " ").trim().slice(0, 80);
+
+          out += `${num} *[${ord._id}]* ${net} ${cap}\n` +
+            `• 📱 *Recipient:* ${phone} (${custName})\n` +
+            `• ❌ *Reason:* ${reason}\n` +
+            `• ⚡ *Actions:* *dm retry ${ord._id}* | *dm refund ${ord._id}*\n\n`;
+        });
+        out += `💡 To re-attempt an order, reply: *dm retry [OrderID]*\n` +
+          `💡 To refund to wallet, reply: *dm refund [OrderID]*`;
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: Retry DataMart Order
+      const dmRetryOrderMatch = cmdText.match(/^(?:datamart|dm)\s*retry(?:\s*order)?\s+([a-f0-9]{24})/i);
+      if (dmRetryOrderMatch) {
+        const orderId = dmRetryOrderMatch[1].trim();
+        const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/retry`, {
+          method: "POST",
+          body: { reason: "Support retry requested via WhatsApp" }
+        });
+        if (resp?.status === "success" || resp?.success) {
+          return sendWhatsApp(from, `✅ *DATAMART ORDER RETRIED!* Order *${orderId}* has been re-queued for carrier dispatch.`);
         } else {
+          return sendWhatsApp(from, `⚠️ Could not retry order: ${resp?.message || resp?.error || "Unknown response"}`);
+        }
+      }
+
+      // Direct Action Command: Refund DataMart Order
+      const dmRefundOrderMatch = cmdText.match(/^(?:datamart|dm)\s*refund(?:\s*order)?\s+([a-f0-9]{24})(?:\s+(.+))?/i);
+      if (dmRefundOrderMatch) {
+        const orderId = dmRefundOrderMatch[1].trim();
+        const reason = (dmRefundOrderMatch[2] || "Support agent refund requested via WhatsApp").trim();
+        const resp = await fetchDatamartSupportEndpoint(`/api/support/order/${orderId}/refund`, {
+          method: "POST",
+          body: { reason, notifyCustomer: true }
+        });
+        if (resp?.status === "success" || resp?.success) {
+          return sendWhatsApp(from, `💸 *DATAMART ORDER REFUNDED!* Order *${orderId}* has been refunded to the agent's wallet balance.`);
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not refund order: ${resp?.message || resp?.error || "Unknown response"}`);
+        }
+      }
+
+      // Direct Action Command: DataMart Withdrawals
+      const dmWithdrawalsMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?withdrawals?$/i);
+      if (dmWithdrawalsMatch) {
+        return sendWhatsApp(from, reply);
+      }
+
+      // Direct Action Command: DataMart Delivery Check (Single or Bulk)
+      const dmDeliveryCheckMatch =
+        cmdText.match(/^(?:datamart|dm)\s*(?:delivery\s*check|delivery\s*audit)(?:\s+([\d,\s\n]+|[A-Za-z0-9_-]+))?$/i) ||
+        cmdText.match(/^(?:delivery\s*check|delivery\s*audit)\s+(?:for\s+)?(?:these\s+ids\s+|this\s+id\s+)?([\d,\s\n]+|[A-Za-z0-9_-]+)$/i) ||
+        cmdText.match(/^([\d,\s\n]{4,})\s+(?:do\s+)?(?:delivery\s*check|check\s+delivery)/i) ||
+        cmdText.match(/(?:do\s+)?delivery\s*check.+?([\d,\s\n]{4,})/i) ||
+        cmdText.match(/([\d,\s\n]{4,}).+?delivery\s*check/i);
+      if (dmDeliveryCheckMatch) {
+        const rawIds = dmDeliveryCheckMatch[1] || "";
+        const idMatches = rawIds.match(/\b\d{4,9}[a-zA-Z]?\b/g);
+        if (idMatches && idMatches.length > 0) {
+          const report = await executeDatamartDeliveryCheck(idMatches, from);
+          if (report) return sendWhatsApp(from, report);
+        }
+
+        const resp = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent');
+        const jobs = Array.isArray(resp?.data) ? resp.data : Array.isArray(resp) ? resp : [];
+        if (jobs.length === 0) {
+          return sendWhatsApp(from, `🚚 *DATAMART DELIVERY CHECK:* No recent automated delivery audits on record.`);
+        }
+
+        const latest = jobs[0];
+        const dateStr = latest.createdAt ? new Date(latest.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "Recent";
+        const total = latest.totalOrders || latest.count || 0;
+        const delivered = latest.deliveredCount || latest.delivered || 0;
+        const failed = latest.failedCount || latest.failed || 0;
+        const status = (latest.status || "completed").toUpperCase();
+
+        let out = `🚚 *DATAMART DELIVERY CHECK AUDIT*\n\n` +
+          `📊 *Latest Audit:* *${status}*\n` +
+          `🕒 *Run Time:* ${dateStr}\n` +
+          `• 📦 *Orders Audited:* ${total.toLocaleString()}\n` +
+          `• ✅ *Carrier Confirmed:* ${delivered.toLocaleString()}\n` +
+          `• ❌ *Carrier Failed:* ${failed}\n\n`;
+
+        if (jobs.length > 1) {
+          out += `📋 *Recent Check History:*\n`;
+          jobs.slice(1, 4).forEach((j, i) => {
+            const t = j.createdAt ? new Date(j.createdAt).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "";
+            out += `• [${t}] ${j.status || "completed"} (${j.totalOrders || 0} orders, ${j.failedCount || 0} failed)\n`;
+          });
+          out += `\n`;
+        }
+
+        out += `💡 To check a specific order batch: *dm delivery check [portalId]*\n` +
+          `💡 To view undelivered complaints: *dm not received*`;
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: DataMart Failed Recovery
+      const dmFailedRecoveryMatch = cmdText.match(/^(?:datamart|dm)\s*failed\s*recovery$/i);
+      if (dmFailedRecoveryMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/failed-recovery');
+        const d = resp?.data || resp || {};
+        const totalFailed = d.totalFailed || 0;
+        const recovered = d.recoveredCount || 0;
+        const batches = d.batchCount || (Array.isArray(d.batches) ? d.batches.length : 0);
+
+        return sendWhatsApp(from,
+          `🔄 *DATAMART FAILED RECOVERY PIPELINE*\n\n` +
+          `• ❌ *Total Failed Orders:* ${totalFailed.toLocaleString()}\n` +
+          `• 🔄 *Batches Processed:* ${batches}\n` +
+          `• ✅ *Successfully Recovered:* ${recovered.toLocaleString()}\n\n` +
+          `💡 *Actions:*\n` +
+          `• Reply: *dm failed orders* to view individual failed orders & retry`
+        );
+      }
+
+      // Direct Action Command: DataMart Skipped Recovery
+      const dmSkippedRecoveryMatch = cmdText.match(/^(?:datamart|dm)\s*skipped\s*recovery$/i);
+      if (dmSkippedRecoveryMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/skipped-recovery');
+        const d = resp?.data || resp || {};
+        const totalSkipped = d.totalSkipped || 0;
+        const val = d.totalValue != null ? Number(d.totalValue).toFixed(2) : "0.00";
+        const recovered = d.recoveredCount || 0;
+
+        return sendWhatsApp(from,
+          `⏭️ *DATAMART SKIPPED RECOVERY PIPELINE*\n\n` +
+          `• ⏭️ *Total Skipped in Queue:* ${totalSkipped.toLocaleString()}\n` +
+          `• 💰 *Total Bundle Value:* GH₵ ${val}\n` +
+          `• ✅ *Recovered / Re-Dispatched:* ${recovered.toLocaleString()}\n\n` +
+          `All skipped queues are monitored 24/7 by the DataMart worker switch.`
+        );
+      }
+
+      // Direct Action Command: DataMart Not Received Customer Reports
+      const dmNotReceivedMatch = cmdText.match(/^(?:datamart|dm)\s*not\s*received$/i);
+      if (dmNotReceivedMatch) {
+        const resp = await fetchDatamartSupportEndpoint('/api/support/not-received');
+        const d = resp?.data || resp || {};
+        const reports = Array.isArray(d.reports) ? d.reports : [];
+        const counts = d.counts || {};
+
+        let out = `⚠️ *DATAMART "NOT RECEIVED" COMPLAINTS*\n\n` +
+          `📊 *Summary:*\n` +
+          `• ⏳ *Pending Investigation:* ${counts.pending || reports.length}\n` +
+          `• ✅ *Resolved:* ${counts.resolved || 0}\n\n`;
+
+        if (reports.length === 0) {
+          out += `_Zero open "Not Received" customer reports right now!_ 🎉\n`;
+        } else {
+          out += `📋 *Recent Customer Complaints:*\n`;
+          reports.slice(0, 5).forEach((rep, idx) => {
+            const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+            const phone = rep.phoneNumber || rep.phone || "N/A";
+            const net = rep.network || "MTN";
+            const cap = rep.capacity != null ? `${rep.capacity}GB` : "";
+            const time = getTimeAgoGhana(rep.createdAt);
+            out += `${num} *${phone}* (${net} ${cap}) - ${time}\n` +
+              `  Ref: ${rep.orderReference || rep.reference || rep._id}\n`;
+          });
+          out += `\n💡 Reply: *dm search [phone]* to inspect any customer above!`;
+        }
+        return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: DataMart Order Verify
+      const dmOrderVerifyMatch = cmdText.match(/^(?:datamart|dm)\s*order\s*verify\s+(.+)$/i);
+      if (dmOrderVerifyMatch) {
+        const query = dmOrderVerifyMatch[1].trim();
+        const resp = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(query)}`);
+        const results = resp?.data?.results || [];
+        const ord = results.find(r => r.type === "order" || r.order)?.order || results[0]?.order || results[0];
+
+        if (!ord || (!ord.network && !ord.phoneNumber)) {
+          return sendWhatsApp(from, `🔍 No DataMart order found matching "*${query}*". Please verify order reference or phone number.`);
+        }
+
+        const net = ord.network || "MTN";
+        const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+        const phone = ord.phoneNumber || "N/A";
+        const status = (ord.status || "processing").toUpperCase();
+        const amt = ord.amount != null ? `GH₵ ${Number(ord.amount).toFixed(2)}` : "N/A";
+        const rawDate = ord.createdAt || ord.created_at || ord.orderDate || ord.date || ord.timestamp;
+        const formattedDate = rawDate ? formatGhanaTime(rawDate) : null;
+        const timeAgo = rawDate ? getTimeAgoGhana(rawDate) : null;
+        const time = formattedDate ? `${formattedDate}${timeAgo ? ` (${timeAgo})` : ""}` : "N/A";
+        const rawPid = ord.exportTracking?.portalId || (ord.apiOrderId && /^\d{4,9}$/.test(String(ord.apiOrderId)) ? ord.apiOrderId : null) || (ord.portalOrderId && /^\d{4,9}$/.test(String(ord.portalOrderId)) ? ord.portalOrderId : null);
+        const portalId = (rawPid && /^\d{4,9}$/.test(String(rawPid))) ? String(rawPid) : null;
+        const refCode = ord.geonetReference || ord.reference || "N/A";
+        const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
+
+        return sendWhatsApp(from,
+          `✅ *DATAMART ORDER VERIFICATION*\n\n` +
+          `🆔 *Portal ID:* *${portalId || "Pending Export"}*${batchNo} (Ref: ${refCode})\n` +
+          `📶 *Network & Size:* ${net} ${cap}\n` +
+          `📱 *Recipient:* *${phone}*\n` +
+          `💵 *Amount:* ${amt}\n` +
+          `📊 *Carrier Status:* *${status}*\n` +
+          `📅 *Date Placed:* *${time}*\n` +
+          `DB ID: \`${ord._id}\`\n\n` +
+          `💡 *Actions:*\n` +
+          `• Delivery check: ${portalId ? `*dm delivery check ${portalId}*` : `*dm delivery check ${refCode}*`}\n` +
+          `• Re-dispatch order: *dm retry ${ord._id}*\n` +
+          `• Refund to wallet: *dm refund ${ord._id}*`
+        );
+      }
+
+      // Direct Action Command 0a: Credit Agent Wallet
+      const creditAgentMatch = cmdText.match(/(?:credit|fund|top\s*up)\s+(?:agent\s+)?([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i);
+      if (creditAgentMatch) {
+        const target = creditAgentMatch[1].trim();
+        const amt = parseFloat(creditAgentMatch[2]);
+        if (!isNaN(amt) && amt > 0) {
+          const res = await creditAgentWalletSafely(target, amt);
+          if (res) {
+            await syncActionToSite("credit_agent", { phone: target, amount: amt });
+            return sendWhatsApp(from,
+              `✅ *AGENT WALLET CREDITED BOSS!*\n\n` +
+              `👤 *Agent:* *${res.agent.name || res.agent.store_name || res.agent.phone}*\n` +
+              `📱 *Phone:* ${res.agent.phone || "N/A"}\n` +
+              `🏪 *Store:* ${res.agent.store_name || "N/A"}\n` +
+              `💵 *Credited:* +GH₵ ${res.credited.toFixed(2)}\n` +
+              `💰 *New Wallet Balance:* *GH₵ ${res.newBalance.toFixed(2)}* live in database!`
+            );
+          } else {
+            return sendWhatsApp(from, `⚠️ Could not find registered agent "${target}". Use "list agents" to see all agents.`);
+          }
+        }
+      }
+
+      // Direct Action Command 0b: Debit Agent Wallet
+      const debitAgentMatch = cmdText.match(/(?:debit|deduct|remove)\s+(?:from\s+)?(?:agent\s+)?([A-Za-z0-9_.-]+)\s+(?:with\s+)?(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i);
+      if (debitAgentMatch) {
+        const target = debitAgentMatch[1].trim();
+        const amt = parseFloat(debitAgentMatch[2]);
+        if (!isNaN(amt) && amt > 0) {
+          const res = await debitAgentWalletSafely(target, amt);
+          if (res) {
+            return sendWhatsApp(from,
+              `✅ *AGENT WALLET DEBITED BOSS!*\n\n` +
+              `👤 *Agent:* *${res.agent.name || res.agent.store_name || res.agent.phone}*\n` +
+              `💵 *Debited:* -GH₵ ${res.debited.toFixed(2)}\n` +
+              `💰 *New Wallet Balance:* *GH₵ ${res.newBalance.toFixed(2)}* live in database!`
+            );
+          } else {
+            return sendWhatsApp(from, `⚠️ Could not find registered agent "${target}".`);
+          }
+        }
+      }
+
+      // Direct Action Command 0a_price: Update Flash Sale Product Price
+      const updateFlashPriceMatch =
+        cmdText.match(/(?:update|change|set)\s+flash\s*sale\s+(?:price\s+)?(?:for\s+)?(?:mtn\s+)?(\d+(?:\.\d+)?)\s*(?:gb)?\s+(?:price\s+)?(?:to|as)?\s*(?:gh[c₵]?\s*)?(\d+(?:\.\d+)?)/i) ||
+        cmdText.match(/(?:update|change|set)\s+(?:price\s+)?(?:for\s+)?(?:mtn\s+)?(\d+(?:\.\d+)?)\s*(?:gb)?\s+flash\s*sale\s+(?:to|as)?\s*(?:gh[c₵]?\s*)?(\d+(?:\.\d+)?)/i);
+      if (updateFlashPriceMatch) {
+        const cap = updateFlashPriceMatch[1].trim();
+        const price = parseFloat(updateFlashPriceMatch[2]);
+        const res = await updateFlashSaleProductPrice(cap, price);
+        if (res) {
+          return sendWhatsApp(from,
+            `⚡ *FLASH SALE PRICE UPDATED BOSS!*\n\n` +
+            `📦 *Package:* MTN ${res.product.capacity}GB Flash Sale\n` +
+            `💰 *Old Price:* GH₵ ${Number(res.oldPrice).toFixed(2)}\n` +
+            `🔥 *New Flash Price:* *GH₵ ${Number(res.newPrice).toFixed(2)}* live on storefront!`
+          );
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not find Flash Sale package for "${cap}GB". Text "Flash sale" to see all packages.`);
+        }
+      }
+
+      // Direct Action Command 0a_toggle: Enable / Turn on Flash Sale
+      const enableFlashMatch = cmdText.match(/(?:turn\s*on|enable|start|activate|switch\s*on|put\s*on)\s+(?:the\s+)?flash\s*sale(?:\s+(?:for\s+)?(\d+)\s*(?:hours?|hrs?))?|(?:turn|switch)\s+(?:the\s+)?flash\s*sale\s+on(?:\s+(?:for\s+)?(\d+)\s*(?:hours?|hrs?))?|\bflash\s*sale\s+(?:on|start|activate)(?:\s+(?:for\s+)?(\d+)\s*(?:hours?|hrs?))?/i);
+      if (enableFlashMatch) {
+        const rawHours = enableFlashMatch[1] || enableFlashMatch[2] || enableFlashMatch[3];
+        const hours = rawHours ? parseInt(rawHours, 10) : 2;
+        const res = await toggleFlashSale(true, hours);
+        if (res?.enabled) {
+          return sendWhatsApp(from,
+            `⚡ *FLASH SALE ACTIVATED BOSS!*\n\n` +
+            `🔥 The Flash Sale banner & discounted rates are now *LIVE* on the storefront!\n` +
+            `⏳ *Active Until:* *${res.endTime?.replace("T", " ")}*\n\n` +
+            `💡 Customers can now purchase MTN Flash bundles directly on the site!`
+          );
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not toggle flash sale. Please verify database connection.`);
+        }
+      }
+
+      // Direct Action Command 0a_disable: Disable / Turn off Flash Sale
+      if (/(?:turn\s*off|disable|stop|end|deactivate|pause|switch\s*off|put\s*off)\s+(?:the\s+)?flash\s*sale|(?:turn|switch)\s+(?:the\s+)?flash\s*sale\s+off|\bflash\s*sale\s+(?:off|stop|deactivate|pause)\b/i.test(lt)) {
+        await toggleFlashSale(false);
+        return sendWhatsApp(from,
+          `🔒 *FLASH SALE TURNED OFF BOSS!*\n\n` +
+          `The Flash Sale has been disabled on the storefront. Products will now sell at their regular prices.`
+        );
+      }
+
+      // Direct Action Command 0a_pause_orders: Pause Store Orders
+      if (/\b(?:pause\s*orders?|pause\s*packages?|stop\s*orders?|disable\s*orders?|close\s*shop|turn\s*off\s*orders?|stop\s*taking\s*orders?|hold\s*orders?|freeze\s*orders?)\b/i.test(lt)) {
+        await supabase.from("settings").upsert({ key: "orders_paused", value: "true" }, { onConflict: "key" });
+        await syncActionToSite("update_setting", { key: "orders_paused", value: "true" }).catch(() => null);
+        return sendWhatsApp(from,
+          `⏸️ *ALL STORE ORDERS & PACKAGES PAUSED BOSS!*\n\n` +
+          `All packages have now been *PAUSED* across:\n` +
+          `• ✅ Main Storefront (data1gh.com)\n` +
+          `• ✅ All Agent Reseller Storefronts\n` +
+          `• ✅ WhatsApp Bot Ordering\n\n` +
+          `📢 All "Buy Now" buttons now display *"Orders Paused"* and checkout is locked.\n\n` +
+          `💡 When ready, simply say *"Resume orders"* or *"Turn on orders"* to open everything back up!`
+        );
+      }
+
+      // Direct Action Command 0a_resume_orders: Resume Store Orders
+      if (/\b(?:resume\s*orders?|resume\s*packages?|open\s*shop|enable\s*orders?|turn\s*on\s*orders?|start\s*taking\s*orders?|unpause\s*orders?|unfreeze\s*orders?)\b/i.test(lt)) {
+        await supabase.from("settings").upsert({ key: "orders_paused", value: "false" }, { onConflict: "key" });
+        await syncActionToSite("update_setting", { key: "orders_paused", value: "false" }).catch(() => null);
+        return sendWhatsApp(from,
+          `▶️ *ALL STORE ORDERS RESUMED BOSS!*\n\n` +
+          `🔥 All packages are now *ACTIVE & OPEN* across:\n` +
+          `• ✅ Main Storefront (data1gh.com)\n` +
+          `• ✅ All Agent Reseller Storefronts\n` +
+          `• ✅ WhatsApp Bot Ordering\n\n` +
+          `Customers can now purchase data packages normally! 🚀`
+        );
+      }
+
+      // Direct Action Command 0d: Suspend / Activate Agent
+      const statusAgentMatch = cmdText.match(/(suspend|block|deactivate|activate|unblock|enable)\s+agent\s+([A-Za-z0-9_.-]+)/i);
+      if (statusAgentMatch) {
+        const actionType = statusAgentMatch[1].toLowerCase();
+        const newStatus = /suspend|block|deactivate/.test(actionType) ? "suspended" : "active";
+        const target = statusAgentMatch[2].trim();
+        const res = await setAgentStatusSafely(target, newStatus);
+        if (res) {
+          return sendWhatsApp(from, `✅ *AGENT STATUS UPDATED BOSS!*\n\n👤 *Agent:* *${res.agent.name || res.agent.store_name || res.agent.phone}*\n⚡ *Status:* *${newStatus.toUpperCase()}* live in database!`);
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not find agent "${target}".`);
+        }
+      }
+
+      // Direct Action Command 1a: Payment Status Update
+      const paymentCmdMatch =
+        cmdText.match(/(?:mark|set|update|change)\s+(?:the\s+)?payment(?:\s+status)?\s+(?:of|for)?\s*([A-Za-z0-9_-]{5,35})\s+(?:to|as)?\s*([a-zA-Z_\s-]{3,20})/i) ||
+        cmdText.match(/(?:mark|set|update|change)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})\s+payment(?:\s+status)?\s+(?:to|as)?\s*([a-zA-Z_\s-]{3,20})/i) ||
+        cmdText.match(/(?:mark|set)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})\s+as\s+(paid|unpaid|refunded)/i);
+
+      if (paymentCmdMatch) {
+        const targetRef = paymentCmdMatch[1].trim();
+        const rawStatus = (paymentCmdMatch[2] || "paid").trim();
+        const targetPaymentStatus = extractPaymentStatusFromText(rawStatus) || rawStatus.toLowerCase();
+        await updateOrderPaymentStatusSafely(targetRef, targetPaymentStatus);
+        await syncActionToSite("update_payment_status", { reference: targetRef, payment_status: targetPaymentStatus });
+        return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n💰 Order *${targetRef}* payment status has been updated to *${targetPaymentStatus.toUpperCase()}* live in the database!`);
+      }
+
+      const hasUpdateIntent = /\b(update|mark|set|change)\b/i.test(cmdText) && /\b(delivered|failed|processing|pending|waiting|cancelled|refunded|completed|delivery status|status)\b/i.test(cmdText);
+
+      if (orderRefsInText.length > 0 && hasUpdateIntent) {
+        const targetStatus = extractStatusFromText(cmdText) || "delivered";
+        const updatedList = [];
+        for (const r of orderRefsInText) {
+          const ok = await updateOrderDeliveryStatusSafely(r, targetStatus);
+          await syncActionToSite("update_order_status", { reference: r, delivery_status: targetStatus });
+          if (ok) updatedList.push(r);
+        }
+        const displayRefs = updatedList.length > 0 ? updatedList : orderRefsInText;
+        return sendWhatsApp(from,
+          `✅ *ACTION COMPLETED BOSS!*\n\n` +
+          `📦 Updated *${displayRefs.length}* order(s) to *${targetStatus.toUpperCase()}* live in the database:\n` +
+          displayRefs.map(r => `• *${r}*`).join("\n")
+        );
+      }
+
+      const orderCmdMatch =
+        cmdText.match(/(?:mark|set|update|change)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})\s+(?:to|as)?\s*(delivered|processing|pending|failed|cancelled|refunded)/i) ||
+        cmdText.match(/(?:mark|set|update)\s+(delivered|processing|pending|failed|cancelled|refunded)\s+(?:for\s+)?(?:order\s+)?([A-Za-z0-9_-]{5,35})/i);
+
+      if (orderCmdMatch) {
+        const isFirst = /^(delivered|processing|pending|failed|cancelled|refunded)$/i.test(orderCmdMatch[2]);
+        const targetRef = isFirst ? orderCmdMatch[1].trim() : orderCmdMatch[2].trim();
+        const rawStatus = (isFirst ? orderCmdMatch[2] : orderCmdMatch[1]).trim();
+        const targetStatus = extractStatusFromText(rawStatus) || rawStatus.toLowerCase();
+        await updateOrderDeliveryStatusSafely(targetRef, targetStatus);
+        await syncActionToSite("update_order_status", { reference: targetRef, delivery_status: targetStatus });
+        return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n📦 Order *${targetRef}* has been marked as *${targetStatus.toUpperCase()}* live in the database!`);
+      }
+
+      // Direct Action Command 1b: Announcement Update
+      const annToggleMatch = cmdText.match(/(?:turn\s*(?:on|off)|enable|disable)\s+(?:the\s+)?(?:announcement|popup|banner)/i);
+      const annMsgMatch = cmdText.match(/(?:update|change|set)\s+(?:the\s+)?(?:announcement|popup|banner)(?:\s+(?:message|text|to|:))?\s*["“']?([^"”']+)["”']?/i);
+
+      if (annToggleMatch) {
+        const enable = /\b(on|enable)\b/i.test(annToggleMatch[0]);
+        await updateStoreAnnouncement({ title: "Store Announcement", message: "", enabled: enable });
+        await syncActionToSite("update_announcement", { enabled: enable });
+        return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n📢 Storefront announcement popup is now *${enable ? "ENABLED (LIVE)" : "DISABLED (OFF)"}* on ${STORE_FRONTEND_URL}!`);
+      }
+
+      if (annMsgMatch) {
+        const newMsg = annMsgMatch[1].trim();
+        if (newMsg && !/^(on|off|true|false|help|status)$/i.test(newMsg)) {
+          await updateStoreAnnouncement({ title: "Store Announcement", message: newMsg, enabled: true });
+          await syncActionToSite("update_announcement", { title: "Store Announcement", message: newMsg, enabled: true });
+          return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n📢 Storefront announcement banner updated live on ${STORE_FRONTEND_URL}:\n\n"${newMsg}"`);
+        }
+      }
+
+      // Direct Action Command 1c: Store Settings
+      const phoneSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:the\s+)?support\s+phone\s+(?:to|=)?\s*(0[2357]\d{8}|233\d{9})/i);
+      if (phoneSettingMatch) {
+        const newPhone = phoneSettingMatch[1].trim();
+        await updateStoreSetting("support_phone", newPhone);
+        await syncActionToSite("update_setting", { key: "support_phone", value: newPhone });
+        return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n📱 Support & alert phone updated to *${newPhone}* live!`);
+      }
+
+      const etaSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:the\s+)?delivery\s+(?:eta|speed|time)\s+(?:to|=)\s*["“']?([^"”']+)["”']?/i);
+      if (etaSettingMatch) {
+        const newEta = etaSettingMatch[1].trim();
+        await updateStoreSetting("delivery_eta", newEta);
+        await syncActionToSite("update_setting", { key: "delivery_eta", value: newEta });
+        return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n⚡ Storefront delivery ETA display updated to *${newEta}*!`);
+      }
+
+      const priceSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:the\s+)?(netflix|afa|mashup|waec|bece)\s+price\s+(?:to|=)?\s*(\d+(?:\.\d+)?)/i);
+      if (priceSettingMatch) {
+        const service = priceSettingMatch[1].toLowerCase();
+        const newPrice = priceSettingMatch[2];
+        const key = service === "waec" ? "waec_price" : (service === "bece" ? "bece_price" : `${service}_price`);
+        await updateStoreSetting(key, newPrice);
+        await syncActionToSite("update_setting", { key, value: newPrice });
+        return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n💰 *${service.toUpperCase()}* price updated to *GH₵ ${Number(newPrice).toFixed(2)}* live on the storefront!`);
+      }
+
+      const genericSettingMatch = cmdText.match(/(?:update|set|change)\s+(?:store\s+)?setting\s+([a-zA-Z0-9_-]+)\s+(?:to|=)\s*["“']?([^"”']+)["”']?/i);
+      if (genericSettingMatch) {
+        const key = genericSettingMatch[1].trim().toLowerCase();
+        const val = genericSettingMatch[2].trim();
+        await updateStoreSetting(key, val);
+        await syncActionToSite("update_setting", { key, value: val });
+        return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n⚙️ Store setting *${key}* updated to *${val}*!`);
+      }
+
+      // Direct Action Command 2: Resync order with DataMart
+      const resyncCmdMatch = cmdText.match(/(?:resync|sync)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})/i);
+      if (resyncCmdMatch) {
+        const targetRef = resyncCmdMatch[1].trim();
+        const execMsg = await executeOwnerDirectAction("resync_order", { ref: targetRef });
+        await syncActionToSite("resync_datamart", { reference: targetRef });
+        return sendWhatsApp(from, `✅ *RESYNC COMPLETED BOSS!*\n\n🔄 ${execMsg || `Order *${targetRef}* synced with DataMart API.`}`);
+      }
+
+      // Direct Action Command 3: Send SMS
+      const smsCmdMatch = cmdText.match(/(?:send\s+)?(?:an\s+)?(?:custom\s+)?sms\s+(?:to\s+)?(0[2357]\d{8}|233\d{9})\s*(?::|\s+(?:saying|with message|that|message:))\s*["“']?([^"”']+)["”']?/i);
+      if (smsCmdMatch) {
+        const targetPhone = smsCmdMatch[1].trim();
+        const targetText = smsCmdMatch[2].trim();
+        await sendAdminSms(targetText, targetPhone);
+        return sendWhatsApp(from,
+          `✅ *SMS DELIVERED BOSS!*\n\n` +
+          `📱 *Recipient:* ${targetPhone}\n` +
+          `🆔 *Sender ID:* *D_1Gh*\n` +
+          `💬 *Message:* "${targetText}"`
+        );
+      }
+
+      // Direct Action Command 4: Stock toggle
+      const stockCmdMatch = cmdText.match(/(?:put|mark|set)\s+([A-Za-z0-9\s]+?)\s+(in\s*stock|back\s*in\s*stock|out\s*of\s*stock|available|unavailable)/i);
+      if (stockCmdMatch) {
+        const itemText = stockCmdMatch[1].trim();
+        const inStock = /in\s*stock|available/i.test(stockCmdMatch[2]);
+        const { data: prods } = await supabase.from("products").select("id, name, network, capacity, in_stock");
+        const found = (prods || []).find(p => `${p.network} ${p.capacity} ${p.name || ""}`.toLowerCase().includes(itemText.toLowerCase()));
+        if (found) {
+          await supabase.from("products").update({ in_stock: inStock, updated_at: new Date().toISOString() }).eq("id", found.id);
+          await syncActionToSite("toggle_product_stock", { product_id: found.id, in_stock: inStock, name: `${found.network} ${found.capacity}` });
+          return sendWhatsApp(from,
+            `✅ *INVENTORY UPDATED BOSS!*\n\n` +
+            `📦 *Package:* ${found.network} ${found.capacity}GB\n` +
+            `⚡ *New Status:* *${inStock ? "IN STOCK ✅" : "OUT OF STOCK ❌"}* on storefront!`
+          );
+        }
+      }
+
+      // Direct Action Command 5: Retry telecom dispatch via DataMart
+      const retryCmdMatch = cmdText.match(/(?:retry|re-dispatch|redispatch|repurchase)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})/i);
+      if (retryCmdMatch) {
+        const targetRef = retryCmdMatch[1].trim();
+        const { data: ord } = await supabase.from("orders").select("reference, recipient_phone, network, capacity, amount").or(`reference.ilike.%${targetRef}%,datamart_reference.ilike.%${targetRef}%`).maybeSingle();
+        if (ord) {
+          await syncActionToSite("retry_order", {
+            reference: ord.reference,
+            phone: ord.recipient_phone,
+            network: ord.network,
+            capacity: ord.capacity
+          });
+          return sendWhatsApp(from,
+            `✅ *RETRY DISPATCHED BOSS!*\n\n` +
+            `🎯 *Order:* *${ord.reference}*\n` +
+            `📦 *Package:* ${ord.capacity}GB ${ord.network} → *${ord.recipient_phone}*\n` +
+            `⚡ Re-dispatched via DataMart Fast Delivery API!`
+          );
+        }
+      }
+
+      // Direct Action Command 6: Product price change
+      const priceCmdMatch =
+        cmdText.match(/(?:change|set|update)\s+(?:the\s+)?(?:price\s+of\s+)?(mtn|telecel|airteltigo|at)\s+(\d+(?:gb|mb)?)\s+(?:data\s+)?(?:price\s+)?(?:to|as)?\s*(?:gh[c₵]?\s*|₵\s*)?(\d+(?:\.\d{1,2})?)/i) ||
+        cmdText.match(/(?:set|change|update)\s+price\s+(?:of\s+)?([A-Za-z0-9\s]+?)\s+(?:to|as)\s+(?:ghc|gh₵|₵)?\s*(\d+(?:\.\d{1,2})?)/i) ||
+        cmdText.match(/(?:set|change|update)\s+([A-Za-z0-9\s]+?)\s+price\s+(?:to|as)\s+(?:ghc|gh₵|₵)?\s*(\d+(?:\.\d{1,2})?)/i);
+      if (priceCmdMatch) {
+        const isNetStyle = Boolean(priceCmdMatch[3]);
+        const itemText = isNetStyle ? `${priceCmdMatch[1]} ${priceCmdMatch[2].replace(/\D/g, "")}` : priceCmdMatch[1].trim();
+        const newPrice = parseFloat(isNetStyle ? priceCmdMatch[3] : priceCmdMatch[2]);
+        const { data: prods } = await supabase.from("products").select("id, name, network, capacity, price");
+        const found = (prods || []).find(p => {
+          if (isNetStyle) {
+            return String(p.network || "").toLowerCase().includes(priceCmdMatch[1].toLowerCase()) &&
+              String(p.capacity || "").replace(/\D/g, "") === priceCmdMatch[2].replace(/\D/g, "");
+          }
+          return `${p.network} ${p.capacity} ${p.name || ""}`.toLowerCase().includes(itemText.toLowerCase());
+        });
+        if (found && !isNaN(newPrice) && newPrice > 0) {
+          await supabase.from("products").update({ price: newPrice, updated_at: new Date().toISOString() }).eq("id", found.id);
+          await syncActionToSite("update_product_price", { product_id: found.id, network: found.network, capacity: found.capacity, price: newPrice });
+          return sendWhatsApp(from,
+            `✅ *PRICE UPDATED BOSS!*\n\n` +
+            `📦 *Package:* ${found.network} ${found.capacity}GB\n` +
+            `💰 *Old Price:* GH₵ ${Number(found.price).toFixed(2)}\n` +
+            `⚡ *New Price:* *GH₵ ${newPrice.toFixed(2)}* live on the storefront!`
+          );
+        }
+      }
+
+      // Direct Action Command 7: Resolve support chat
+      const chatCmdMatch = cmdText.match(/(?:resolve|close|clear)\s+(?:support\s+)?(?:chat|conversation)(?:\s+(?:with|for)\s+([A-Za-z0-9_-]+))?/i);
+      if (chatCmdMatch) {
+        const target = chatCmdMatch[1]?.trim() || "";
+        await executeOwnerDirectAction("resolve_support_chat", { phone: target || null });
+        return sendWhatsApp(from, `✅ *SUPPORT CHAT RESOLVED BOSS!*\n\n💬 Marked open customer support conversation${target ? ` for *${target}*` : ""} as resolved!`);
+      }
+
+      // Direct Action Command 7b: Reply to customer support chat
+      const replyChatMatch =
+        cmdText.match(/(?:reply|respond|answer)\s+(?:to\s+)?(?:support\s+)?(?:chat|customer|user|ticket)(?:\s+(?:with|for|to)\s+([A-Za-z0-9_-]+))?(?:\s*:\s*|\s+)([\s\S]+)/i) ||
+        cmdText.match(/^support\s+reply(?:\s+(?:to|for)\s+([A-Za-z0-9_-]+))?(?:\s*:\s*|\s+)([\s\S]+)/i);
+
+      if (replyChatMatch) {
+        const target = replyChatMatch[1]?.trim() || null;
+        const msgText = (replyChatMatch[2] || replyChatMatch[1])?.trim();
+        const execMsg = await executeOwnerDirectAction("reply_support_chat", { phone: target, message: msgText });
+        return sendWhatsApp(from, `✅ *SUPPORT CHAT REPLY DISPATCHED!*\n\n${execMsg}`);
+      }
+
+      // Direct Action Command 7c: Set DataMart login credentials
+      const dmLoginMatch = cmdText.match(/(?:set|save)\s+datamart\s+(?:login|credentials?|account)\s+(\S+@\S+)\s+(\S+)/i);
+      if (dmLoginMatch) {
+        const email = dmLoginMatch[1].trim();
+        const password = dmLoginMatch[2].trim();
+        await supabase.from("settings").upsert([
+          { key: "datamart_login_email", value: email },
+          { key: "datamart_login_password", value: password }
+        ], { onConflict: "key" });
+
+        // Attempt instant login to fetch token
+        let tokenMsg = "";
+        try {
+          const lRes = await axios.post("https://api.datamartgh.shop/api/v1/login", { email, password }, { timeout: 10000 });
+          if (lRes.data?.token) {
+            await supabase.from("settings").upsert({ key: "datamart_auth_token", value: lRes.data.token }, { onConflict: "key" });
+            tokenMsg = "\n🔑 *DataMart Token:* Connected & active for automated 1-click MoMo cashout topup!";
+          }
+        } catch (_) {
+          tokenMsg = "\n⚠️ Could not authenticate with DataMart API yet. Please verify email/password.";
+        }
+        return sendWhatsApp(from, `✅ *DATAMART CREDENTIALS SAVED BOSS!*\n\n📧 *Email:* ${email}${tokenMsg}`);
+      }
+
+      // Direct Action Command 8: WhatsApp Channel Broadcast (Flash Sale, Bundles/Prices, Vouchers, Custom)
+      const channelPostMatch =
+        cmdText.match(/(?:post|broadcast|publish|send|drop)\s+(?:the\s+)?(flash\s*sale|flash|prices?|bundles?|rates?|catalog|vouchers?|giveaway)(?:\s+(?:update|promo|alert))?(?:\s+(?:to|in|on)\s+(?:the\s+)?channel)?/i) ||
+        cmdText.match(/(?:post|broadcast|publish|drop)\s+(?:to|in|on)\s+(?:the\s+)?channel(?:\s*:\s*|\s+)([\s\S]+)/i) ||
+        cmdText.match(/^channel\s+(?:post|broadcast|update)(?:\s*:\s*|\s+)?(flash|prices?|vouchers?)?/i) ||
+        cmdText.match(/(?:flash\s*sale|flash)\s+update\s+(?:in|on|to)\s+(?:the\s+)?channel/i);
+
+      if (channelPostMatch) {
+        let topic = "general";
+        let customMsg = "";
+        const m1 = channelPostMatch[1] ? channelPostMatch[1].toLowerCase().trim() : "";
+        if (/flash/i.test(cmdText) || /flash/i.test(m1)) topic = "flash";
+        else if (/price|bundle|rate|catalog/i.test(m1)) topic = "prices";
+        else if (/voucher|giveaway/i.test(m1)) topic = "vouchers";
+        else if (m1 && m1.length > 10) {
+          topic = "custom";
+          customMsg = m1;
+        }
+        const execMsg = await executeOwnerDirectAction("post_to_channel", { topic, message: customMsg, phone: String(from) });
+        return sendWhatsApp(from, `✅ *CHANNEL BROADCAST DISPATCHED BOSS!*\n\n${execMsg}`);
+      }
+
+      // Direct Action Command 9: Universal Agent Boost Margin (Apply to All Agents)
+      const allAgentsBoostMatch =
+        cmdText.match(/(?:set|apply|update|change)\s+(?:all\s+agents?|resellers?)\s+(?:boost\s+)?(?:profit|markup|margin)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|apply|update|change)\s+(?:agent\s+)?(?:boost\s+)?(?:profit|markup|margin)\s+(?:for\s+all|to\s+all)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|apply|update|change)\s+(?:all\s+agents?|resellers?)\s+(?:to\s+)?(\d+(?:\.\d+)?)\s*%\s*(?:boost\s+)?(?:profit|markup|margin)/i);
+
+      if (allAgentsBoostMatch) {
+        let pct = Math.max(0, Math.min(500, parseFloat(allAgentsBoostMatch[1])));
+
+        // Enforce platform rule: Reseller selling margin cannot be less than Admin wholesale increment from provider
+        let adminMarkup = 10;
+        try {
+          const { data: sRow } = await supabase.from("settings").select("value").eq("key", "boost_markup_percent").maybeSingle();
+          if (sRow?.value && Number.isFinite(Number(sRow.value))) {
+            adminMarkup = Number(sRow.value);
+          }
+        } catch (_) { }
+
+        if (pct < adminMarkup) {
+          pct = adminMarkup;
+        }
+
+        const { data: ags } = await supabase.from("agents").select("id, store_slug, custom_prices");
+        let count = 0;
+        if (Array.isArray(ags)) {
+          const settingsRows = [];
+          for (const ag of ags) {
+            const updated = { ...(ag.custom_prices || {}), boost_markup_percent: pct };
+            await supabase.from("agents").update({ custom_prices: updated }).eq("id", ag.id);
+            settingsRows.push({
+              key: `agent_pricing_${ag.id}`,
+              value: JSON.stringify(updated),
+            });
+            if (ag.store_slug) {
+              settingsRows.push({
+                key: `agent_pricing_${String(ag.store_slug).toLowerCase().trim()}`,
+                value: JSON.stringify(updated),
+              });
+            }
+            count++;
+          }
+          if (settingsRows.length > 0) {
+            try { await supabase.from("settings").upsert(settingsRows, { onConflict: "key" }); } catch (_) { }
+          }
+        }
+        await supabase.from("settings").upsert([
+          { key: "default_agent_boost_markup_percent", value: String(pct) },
+          { key: "agent_boost_default_markup_percent", value: String(pct) },
+        ], { onConflict: "key" });
+
+        return sendWhatsApp(from,
+          `✅ *ALL AGENTS UPDATED BOSS!*\n\n` +
+          `🚀 Social Media Boost profit margin set to *+${pct}%* across all *${count}* registered resellers!\n\n` +
+          `Every reseller storefront will now sell boost services with a +${pct}% margin.`
+        );
+      }
+
+      // Direct Action Command 9b: Boost Provider Balance (BoostUpGH)
+      const boostBalanceMatch =
+        cmdText.match(/^(?:check\s+)?(?:boost|smm|boostup|boostupgh)\s*(?:wallet\s+)?balance$/i) ||
+        cmdText.match(/^(?:what\s+is\s+)?(?:our\s+|the\s+)?(?:boost|smm|boostupgh)\s+balance/i) ||
+        cmdText.match(/^boost\s+balance$/i);
+
+      if (boostBalanceMatch) {
+        const msg = await executeOwnerDirectAction("query_boost_balance");
+        return sendWhatsApp(from, msg);
+      }
+
+      // Direct Action Command 9c: Set Provider Wholesale Boost Markup %
+      const providerBoostMatch =
+        cmdText.match(/(?:set|change|update)\s+(?:provider\s+|wholesale\s+)?(?:boost\s+)?(?:markup|increment|rate)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|change|update)\s+boost\s+(?:provider\s+|wholesale\s+)?(?:markup|increment|rate)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i) ||
+        cmdText.match(/(?:set|change|update)\s+wholesale\s+(?:boost\s+)?(?:markup|increment)\s*(?:to|as)?\s*(\d+(?:\.\d+)?)\s*%/i);
+
+      if (providerBoostMatch) {
+        const pct = parseFloat(providerBoostMatch[1]);
+        const msg = await executeOwnerDirectAction("set_boost_provider_markup", { percent: pct });
+        return sendWhatsApp(from, msg);
+      }
+
+      // Direct Action Command 9d: Query Boost Orders
+      const boostOrdersMatch =
+        cmdText.match(/^(?:check\s+|list\s+|show\s+|get\s+)?(?:recent\s+)?(?:boost|smm)\s+orders/i) ||
+        cmdText.match(/^boost\s+orders$/i);
+
+      if (boostOrdersMatch) {
+        const msg = await executeOwnerDirectAction("query_boost_orders", { limit: 8 });
+        return sendWhatsApp(from, msg);
+      }
+
+      // Check if user is in Support Mode
+      const isSupportMode = getUserMode(from, currentSession) === "support" || currentSession?.step === 97;
+
+      let effectiveSystemPrompt = ownerSystemPrompt;
+      if (isSupportMode) {
+        effectiveSystemPrompt =
+          "You are Stony 💙, the Head of Live Customer Support & Support Desk Operations at DataMart and Rezolv.\n" +
+          "You are having a direct WhatsApp conversation with the business owner in LOCKED-IN SUPPORT MODE.\n\n" +
+          "STRICT SUPPORT MODE MANDATE (ZERO DATA 1 STORE PROMPT DUMPING):\n" +
+          "- You are 100% DEDICATED to customer support tickets, resolving agent/customer complaints, drafting replies, and tracking issue resolutions.\n" +
+          "- NEVER talk about DATA 1 GH store orders, today's store sales, revenue, marketing promos, campus reps, or failed store checkout orders!\n" +
+          "- NEVER talk about retrying store dispatches (like WS-MFDA8PM) or clearing store queue!\n" +
+          "- NEVER say you cannot reply or don't have a reply button! You can dispatch WhatsApp & SMS directly to customers, and reply directly on Rezolv!\n" +
+          "- Talk like an intelligent, sharp Ghanaian customer support lead ('bossu', 'chale', 'sharp', 'no wahala'). Keep replies crisp, direct, and focused strictly on the tickets and customer communications.\n\n" +
+          "CUSTOMER SUPPORT CAPABILITIES & ACTIONS:\n" +
+          "1. DataMart Tickets (RPT...): You dispatch WhatsApp and SMS directly to customer phones!\n" +
+          "   When owner asks to reply, tell, or message a customer on a DataMart ticket (e.g. 'reply him to text me on 0547100951' or 'reply Prince Boachie'):\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"send_customer_message\", \"target\": \"[name/phone/RPT]\", \"message\": \"[message]\"}]\n" +
+          "2. Rezolv Live Chat (TKT-...): You reply directly in the live web chat widget as Stony 💙.\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"[TKT-ID]\", \"message\": \"[message]\"}]\n" +
+          "3. Close/Resolve Ticket:\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"[TKT-ID]\"}]\n" +
+          "4. Carrier Delivery Check on Portal Order ID:\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"datamart_delivery_check\", \"portalOrderId\": \"[id]\"}]\n" +
+          "5. Search customer/agent on DataMart:\n" +
+          "   Output: [EXECUTE_ACTION: {\"type\": \"datamart_search_customer\", \"query\": \"[query]\"}]\n\n" +
+          "LIVE CUSTOMER SUPPORT QUEUES & TICKETS CONTEXT:\n" +
+          (rezolvLiveContext ? `${rezolvLiveContext}\n` : "") +
+          (dmSupportLiveContext ? `${dmSupportLiveContext}\n` : "");
+      }
+
+      // ── STEP 1: FAST DIRECT IN-BOT CO-PILOT ENGINE (USING WEBSITE'S CONFIGURED PROVIDER & MODEL) ──
+      let aiReply = "";
+      try {
+        const aiResult = await executeBotAi({
+          systemPrompt: effectiveSystemPrompt,
+          userMessage: text,
+          history,
+          maxTokens: 2500,
+          temperature: 0.7
+        });
+        aiReply = aiResult?.text || "";
+      } catch (botAiErr) {
+        console.warn("Direct bot AI call note:", botAiErr.message);
+      }
+
+      // If direct bot engine didn't yield text, try Site Co-Pilot bridge as backup
+      if (!aiReply) {
+        try {
+          const siteResp = await axios.post(
+            siteAiEndpoint,
+            {
+              action: "aiCoPilotChat",
+              message: text,
+              history: history.slice(-8).map(h => ({
+                role: h.role === "assistant" || h.role === "model" ? "assistant" : "user",
+                content: h.text || h.content || ""
+              })),
+              source: "whatsapp",
+              phone: String(from),
+            },
+            {
+              headers: {
+                "Content-Type": "application/json",
+                "x-admin-bot": "true",
+                "x-admin-key": process.env.ADMIN_API_KEY || "data1gh-secure-admin",
+              },
+              timeout: 15000,
+            }
+          );
+
+          if (
+            siteResp.data &&
+            siteResp.data.ok &&
+            siteResp.data.reply
+          ) {
+            aiReply = siteResp.data.reply;
+            if (siteResp.data.staged_action) {
+              try {
+                const execRes = await executeOwnerDirectAction(
+                  siteResp.data.staged_action.action_type || siteResp.data.staged_action.type,
+                  siteResp.data.staged_action.payload || siteResp.data.staged_action
+                );
+                if (execRes) aiReply += `\n\n✅ Done bossu! ${execRes}`;
+              } catch (_) { }
+            }
+          }
+        } catch (_) { }
+      }
+
+      // Check if AI emitted direct execution tag [EXECUTE_ACTION: {...}]
+      const execActionMatch = aiReply ? aiReply.match(/\[EXECUTE_ACTION:\s*(\{[\s\S]*?\})\]/i) : null;
+      if (execActionMatch) {
+        try {
+          const actionObj = JSON.parse(execActionMatch[1]);
+          aiReply = aiReply.replace(execActionMatch[0], "").trim();
+          const aType = actionObj.action_type || actionObj.type;
+          const aPayload = actionObj.payload || actionObj;
           const execRes = await executeOwnerDirectAction(aType, aPayload);
           await syncActionToSite(aType, aPayload);
           if (execRes) {
             aiReply += `\n\n✅ Done bossu! ${execRes}`;
           }
+        } catch (err) {
+          console.warn("Failed executing action tag in bot:", err.message);
         }
-      } catch (err) {
-        console.warn("Failed handling suggested action:", err.message);
+      }
+
+      // If AI emitted [SUGGEST_ACTION: {...}], handle confirmation vs execution cleanly
+      if (aiReply) {
+        const proposed = extractProposedActionFromText(aiReply);
+        if (proposed?.action) {
+          try {
+            if (proposed.fullTag) {
+              aiReply = aiReply.replace(proposed.fullTag, "").trim();
+            }
+            const aType = proposed.action.action_type || proposed.action.type;
+            const aPayload = proposed.action.payload || proposed.action;
+            const isQuestion = /\?|shall\s+i|do\s+you\s+want|would\s+you\s+like|confirm|approve/i.test(aiReply);
+
+            if (isQuestion) {
+              // Store as pending action so owner's next reply ("yes", "proceed") executes it safely
+              await setOwnerPendingAction(from, proposed.action);
+            } else {
+              const execRes = await executeOwnerDirectAction(aType, aPayload);
+              await syncActionToSite(aType, aPayload);
+              if (execRes) {
+                aiReply += `\n\n✅ Done bossu! ${execRes}`;
+              }
+            }
+          } catch (err) {
+            console.warn("Failed handling suggested action:", err.message);
+          }
+        }
+
+        // Clean up any remaining suggestion tags so no raw internal syntax leaks
+        aiReply = aiReply.replace(/\[SUGGEST_[A-Z_]+:[^\]]*\]/gi, "").trim();
+        aiReply = aiReply.replace(/\[EXECUTE_[A-Z_]+:[^\]]*\]/gi, "").trim();
+      }
+
+      // ── SMART CONVERSATIONAL PERSONAL ASSISTANT FALLBACK ──
+      if (!aiReply) {
+        if (isSupportMode) {
+          aiReply = `I dey with you bossu! 🎫 *Support Mode is fully locked in.*\nLet me know which customer ticket or complaint you'd like me to inspect, draft a reply for, or dispatch!`;
+        }
+        // 1. Order Lookups (like WSF7AEZQA)
+        else if (specificOrderCtx) {
+          aiReply = `🔍 *Live Order Status:*\n${specificOrderCtx}\nIf payment just went through on MoMo, you can refresh or I can trigger delivery directly for you!`;
+        }
+
+        // 2. Greetings & Personal Check-in
+        else if (/^(hi|hello|hey|yo|sup|chale|boss|bossu|how far|how you dey|good morning|good evening|stony|are you there|you dey)/i.test(lt)) {
+          const convReplies = [
+            `I dey solid bossu! 😊 Everything dey move on the system. How your day dey go? Any orders you want make I check, or we dey plan marketing today?`,
+            `Chale boss, I dey right here! System is active. Delivery speed is around ${deliveryEta}.${walletBalance ? ` Wallet is sitting at ${walletBalance}.` : ""} What's the plan?`,
+            `I dey here with you boss! Ready for anything — stats, orders, or brainstorming new promos. How can I help you right now?`
+          ];
+          aiReply = convReplies[history.length % convReplies.length];
+        }
+
+        // 3. Sales / Today / Revenue / Stats
+        else if (/\b(stat|today|sales|revenue|how many orders|how much|market|cash|money)\b/i.test(lt)) {
+          aiReply = `📊 *Today's Performance:* We have *${todayPaidCount} paid orders* bringing in *GH₵ ${todayRevenue.toFixed(2)}* so far today! Delivery speed is running at *${deliveryEta}*. ${walletBalance ? `DataMart wallet: *${walletBalance}*.` : ""} How do you feel about dropping a quick status promo to push more volume?`;
+        }
+
+        // 3b. Whole-system capabilities check / scope question (e.g. "will the ai perform", "only this that it can do", "it should be montring the whole system")
+        else if (/\b(perform|only this|what can you do|capabilities|scope|whole system|montr|supervise|oversee)\b/i.test(lt)) {
+          aiReply = `I supervise the whole live store 24/7 bossu! Sales (₵${todayRevenue.toFixed(2)} today across ${todayPaidCount} orders), DataMart wallet (${walletBalance || "Active"}), Arkesel SMS (${arkeselSmsBalance || "Operational"}), delivery speed (~${deliveryEta}), and customer support chats (${openSupportCount} active). You can command me to update order statuses, adjust prices, toggle stock, trigger retries, or send custom SMS right from here! What specific action or update do you want us to run?`;
+        }
+
+        // 3c. Post-Payment Lifecycle & Whole-System Oversight (e.g. "still after payment successful", "after payment")
+        else if (/\b(after payment|payment succe|post[- ]payment|still after|what happens after)\b/i.test(lt)) {
+          aiReply = `Yes bossu! Immediately payment confirms, the order routes into automated DataMart dispatch. I monitor the network delivery speed (~${deliveryEta}), poll until it's confirmed delivered, safeguard your wallet balance, and alert you if anything flags stuck. Everything moves hands-free!`;
+        }
+
+        // 4. Whole-System Overview / Health Check
+        else if (/\b(system|whole|everything|monitor|audit|health|overview|check all)\b/i.test(lt)) {
+          aiReply = `🌐 *Store Status:* Delivery ETA is *${deliveryEta}*. DataMart wallet: *${walletBalance || "Connected"}*. Arkesel SMS: *${arkeselSmsBalance || "Active"}*. Today: *${todayPaidCount} orders* (GH₵ ${todayRevenue.toFixed(2)}). Support chats: *${openSupportCount}* (${unreadSupportCount > 0 ? `⚠️ ${unreadSupportCount} unread` : "all clear"}). All systems operational boss!`;
+        }
+
+        // 5. Digital Services: Netflix
+        else if (/\b(netflix|movie|stream)\b/i.test(lt)) {
+          aiReply = `📺 *Netflix 30-Day Subscriptions:* We currently have *${netflixCount} active subscriber(s)*. The auto-credential and IMAP code extraction pipeline is active. Need me to look up any specific subscriber code?`;
+        }
+
+        // 6. Digital Services: MTN MashUp
+        else if (/\b(mashup|combo|mix)\b/i.test(lt)) {
+          aiReply = pendingMashupCount > 0
+            ? `📶 *MTN MashUp Alert:* We have *${pendingMashupCount} order(s) awaiting manual dispatch* on *567*2#! Deliver to their numbers so customers get their data and minutes.`
+            : `📶 *MTN MashUp:* All MashUp orders are cleared boss! No pending manual applications right now.`;
+        }
+
+        // 7. Digital Services: AFA Registration
+        else if (/\b(afa|farmer|alliance)\b/i.test(lt)) {
+          aiReply = `🪪 *AFA Registrations:* We have processed *${afaCount} registration(s)* on the portal. The AFA verification API is connected and responding.`;
+        }
+
+        // 8. Result Checkers (WAEC / BECE / WASSCE)
+        else if (/\b(checker|waec|bece|wassce|novdec|result)\b/i.test(lt)) {
+          aiReply = `🎓 *WAEC Result Checkers:* We have sold *${checkerCount} checker voucher(s)*. Instant PIN and serial issuance is active directly on the website portal!`;
+        }
+
+        // 8a. Flash Sale Orders & Campaign
+        else if (/\b(flash\s*orders?|flash\s*sale\s*orders?|flash\s*prices?|flash\s*revenue)\b/i.test(lt) || (/\bflash\s*sale\b/i.test(lt) && !/\b(turn|enable|disable|start|stop|activate|deactivate|off|on)\b/i.test(lt))) {
+          aiReply = await listFlashSaleOrdersSummary();
+        }
+
+        // 8a2. Full Order History & Total Orders
+        else if (/\b(full\s*history|all\s*time\s*orders?|order\s*history|total\s*orders?)\b/i.test(lt)) {
+          aiReply = await getAllTimeOrderStatsSummary();
+        }
+
+        // 8b. Reseller Agent Store Orders & Sales
+        else if (/\b(agent orders?|agent sales?|orders? from agent|sales? from agent|order from agent store|orders from agent store)\b/i.test(lt)) {
+          aiReply = await listAgentOrdersSummary();
+        }
+
+        // 8c. Reseller Agents & Agent Stores
+        else if (/\b(agent|agents|reseller|resellers|agent wallet|agent store)\b/i.test(lt)) {
+          const summary = await listAllAgentsSummary();
+          aiReply = `👥 *Reseller Agent Network:*\n\n${summary}\n\n💡 You can check agent sales by texting "Show agent orders" or credit an agent with "Credit agent [name/phone] with [amount]".`;
+        }
+
+        // 9. Live Customer Support Chats
+        else if (/\b(chat|support|unread|ticket|complaint|customer|help)\b/i.test(lt)) {
+          aiReply = unreadSupportCount > 0
+            ? `💬 *Customer Support Alert:* We have *${unreadSupportCount} unread message(s)* across *${openSupportCount} open live chat(s)*! You can check the admin portal or reply to visitors.`
+            : `💬 *Customer Support:* All customer chats are up to date! *${openSupportCount} open session(s)* with zero unread messages right now.`;
+        }
+
+        // 10. Catalog & Out of Stock
+        else if (/\b(stock|out of stock|inventory|package|catalog)\b/i.test(lt)) {
+          aiReply = outOfStockCount > 0
+            ? `⚠️ *Stock Alert:* There are *${outOfStockCount} package(s) marked out of stock* in the products catalog. Check the admin products page to re-enable them if inventory is ready!`
+            : `📦 *Inventory Status:* All data bundle packages across MTN, Telecel, and AirtelTigo are *IN STOCK* and purchasable!`;
+        }
+
+        // 11. Arkesel SMS Balance
+        else if (/\b(sms|arkesel|credit|units)\b/i.test(lt)) {
+          aiReply = arkeselSmsBalance
+            ? `✉️ *Arkesel SMS Gateway:* You have *${arkeselSmsBalance}* credits available for order receipts and security alerts.`
+            : `✉️ *Arkesel SMS Gateway:* Connected and ready to dispatch notifications.`;
+        }
+
+        // 12. Wallet / DataMart Balance
+        else if (/\b(balance|wallet|datamart|credit)\b/i.test(lt)) {
+          aiReply = walletBalance
+            ? `Our DataMart wallet balance is *${walletBalance}* right now boss. ${Number(walletBalance.replace(/[^\d.]/g, "") || 0) < 50 ? "⚠️ It's getting a bit low — might want to top up soon so orders don't pause." : "We're well covered for incoming orders!"}`
+            : "Couldn't fetch the exact wallet balance right now boss, but the DataMart API connection is active. I can recheck in a moment!";
+        }
+
+        // 13. Delivery Speed / Tracker
+        else if (/\b(speed|delivery|fast|delay|tracker|eta)\b/i.test(lt)) {
+          aiReply = `Data delivery is currently hitting around *${deliveryEta}* boss 🚀 MTN orders are moving through DataMart steadily. Any specific recipient number giving trouble?`;
+        }
+
+        // 14. Stuck / Failed / Problem Orders
+        else if (/\b(failed|stuck|problem|complaint|issue|pending)\b/i.test(lt)) {
+          if (failedOrdersList.length > 0) {
+            aiReply = `⚠️ We have *${failedOrdersList.length} failed order(s)* needing attention:\n` +
+              failedOrdersList.map((o, idx) => `${idx + 1}. Ref *${o.reference}* — ${o.capacity}GB ${o.network} to ${o.recipient_phone}`).join("\n") +
+              `\n\nDrop any reference and I can inspect it or prepare a retry for you boss!`;
+          } else if (pendingOrdersList.length > 0) {
+            aiReply = `⏳ No failed orders! We have *${pendingOrdersList.length} order(s) currently in progress* with telecom networks. They usually land within ${deliveryEta}.`;
+          } else {
+            aiReply = `All clear boss! ✅ Zero failed orders and zero stuck orders right now. Everything is running smoothly.`;
+          }
+        }
+
+        // 15. Ideas / Marketing / Growth Advice
+        else if (/\b(idea|advice|grow|market|promo|scale|customers?|boost|increase)\b/i.test(lt)) {
+          aiReply = `💡 *3 Quick Ideas to Boost Our Sales Today Bossu:*\n\n1. *Campus Reps:* Get 2-3 university students (Legon, KNUST, UPSA) posting on their department WhatsApp groups with their referral link.\n2. *Flash Bundle Discount:* Run a 2-hour "Happy Hour" on 5GB MTN bundles on your WhatsApp status — bundle buyers love urgency.\n3. *Repeat Buyer Reminder:* Send an SMS through Arkesel to customers who bought 1-2 weeks ago — they're probably running low on data right now!\n\nWant to draft a message for one of these?`;
+        }
+
+        // 16. Dynamic conversational partner reply
+        else {
+          aiReply = `I dey with you bossu! Everything is running smooth on the system. DataMart wallet is at ${walletBalance || "GH₵ 0.00"}, delivery speed is ${deliveryEta}, and we have ${todayPaidCount} paid orders today (GH₵ ${todayRevenue.toFixed(2)}). What specific order, price, or agent would you like me to update?`;
+        }
+      }
+
+      aiReply = sanitizeSecretsFromText(aiReply)
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/\*\*([^*\n]+)\*\*/g, "*$1*")
+        .replace(/^#{1,4}\s+(.+)$/gm, "*$1*")
+        .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony")
+        .replace(/\bdatamart\b/gi, "DataMart");
+
+      // ── SAVE UPDATED CONVERSATION MEMORY ──
+      try {
+        const updatedHistory = [
+          ...history.slice(-6),
+          { role: "user", text },
+          { role: "assistant", text: aiReply }
+        ];
+        await saveOwnerHistory(from, updatedHistory);
+      } catch (_) { }
+
+      return sendWhatsApp(from, aiReply);
+    }
+
+    let session = await getCustomerSession(from);
+
+    /* =====================================================
+    CREATE SESSION
+    ===================================================== */
+
+    if (!session) {
+      session = await saveCustomerSession(from, { step: 1 });
+      if (!/^[1-8]$/.test(text.trim())) {
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, activeMenu);
       }
     }
 
-    // Clean up any remaining suggestion tags so no raw internal syntax leaks
-    aiReply = aiReply.replace(/\[SUGGEST_[A-Z_]+:[^\]]*\]/gi, "").trim();
-    aiReply = aiReply.replace(/\[EXECUTE_[A-Z_]+:[^\]]*\]/gi, "").trim();
-  }
-
-  // ── SMART CONVERSATIONAL PERSONAL ASSISTANT FALLBACK ──
-  if (!aiReply) {
-    if (isSupportMode) {
-      aiReply = `I dey with you bossu! 🎫 *Support Mode is fully locked in.*\nLet me know which customer ticket or complaint you'd like me to inspect, draft a reply for, or dispatch!`;
-    }
-    // 1. Order Lookups (like WSF7AEZQA)
-    else if (specificOrderCtx) {
-      aiReply = `🔍 *Live Order Status:*\n${specificOrderCtx}\nIf payment just went through on MoMo, you can refresh or I can trigger delivery directly for you!`;
+    if (!session.step) {
+      session.step = 1;
+      await saveCustomerSession(from, { step: 1 });
     }
 
-    // 2. Greetings & Personal Check-in
-    else if (/^(hi|hello|hey|yo|sup|chale|boss|bossu|how far|how you dey|good morning|good evening|stony|are you there|you dey)/i.test(lt)) {
-      const convReplies = [
-        `I dey solid bossu! 😊 Everything dey move on the system. How your day dey go? Any orders you want make I check, or we dey plan marketing today?`,
-        `Chale boss, I dey right here! System is active. Delivery speed is around ${deliveryEta}.${walletBalance ? ` Wallet is sitting at ${walletBalance}.` : ""} What's the plan?`,
-        `I dey here with you boss! Ready for anything — stats, orders, or brainstorming new promos. How can I help you right now?`
-      ];
-      aiReply = convReplies[history.length % convReplies.length];
+    // Direct AI mode handling for non-owner customers (never interrupt active checkout)
+    const inCheckout = Boolean(session && session.step > 1 && session.step < 99);
+    if (!inCheckout && (activeMode === "ai" || session.step === 99) && !/^[1-8]$/.test(text.trim())) {
+      return handleCustomerAi(from, effectiveText || text);
+    }
+    if (session.step === 99 && /^[1-8]$/.test(text.trim())) {
+      session.step = 1;
+      setUserMode(from, "bot");
+      session = await saveCustomerSession(from, { step: 1 });
     }
 
-    // 3. Sales / Today / Revenue / Stats
-    else if (/\b(stat|today|sales|revenue|how many orders|how much|market|cash|money)\b/i.test(lt)) {
-      aiReply = `📊 *Today's Performance:* We have *${todayPaidCount} paid orders* bringing in *GH₵ ${todayRevenue.toFixed(2)}* so far today! Delivery speed is running at *${deliveryEta}*. ${walletBalance ? `DataMart wallet: *${walletBalance}*.` : ""} How do you feel about dropping a quick status promo to push more volume?`;
+    /* =====================================================
+    RESET
+    ===================================================== */
+
+    if (/^(hi|hello|start|reset|restart|menu)$/i.test(text.trim())) {
+      session = await saveCustomerSession(from, { step: 1, bundle: null });
+      const { MENU: activeMenu } = getMenusForSession(session);
+      return sendWhatsApp(from, activeMenu);
     }
 
-    // 3b. Whole-system capabilities check / scope question (e.g. "will the ai perform", "only this that it can do", "it should be montring the whole system")
-    else if (/\b(perform|only this|what can you do|capabilities|scope|whole system|montr|supervise|oversee)\b/i.test(lt)) {
-      aiReply = `I supervise the whole live store 24/7 bossu! Sales (₵${todayRevenue.toFixed(2)} today across ${todayPaidCount} orders), DataMart wallet (${walletBalance || "Active"}), Arkesel SMS (${arkeselSmsBalance || "Operational"}), delivery speed (~${deliveryEta}), and customer support chats (${openSupportCount} active). You can command me to update order statuses, adjust prices, toggle stock, trigger retries, or send custom SMS right from here! What specific action or update do you want us to run?`;
-    }
+    /* =====================================================
+    STEP 1 - MAIN MENU
+    ===================================================== */
 
-    // 3c. Post-Payment Lifecycle & Whole-System Oversight (e.g. "still after payment successful", "after payment")
-    else if (/\b(after payment|payment succe|post[- ]payment|still after|what happens after)\b/i.test(lt)) {
-      aiReply = `Yes bossu! Immediately payment confirms, the order routes into automated DataMart dispatch. I monitor the network delivery speed (~${deliveryEta}), poll until it's confirmed delivered, safeguard your wallet balance, and alert you if anything flags stuck. Everything moves hands-free!`;
-    }
+    if (session.step === 1) {
+      let network;
 
-    // 4. Whole-System Overview / Health Check
-    else if (/\b(system|whole|everything|monitor|audit|health|overview|check all)\b/i.test(lt)) {
-      aiReply = `🌐 *Store Status:* Delivery ETA is *${deliveryEta}*. DataMart wallet: *${walletBalance || "Connected"}*. Arkesel SMS: *${arkeselSmsBalance || "Active"}*. Today: *${todayPaidCount} orders* (GH₵ ${todayRevenue.toFixed(2)}). Support chats: *${openSupportCount}* (${unreadSupportCount > 0 ? `⚠️ ${unreadSupportCount} unread` : "all clear"}). All systems operational boss!`;
-    }
+      if (text === "1") {
+        network = "MTN";
+      } else if (text === "2") {
+        network = "AIRTELTIGO";
+      } else if (text === "3") {
+        network = "TELECEL";
+      } else if (text === "4") {
+        await saveCustomerSession(from, { step: 6 });
+        return sendWhatsApp(from, `📦 TRACK YOUR ORDER\n\nPlease enter the phone number or order reference used when you purchased your data.\n\nExample:\n0241234567 or WS-123456`);
+      } else if (text === "5") {
+        const netflixCost = resolveServiceCustomPrice("netflix", session.custom_prices, NETFLIX_PRICE);
+        await saveCustomerSession(from, {
+          step: 50,
+          bundle: JSON.stringify({ type: "netflix", price: netflixCost }),
+          momo_number: null,
+          phone_number: null
+        });
 
-    // 5. Digital Services: Netflix
-    else if (/\b(netflix|movie|stream)\b/i.test(lt)) {
-      aiReply = `📺 *Netflix 30-Day Subscriptions:* We currently have *${netflixCount} active subscriber(s)*. The auto-credential and IMAP code extraction pipeline is active. Need me to look up any specific subscriber code?`;
-    }
+        const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+        return sendWhatsApp(from, `${storeHeader}📺 Netflix Subscription — ₵${netflixCost.toFixed(2)}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
+      } else if (text === "6") {
+        const afaCost = resolveServiceCustomPrice("afa", session.custom_prices, AFA_PRICE);
+        await saveCustomerSession(from, {
+          step: 30,
+          bundle: null,
+          momo_number: null,
+          phone_number: null
+        });
 
-    // 6. Digital Services: MTN MashUp
-    else if (/\b(mashup|combo|mix)\b/i.test(lt)) {
-      aiReply = pendingMashupCount > 0
-        ? `📶 *MTN MashUp Alert:* We have *${pendingMashupCount} order(s) awaiting manual dispatch* on *567*2#! Deliver to their numbers so customers get their data and minutes.`
-        : `📶 *MTN MashUp:* All MashUp orders are cleared boss! No pending manual applications right now.`;
-    }
-
-    // 7. Digital Services: AFA Registration
-    else if (/\b(afa|farmer|alliance)\b/i.test(lt)) {
-      aiReply = `🪪 *AFA Registrations:* We have processed *${afaCount} registration(s)* on the portal. The AFA verification API is connected and responding.`;
-    }
-
-    // 8. Result Checkers (WAEC / BECE / WASSCE)
-    else if (/\b(checker|waec|bece|wassce|novdec|result)\b/i.test(lt)) {
-      aiReply = `🎓 *WAEC Result Checkers:* We have sold *${checkerCount} checker voucher(s)*. Instant PIN and serial issuance is active directly on the website portal!`;
-    }
-
-    // 8a. Flash Sale Orders & Campaign
-    else if (/\b(flash\s*orders?|flash\s*sale\s*orders?|flash\s*prices?|flash\s*revenue)\b/i.test(lt) || (/\bflash\s*sale\b/i.test(lt) && !/\b(turn|enable|disable|start|stop|activate|deactivate|off|on)\b/i.test(lt))) {
-      aiReply = await listFlashSaleOrdersSummary();
-    }
-
-    // 8a2. Full Order History & Total Orders
-    else if (/\b(full\s*history|all\s*time\s*orders?|order\s*history|total\s*orders?)\b/i.test(lt)) {
-      aiReply = await getAllTimeOrderStatsSummary();
-    }
-
-    // 8b. Reseller Agent Store Orders & Sales
-    else if (/\b(agent orders?|agent sales?|orders? from agent|sales? from agent|order from agent store|orders from agent store)\b/i.test(lt)) {
-      aiReply = await listAgentOrdersSummary();
-    }
-
-    // 8c. Reseller Agents & Agent Stores
-    else if (/\b(agent|agents|reseller|resellers|agent wallet|agent store)\b/i.test(lt)) {
-      const summary = await listAllAgentsSummary();
-      aiReply = `👥 *Reseller Agent Network:*\n\n${summary}\n\n💡 You can check agent sales by texting "Show agent orders" or credit an agent with "Credit agent [name/phone] with [amount]".`;
-    }
-
-    // 9. Live Customer Support Chats
-    else if (/\b(chat|support|unread|ticket|complaint|customer|help)\b/i.test(lt)) {
-      aiReply = unreadSupportCount > 0
-        ? `💬 *Customer Support Alert:* We have *${unreadSupportCount} unread message(s)* across *${openSupportCount} open live chat(s)*! You can check the admin portal or reply to visitors.`
-        : `💬 *Customer Support:* All customer chats are up to date! *${openSupportCount} open session(s)* with zero unread messages right now.`;
-    }
-
-    // 10. Catalog & Out of Stock
-    else if (/\b(stock|out of stock|inventory|package|catalog)\b/i.test(lt)) {
-      aiReply = outOfStockCount > 0
-        ? `⚠️ *Stock Alert:* There are *${outOfStockCount} package(s) marked out of stock* in the products catalog. Check the admin products page to re-enable them if inventory is ready!`
-        : `📦 *Inventory Status:* All data bundle packages across MTN, Telecel, and AirtelTigo are *IN STOCK* and purchasable!`;
-    }
-
-    // 11. Arkesel SMS Balance
-    else if (/\b(sms|arkesel|credit|units)\b/i.test(lt)) {
-      aiReply = arkeselSmsBalance
-        ? `✉️ *Arkesel SMS Gateway:* You have *${arkeselSmsBalance}* credits available for order receipts and security alerts.`
-        : `✉️ *Arkesel SMS Gateway:* Connected and ready to dispatch notifications.`;
-    }
-
-    // 12. Wallet / DataMart Balance
-    else if (/\b(balance|wallet|datamart|credit)\b/i.test(lt)) {
-      aiReply = walletBalance
-        ? `Our DataMart wallet balance is *${walletBalance}* right now boss. ${Number(walletBalance.replace(/[^\d.]/g, "") || 0) < 50 ? "⚠️ It's getting a bit low — might want to top up soon so orders don't pause." : "We're well covered for incoming orders!"}`
-        : "Couldn't fetch the exact wallet balance right now boss, but the DataMart API connection is active. I can recheck in a moment!";
-    }
-
-    // 13. Delivery Speed / Tracker
-    else if (/\b(speed|delivery|fast|delay|tracker|eta)\b/i.test(lt)) {
-      aiReply = `Data delivery is currently hitting around *${deliveryEta}* boss 🚀 MTN orders are moving through DataMart steadily. Any specific recipient number giving trouble?`;
-    }
-
-    // 14. Stuck / Failed / Problem Orders
-    else if (/\b(failed|stuck|problem|complaint|issue|pending)\b/i.test(lt)) {
-      if (failedOrdersList.length > 0) {
-        aiReply = `⚠️ We have *${failedOrdersList.length} failed order(s)* needing attention:\n` +
-          failedOrdersList.map((o, idx) => `${idx + 1}. Ref *${o.reference}* — ${o.capacity}GB ${o.network} to ${o.recipient_phone}`).join("\n") +
-          `\n\nDrop any reference and I can inspect it or prepare a retry for you boss!`;
-      } else if (pendingOrdersList.length > 0) {
-        aiReply = `⏳ No failed orders! We have *${pendingOrdersList.length} order(s) currently in progress* with telecom networks. They usually land within ${deliveryEta}.`;
+        const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+        return sendWhatsApp(from, `${storeHeader}🪪 AFA Registration — ₵${afaCost.toFixed(2)}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
+      } else if (text === "7") {
+        await saveCustomerSession(from, { step: 10, network: "MASHUP" });
+        return sendWhatsApp(from, `📶 MTN MashUp Bundle\n\nEnter the amount you want to pay (₵${MASHUP_MIN_AMOUNT} - ₵${MASHUP_MAX_AMOUNT}):\n\nExample: 5\n\nThe data + minutes mix you get depends on what MTN offers for that amount — this will be applied to your number manually.`);
+      } else if (text === "8") {
+        await saveCustomerSession(from, { step: 70 });
+        return playScratchCard(from);
       } else {
-        aiReply = `All clear boss! ✅ Zero failed orders and zero stuck orders right now. Everything is running smoothly.`;
+        return handleCustomerAi(from, text);
+      }
+
+      await saveCustomerSession(from, { step: 2, network });
+      const { MENUS: sessionMenus } = getMenusForSession(session);
+      return sendWhatsApp(from, sessionMenus[network]);
+    }
+
+    /* =====================================================
+    STEP 2 - SELECT BUNDLE
+    ===================================================== */
+
+    if (session.step === 2) {
+      const sessionPackages = getPackagesForSession(session);
+      const bundle = sessionPackages[session.network]?.[text];
+      if (!bundle) {
+        return sendWhatsApp(from, "Invalid option ❌ Choose an option to continue");
+      }
+
+      await saveCustomerSession(from, { step: 3, bundle: text });
+      return sendWhatsApp(from, "Enter phone number to receive the data on:");
+    }
+
+    /* =====================================================
+    STEP 3 - DELIVERY PHONE NUMBER
+    ===================================================== */
+
+    if (session.step === 3) {
+      const phone = normalizePhone(text);
+      if (phone.length !== 10 || !phone.startsWith("0")) {
+        return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana phone number to continue");
+      }
+
+      session = await saveCustomerSession(from, { phone_number: phone, step: 8 });
+      return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from:\n\n(This can be the same number or a different one)`);
+    }
+
+    /* =====================================================
+    STEP 8 - MOMO PAYMENT NUMBER
+    ===================================================== */
+
+    if (session.step === 8) {
+      const momoNumber = normalizePhone(text);
+      if (momoNumber.length !== 10 || !momoNumber.startsWith("0")) {
+        return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
+      }
+
+      const sessionPackages = getPackagesForSession(session);
+      const bundle = sessionPackages[session.network]?.[session.bundle];
+
+      // Agent Store Checkout skips scratch code straight to confirmation
+      if (session.agent_id) {
+        session = await saveCustomerSession(from, {
+          momo_number: momoNumber,
+          step: 4,
+          scratch_order_opt_in: false
+        });
+        const tracker = await getDeliveryEstimate();
+        const estimateMessage = buildDeliveryEstimateMessage(tracker);
+        const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+        const priceStr = bundle ? bundle.price.toFixed(2) : "0.00";
+        const capStr = bundle ? bundle.capacity : "";
+        return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n${storeHeader}📶 Network: ${session.network}\n📦 Data: ${capStr}GB\n💰 Amount: ₵${priceStr}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${momoNumber}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
+      }
+
+      session = await saveCustomerSession(from, {
+        momo_number: momoNumber,
+        step: 15,
+        scratch_order_opt_in: false
+      });
+
+      const activeScratch = await getActiveScratchCode(from);
+      if (activeScratch) {
+        return sendWhatsApp(from, `🎟️ SCRATCH & WIN (OPTIONAL)\n\nActive Code: *${activeScratch.code}*\nProgress: ${Number(activeScratch.orders_completed || 0)}/${SCRATCH_REQUIRED_ORDERS}\n\nUse this code for this paid order?\n\n1 - YES, use my code\n2 - NO, skip`);
+      }
+
+      return sendWhatsApp(from, `🎟️ SCRATCH & WIN (OPTIONAL)\n\nDo you have a Data1 Scratch Code for this paid order?\n\n1 - YES, enter my code\n2 - NO / SKIP`);
+    }
+
+    /* =====================================================
+    STEP 15 - OPTIONAL SCRATCH CODE AT CHECKOUT
+    ===================================================== */
+
+    if (session.step === 15) {
+      const finishConfirm = async () => {
+        const sessionPackages = getPackagesForSession(session);
+        const bundle = sessionPackages[session.network]?.[session.bundle];
+        const tracker = await getDeliveryEstimate();
+        const estimateMessage = buildDeliveryEstimateMessage(tracker);
+        session = await saveCustomerSession(from, { step: 4 });
+        const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+        const priceStr = bundle ? bundle.price.toFixed(2) : "0.00";
+        const capStr = bundle ? bundle.capacity : "";
+        return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n${storeHeader}📶 Network: ${session.network}\n📦 Data: ${capStr}GB\n💰 Amount: ₵${priceStr}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
+      };
+
+      if (text === "2" || /^no$/i.test(text) || /^skip$/i.test(text)) {
+        session = await saveCustomerSession(from, { scratch_order_opt_in: false });
+        return finishConfirm();
+      }
+
+      if (text === "1" || /^yes$/i.test(text)) {
+        const activeScratch = await getActiveScratchCode(from);
+        if (activeScratch) {
+          session = await saveCustomerSession(from, { scratch_code: activeScratch.code, scratch_order_opt_in: true });
+          return finishConfirm();
+        }
+        session = await saveCustomerSession(from, { step: 16, scratch_order_opt_in: false });
+        return sendWhatsApp(from, "🎟️ Enter your Data1 Scratch Code:\n\nExample: Data1A7K92P");
+      }
+      return sendWhatsApp(from, "Reply 1 for YES or 2 for NO / SKIP.");
+    }
+
+    /* =====================================================
+    STEP 16 - ENTER SCRATCH CODE AT CHECKOUT
+    ===================================================== */
+
+    if (session.step === 16) {
+      const result = await activateScratchCodeForCheckout(from, text);
+      if (!result.ok) return sendWhatsApp(from, result.message);
+      session = await saveCustomerSession(from, { scratch_code: result.scratch.code, scratch_order_opt_in: true, step: 4 });
+      const sessionPackages = getPackagesForSession(session);
+      const bundle = sessionPackages[session.network]?.[session.bundle];
+      const tracker = await getDeliveryEstimate();
+      const estimateMessage = buildDeliveryEstimateMessage(tracker);
+      const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+      const priceStr = bundle ? bundle.price.toFixed(2) : "0.00";
+      const capStr = bundle ? bundle.capacity : "";
+      return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n${storeHeader}📶 Network: ${session.network}\n📦 Data: ${capStr}GB\n💰 Amount: ₵${priceStr}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n🎟️ Scratch Code: ${result.scratch.code}\n🎯 This order will count toward: ${Number(result.scratch.orders_completed || 0) + 1}/${SCRATCH_REQUIRED_ORDERS}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
+    }
+
+    /* =====================================================
+    STEP 70 - SCRATCH MENU / CODE GENERATION
+    ===================================================== */
+
+    if (session.step === 70) {
+      if (/^yes$/i.test(text)) {
+        try {
+          const result = await createScratchCodeForCustomer(from);
+          if (!result.ok) {
+            const x = result.existing;
+            return sendWhatsApp(from, x.unlocked ? `🎉 Your Scratch Card is already unlocked!\n\nCode: *${x.code}*\nProgress: ${Number(x.orders_completed || 0)}/5\n\nReply *SCRATCH* to play.` : `🎟️ You already have an active code: *${x.code}*\n\nProgress: ${Number(x.orders_completed || 0)}/5\n\nUse it during payment on your next paid data orders.`);
+          }
+          return sendWhatsApp(from, `🎉 YOUR UNIQUE SCRATCH CODE IS READY!\n\n🎟️ *${result.data.code}*\n\nUse this code during payment on your Data orders. Complete 5 PAID Data orders using this code.\n\nProgress: 0/5\n\nAfter the 5th paid order, your Scratch Card unlocks automatically. Come back here and reply *SCRATCH* to win 1GB or 2GB! 🎁`);
+        } catch (e) {
+          console.error("SCRATCH GENERATION ERROR:", e);
+          return sendWhatsApp(from, "❌ We could not generate your Scratch Code right now. Please reply *YES* to try again.");
+        }
+      }
+      if (/^scratch$/i.test(text)) return playScratchCard(from);
+      const activeScratch = await getActiveScratchCode(from);
+      if (activeScratch) return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\nCode: *${activeScratch.code}*\nProgress: ${Number(activeScratch.orders_completed || 0)}/5\n\n${activeScratch.unlocked ? "🎉 UNLOCKED — reply SCRATCH to play." : "Use this code during payment on your paid data orders."}`);
+      return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\nYou do not currently have an active Scratch Code.\n\nReply *YES* to generate your unique Data1 Scratch Code automatically.\n\nThen use it during payment on 5 PAID data orders. After 5/5, come back and reply *SCRATCH* to win! 🎁`);
+    }
+
+    /* =====================================================
+    STEP 80 - SCRATCH PRIZE NETWORK
+    ===================================================== */
+
+    if (session.step === 80) {
+      const networks = { "1": "MTN", "2": "AIRTELTIGO", "3": "TELECEL" };
+      const network = networks[text];
+      if (!network) return sendWhatsApp(from, "Invalid option ❌\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel");
+      session = await saveCustomerSession(from, { network, step: 81 });
+      return sendWhatsApp(from, "📱 Enter the Ghana phone number where you want your FREE prize sent:");
+    }
+
+    /* =====================================================
+    STEP 81 - SCRATCH PRIZE DELIVERY
+    ===================================================== */
+
+    if (session.step === 81) {
+      const prizePhone = normalizePhone(text);
+      if (prizePhone.length !== 10 || !prizePhone.startsWith("0")) return sendWhatsApp(from, "❌ Invalid Ghana phone number.\n\nExample: 0241234567");
+      const scratch = await supabase.from("scratch_codes").select("*").eq("assigned_to", normalizePhone(from)).eq("status", "processing").maybeSingle().then(r => r.data);
+      if (!scratch) return sendWhatsApp(from, "❌ Scratch prize session not found. Reply SCRATCH and try again.");
+      const capacity = String(scratch.prize || "1");
+      const prizeLabel = capacity === "2" ? "2GB" : "1GB";
+      const networkMap = { MTN: "YELLO", AIRTELTIGO: "AT_PREMIUM", TELECEL: "TELECEL" };
+      try {
+        const response = await axios.post(`${DATAMART_BASE}/purchase`, { phoneNumber: prizePhone, network: networkMap[session.network] || "YELLO", capacity, gateway: "wallet", delivery: "fast" }, { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 });
+        const data = response.data?.data || response.data || {};
+        const reference = data.reference || data.orderReference || data.order_reference || null;
+        const deliveredAt = new Date().toISOString();
+        const { data: updatedScratch } = await supabase.from("scratch_codes").update({ status: "used", prize_network: session.network, prize_phone: prizePhone, datamart_reference: reference, delivered_at: deliveredAt }).eq("id", scratch.id).select("*").maybeSingle();
+        syncScratchToStoreApi({ scratch: updatedScratch || { ...scratch, status: "used", prize_network: session.network, prize_phone: prizePhone, datamart_reference: reference, delivered_at: deliveredAt } });
+        session = await saveCustomerSession(from, { step: 1, scratch_prize: null });
+        return sendWhatsApp(from, `🎉 PRIZE SENT SUCCESSFULLY!\n\n🎁 Prize: ${prizeLabel}\n📶 Network: ${session.network}\n📱 Sent to: ${prizePhone}\n${reference ? `🆔 Reference: ${reference}\n` : ""}\nReply HI to continue shopping.`);
+      } catch (e) {
+        console.error("SCRATCH PRIZE DELIVERY ERROR:", e.response?.data || e.message);
+        await supabase.from("scratch_codes").update({ status: "unlocked", scratched: false }).eq("id", scratch.id);
+        return sendWhatsApp(from, `❌ We could not send your ${prizeLabel} prize right now. Your Scratch Card has NOT been lost. Reply *SCRATCH* and try again.`);
       }
     }
 
-    // 15. Ideas / Marketing / Growth Advice
-    else if (/\b(idea|advice|grow|market|promo|scale|customers?|boost|increase)\b/i.test(lt)) {
-      aiReply = `💡 *3 Quick Ideas to Boost Our Sales Today Bossu:*\n\n1. *Campus Reps:* Get 2-3 university students (Legon, KNUST, UPSA) posting on their department WhatsApp groups with their referral link.\n2. *Flash Bundle Discount:* Run a 2-hour "Happy Hour" on 5GB MTN bundles on your WhatsApp status — bundle buyers love urgency.\n3. *Repeat Buyer Reminder:* Send an SMS through Arkesel to customers who bought 1-2 weeks ago — they're probably running low on data right now!\n\nWant to draft a message for one of these?`;
-    }
+    /* =====================================================
+    STEP 4 - CONFIRM PAYMENT
+    ===================================================== */
 
-    // 16. Dynamic conversational partner reply
-    else {
-      aiReply = `I dey with you bossu! Everything is running smooth on the system. DataMart wallet is at ${walletBalance || "GH₵ 0.00"}, delivery speed is ${deliveryEta}, and we have ${todayPaidCount} paid orders today (GH₵ ${todayRevenue.toFixed(2)}). What specific order, price, or agent would you like me to update?`;
-    }
-  }
-
-  aiReply = sanitizeSecretsFromText(aiReply)
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/\*\*([^*\n]+)\*\*/g, "*$1*")
-    .replace(/^#{1,4}\s+(.+)$/gm, "*$1*")
-    .replace(/\b(as an ai( language model)?|i am an ai( language model)?|i'm an ai( language model)?)\b/gi, "I am Stony")
-    .replace(/\bdatamart\b/gi, "DataMart");
-
-  // ── SAVE UPDATED CONVERSATION MEMORY ──
-  try {
-    const updatedHistory = [
-      ...history.slice(-6),
-      { role: "user", text },
-      { role: "assistant", text: aiReply }
-    ];
-    await saveOwnerHistory(from, updatedHistory);
-  } catch (_) { }
-
-  return sendWhatsApp(from, aiReply);
-}
-
-let session = await getCustomerSession(from);
-
-/* =====================================================
-CREATE SESSION
-===================================================== */
-
-if (!session) {
-  session = await saveCustomerSession(from, { step: 1 });
-  if (!/^[1-8]$/.test(text.trim())) {
-    const { MENU: activeMenu } = getMenusForSession(session);
-    return sendWhatsApp(from, activeMenu);
-  }
-}
-
-if (!session.step) {
-  session.step = 1;
-  await saveCustomerSession(from, { step: 1 });
-}
-
-// Direct AI mode handling for non-owner customers (never interrupt active checkout)
-const inCheckout = Boolean(session && session.step > 1 && session.step < 99);
-if (!inCheckout && (activeMode === "ai" || session.step === 99) && !/^[1-8]$/.test(text.trim())) {
-  return handleCustomerAi(from, effectiveText || text);
-}
-if (session.step === 99 && /^[1-8]$/.test(text.trim())) {
-  session.step = 1;
-  setUserMode(from, "bot");
-  session = await saveCustomerSession(from, { step: 1 });
-}
-
-/* =====================================================
-RESET
-===================================================== */
-
-if (/^(hi|hello|start|reset|restart|menu)$/i.test(text.trim())) {
-  session = await saveCustomerSession(from, { step: 1, bundle: null });
-  const { MENU: activeMenu } = getMenusForSession(session);
-  return sendWhatsApp(from, activeMenu);
-}
-
-/* =====================================================
-STEP 1 - MAIN MENU
-===================================================== */
-
-if (session.step === 1) {
-  let network;
-
-  if (text === "1") {
-    network = "MTN";
-  } else if (text === "2") {
-    network = "AIRTELTIGO";
-  } else if (text === "3") {
-    network = "TELECEL";
-  } else if (text === "4") {
-    await saveCustomerSession(from, { step: 6 });
-    return sendWhatsApp(from, `📦 TRACK YOUR ORDER\n\nPlease enter the phone number or order reference used when you purchased your data.\n\nExample:\n0241234567 or WS-123456`);
-  } else if (text === "5") {
-    const netflixCost = resolveServiceCustomPrice("netflix", session.custom_prices, NETFLIX_PRICE);
-    await saveCustomerSession(from, {
-      step: 50,
-      bundle: JSON.stringify({ type: "netflix", price: netflixCost }),
-      momo_number: null,
-      phone_number: null
-    });
-
-    const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
-    return sendWhatsApp(from, `${storeHeader}📺 Netflix Subscription — ₵${netflixCost.toFixed(2)}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
-  } else if (text === "6") {
-    const afaCost = resolveServiceCustomPrice("afa", session.custom_prices, AFA_PRICE);
-    await saveCustomerSession(from, {
-      step: 30,
-      bundle: null,
-      momo_number: null,
-      phone_number: null
-    });
-
-    const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
-    return sendWhatsApp(from, `${storeHeader}🪪 AFA Registration — ₵${afaCost.toFixed(2)}\n\nSelect the network for the Mobile Money number you'll pay from:\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel`);
-  } else if (text === "7") {
-    await saveCustomerSession(from, { step: 10, network: "MASHUP" });
-    return sendWhatsApp(from, `📶 MTN MashUp Bundle\n\nEnter the amount you want to pay (₵${MASHUP_MIN_AMOUNT} - ₵${MASHUP_MAX_AMOUNT}):\n\nExample: 5\n\nThe data + minutes mix you get depends on what MTN offers for that amount — this will be applied to your number manually.`);
-  } else if (text === "8") {
-    await saveCustomerSession(from, { step: 70 });
-    return playScratchCard(from);
-  } else {
-    return handleCustomerAi(from, text);
-  }
-
-  await saveCustomerSession(from, { step: 2, network });
-  const { MENUS: sessionMenus } = getMenusForSession(session);
-  return sendWhatsApp(from, sessionMenus[network]);
-}
-
-/* =====================================================
-STEP 2 - SELECT BUNDLE
-===================================================== */
-
-if (session.step === 2) {
-  const sessionPackages = getPackagesForSession(session);
-  const bundle = sessionPackages[session.network]?.[text];
-  if (!bundle) {
-    return sendWhatsApp(from, "Invalid option ❌ Choose an option to continue");
-  }
-
-  await saveCustomerSession(from, { step: 3, bundle: text });
-  return sendWhatsApp(from, "Enter phone number to receive the data on:");
-}
-
-/* =====================================================
-STEP 3 - DELIVERY PHONE NUMBER
-===================================================== */
-
-if (session.step === 3) {
-  const phone = normalizePhone(text);
-  if (phone.length !== 10 || !phone.startsWith("0")) {
-    return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana phone number to continue");
-  }
-
-  session = await saveCustomerSession(from, { phone_number: phone, step: 8 });
-  return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from:\n\n(This can be the same number or a different one)`);
-}
-
-/* =====================================================
-STEP 8 - MOMO PAYMENT NUMBER
-===================================================== */
-
-if (session.step === 8) {
-  const momoNumber = normalizePhone(text);
-  if (momoNumber.length !== 10 || !momoNumber.startsWith("0")) {
-    return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
-  }
-
-  const sessionPackages = getPackagesForSession(session);
-  const bundle = sessionPackages[session.network]?.[session.bundle];
-
-  // Agent Store Checkout skips scratch code straight to confirmation
-  if (session.agent_id) {
-    session = await saveCustomerSession(from, {
-      momo_number: momoNumber,
-      step: 4,
-      scratch_order_opt_in: false
-    });
-    const tracker = await getDeliveryEstimate();
-    const estimateMessage = buildDeliveryEstimateMessage(tracker);
-    const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
-    const priceStr = bundle ? bundle.price.toFixed(2) : "0.00";
-    const capStr = bundle ? bundle.capacity : "";
-    return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n${storeHeader}📶 Network: ${session.network}\n📦 Data: ${capStr}GB\n💰 Amount: ₵${priceStr}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${momoNumber}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
-  }
-
-  session = await saveCustomerSession(from, {
-    momo_number: momoNumber,
-    step: 15,
-    scratch_order_opt_in: false
-  });
-
-  const activeScratch = await getActiveScratchCode(from);
-  if (activeScratch) {
-    return sendWhatsApp(from, `🎟️ SCRATCH & WIN (OPTIONAL)\n\nActive Code: *${activeScratch.code}*\nProgress: ${Number(activeScratch.orders_completed || 0)}/${SCRATCH_REQUIRED_ORDERS}\n\nUse this code for this paid order?\n\n1 - YES, use my code\n2 - NO, skip`);
-  }
-
-  return sendWhatsApp(from, `🎟️ SCRATCH & WIN (OPTIONAL)\n\nDo you have a Data1 Scratch Code for this paid order?\n\n1 - YES, enter my code\n2 - NO / SKIP`);
-}
-
-/* =====================================================
-STEP 15 - OPTIONAL SCRATCH CODE AT CHECKOUT
-===================================================== */
-
-if (session.step === 15) {
-  const finishConfirm = async () => {
-    const sessionPackages = getPackagesForSession(session);
-    const bundle = sessionPackages[session.network]?.[session.bundle];
-    const tracker = await getDeliveryEstimate();
-    const estimateMessage = buildDeliveryEstimateMessage(tracker);
-    session = await saveCustomerSession(from, { step: 4 });
-    const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
-    const priceStr = bundle ? bundle.price.toFixed(2) : "0.00";
-    const capStr = bundle ? bundle.capacity : "";
-    return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n${storeHeader}📶 Network: ${session.network}\n📦 Data: ${capStr}GB\n💰 Amount: ₵${priceStr}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
-  };
-
-  if (text === "2" || /^no$/i.test(text) || /^skip$/i.test(text)) {
-    session = await saveCustomerSession(from, { scratch_order_opt_in: false });
-    return finishConfirm();
-  }
-
-  if (text === "1" || /^yes$/i.test(text)) {
-    const activeScratch = await getActiveScratchCode(from);
-    if (activeScratch) {
-      session = await saveCustomerSession(from, { scratch_code: activeScratch.code, scratch_order_opt_in: true });
-      return finishConfirm();
-    }
-    session = await saveCustomerSession(from, { step: 16, scratch_order_opt_in: false });
-    return sendWhatsApp(from, "🎟️ Enter your Data1 Scratch Code:\n\nExample: Data1A7K92P");
-  }
-  return sendWhatsApp(from, "Reply 1 for YES or 2 for NO / SKIP.");
-}
-
-/* =====================================================
-STEP 16 - ENTER SCRATCH CODE AT CHECKOUT
-===================================================== */
-
-if (session.step === 16) {
-  const result = await activateScratchCodeForCheckout(from, text);
-  if (!result.ok) return sendWhatsApp(from, result.message);
-  session = await saveCustomerSession(from, { scratch_code: result.scratch.code, scratch_order_opt_in: true, step: 4 });
-  const sessionPackages = getPackagesForSession(session);
-  const bundle = sessionPackages[session.network]?.[session.bundle];
-  const tracker = await getDeliveryEstimate();
-  const estimateMessage = buildDeliveryEstimateMessage(tracker);
-  const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
-  const priceStr = bundle ? bundle.price.toFixed(2) : "0.00";
-  const capStr = bundle ? bundle.capacity : "";
-  return sendWhatsApp(from, `Confirm Order: Your order will be delivered ✅\n\n${storeHeader}📶 Network: ${session.network}\n📦 Data: ${capStr}GB\n💰 Amount: ₵${priceStr}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${session.momo_number}\n\n🎟️ Scratch Code: ${result.scratch.code}\n🎯 This order will count toward: ${Number(result.scratch.orders_completed || 0) + 1}/${SCRATCH_REQUIRED_ORDERS}\n\n${estimateMessage}\n\nReply YES to pay or NO to cancel`);
-}
-
-/* =====================================================
-STEP 70 - SCRATCH MENU / CODE GENERATION
-===================================================== */
-
-if (session.step === 70) {
-  if (/^yes$/i.test(text)) {
-    try {
-      const result = await createScratchCodeForCustomer(from);
-      if (!result.ok) {
-        const x = result.existing;
-        return sendWhatsApp(from, x.unlocked ? `🎉 Your Scratch Card is already unlocked!\n\nCode: *${x.code}*\nProgress: ${Number(x.orders_completed || 0)}/5\n\nReply *SCRATCH* to play.` : `🎟️ You already have an active code: *${x.code}*\n\nProgress: ${Number(x.orders_completed || 0)}/5\n\nUse it during payment on your next paid data orders.`);
+    if (session.step === 4) {
+      if (/^no$/i.test(text)) {
+        await saveCustomerSession(from, { step: 1 });
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
       }
-      return sendWhatsApp(from, `🎉 YOUR UNIQUE SCRATCH CODE IS READY!\n\n🎟️ *${result.data.code}*\n\nUse this code during payment on your Data orders. Complete 5 PAID Data orders using this code.\n\nProgress: 0/5\n\nAfter the 5th paid order, your Scratch Card unlocks automatically. Come back here and reply *SCRATCH* to win 1GB or 2GB! 🎁`);
-    } catch (e) {
-      console.error("SCRATCH GENERATION ERROR:", e);
-      return sendWhatsApp(from, "❌ We could not generate your Scratch Code right now. Please reply *YES* to try again.");
+
+      if (/^yes$/i.test(text)) {
+        const sessionPackages = getPackagesForSession(session);
+        const bundle = sessionPackages[session.network][session.bundle];
+        return initiateMomoCharge(from, session, bundle);
+      }
+
+      return sendWhatsApp(from, "Reply YES to pay or NO to cancel.");
     }
-  }
-  if (/^scratch$/i.test(text)) return playScratchCard(from);
-  const activeScratch = await getActiveScratchCode(from);
-  if (activeScratch) return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\nCode: *${activeScratch.code}*\nProgress: ${Number(activeScratch.orders_completed || 0)}/5\n\n${activeScratch.unlocked ? "🎉 UNLOCKED — reply SCRATCH to play." : "Use this code during payment on your paid data orders."}`);
-  return sendWhatsApp(from, `🎟️ SCRATCH & WIN\n\nYou do not currently have an active Scratch Code.\n\nReply *YES* to generate your unique Data1 Scratch Code automatically.\n\nThen use it during payment on 5 PAID data orders. After 5/5, come back and reply *SCRATCH* to win! 🎁`);
-}
 
-/* =====================================================
-STEP 80 - SCRATCH PRIZE NETWORK
-===================================================== */
+    /* =====================================================
+    STEP 9 - AWAITING OTP
+    ===================================================== */
 
-if (session.step === 80) {
-  const networks = { "1": "MTN", "2": "AIRTELTIGO", "3": "TELECEL" };
-  const network = networks[text];
-  if (!network) return sendWhatsApp(from, "Invalid option ❌\n\n1 - MTN\n2 - AirtelTigo\n3 - Telecel");
-  session = await saveCustomerSession(from, { network, step: 81 });
-  return sendWhatsApp(from, "📱 Enter the Ghana phone number where you want your FREE prize sent:");
-}
-
-/* =====================================================
-STEP 81 - SCRATCH PRIZE DELIVERY
-===================================================== */
-
-if (session.step === 81) {
-  const prizePhone = normalizePhone(text);
-  if (prizePhone.length !== 10 || !prizePhone.startsWith("0")) return sendWhatsApp(from, "❌ Invalid Ghana phone number.\n\nExample: 0241234567");
-  const scratch = await supabase.from("scratch_codes").select("*").eq("assigned_to", normalizePhone(from)).eq("status", "processing").maybeSingle().then(r => r.data);
-  if (!scratch) return sendWhatsApp(from, "❌ Scratch prize session not found. Reply SCRATCH and try again.");
-  const capacity = String(scratch.prize || "1");
-  const prizeLabel = capacity === "2" ? "2GB" : "1GB";
-  const networkMap = { MTN: "YELLO", AIRTELTIGO: "AT_PREMIUM", TELECEL: "TELECEL" };
-  try {
-    const response = await axios.post(`${DATAMART_BASE}/purchase`, { phoneNumber: prizePhone, network: networkMap[session.network] || "YELLO", capacity, gateway: "wallet", delivery: "fast" }, { headers: { "x-api-key": DATA_API_KEY, "Content-Type": "application/json" }, timeout: 30000 });
-    const data = response.data?.data || response.data || {};
-    const reference = data.reference || data.orderReference || data.order_reference || null;
-    const deliveredAt = new Date().toISOString();
-    const { data: updatedScratch } = await supabase.from("scratch_codes").update({ status: "used", prize_network: session.network, prize_phone: prizePhone, datamart_reference: reference, delivered_at: deliveredAt }).eq("id", scratch.id).select("*").maybeSingle();
-    syncScratchToStoreApi({ scratch: updatedScratch || { ...scratch, status: "used", prize_network: session.network, prize_phone: prizePhone, datamart_reference: reference, delivered_at: deliveredAt } });
-    session = await saveCustomerSession(from, { step: 1, scratch_prize: null });
-    return sendWhatsApp(from, `🎉 PRIZE SENT SUCCESSFULLY!\n\n🎁 Prize: ${prizeLabel}\n📶 Network: ${session.network}\n📱 Sent to: ${prizePhone}\n${reference ? `🆔 Reference: ${reference}\n` : ""}\nReply HI to continue shopping.`);
-  } catch (e) {
-    console.error("SCRATCH PRIZE DELIVERY ERROR:", e.response?.data || e.message);
-    await supabase.from("scratch_codes").update({ status: "unlocked", scratched: false }).eq("id", scratch.id);
-    return sendWhatsApp(from, `❌ We could not send your ${prizeLabel} prize right now. Your Scratch Card has NOT been lost. Reply *SCRATCH* and try again.`);
-  }
-}
-
-/* =====================================================
-STEP 4 - CONFIRM PAYMENT
-===================================================== */
-
-if (session.step === 4) {
-  if (/^no$/i.test(text)) {
-    await saveCustomerSession(from, { step: 1 });
-    const { MENU: activeMenu } = getMenusForSession(session);
-    return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
-  }
-
-  if (/^yes$/i.test(text)) {
-    const sessionPackages = getPackagesForSession(session);
-    const bundle = sessionPackages[session.network][session.bundle];
-    return initiateMomoCharge(from, session, bundle);
-  }
-
-  return sendWhatsApp(from, "Reply YES to pay or NO to cancel.");
-}
-
-/* =====================================================
-STEP 9 - AWAITING OTP
-===================================================== */
-
-if (session.step === 9) {
-  return submitMomoOtp(from, session, text.trim());
-}
-
-/* =====================================================
-STEP 10 - MASHUP CUSTOM AMOUNT
-===================================================== */
-
-if (session.step === 10) {
-  const amountText = text.trim();
-  if (!isValidMashupAmount(amountText)) {
-    return sendWhatsApp(from, `Invalid amount ❌ Enter an amount between ₵${MASHUP_MIN_AMOUNT} and ₵${MASHUP_MAX_AMOUNT} (e.g. 5)`);
-  }
-
-  session = await saveCustomerSession(from, { bundle: amountText, step: 11 });
-  const combos = getMashupCombos(amountText);
-  let comboMenu = `MashUp ₵${amountText} — choose a package:\n\n`;
-  combos.forEach((c, i) => {
-    comboMenu += `${i + 1} - ${c.label}\n`;
-  });
-  comboMenu += `\nChoose an option to continue`;
-  return sendWhatsApp(from, comboMenu);
-}
-
-/* =====================================================
-STEP 11 - MASHUP COMBO SELECTION
-===================================================== */
-
-if (session.step === 11) {
-  const combos = getMashupCombos(session.bundle);
-  const combo = combos[Number(text) - 1];
-  if (!combo) {
-    return sendWhatsApp(from, "Invalid option ❌ Choose an option to continue");
-  }
-
-  session = await saveCustomerSession(from, { bundle: `${session.bundle}|${combo.id}`, step: 12 });
-  return sendWhatsApp(from, "Enter phone number to receive the MashUp bundle on:");
-}
-
-/* =====================================================
-STEP 12 - MASHUP DELIVERY PHONE NUMBER
-===================================================== */
-
-if (session.step === 12) {
-  const phone = normalizePhone(text);
-  if (phone.length !== 10 || !phone.startsWith("0")) {
-    return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana phone number to continue");
-  }
-
-  session = await saveCustomerSession(from, { phone_number: phone, step: 13 });
-  return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from:\n\n(This can be the same number or a different one)`);
-}
-
-/* =====================================================
-STEP 13 - MASHUP MOMO PAYMENT NUMBER
-===================================================== */
-
-if (session.step === 13) {
-  const momoNumber = normalizePhone(text);
-  if (momoNumber.length !== 10 || !momoNumber.startsWith("0")) {
-    return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
-  }
-
-  const parsed = parseMashupSelection(session.bundle);
-  if (!parsed) {
-    session = await saveCustomerSession(from, { step: 1 });
-    return sendWhatsApp(from, "❌ Something went wrong with your selection. Please reply HI and try again.");
-  }
-
-  session = await saveCustomerSession(from, {
-    momo_number: momoNumber,
-    step: 14
-  });
-
-  return sendWhatsApp(
-    from,
-    `Confirm Order: Your MashUp will be applied manually ✅\n\n📶 Network: MTN (MashUp)\n📦 Package: ${parsed.combo.label}\n💰 Amount: ₵${parsed.amount.toFixed(2)}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${momoNumber}\n\n⏳ Note: MashUp bundles are applied manually and may take a little longer than regular data orders.\n\nReply YES to pay or NO to cancel`
-  );
-}
-
-/* =====================================================
-STEP 14 - CONFIRM MASHUP PAYMENT
-===================================================== */
-
-if (session.step === 14) {
-  if (/^no$/i.test(text)) {
-    session = await saveCustomerSession(from, { step: 1 });
-    const { MENU: activeMenu } = getMenusForSession(session);
-    return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
-  }
-
-  if (/^yes$/i.test(text)) {
-    const parsed = parseMashupSelection(session.bundle);
-    if (!parsed) {
-      session = await saveCustomerSession(from, { step: 1 });
-      return sendWhatsApp(from, "❌ Something went wrong with your selection. Please reply HI and try again.");
+    if (session.step === 9) {
+      return submitMomoOtp(from, session, text.trim());
     }
-    const bundle = { price: parsed.amount, capacity: parsed.combo.label };
-    return initiateMomoCharge(from, session, bundle);
-  }
 
-  return sendWhatsApp(from, "Reply YES to pay or NO to cancel.");
-}
+    /* =====================================================
+    STEP 10 - MASHUP CUSTOM AMOUNT
+    ===================================================== */
 
-/* =====================================================
-STEP 30 - AFA: MOMO NETWORK SELECTION
-===================================================== */
+    if (session.step === 10) {
+      const amountText = text.trim();
+      if (!isValidMashupAmount(amountText)) {
+        return sendWhatsApp(from, `Invalid amount ❌ Enter an amount between ₵${MASHUP_MIN_AMOUNT} and ₵${MASHUP_MAX_AMOUNT} (e.g. 5)`);
+      }
 
-if (session.step === 30) {
-  let network = null;
-  if (text === "1") network = "MTN";
-  else if (text === "2") network = "AIRTELTIGO";
-  else if (text === "3") network = "TELECEL";
-
-  if (!network) {
-    return sendWhatsApp(from, "Invalid option ❌ Reply 1 for MTN, 2 for AirtelTigo, or 3 for Telecel");
-  }
-
-  session = await saveCustomerSession(from, { network, step: 31 });
-  return sendWhatsApp(from, "Enter the Full Name of the applicant:");
-}
-
-/* =====================================================
-STEP 31 - AFA: FULL NAME
-===================================================== */
-
-if (session.step === 31) {
-  const fullName = text.trim();
-  if (fullName.length < 3) {
-    return sendWhatsApp(from, "Invalid name ❌ Enter the applicant's full name (e.g. John Doe)");
-  }
-
-  session = await saveCustomerSession(from, {
-    bundle: mergeAfaField(session, "full_name", fullName),
-    step: 32
-  });
-
-  return sendWhatsApp(from, "Enter the applicant's Phone Number (e.g. 0241234567):");
-}
-
-/* =====================================================
-STEP 32 - AFA: PHONE NUMBER
-===================================================== */
-
-if (session.step === 32) {
-  const afaPhone = normalizePhone(text);
-  if (afaPhone.length !== 10 || !afaPhone.startsWith("0")) {
-    return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana phone number (e.g. 0241234567)");
-  }
-
-  session = await saveCustomerSession(from, {
-    bundle: mergeAfaField(session, "phone_number", afaPhone),
-    step: 33
-  });
-
-  return sendWhatsApp(from, "Enter the applicant's Ghana Card Number (e.g. GHA-000000000-0):");
-}
-
-/* =====================================================
-STEP 33 - AFA: GHANA CARD NUMBER
-===================================================== */
-
-if (session.step === 33) {
-  const idNumber = text.trim().toUpperCase();
-  if (!isValidGhanaCard(idNumber)) {
-    return sendWhatsApp(from, "Invalid Ghana Card number ❌ Use the format GHA-000000000-0");
-  }
-
-  session = await saveCustomerSession(from, {
-    bundle: mergeAfaField(session, "id_number", idNumber),
-    step: 34
-  });
-
-  return sendWhatsApp(from, "Enter the applicant's Location (e.g. Tafo, Kumasi):");
-}
-
-/* =====================================================
-STEP 34 - AFA: LOCATION
-===================================================== */
-
-if (session.step === 34) {
-  const location = text.trim();
-  if (location.length < 2) {
-    return sendWhatsApp(from, "Invalid location ❌ Enter the applicant's location (e.g. Tafo, Kumasi)");
-  }
-
-  session = await saveCustomerSession(from, {
-    bundle: mergeAfaField(session, "location", location),
-    step: 35
-  });
-
-  return sendWhatsApp(from, "Enter the applicant's Date of Birth (DD/MM/YYYY, e.g. 15/06/1995):");
-}
-
-/* =====================================================
-STEP 35 - AFA: DATE OF BIRTH
-===================================================== */
-
-if (session.step === 35) {
-  const dob = parseAfaDob(text);
-  if (!dob) {
-    return sendWhatsApp(from, "Invalid date ❌ Use the format DD/MM/YYYY (e.g. 15/06/1995)");
-  }
-
-  session = await saveCustomerSession(from, {
-    bundle: mergeAfaField(session, "dob", dob),
-    step: 36
-  });
-
-  return sendWhatsApp(from, "Enter the applicant's Occupation (e.g. Student, Teacher, Business Owner):");
-}
-
-/* =====================================================
-STEP 36 - AFA: OCCUPATION
-===================================================== */
-
-if (session.step === 36) {
-  const occupation = text.trim();
-  if (occupation.length < 2) {
-    return sendWhatsApp(from, "Invalid occupation ❌ Enter the applicant's occupation (e.g. Trader)");
-  }
-
-  session = await saveCustomerSession(from, {
-    bundle: mergeAfaField(session, "occupation", occupation),
-    step: 37
-  });
-
-  return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from (${session.network}):`);
-}
-
-/* =====================================================
-STEP 37 - AFA: MOMO PAYMENT NUMBER
-===================================================== */
-
-if (session.step === 37) {
-  const momoNumber = normalizePhone(text);
-  if (momoNumber.length !== 10 || !momoNumber.startsWith("0")) {
-    return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
-  }
-
-  const afaData = getAfaData(session);
-  if (!afaData) {
-    session = await saveCustomerSession(from, { step: 1 });
-    return sendWhatsApp(from, "❌ Something went wrong with your form. Please reply HI and try again.");
-  }
-
-  session = await saveCustomerSession(from, {
-    momo_number: momoNumber,
-    step: 38
-  });
-
-  const afaCost = resolveServiceCustomPrice("afa", session.custom_prices, AFA_PRICE);
-  const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
-  return sendWhatsApp(
-    from,
-    `Confirm AFA Registration ✅\n\n${storeHeader}👤 Full Name: ${afaData.full_name}\n📱 Phone: ${afaData.phone_number}\n🪪 Ghana Card: ${afaData.id_number}\n📍 Location: ${afaData.location}\n🎂 DOB: ${afaData.dob}\n💼 Occupation: ${afaData.occupation}\n\n💰 Amount: ₵${afaCost.toFixed(2)}\n💳 Pay from (Momo, ${session.network}): ${momoNumber}\n\nReply YES to pay or NO to cancel`
-  );
-}
-
-/* =====================================================
-STEP 38 - CONFIRM AFA PAYMENT
-===================================================== */
-
-if (session.step === 38) {
-  if (/^no$/i.test(text)) {
-    session = await saveCustomerSession(from, { step: 1 });
-    const { MENU: activeMenu } = getMenusForSession(session);
-    return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
-  }
-
-  if (/^yes$/i.test(text)) {
-    const afaData = getAfaData(session);
-    if (!afaData) {
-      session = await saveCustomerSession(from, { step: 1 });
-      return sendWhatsApp(from, "❌ Something went wrong with your form. Please reply HI and try again.");
+      session = await saveCustomerSession(from, { bundle: amountText, step: 11 });
+      const combos = getMashupCombos(amountText);
+      let comboMenu = `MashUp ₵${amountText} — choose a package:\n\n`;
+      combos.forEach((c, i) => {
+        comboMenu += `${i + 1} - ${c.label}\n`;
+      });
+      comboMenu += `\nChoose an option to continue`;
+      return sendWhatsApp(from, comboMenu);
     }
-    const afaCost = resolveServiceCustomPrice("afa", session.custom_prices, AFA_PRICE);
-    const bundle = { price: afaCost, capacity: "AFA Registration" };
-    return initiateMomoCharge(from, session, bundle);
-  }
 
-  return sendWhatsApp(from, "Reply YES to pay or NO to cancel.");
-}
+    /* =====================================================
+    STEP 11 - MASHUP COMBO SELECTION
+    ===================================================== */
 
-/* =====================================================
-STEP 50 - NETFLIX: MOMO NETWORK SELECTION
-===================================================== */
+    if (session.step === 11) {
+      const combos = getMashupCombos(session.bundle);
+      const combo = combos[Number(text) - 1];
+      if (!combo) {
+        return sendWhatsApp(from, "Invalid option ❌ Choose an option to continue");
+      }
 
-if (session.step === 50) {
-  let network = null;
-  if (text === "1") network = "MTN";
-  else if (text === "2") network = "AIRTELTIGO";
-  else if (text === "3") network = "TELECEL";
+      session = await saveCustomerSession(from, { bundle: `${session.bundle}|${combo.id}`, step: 12 });
+      return sendWhatsApp(from, "Enter phone number to receive the MashUp bundle on:");
+    }
 
-  if (!network) {
-    return sendWhatsApp(from, "Invalid option ❌ Reply 1 for MTN, 2 for AirtelTigo, or 3 for Telecel");
-  }
+    /* =====================================================
+    STEP 12 - MASHUP DELIVERY PHONE NUMBER
+    ===================================================== */
 
-  session = await saveCustomerSession(from, { network, step: 51 });
-  return sendWhatsApp(from, "Enter the Mobile Money number to pay from:");
-}
+    if (session.step === 12) {
+      const phone = normalizePhone(text);
+      if (phone.length !== 10 || !phone.startsWith("0")) {
+        return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana phone number to continue");
+      }
 
-/* =====================================================
-STEP 51 - NETFLIX: MOMO PAYMENT NUMBER
-===================================================== */
+      session = await saveCustomerSession(from, { phone_number: phone, step: 13 });
+      return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from:\n\n(This can be the same number or a different one)`);
+    }
 
-if (session.step === 51) {
-  const momoNumber = normalizePhone(text);
-  if (momoNumber.length !== 10 || !momoNumber.startsWith("0")) {
-    return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
-  }
+    /* =====================================================
+    STEP 13 - MASHUP MOMO PAYMENT NUMBER
+    ===================================================== */
 
-  session = await saveCustomerSession(from, {
-    momo_number: momoNumber,
-    step: 52
-  });
+    if (session.step === 13) {
+      const momoNumber = normalizePhone(text);
+      if (momoNumber.length !== 10 || !momoNumber.startsWith("0")) {
+        return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
+      }
 
-  const netflixCost = resolveServiceCustomPrice("netflix", session.custom_prices, NETFLIX_PRICE);
-  const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
-  return sendWhatsApp(
-    from,
-    `Confirm Netflix Subscription ✅\n\n${storeHeader}📺 Netflix Subscription\n💰 Amount: ₵${netflixCost.toFixed(2)}\n💳 Pay from (Momo, ${session.network}): ${momoNumber}\n\nReply YES to pay or NO to cancel`
-  );
-}
+      const parsed = parseMashupSelection(session.bundle);
+      if (!parsed) {
+        session = await saveCustomerSession(from, { step: 1 });
+        return sendWhatsApp(from, "❌ Something went wrong with your selection. Please reply HI and try again.");
+      }
 
-/* =====================================================
-STEP 52 - CONFIRM NETFLIX PAYMENT
-===================================================== */
+      session = await saveCustomerSession(from, {
+        momo_number: momoNumber,
+        step: 14
+      });
 
-if (session.step === 52) {
-  if (/^no$/i.test(text)) {
-    session = await saveCustomerSession(from, { step: 1 });
-    const { MENU: activeMenu } = getMenusForSession(session);
-    return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
-  }
-
-  if (/^yes$/i.test(text)) {
-    const netflixCost = resolveServiceCustomPrice("netflix", session.custom_prices, NETFLIX_PRICE);
-    const bundle = { price: netflixCost, capacity: "Netflix Subscription" };
-    return initiateMomoCharge(from, session, bundle);
-  }
-
-  return sendWhatsApp(from, "Reply YES to pay or NO to cancel.");
-}
-
-/* =====================================================
-STEP 53 - NETFLIX: AWAITING REFERENCE CODE
-===================================================== */
-
-if (session.step === 53) {
-  const netflixData = getNetflixData(session);
-  if (!netflixData) {
-    session = await saveCustomerSession(from, { step: 1 });
-    return sendWhatsApp(from, "❌ Something went wrong with your order. Please reply HI and try again.");
-  }
-
-  if (netflixData.used) {
-    return sendWhatsApp(
-      from,
-      `❌ This reference code has already been used to fetch a sign-in code.\n\nNeed to sign in again (e.g. a different device)? Pay again via the main menu to get a new reference code.\n\nSEND: hi to return to the main menu.`
-    );
-  }
-
-  const enteredCode = text.trim().toUpperCase();
-  if (enteredCode !== netflixData.refCode) {
-    return sendWhatsApp(
-      from,
-      `Please reply with your reference code exactly as sent: *${netflixData.refCode}*\n\nThis confirms it's really you before we fetch your Netflix sign-in code.`
-    );
-  }
-
-  await sendWhatsApp(from, "🔄 Getting you the code...., one moment...");
-  const result = await fetchNetflixSignIn(netflixData.paidAt);
-
-  if (result.type === "code" || result.type === "approved" || result.type === "link_flagged") {
-    session = await saveCustomerSession(from, {
-      bundle: JSON.stringify({ ...netflixData, used: true })
-    });
-  }
-
-  if (result.type === "code") {
-    return sendWhatsApp(from, `✅ Your Netflix sign-in code is:\n\n*${result.value}*\n\nEnter this on Netflix to complete sign-in.\n\nSEND: hi to return to the main menu.`);
-  }
-
-  if (result.type === "approved") {
-    return sendWhatsApp(from, `✅ Your Netflix sign-in has been approved! You should now be signed in.\n\nSEND: hi to return to the main menu.`);
-  }
-
-  if (result.type === "link_flagged") {
-    await sendAdminWhatsApp(
-      `🔔 NETFLIX APPROVAL NEEDED\n\nNetflix sent an approval link instead of a code for a customer sign-in. Please open this link to approve:\n${result.link}\n\nCustomer: ${session.phone}`
-    );
-    return sendWhatsApp(from, "⏳ We're finalizing your sign-in approval, this should complete shortly. If you don't see it go through, contact 0547100951 (@stony11).");
-  }
-
-  if (result.type === "error") {
-    return sendWhatsApp(from, `❌ We could not check the email right now. Please reply *${netflixData.refCode}* again in a moment, or contact 0547100951 (@stony11) for help.`);
-  }
-
-  return sendWhatsApp(from, `❌ We couldn't find a code or sign-in request yet.\n\nMake sure you've chosen "Sign in" on Netflix using ${NETFLIX_EMAIL}, then reply *${netflixData.refCode}* again in a moment.`);
-}
-
-/* =====================================================
-STEP 6 - TRACKING PHONE
-===================================================== */
-
-if (session.step === 6) {
-  const trackingPhone = normalizePhone(text);
-  if (trackingPhone.length === 10 && trackingPhone.startsWith("0")) {
-    return trackOrders(from, trackingPhone);
-  }
-  const isRefOrId = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(text) ||
-    /^[A-Za-z0-9_-]{5,35}$/.test(text.trim());
-  if (isRefOrId) {
-    const report = await executeDatamartSearch(text.trim(), from);
-    if (report) return sendWhatsApp(from, report);
-  }
-  return sendWhatsApp(from, `❌ Invalid input.\n\nPlease enter a valid Ghana phone number (e.g. 0241234567) or order reference (e.g. AGT-MTN-...).`);
-}
-
-/* =====================================================
-STEP 5 - AWAITING PAYMENT CONFIRMATION
-===================================================== */
-
-if (session.step === 5) {
-  if (/^(cancel|no|stop)$/i.test(text)) {
-    await saveCustomerSession(from, { step: 1 });
-    const { MENU: activeMenu } = getMenusForSession(session);
-    return sendWhatsApp(from, "❌ Order cancelled.\n\n" + activeMenu);
-  }
-
-  let amount = null;
-  if (session.network === "MASHUP") {
-    const parsed = parseMashupSelection(session.bundle);
-    amount = parsed?.amount;
-  } else if (session.network && session.bundle) {
-    const sessionPackages = getPackagesForSession(session);
-    const b = sessionPackages[session.network]?.[session.bundle];
-    amount = b ? b.price : (PACKAGES[session.network]?.[session.bundle]?.price || null);
-  } else if (session.network === "AFA" || session.bundle?.includes?.("AFA")) {
-    amount = AFA_PRICE;
-  } else if (session.bundle?.includes?.("netflix") || session.network === "NETFLIX") {
-    amount = NETFLIX_PRICE;
-  }
-
-  if (/^(link|pay|checkout)$/i.test(text) && amount) {
-    const linkRef = `WS-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
-    const link = await createPaystackCheckoutLink(from, linkRef, amount);
-    if (link) {
-      await saveCustomerSession(from, { ref: linkRef });
       return sendWhatsApp(
         from,
-        `💳 PAYMENT LINK\n\nTap below to pay online:\n${link}\n\nAmount: ₵${Number(amount).toFixed(2)}\nOnce paid, your order will be delivered automatically!`
+        `Confirm Order: Your MashUp will be applied manually ✅\n\n📶 Network: MTN (MashUp)\n📦 Package: ${parsed.combo.label}\n💰 Amount: ₵${parsed.amount.toFixed(2)}\n📱 Data goes to: ${session.phone_number}\n💳 Pay from (Momo): ${momoNumber}\n\n⏳ Note: MashUp bundles are applied manually and may take a little longer than regular data orders.\n\nReply YES to pay or NO to cancel`
       );
     }
-  }
 
-  const provider = getMomoProvider(session.momo_number, session.network);
-  let helpMsg = `⏳ Awaiting payment confirmation${session.momo_number ? " for " + session.momo_number : ""}.\n\n`;
+    /* =====================================================
+    STEP 14 - CONFIRM MASHUP PAYMENT
+    ===================================================== */
 
-  if (provider === "mtn") {
-    helpMsg += `👉 *Prompt didn't pop up on your phone?*\n1. Dial *170#\n2. Select 6 (My Wallet)\n3. Select 3 (My Approvals)\n4. Enter your MoMo PIN & select 1 to approve!\n\n`;
-  } else if (provider === "vod") {
-    helpMsg += `👉 Dial *110# to approve the pending transaction or generate a voucher.\n\n`;
-  } else if (provider === "atl") {
-    helpMsg += `👉 Dial *110# to approve the pending transaction.\n\n`;
-  }
+    if (session.step === 14) {
+      if (/^no$/i.test(text)) {
+        session = await saveCustomerSession(from, { step: 1 });
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
+      }
 
-  helpMsg += `Reply *LINK* for a direct payment link.\nReply *CANCEL* to cancel this order, or *HI* for the main menu.`;
-  return sendWhatsApp(from, helpMsg);
-}
+      if (/^yes$/i.test(text)) {
+        const parsed = parseMashupSelection(session.bundle);
+        if (!parsed) {
+          session = await saveCustomerSession(from, { step: 1 });
+          return sendWhatsApp(from, "❌ Something went wrong with your selection. Please reply HI and try again.");
+        }
+        const bundle = { price: parsed.amount, capacity: parsed.combo.label };
+        return initiateMomoCharge(from, session, bundle);
+      }
+
+      return sendWhatsApp(from, "Reply YES to pay or NO to cancel.");
+    }
+
+    /* =====================================================
+    STEP 30 - AFA: MOMO NETWORK SELECTION
+    ===================================================== */
+
+    if (session.step === 30) {
+      let network = null;
+      if (text === "1") network = "MTN";
+      else if (text === "2") network = "AIRTELTIGO";
+      else if (text === "3") network = "TELECEL";
+
+      if (!network) {
+        return sendWhatsApp(from, "Invalid option ❌ Reply 1 for MTN, 2 for AirtelTigo, or 3 for Telecel");
+      }
+
+      session = await saveCustomerSession(from, { network, step: 31 });
+      return sendWhatsApp(from, "Enter the Full Name of the applicant:");
+    }
+
+    /* =====================================================
+    STEP 31 - AFA: FULL NAME
+    ===================================================== */
+
+    if (session.step === 31) {
+      const fullName = text.trim();
+      if (fullName.length < 3) {
+        return sendWhatsApp(from, "Invalid name ❌ Enter the applicant's full name (e.g. John Doe)");
+      }
+
+      session = await saveCustomerSession(from, {
+        bundle: mergeAfaField(session, "full_name", fullName),
+        step: 32
+      });
+
+      return sendWhatsApp(from, "Enter the applicant's Phone Number (e.g. 0241234567):");
+    }
+
+    /* =====================================================
+    STEP 32 - AFA: PHONE NUMBER
+    ===================================================== */
+
+    if (session.step === 32) {
+      const afaPhone = normalizePhone(text);
+      if (afaPhone.length !== 10 || !afaPhone.startsWith("0")) {
+        return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana phone number (e.g. 0241234567)");
+      }
+
+      session = await saveCustomerSession(from, {
+        bundle: mergeAfaField(session, "phone_number", afaPhone),
+        step: 33
+      });
+
+      return sendWhatsApp(from, "Enter the applicant's Ghana Card Number (e.g. GHA-000000000-0):");
+    }
+
+    /* =====================================================
+    STEP 33 - AFA: GHANA CARD NUMBER
+    ===================================================== */
+
+    if (session.step === 33) {
+      const idNumber = text.trim().toUpperCase();
+      if (!isValidGhanaCard(idNumber)) {
+        return sendWhatsApp(from, "Invalid Ghana Card number ❌ Use the format GHA-000000000-0");
+      }
+
+      session = await saveCustomerSession(from, {
+        bundle: mergeAfaField(session, "id_number", idNumber),
+        step: 34
+      });
+
+      return sendWhatsApp(from, "Enter the applicant's Location (e.g. Tafo, Kumasi):");
+    }
+
+    /* =====================================================
+    STEP 34 - AFA: LOCATION
+    ===================================================== */
+
+    if (session.step === 34) {
+      const location = text.trim();
+      if (location.length < 2) {
+        return sendWhatsApp(from, "Invalid location ❌ Enter the applicant's location (e.g. Tafo, Kumasi)");
+      }
+
+      session = await saveCustomerSession(from, {
+        bundle: mergeAfaField(session, "location", location),
+        step: 35
+      });
+
+      return sendWhatsApp(from, "Enter the applicant's Date of Birth (DD/MM/YYYY, e.g. 15/06/1995):");
+    }
+
+    /* =====================================================
+    STEP 35 - AFA: DATE OF BIRTH
+    ===================================================== */
+
+    if (session.step === 35) {
+      const dob = parseAfaDob(text);
+      if (!dob) {
+        return sendWhatsApp(from, "Invalid date ❌ Use the format DD/MM/YYYY (e.g. 15/06/1995)");
+      }
+
+      session = await saveCustomerSession(from, {
+        bundle: mergeAfaField(session, "dob", dob),
+        step: 36
+      });
+
+      return sendWhatsApp(from, "Enter the applicant's Occupation (e.g. Student, Teacher, Business Owner):");
+    }
+
+    /* =====================================================
+    STEP 36 - AFA: OCCUPATION
+    ===================================================== */
+
+    if (session.step === 36) {
+      const occupation = text.trim();
+      if (occupation.length < 2) {
+        return sendWhatsApp(from, "Invalid occupation ❌ Enter the applicant's occupation (e.g. Trader)");
+      }
+
+      session = await saveCustomerSession(from, {
+        bundle: mergeAfaField(session, "occupation", occupation),
+        step: 37
+      });
+
+      return sendWhatsApp(from, `📲 Enter the Mobile Money number to pay from (${session.network}):`);
+    }
+
+    /* =====================================================
+    STEP 37 - AFA: MOMO PAYMENT NUMBER
+    ===================================================== */
+
+    if (session.step === 37) {
+      const momoNumber = normalizePhone(text);
+      if (momoNumber.length !== 10 || !momoNumber.startsWith("0")) {
+        return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
+      }
+
+      const afaData = getAfaData(session);
+      if (!afaData) {
+        session = await saveCustomerSession(from, { step: 1 });
+        return sendWhatsApp(from, "❌ Something went wrong with your form. Please reply HI and try again.");
+      }
+
+      session = await saveCustomerSession(from, {
+        momo_number: momoNumber,
+        step: 38
+      });
+
+      const afaCost = resolveServiceCustomPrice("afa", session.custom_prices, AFA_PRICE);
+      const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+      return sendWhatsApp(
+        from,
+        `Confirm AFA Registration ✅\n\n${storeHeader}👤 Full Name: ${afaData.full_name}\n📱 Phone: ${afaData.phone_number}\n🪪 Ghana Card: ${afaData.id_number}\n📍 Location: ${afaData.location}\n🎂 DOB: ${afaData.dob}\n💼 Occupation: ${afaData.occupation}\n\n💰 Amount: ₵${afaCost.toFixed(2)}\n💳 Pay from (Momo, ${session.network}): ${momoNumber}\n\nReply YES to pay or NO to cancel`
+      );
+    }
+
+    /* =====================================================
+    STEP 38 - CONFIRM AFA PAYMENT
+    ===================================================== */
+
+    if (session.step === 38) {
+      if (/^no$/i.test(text)) {
+        session = await saveCustomerSession(from, { step: 1 });
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
+      }
+
+      if (/^yes$/i.test(text)) {
+        const afaData = getAfaData(session);
+        if (!afaData) {
+          session = await saveCustomerSession(from, { step: 1 });
+          return sendWhatsApp(from, "❌ Something went wrong with your form. Please reply HI and try again.");
+        }
+        const afaCost = resolveServiceCustomPrice("afa", session.custom_prices, AFA_PRICE);
+        const bundle = { price: afaCost, capacity: "AFA Registration" };
+        return initiateMomoCharge(from, session, bundle);
+      }
+
+      return sendWhatsApp(from, "Reply YES to pay or NO to cancel.");
+    }
+
+    /* =====================================================
+    STEP 50 - NETFLIX: MOMO NETWORK SELECTION
+    ===================================================== */
+
+    if (session.step === 50) {
+      let network = null;
+      if (text === "1") network = "MTN";
+      else if (text === "2") network = "AIRTELTIGO";
+      else if (text === "3") network = "TELECEL";
+
+      if (!network) {
+        return sendWhatsApp(from, "Invalid option ❌ Reply 1 for MTN, 2 for AirtelTigo, or 3 for Telecel");
+      }
+
+      session = await saveCustomerSession(from, { network, step: 51 });
+      return sendWhatsApp(from, "Enter the Mobile Money number to pay from:");
+    }
+
+    /* =====================================================
+    STEP 51 - NETFLIX: MOMO PAYMENT NUMBER
+    ===================================================== */
+
+    if (session.step === 51) {
+      const momoNumber = normalizePhone(text);
+      if (momoNumber.length !== 10 || !momoNumber.startsWith("0")) {
+        return sendWhatsApp(from, "Invalid number ❌ Enter a correct Ghana Mobile Money number to continue");
+      }
+
+      session = await saveCustomerSession(from, {
+        momo_number: momoNumber,
+        step: 52
+      });
+
+      const netflixCost = resolveServiceCustomPrice("netflix", session.custom_prices, NETFLIX_PRICE);
+      const storeHeader = session.agent_name ? `🏪 Store: *${session.agent_name}*\n` : "";
+      return sendWhatsApp(
+        from,
+        `Confirm Netflix Subscription ✅\n\n${storeHeader}📺 Netflix Subscription\n💰 Amount: ₵${netflixCost.toFixed(2)}\n💳 Pay from (Momo, ${session.network}): ${momoNumber}\n\nReply YES to pay or NO to cancel`
+      );
+    }
+
+    /* =====================================================
+    STEP 52 - CONFIRM NETFLIX PAYMENT
+    ===================================================== */
+
+    if (session.step === 52) {
+      if (/^no$/i.test(text)) {
+        session = await saveCustomerSession(from, { step: 1 });
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, "❌ Cancelled\n\n" + activeMenu);
+      }
+
+      if (/^yes$/i.test(text)) {
+        const netflixCost = resolveServiceCustomPrice("netflix", session.custom_prices, NETFLIX_PRICE);
+        const bundle = { price: netflixCost, capacity: "Netflix Subscription" };
+        return initiateMomoCharge(from, session, bundle);
+      }
+
+      return sendWhatsApp(from, "Reply YES to pay or NO to cancel.");
+    }
+
+    /* =====================================================
+    STEP 53 - NETFLIX: AWAITING REFERENCE CODE
+    ===================================================== */
+
+    if (session.step === 53) {
+      const netflixData = getNetflixData(session);
+      if (!netflixData) {
+        session = await saveCustomerSession(from, { step: 1 });
+        return sendWhatsApp(from, "❌ Something went wrong with your order. Please reply HI and try again.");
+      }
+
+      if (netflixData.used) {
+        return sendWhatsApp(
+          from,
+          `❌ This reference code has already been used to fetch a sign-in code.\n\nNeed to sign in again (e.g. a different device)? Pay again via the main menu to get a new reference code.\n\nSEND: hi to return to the main menu.`
+        );
+      }
+
+      const enteredCode = text.trim().toUpperCase();
+      if (enteredCode !== netflixData.refCode) {
+        return sendWhatsApp(
+          from,
+          `Please reply with your reference code exactly as sent: *${netflixData.refCode}*\n\nThis confirms it's really you before we fetch your Netflix sign-in code.`
+        );
+      }
+
+      await sendWhatsApp(from, "🔄 Getting you the code...., one moment...");
+      const result = await fetchNetflixSignIn(netflixData.paidAt);
+
+      if (result.type === "code" || result.type === "approved" || result.type === "link_flagged") {
+        session = await saveCustomerSession(from, {
+          bundle: JSON.stringify({ ...netflixData, used: true })
+        });
+      }
+
+      if (result.type === "code") {
+        return sendWhatsApp(from, `✅ Your Netflix sign-in code is:\n\n*${result.value}*\n\nEnter this on Netflix to complete sign-in.\n\nSEND: hi to return to the main menu.`);
+      }
+
+      if (result.type === "approved") {
+        return sendWhatsApp(from, `✅ Your Netflix sign-in has been approved! You should now be signed in.\n\nSEND: hi to return to the main menu.`);
+      }
+
+      if (result.type === "link_flagged") {
+        await sendAdminWhatsApp(
+          `🔔 NETFLIX APPROVAL NEEDED\n\nNetflix sent an approval link instead of a code for a customer sign-in. Please open this link to approve:\n${result.link}\n\nCustomer: ${session.phone}`
+        );
+        return sendWhatsApp(from, "⏳ We're finalizing your sign-in approval, this should complete shortly. If you don't see it go through, contact 0547100951 (@stony11).");
+      }
+
+      if (result.type === "error") {
+        return sendWhatsApp(from, `❌ We could not check the email right now. Please reply *${netflixData.refCode}* again in a moment, or contact 0547100951 (@stony11) for help.`);
+      }
+
+      return sendWhatsApp(from, `❌ We couldn't find a code or sign-in request yet.\n\nMake sure you've chosen "Sign in" on Netflix using ${NETFLIX_EMAIL}, then reply *${netflixData.refCode}* again in a moment.`);
+    }
+
+    /* =====================================================
+    STEP 6 - TRACKING PHONE
+    ===================================================== */
+
+    if (session.step === 6) {
+      const trackingPhone = normalizePhone(text);
+      if (trackingPhone.length === 10 && trackingPhone.startsWith("0")) {
+        return trackOrders(from, trackingPhone);
+      }
+      const isRefOrId = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(text) ||
+        /^[A-Za-z0-9_-]{5,35}$/.test(text.trim());
+      if (isRefOrId) {
+        const report = await executeDatamartSearch(text.trim(), from);
+        if (report) return sendWhatsApp(from, report);
+      }
+      return sendWhatsApp(from, `❌ Invalid input.\n\nPlease enter a valid Ghana phone number (e.g. 0241234567) or order reference (e.g. AGT-MTN-...).`);
+    }
+
+    /* =====================================================
+    STEP 5 - AWAITING PAYMENT CONFIRMATION
+    ===================================================== */
+
+    if (session.step === 5) {
+      if (/^(cancel|no|stop)$/i.test(text)) {
+        await saveCustomerSession(from, { step: 1 });
+        const { MENU: activeMenu } = getMenusForSession(session);
+        return sendWhatsApp(from, "❌ Order cancelled.\n\n" + activeMenu);
+      }
+
+      let amount = null;
+      if (session.network === "MASHUP") {
+        const parsed = parseMashupSelection(session.bundle);
+        amount = parsed?.amount;
+      } else if (session.network && session.bundle) {
+        const sessionPackages = getPackagesForSession(session);
+        const b = sessionPackages[session.network]?.[session.bundle];
+        amount = b ? b.price : (PACKAGES[session.network]?.[session.bundle]?.price || null);
+      } else if (session.network === "AFA" || session.bundle?.includes?.("AFA")) {
+        amount = AFA_PRICE;
+      } else if (session.bundle?.includes?.("netflix") || session.network === "NETFLIX") {
+        amount = NETFLIX_PRICE;
+      }
+
+      if (/^(link|pay|checkout)$/i.test(text) && amount) {
+        const linkRef = `WS-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+        const link = await createPaystackCheckoutLink(from, linkRef, amount);
+        if (link) {
+          await saveCustomerSession(from, { ref: linkRef });
+          return sendWhatsApp(
+            from,
+            `💳 PAYMENT LINK\n\nTap below to pay online:\n${link}\n\nAmount: ₵${Number(amount).toFixed(2)}\nOnce paid, your order will be delivered automatically!`
+          );
+        }
+      }
+
+      const provider = getMomoProvider(session.momo_number, session.network);
+      let helpMsg = `⏳ Awaiting payment confirmation${session.momo_number ? " for " + session.momo_number : ""}.\n\n`;
+
+      if (provider === "mtn") {
+        helpMsg += `👉 *Prompt didn't pop up on your phone?*\n1. Dial *170#\n2. Select 6 (My Wallet)\n3. Select 3 (My Approvals)\n4. Enter your MoMo PIN & select 1 to approve!\n\n`;
+      } else if (provider === "vod") {
+        helpMsg += `👉 Dial *110# to approve the pending transaction or generate a voucher.\n\n`;
+      } else if (provider === "atl") {
+        helpMsg += `👉 Dial *110# to approve the pending transaction.\n\n`;
+      }
+
+      helpMsg += `Reply *LINK* for a direct payment link.\nReply *CANCEL* to cancel this order, or *HI* for the main menu.`;
+      return sendWhatsApp(from, helpMsg);
+    }
 
   } catch (e) {
-  console.error("BOT ERROR:", e.response?.data || e.message);
-}
+    console.error("BOT ERROR:", e.response?.data || e.message);
+  }
 });
 
 /* =========================================================
