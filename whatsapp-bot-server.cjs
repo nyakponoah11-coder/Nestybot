@@ -2501,8 +2501,13 @@ async function seedSubmittedPortalIdsCache() {
 }
 
 async function submitFailedPortalIdToGroup(portalId, meta = {}) {
-  const cleanId = String(portalId || "").replace(/\D/g, "");
-  if (!cleanId || cleanId.length < 4 || cleanId.length > 9) return { ok: false, reason: "invalid_id" };
+  const rawId = String(portalId || "").trim();
+  // ONLY strictly 4-to-9 digit numeric Portal IDs are valid (NO letters, NO hyphens, NO references)
+  if (!/^\d{4,9}$/.test(rawId)) {
+    console.log(`[FAILED ORDER GROUP] Rejected non-portal-ID target: "${portalId}". Group reporting is strictly for numeric Portal IDs.`);
+    return { ok: false, reason: "invalid_id" };
+  }
+  const cleanId = rawId;
 
   // 1. ABSOLUTE SYNCHRONOUS MUTEX & MEMORY DEDUPLICATION CHECK
   // If this ID is already in flight right now or already submitted, reject immediately with zero latency
@@ -7168,8 +7173,6 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
         if (st === "failed" || st === "cancelled" || (liveTrack.failed && liveTrack.failed > 0)) {
           if (portalId && /^\d{4,9}$/.test(String(portalId))) {
             submitFailedPortalIdToGroup(portalId, { reason: "support_draft_failed", failedCount: liveTrack.failed || 1 }).catch(() => { });
-          } else if (refCode) {
-            submitFailedPortalIdToGroup(refCode, { reason: "support_draft_failed", failedCount: liveTrack.failed || 1, phone: ph, network: net }).catch(() => { });
           }
 
           const batchItems = Array.isArray(liveTrack.items) ? liveTrack.items : [];
@@ -7209,16 +7212,21 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
           const ageMs = orderDate ? (Date.now() - new Date(orderDate).getTime()) : (fullTicket?.createdAt ? (Date.now() - new Date(fullTicket.createdAt).getTime()) : null);
           const isOver24H = liveTrack.isQueuedOver24Hours || (ageMs && !isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)) || /\b(?:24\s*hrs?|24\s*hours?|yesterday|days?|over\s*a\s*day|going\s*to\s*24)\b/i.test(lastMsg);
 
-          const reportTarget = portalId || refCode;
-          if (isOver24H && reportTarget) {
-            submitFailedPortalIdToGroup(reportTarget, {
+          const hasValidPortalId = portalId && /^\d{4,9}$/.test(String(portalId));
+
+          if (isOver24H && hasValidPortalId) {
+            submitFailedPortalIdToGroup(portalId, {
               reason: "vendor_queue_over_24h",
               phone: ph,
               network: net,
               date: orderDate
             }).catch(() => { });
-            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode}) (Reported to team group)`;
-            draftText = `Hello ${firstName}, we have verified your order (${refCode}) on ${brand}. It has been in the vendor dispatch queue for over 24 hours, so we have flagged and reported it directly to our technical team group to expedite and resolve immediately. Your data will land shortly. Thank you for your patience!`;
+            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""} (Reported to team group)`;
+            draftText = `Hello ${firstName}, we have verified your order on ${brand} (Track ID: ${portalId}). It has been in the vendor dispatch queue for over 24 hours, so we have flagged and reported it directly to our technical team group to expedite and resolve immediately. Your data will land shortly. Thank you for your patience!`;
+          } else if (isOver24H) {
+            // Over 24 hours but no numeric Portal ID assigned yet (Pending Export) -> Do NOT report to group
+            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
+            draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on ${brand}. It is currently in the vendor queue awaiting network dispatch. Your data will land shortly. Kindly dial *124# to check. Thank you for your patience!`;
           } else {
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
             draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on ${brand}. It is currently in the vendor queue awaiting network dispatch. Your data will land shortly. Kindly dial *124# to check. Thank you for your patience!`;
