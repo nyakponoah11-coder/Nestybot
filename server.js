@@ -11103,7 +11103,7 @@ app.post("/webhook", async (req, res) => {
   };
 
   // ── SPECIAL HANDLER FOR BATCH REZOLV REPLIES ──
-  // A: Send single draft (e.g. "Send 1", "send 2")
+  // A: Send single draft (e.g. "Send 1", "send 2", "send draft 1")
   if (sendSingleMatch) {
     await ensureSupportBatchPendingAction();
     if (pendingAction && pendingAction.type === "batch_rezolv_reply") {
@@ -11115,10 +11115,75 @@ app.post("/webhook", async (req, res) => {
         pendingAction.drafts.splice(idx, 1);
         if (pendingAction.drafts.length > 0) {
           await setOwnerPendingAction(from, pendingAction);
+          try {
+            const normF = String(from || "").replace(/\D/g, "");
+            await supabase.from("settings").upsert({
+              key: `latest_support_batch_${normF}`,
+              value: JSON.stringify(pendingAction.drafts)
+            }, { onConflict: "key" });
+          } catch (_) { }
         } else {
           await clearOwnerPendingAction(from);
+          try {
+            const normF = String(from || "").replace(/\D/g, "");
+            await supabase.from("settings").delete().eq("key", `latest_support_batch_${normF}`);
+          } catch (_) { }
         }
-        console.log("♻️ RECOVERED PENDING ACTION FROM RECENT CONVERSATION HISTORY:", pendingAction);
+
+        const rezolvCtx = await getUserRezolvContext(from);
+        const activeAgent = rezolvCtx?.agentName || "Stony 💙";
+        const custName = targetDraft.customerName || "Customer";
+        const tNum = targetDraft.ticketId || targetDraft.id || `#${idx + 1}`;
+        const isOk = res && !res.startsWith("⚠️") && !res.startsWith("❌");
+
+        let replyCard = isOk
+          ? `🚀 *DISPATCHED DRAFT #${idx + 1} LIVE AS ${activeAgent}!* ✅\n\n` +
+            `👤 *Customer:* *${custName}* ([${tNum}])\n` +
+            `💬 *Message Sent:*\n"${replyMsg}"\n\n` +
+            (pendingAction.drafts.length > 0
+              ? `💡 *${pendingAction.drafts.length} draft(s) remaining in this batch.* Reply *SEND ALL* or *SEND [number]* to dispatch next!`
+              : `🎉 *All staged drafts in this batch have been sent!* Reply *draft 5* to stage new tickets.`)
+          : `⚠️ *FAILED TO SEND DRAFT #${idx + 1}:* ${res}`;
+
+        return sendWhatsApp(from, replyCard);
+      } else {
+        const total = pendingAction.drafts?.length || 0;
+        return sendWhatsApp(from, `⚠️ Draft #${idx + 1} not found in current batch (${total} available). Text *SEND ALL* to send all, or *draft 5* to refresh.`);
+      }
+    } else {
+      return sendWhatsApp(from, `ℹ️ No pending support draft batch found. Text *draft 5* or *inbox* to stage customer tickets for review!`);
+    }
+  }
+
+  // B: Edit single draft text (e.g. "1: Hello Kwame...", "2: We have checked...")
+  if (editSingleMatch) {
+    await ensureSupportBatchPendingAction();
+    if (pendingAction && pendingAction.type === "batch_rezolv_reply") {
+      const idx = parseInt(editSingleMatch[1], 10) - 1;
+      const targetDraft = pendingAction.drafts?.[idx];
+      if (targetDraft) {
+        targetDraft.draftMessage = editSingleMatch[2].trim();
+        targetDraft.message = targetDraft.draftMessage;
+        targetDraft.text = targetDraft.draftMessage;
+        await setOwnerPendingAction(from, pendingAction);
+        try {
+          const normF = String(from || "").replace(/\D/g, "");
+          await supabase.from("settings").upsert({
+            key: `latest_support_batch_${normF}`,
+            value: JSON.stringify(pendingAction.drafts)
+          }, { onConflict: "key" });
+        } catch (_) { }
+
+        const custName = targetDraft.customerName || "Customer";
+        const tNum = targetDraft.ticketId || targetDraft.id || `#${idx + 1}`;
+        return sendWhatsApp(from,
+          `📝 *UPDATED DRAFT #${idx + 1} FOR ${custName.toUpperCase()} ([${tNum}])!*\n\n` +
+          `*New Reply:*\n"${targetDraft.draftMessage}"\n\n` +
+          `👉 Reply *SEND ${idx + 1}* to dispatch this now, or *SEND ALL* to dispatch the whole batch!`
+        );
+      } else {
+        const total = pendingAction.drafts?.length || 0;
+        return sendWhatsApp(from, `⚠️ Draft #${idx + 1} not found in current batch (${total} available).`);
       }
     }
   }
@@ -11157,7 +11222,10 @@ app.post("/webhook", async (req, res) => {
         }
       }));
 
-      let report = `🚀 *DISPATCHED ALL ${results.length} SUPPORT REPLIES LIVE AS STONY 💙!*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+      const rezolvCtx = await getUserRezolvContext(from);
+      const activeAgent = rezolvCtx?.agentName || "Stony 💙";
+
+      let report = `🚀 *DISPATCHED ALL ${results.length} SUPPORT REPLIES LIVE AS ${activeAgent}!*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
       results.forEach(r => {
         report += `${r.ok ? "✅" : "⚠️"} *[${r.ticketId}]* ${r.name || "Customer"}\n`;
       });
