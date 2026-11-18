@@ -5049,7 +5049,7 @@ async function executeOwnerDirectAction(type, payload = {}) {
     if (cleanType === "datamart_search_customer" || cleanType === "datamart_search" || cleanType === "datamart_investigate") {
       const q = payload.query || payload.phone || payload.email || payload.name;
       if (!q) return "⚠️ Missing search query.";
-      return await executeDatamartSearch(q);
+      return await executeDatamartSearch(q, payload.callerPhone || payload.from || null);
     }
 
     // 29b. DataMart MoMo Claims Query
@@ -7796,7 +7796,33 @@ async function executeDatamartSearch(rawQuery, callerPhone = null) {
     d = resp?.data;
   } catch (_) { }
   const users = d?.results?.users || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "customer" || x.email) : []);
-  const orders = d?.results?.orders || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "order" || x.network) : []);
+  let orders = d?.results?.orders || (Array.isArray(d?.results) ? d.results.filter(x => x.type === "order" || x.network) : []);
+
+  // Fallback: If no orders returned from DataMart support search, check store database orders
+  if (orders.length === 0) {
+    try {
+      const cleanDigits = q.replace(/\D/g, "");
+      let dbQuery = supabase.from("orders").select("*");
+      if (cleanDigits.length >= 9) {
+        dbQuery = dbQuery.ilike("recipient_phone", `%${cleanDigits.slice(-9)}%`);
+      } else {
+        dbQuery = dbQuery.or(`reference.ilike.%${q}%,datamart_reference.ilike.%${q}%`);
+      }
+      const { data: dbOrders } = await dbQuery.order("created_at", { ascending: false }).limit(5);
+      if (dbOrders && dbOrders.length > 0) {
+        orders = dbOrders.map(dbo => ({
+          network: dbo.network,
+          capacity: dbo.capacity,
+          phoneNumber: dbo.recipient_phone,
+          status: (dbo.delivery_status || dbo.datamart_status || "processing").toUpperCase(),
+          apiOrderId: dbo.datamart_reference || dbo.reference,
+          geonetReference: dbo.reference,
+          createdAt: dbo.created_at,
+          amount: dbo.amount
+        }));
+      }
+    } catch (_) { }
+  }
 
   if (foundTickets.length === 0 && !rezolvFound && users.length === 0 && orders.length === 0) {
     // Check MoMo claims before giving up
@@ -7872,16 +7898,26 @@ async function executeDatamartSearch(rawQuery, callerPhone = null) {
   if (orders.length > 0) {
     out += `📦 *Recent Orders (${orders.length} found):*\n`;
     orders.slice(0, 5).forEach((ord) => {
+      const net = ord.network || "MTN";
       const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+      const phone = ord.phoneNumber || ord.recipientPhone || "N/A";
       // Ensure Portal ID is the 6-digit carrier portal ID (apiOrderId or exportTracking.portalId), NEVER internal DB mongo ID
       const portalId = ord.apiOrderId || ord.exportTracking?.portalId || (ord.portalOrderId && ord.portalOrderId !== ord._id ? ord.portalOrderId : null);
       if (orders.length === 1 && portalId) singlePortalId = portalId;
       const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
       const status = (ord.status || "N/A").toUpperCase();
-      const statusEmoji = status === "COMPLETED" ? "✅" : status === "FAILED" ? "❌" : "⏳";
-      out += `• ${statusEmoji} *${ord.network} ${cap}* to *${ord.phoneNumber}* (*${status}*)\n` +
+      const statusEmoji = (status === "COMPLETED" || status === "DELIVERED") ? "✅" : (status === "FAILED" || status === "CANCELLED") ? "❌" : "⏳";
+
+      const rawDate = ord.createdAt || ord.created_at || ord.orderDate || ord.date || ord.timestamp;
+      const formattedDate = rawDate ? formatGhanaTime(rawDate) : null;
+      const timeAgo = rawDate ? getTimeAgoGhana(rawDate) : null;
+      const dateDisplay = formattedDate ? `${formattedDate}${timeAgo ? ` (${timeAgo})` : ""}` : "N/A";
+      const amtPart = (ord.amount != null || ord.price != null) ? ` · GH₵ ${Number(ord.amount || ord.price).toFixed(2)}` : "";
+
+      out += `• ${statusEmoji} *${net} ${cap}* to *${phone}* (*${status}*${amtPart})\n` +
         `  🆔 *Portal ID:* *${portalId || "Pending Export"}*${batchNo}\n` +
-        `  Ref: ${ord.geonetReference || ord.originalReference || "N/A"}\n`;
+        `  📅 *Date Placed:* *${dateDisplay}*\n` +
+        `  Ref: ${ord.geonetReference || ord.originalReference || ord.reference || "N/A"}\n`;
     });
     out += "\n";
   }
@@ -8018,6 +8054,7 @@ async function executeDatamartBulkPhoneCheck(rawPhoneList, callerPhone = null) {
         portalId,
         batchNumber,
         ref,
+        createdAt,
         timeAgo
       };
     } catch (err) {
@@ -8056,10 +8093,14 @@ async function executeDatamartBulkPhoneCheck(rawPhoneList, callerPhone = null) {
       const batchPart = r.batchNumber ? ` (Batch #${r.batchNumber})` : "";
       const refPart = r.ref ? ` · Ref: ${r.ref}` : "";
 
+      const rawDate = r.createdAt;
+      const formattedDate = rawDate ? formatGhanaTime(rawDate) : null;
+      const datePart = formattedDate ? `${formattedDate}${r.timeAgo ? ` (${r.timeAgo})` : ""}` : (r.timeAgo || "N/A");
+
       msg += `${numEmoji} *${r.phone}*${pkgPart}\n` +
         `• 📊 *Status:* ${r.statusEmoji} *${r.statusText}*\n` +
         `• 🆔 *Portal ID:* *${r.portalId || "Pending Export"}*${batchPart}\n` +
-        `• 🕒 *Placed:* ${r.timeAgo}${refPart}\n`;
+        `• 📅 *Date Placed:* *${datePart}*${refPart}\n`;
       if (r.isFailed && (r.portalId || r.ref)) {
         msg += `• 💡 *Action:* Reply *retry ${r.portalId || r.phone}* to reprocess\n`;
       }
@@ -9184,7 +9225,7 @@ async function handleCustomerAi(from, rawText) {
       if (ords && ords.length > 0) {
         const liveStatus = await getRealDatamartDeliveryStatus(ords[0].reference).catch(() => ({ deliveryStatus: ords[0].delivery_status }));
         customerOrderLookupCtx = `\nLIVE ORDER LOOKUP FOR "${lookup}":\n` +
-          ords.map((o, idx) => `${idx + 1}. Ref: ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | Amount: GH₵ ${o.amount} | Payment: ${o.payment_status} | Live Delivery Status: ${idx === 0 ? (liveStatus?.deliveryStatus || o.delivery_status) : o.delivery_status}`).join("\n") + "\n";
+          ords.map((o, idx) => `${idx + 1}. Ref: ${o.reference} | ${o.capacity}GB ${o.network} → ${o.recipient_phone} | Date Placed: ${formatGhanaTime(o.created_at)} | Amount: GH₵ ${o.amount} | Payment: ${o.payment_status} | Live Delivery Status: ${idx === 0 ? (liveStatus?.deliveryStatus || o.delivery_status) : o.delivery_status}`).join("\n") + "\n";
       }
     } catch (_) { }
   }
@@ -13005,7 +13046,10 @@ app.post("/webhook", async (req, res) => {
     const phone = ord.phoneNumber || "N/A";
     const status = (ord.status || "processing").toUpperCase();
     const amt = ord.amount != null ? `GH₵ ${Number(ord.amount).toFixed(2)}` : "N/A";
-    const time = ord.createdAt ? new Date(ord.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "N/A";
+    const rawDate = ord.createdAt || ord.created_at || ord.orderDate || ord.date || ord.timestamp;
+    const formattedDate = rawDate ? formatGhanaTime(rawDate) : null;
+    const timeAgo = rawDate ? getTimeAgoGhana(rawDate) : null;
+    const time = formattedDate ? `${formattedDate}${timeAgo ? ` (${timeAgo})` : ""}` : "N/A";
     const portalId = ord.apiOrderId || ord.exportTracking?.portalId || ord.geonetReference || ord._id;
     const batchNo = ord.exportTracking?.batchNumber ? ` (Batch #${ord.exportTracking.batchNumber})` : "";
 
@@ -13016,7 +13060,7 @@ app.post("/webhook", async (req, res) => {
       `📱 *Recipient:* *${phone}*\n` +
       `💵 *Amount:* ${amt}\n` +
       `📊 *Carrier Status:* *${status}*\n` +
-      `🕒 *Submitted:* ${time}\n` +
+      `📅 *Date Placed:* *${time}*\n` +
       `DB ID: \`${ord._id}\`\n\n` +
       `💡 *Actions:*\n` +
       `• Delivery check: *dm delivery check ${portalId}*\n` +
