@@ -7522,19 +7522,17 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
       return { ...t, _waitMins: waitMins, _msgTime: msgTime };
     });
 
-    // Filter strictly for tickets that have been waiting 10+ minutes in the live inbox
-    let currentInbox10mPlus = poolWithWaitTime.filter(t => t._waitMins >= 10);
-
     // FIRST COME FIRST SERVED: Sort strictly by HIGHEST waiting time first (oldest waiting customer first!)
-    currentInbox10mPlus.sort((a, b) => b._waitMins - a._waitMins);
+    poolWithWaitTime.sort((a, b) => b._waitMins - a._waitMins);
 
-    if (currentInbox10mPlus.length === 0) {
-      return `🎉 *ALL CAUGHT UP!* No support tickets currently waiting more than 10 minutes in the live Rezolv inbox (${liveInbox.length} ticket(s) under 10m).`;
+    if (poolWithWaitTime.length === 0) {
+      return `🎉 *ALL CAUGHT UP!* No open support tickets currently waiting for reply in Rezolv live inbox.`;
     }
 
-    const listToProcess = currentInbox10mPlus.slice(0, limit);
+    // Fill up to limit (e.g. 5) starting from the oldest waiting customers
+    const listToProcess = poolWithWaitTime.slice(0, limit);
 
-    const drafts = (await Promise.all(listToProcess.map(async (t) => {
+    const drafts = (await Promise.all(listToProcess.map(async (t, idx) => {
       try {
         const details = await rezolvApiRequest("/tickets/" + t._id, {}, from);
         const dData = details.data?.data || details.data || {};
@@ -7579,13 +7577,18 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
           from: from,
           workspaceId: rezolvCtx.workspaceId,
           workspaceName: rezolvCtx.workspaceName,
-          brandName: rezolvCtx.brandName
+          brandName: rezolvCtx.brandName,
+          draftNum: idx + 1,
+          sent: false
         };
       } catch (err) {
         console.warn(`Draft error for ${t.ticketNumber}:`, err.message);
         return null;
       }
     }))).filter(Boolean);
+
+    // Re-index draftNum consecutively in case any failed to load
+    drafts.forEach((d, i) => { d.draftNum = i + 1; });
 
     if (drafts.length === 0) {
       return `ℹ️ All current tickets are already attended to or resolved!`;
@@ -7607,7 +7610,8 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
     const activeBrandName = rezolvCtx.brandName || "DataMart";
     const activeAgentName = rezolvCtx.agentName || "Stony 💙";
 
-    let msg = `📬 *${activeWsName} LIVE SUPPORT — ${drafts.length} DRAFTS READY (10+ MINS WAITING):*\n` +
+    const countNote = drafts.length < limit ? ` *(Only ${drafts.length} ticket(s) currently waiting in your live inbox)*` : "";
+    let msg = `📬 *${activeWsName} LIVE SUPPORT — ${drafts.length} DRAFTS READY (#1 to #${drafts.length}):*${countNote}\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
     const numEmojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"];
@@ -10594,13 +10598,30 @@ app.post("/webhook", async (req, res) => {
       // If user typed "Send 1" / "Send 2"
       if (supportSendSingleMatch) {
         if (batchPending.drafts.length > 0) {
-          const idx = parseInt(supportSendSingleMatch[1], 10) - 1;
-          const targetDraft = batchPending.drafts[idx];
+          const reqNum = parseInt(supportSendSingleMatch[1], 10);
+          let targetDraft = batchPending.drafts.find(d => d.draftNum === reqNum);
+          if (!targetDraft && reqNum >= 1 && reqNum <= batchPending.drafts.length) {
+            targetDraft = batchPending.drafts[reqNum - 1];
+          }
+
           if (targetDraft) {
+            if (targetDraft.sent) {
+              const custName = targetDraft.customerName || "Customer";
+              const remaining = batchPending.drafts.filter(d => !d.sent);
+              return sendWhatsApp(from,
+                `ℹ️ *Draft #${reqNum} for ${custName} has ALREADY been dispatched!* ✅\n\n` +
+                (remaining.length > 0
+                  ? `💡 *${remaining.length} draft(s) remaining in this batch:* ${remaining.map(d => `#${d.draftNum || (batchPending.drafts.indexOf(d) + 1)}`).join(", ")}. Text *SEND ALL* or *SEND [number]*!`
+                  : `🎉 All drafts in this batch are already sent! Text *draft 5* to stage new tickets.`)
+              );
+            }
+
             const replyMsg = targetDraft.draftMessage || targetDraft.message || targetDraft.text;
             const res = await sendRezolvReply(targetDraft, replyMsg, from);
-            batchPending.drafts.splice(idx, 1);
-            if (batchPending.drafts.length > 0) {
+            targetDraft.sent = true;
+
+            const remaining = batchPending.drafts.filter(d => !d.sent);
+            if (remaining.length > 0) {
               await setOwnerPendingAction(from, batchPending);
               try {
                 await supabase.from("settings").upsert({
@@ -10618,22 +10639,29 @@ app.post("/webhook", async (req, res) => {
             const rezolvCtx = await getUserRezolvContext(from);
             const activeAgent = rezolvCtx?.agentName || "Stony 💙";
             const custName = targetDraft.customerName || "Customer";
-            const tNum = targetDraft.ticketId || targetDraft.id || `#${idx + 1}`;
+            const tNum = targetDraft.ticketId || targetDraft.id || `#${reqNum}`;
             const isOk = res && !res.startsWith("⚠️") && !res.startsWith("❌");
 
             let replyCard = isOk
-              ? `🚀 *DISPATCHED DRAFT #${idx + 1} LIVE AS ${activeAgent}!* ✅\n\n` +
+              ? `🚀 *DISPATCHED DRAFT #${reqNum} LIVE AS ${activeAgent}!* ✅\n\n` +
                 `👤 *Customer:* *${custName}* ([${tNum}])\n` +
                 `💬 *Message Sent:*\n"${replyMsg}"\n\n` +
-                (batchPending.drafts.length > 0
-                  ? `💡 *${batchPending.drafts.length} draft(s) remaining in this batch.* Reply *SEND ALL* or *SEND [number]* to dispatch next!`
+                (remaining.length > 0
+                  ? `💡 *${remaining.length} draft(s) remaining in this batch:* ${remaining.map(d => `#${d.draftNum || (batchPending.drafts.indexOf(d) + 1)}`).join(", ")}. Reply *SEND ALL* or *SEND [number]* to dispatch next!`
                   : `🎉 *All staged drafts in this batch have been sent!* Reply *draft 5* to stage new tickets.`)
-              : `⚠️ *FAILED TO SEND DRAFT #${idx + 1}:* ${res}`;
+              : `⚠️ *FAILED TO SEND DRAFT #${reqNum}:* ${res}`;
 
             return sendWhatsApp(from, replyCard);
           } else {
             const total = batchPending.drafts.length;
-            return sendWhatsApp(from, `⚠️ Draft #${idx + 1} not found in current batch (${total} available). Text *SEND ALL* to send all, or *draft 5* to refresh.`);
+            const remaining = batchPending.drafts.filter(d => !d.sent);
+            return sendWhatsApp(from,
+              `⚠️ *Draft #${reqNum} not found in this batch.*\n\n` +
+              `This batch only has *${total} draft(s)* total (#1${total > 1 ? ` to #${total}` : ""}).\n` +
+              (remaining.length > 0
+                ? `💡 *${remaining.length} draft(s) still waiting to send:* ${remaining.map(d => `#${d.draftNum || (batchPending.drafts.indexOf(d) + 1)}`).join(", ")}. Reply *SEND [number]* or *SEND ALL*!`
+                : `🎉 All drafts in this batch have already been sent! Text *draft 5* to stage new tickets.`)
+            );
           }
         } else {
           return sendWhatsApp(from, `ℹ️ No pending support drafts found. Text *draft 5* or *inbox* to stage customer tickets for review!`);
@@ -10643,8 +10671,12 @@ app.post("/webhook", async (req, res) => {
       // If user typed "1: Hello..."
       if (supportEditSingleMatch) {
         if (batchPending.drafts.length > 0) {
-          const idx = parseInt(supportEditSingleMatch[1], 10) - 1;
-          const targetDraft = batchPending.drafts[idx];
+          const reqNum = parseInt(supportEditSingleMatch[1], 10);
+          let targetDraft = batchPending.drafts.find(d => d.draftNum === reqNum);
+          if (!targetDraft && reqNum >= 1 && reqNum <= batchPending.drafts.length) {
+            targetDraft = batchPending.drafts[reqNum - 1];
+          }
+
           if (targetDraft) {
             targetDraft.draftMessage = supportEditSingleMatch[2].trim();
             targetDraft.message = targetDraft.draftMessage;
@@ -10658,24 +10690,28 @@ app.post("/webhook", async (req, res) => {
             } catch (_) { }
 
             const custName = targetDraft.customerName || "Customer";
-            const tNum = targetDraft.ticketId || targetDraft.id || `#${idx + 1}`;
+            const tNum = targetDraft.ticketId || targetDraft.id || `#${reqNum}`;
             return sendWhatsApp(from,
-              `📝 *UPDATED DRAFT #${idx + 1} FOR ${custName.toUpperCase()} ([${tNum}])!*\n\n` +
+              `📝 *UPDATED DRAFT #${reqNum} FOR ${custName.toUpperCase()} ([${tNum}])!*\n\n` +
               `*New Reply:*\n"${targetDraft.draftMessage}"\n\n` +
-              `👉 Reply *SEND ${idx + 1}* to dispatch this now, or *SEND ALL* to dispatch the whole batch!`
+              `👉 Reply *SEND ${reqNum}* to dispatch this now, or *SEND ALL* to dispatch the whole batch!`
             );
+          } else {
+            const total = batchPending.drafts.length;
+            return sendWhatsApp(from, `⚠️ Draft #${reqNum} not found in this batch (${total} available).`);
           }
         }
       }
 
       // If user typed "Send all"
       if (supportSendAllMatch) {
-        if (batchPending.drafts.length > 0) {
-          const draftsToSend = [...batchPending.drafts];
+        const draftsToSend = batchPending.drafts.filter(d => !d.sent);
+        if (draftsToSend.length > 0) {
           const results = await Promise.all(draftsToSend.map(async (d) => {
             try {
               const replyText = d.draftMessage || d.message || d.text;
               const res = await sendRezolvReply(d, replyText, from);
+              d.sent = true;
               return { ticketId: d.ticketId || d.id, name: d.customerName, ok: res && !res.startsWith("⚠️") && !res.startsWith("❌"), res };
             } catch (err) {
               return { ticketId: d.ticketId || d.id, name: d.customerName, ok: false, res: err.message };
@@ -10697,7 +10733,7 @@ app.post("/webhook", async (req, res) => {
           report += `\n🎉 All customer tickets have been answered! Text *draft 5* or *inbox* to stage new tickets.`;
           return sendWhatsApp(from, report);
         } else {
-          return sendWhatsApp(from, `ℹ️ No pending support drafts found. Text *draft 5* or *inbox* to stage customer tickets for review!`);
+          return sendWhatsApp(from, `ℹ️ All drafts in current batch have already been sent. Text *draft 5* or *inbox* to stage new tickets!`);
         }
       }
     }
@@ -11542,13 +11578,30 @@ app.post("/webhook", async (req, res) => {
   if (sendSingleMatch) {
     await ensureSupportBatchPendingAction();
     if (pendingAction && pendingAction.type === "batch_rezolv_reply") {
-      const idx = parseInt(sendSingleMatch[1], 10) - 1;
-      const targetDraft = pendingAction.drafts?.[idx];
+      const reqNum = parseInt(sendSingleMatch[1], 10);
+      let targetDraft = pendingAction.drafts?.find(d => d.draftNum === reqNum);
+      if (!targetDraft && reqNum >= 1 && reqNum <= (pendingAction.drafts?.length || 0)) {
+        targetDraft = pendingAction.drafts[reqNum - 1];
+      }
+
       if (targetDraft) {
+        if (targetDraft.sent) {
+          const custName = targetDraft.customerName || "Customer";
+          const remaining = (pendingAction.drafts || []).filter(d => !d.sent);
+          return sendWhatsApp(from,
+            `ℹ️ *Draft #${reqNum} for ${custName} has ALREADY been dispatched!* ✅\n\n` +
+            (remaining.length > 0
+              ? `💡 *${remaining.length} draft(s) remaining in this batch:* ${remaining.map(d => `#${d.draftNum || (pendingAction.drafts.indexOf(d) + 1)}`).join(", ")}. Text *SEND ALL* or *SEND [number]*!`
+              : `🎉 All drafts in this batch are already sent! Text *draft 5* to stage new tickets.`)
+          );
+        }
+
         const replyMsg = targetDraft.draftMessage || targetDraft.message || targetDraft.text;
         const res = await sendRezolvReply(targetDraft, replyMsg, from);
-        pendingAction.drafts.splice(idx, 1);
-        if (pendingAction.drafts.length > 0) {
+        targetDraft.sent = true;
+
+        const remaining = (pendingAction.drafts || []).filter(d => !d.sent);
+        if (remaining.length > 0) {
           await setOwnerPendingAction(from, pendingAction);
           try {
             const normF = String(from || "").replace(/\D/g, "");
@@ -11568,22 +11621,29 @@ app.post("/webhook", async (req, res) => {
         const rezolvCtx = await getUserRezolvContext(from);
         const activeAgent = rezolvCtx?.agentName || "Stony 💙";
         const custName = targetDraft.customerName || "Customer";
-        const tNum = targetDraft.ticketId || targetDraft.id || `#${idx + 1}`;
+        const tNum = targetDraft.ticketId || targetDraft.id || `#${reqNum}`;
         const isOk = res && !res.startsWith("⚠️") && !res.startsWith("❌");
 
         let replyCard = isOk
-          ? `🚀 *DISPATCHED DRAFT #${idx + 1} LIVE AS ${activeAgent}!* ✅\n\n` +
+          ? `🚀 *DISPATCHED DRAFT #${reqNum} LIVE AS ${activeAgent}!* ✅\n\n` +
             `👤 *Customer:* *${custName}* ([${tNum}])\n` +
             `💬 *Message Sent:*\n"${replyMsg}"\n\n` +
-            (pendingAction.drafts.length > 0
-              ? `💡 *${pendingAction.drafts.length} draft(s) remaining in this batch.* Reply *SEND ALL* or *SEND [number]* to dispatch next!`
+            (remaining.length > 0
+              ? `💡 *${remaining.length} draft(s) remaining in this batch:* ${remaining.map(d => `#${d.draftNum || (pendingAction.drafts.indexOf(d) + 1)}`).join(", ")}. Reply *SEND ALL* or *SEND [number]* to dispatch next!`
               : `🎉 *All staged drafts in this batch have been sent!* Reply *draft 5* to stage new tickets.`)
-          : `⚠️ *FAILED TO SEND DRAFT #${idx + 1}:* ${res}`;
+          : `⚠️ *FAILED TO SEND DRAFT #${reqNum}:* ${res}`;
 
         return sendWhatsApp(from, replyCard);
       } else {
         const total = pendingAction.drafts?.length || 0;
-        return sendWhatsApp(from, `⚠️ Draft #${idx + 1} not found in current batch (${total} available). Text *SEND ALL* to send all, or *draft 5* to refresh.`);
+        const remaining = (pendingAction.drafts || []).filter(d => !d.sent);
+        return sendWhatsApp(from,
+          `⚠️ *Draft #${reqNum} not found in this batch.*\n\n` +
+          `This batch only has *${total} draft(s)* total (#1${total > 1 ? ` to #${total}` : ""}).\n` +
+          (remaining.length > 0
+            ? `💡 *${remaining.length} draft(s) still waiting to send:* ${remaining.map(d => `#${d.draftNum || (pendingAction.drafts.indexOf(d) + 1)}`).join(", ")}. Reply *SEND [number]* or *SEND ALL*!`
+            : `🎉 All drafts in this batch have already been sent! Text *draft 5* to stage new tickets.`)
+        );
       }
     } else {
       return sendWhatsApp(from, `ℹ️ No pending support draft batch found. Text *draft 5* or *inbox* to stage customer tickets for review!`);
@@ -11594,8 +11654,12 @@ app.post("/webhook", async (req, res) => {
   if (editSingleMatch) {
     await ensureSupportBatchPendingAction();
     if (pendingAction && pendingAction.type === "batch_rezolv_reply") {
-      const idx = parseInt(editSingleMatch[1], 10) - 1;
-      const targetDraft = pendingAction.drafts?.[idx];
+      const reqNum = parseInt(editSingleMatch[1], 10);
+      let targetDraft = pendingAction.drafts?.find(d => d.draftNum === reqNum);
+      if (!targetDraft && reqNum >= 1 && reqNum <= (pendingAction.drafts?.length || 0)) {
+        targetDraft = pendingAction.drafts[reqNum - 1];
+      }
+
       if (targetDraft) {
         targetDraft.draftMessage = editSingleMatch[2].trim();
         targetDraft.message = targetDraft.draftMessage;
@@ -11610,15 +11674,15 @@ app.post("/webhook", async (req, res) => {
         } catch (_) { }
 
         const custName = targetDraft.customerName || "Customer";
-        const tNum = targetDraft.ticketId || targetDraft.id || `#${idx + 1}`;
+        const tNum = targetDraft.ticketId || targetDraft.id || `#${reqNum}`;
         return sendWhatsApp(from,
-          `📝 *UPDATED DRAFT #${idx + 1} FOR ${custName.toUpperCase()} ([${tNum}])!*\n\n` +
+          `📝 *UPDATED DRAFT #${reqNum} FOR ${custName.toUpperCase()} ([${tNum}])!*\n\n` +
           `*New Reply:*\n"${targetDraft.draftMessage}"\n\n` +
-          `👉 Reply *SEND ${idx + 1}* to dispatch this now, or *SEND ALL* to dispatch the whole batch!`
+          `👉 Reply *SEND ${reqNum}* to dispatch this now, or *SEND ALL* to dispatch the whole batch!`
         );
       } else {
         const total = pendingAction.drafts?.length || 0;
-        return sendWhatsApp(from, `⚠️ Draft #${idx + 1} not found in current batch (${total} available).`);
+        return sendWhatsApp(from, `⚠️ Draft #${reqNum} not found in this batch (${total} available).`);
       }
     }
   }
@@ -11644,8 +11708,8 @@ app.post("/webhook", async (req, res) => {
 
     // 0b. BATCH REZOLV SUPPORT REPLIES CONFIRMATION
     if (type === "batch_rezolv_reply") {
-      const drafts = pendingAction.drafts || [];
-      if (drafts.length === 0) return sendWhatsApp(from, "ℹ️ No staged drafts to send. Text *draft 5* to stage new tickets.");
+      const drafts = (pendingAction.drafts || []).filter(d => !d.sent);
+      if (drafts.length === 0) return sendWhatsApp(from, "ℹ️ All staged drafts in this batch have already been sent! Text *draft 5* to stage new tickets.");
 
       const results = await Promise.all(drafts.map(async (d) => {
         try {
