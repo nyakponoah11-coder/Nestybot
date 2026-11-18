@@ -2478,11 +2478,46 @@ Auto-submits raw Portal ID (only the ID) to a WhatsApp group
 Pre-checks if Portal ID already exists to prevent duplicates!
 ========================================================= */
 
+const failedPortalIdSubmissionsInFlight = new Set();
+const submittedPortalIdsMemoryCache = new Set();
+let portalIdCacheSeeded = false;
+
+async function seedSubmittedPortalIdsCache() {
+  if (portalIdCacheSeeded) return;
+  try {
+    const { data: regRow } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", "failed_orders_posted_portal_ids")
+      .maybeSingle();
+    if (regRow?.value) {
+      const arr = typeof regRow.value === "string" ? JSON.parse(regRow.value) : regRow.value;
+      if (Array.isArray(arr)) {
+        arr.forEach(id => submittedPortalIdsMemoryCache.add(String(id).replace(/\D/g, "")));
+      }
+    }
+    portalIdCacheSeeded = true;
+  } catch (_) { }
+}
+
 async function submitFailedPortalIdToGroup(portalId, meta = {}) {
   const cleanId = String(portalId || "").replace(/\D/g, "");
   if (!cleanId || cleanId.length < 4 || cleanId.length > 9) return { ok: false, reason: "invalid_id" };
 
+  // 1. ABSOLUTE SYNCHRONOUS MUTEX & MEMORY DEDUPLICATION CHECK
+  // If this ID is already in flight right now or already submitted, reject immediately with zero latency
+  if (failedPortalIdSubmissionsInFlight.has(cleanId) || submittedPortalIdsMemoryCache.has(cleanId)) {
+    console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY in-flight or submitted (mutex lock). Skipping duplicate.`);
+    return { ok: true, skipped: true, reason: "already_exists_or_in_flight" };
+  }
+
+  // Lock synchronously in memory before ANY await
+  failedPortalIdSubmissionsInFlight.add(cleanId);
+  submittedPortalIdsMemoryCache.add(cleanId);
+
   try {
+    await seedSubmittedPortalIdsCache();
+
     // 1. Get configured group JID from Supabase settings
     let groupJid = null;
     const { data: sRow } = await supabase
@@ -2517,13 +2552,14 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
 
     if (!groupJid) {
       console.log(`[FAILED ORDER] Portal ID ${cleanId} failed, but no failed_orders_group_jid configured yet.`);
+      submittedPortalIdsMemoryCache.delete(cleanId);
       return { ok: false, reason: "no_group_configured" };
     }
 
     // STRICT NORMALIZATION: Ensure clean JID format
     groupJid = groupJid.replace(/(@g\.us)+$/i, "") + "@g.us";
 
-    // 2. Check if this Portal ID was ALREADY submitted to the group (Persistent deduplication registry)
+    // 2. Persistent Supabase registry check
     const { data: regRow } = await supabase
       .from("settings")
       .select("value")
@@ -2538,8 +2574,11 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     }
     if (!Array.isArray(postedIds)) postedIds = [];
 
-    // Check if ID already exists in registry
-    if (postedIds.includes(cleanId)) {
+    // Sync in-memory cache with DB rows
+    postedIds.forEach(id => submittedPortalIdsMemoryCache.add(String(id).replace(/\D/g, "")));
+
+    // Check if ID already exists in DB registry
+    if (postedIds.includes(cleanId) && !meta.force) {
       console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group history. Skipping duplicate submission.`);
       return { ok: true, skipped: true, reason: "already_exists" };
     }
@@ -2548,6 +2587,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     const { ok: bOk, sock } = await initBaileysChannelClient();
     if (!bOk || !sock) {
       console.warn("[FAILED ORDER GROUP] Baileys socket not ready to post failed portal ID:", cleanId);
+      submittedPortalIdsMemoryCache.delete(cleanId);
       return { ok: false, reason: "baileys_not_ready" };
     }
 
@@ -2557,7 +2597,8 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
 
     // 5. Record cleanId in persistent registry
     postedIds.push(cleanId);
-    if (postedIds.length > 1500) postedIds = postedIds.slice(-1500); // keep last 1500 IDs
+    postedIds = [...new Set(postedIds)]; // eliminate any duplicates
+    if (postedIds.length > 2000) postedIds = postedIds.slice(-2000); // keep last 2000 IDs
     await supabase.from("settings").upsert({
       key: "failed_orders_posted_portal_ids",
       value: JSON.stringify(postedIds),
@@ -2567,7 +2608,10 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     return { ok: true, submitted: true, portalId: cleanId };
   } catch (err) {
     console.error(`❌ [FAILED ORDER GROUP] Error submitting ${cleanId} to group:`, err.message);
+    submittedPortalIdsMemoryCache.delete(cleanId);
     return { ok: false, error: err.message };
+  } finally {
+    failedPortalIdSubmissionsInFlight.delete(cleanId);
   }
 }
 
@@ -7251,13 +7295,6 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
               const s = String(it.status || "").toLowerCase();
               return s !== "sent" && s !== "delivered";
             });
-
-            // Auto-submit failed portal ID to configured WhatsApp group if delivery failed
-            if ((failed > 0 || failedItems.length > 0) && targetId && /^\d{4,9}$/.test(String(targetId))) {
-              submitFailedPortalIdToGroup(targetId, { reason: "carrier_delivery_check_failed", failedCount: failed || failedItems.length }).catch(err => {
-                console.error("❌ Auto-submit to group error:", err.message);
-              });
-            }
 
             const failedPortalSummaries = failedItems.length > 0 ? [{
               portalId: String(targetId),
