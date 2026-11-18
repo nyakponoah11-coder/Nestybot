@@ -6597,17 +6597,32 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
     async function sendRezolvReply(identifier, replyText) {
       try {
         if (!replyText || !replyText.trim()) {
-          return `⚠️ Please provide a message to send. Example: *reply ${identifier} Hello, your order has been delivered!*`;
+          const displayId = typeof identifier === "object" ? (identifier.ticketId || identifier.id) : identifier;
+          return `⚠️ Please provide a message to send. Example: *reply ${displayId} Hello, your order has been delivered!*`;
         }
         const cleanText = replyText.trim();
-        const found = await findRezolvTicket(identifier);
-        if (!found || !found.id) {
-          return `⚠️ Could not find ticket *${identifier}* on Rezolv. Please verify the ticket number.`;
+        let tktId = null;
+        let ticketNumber = null;
+        let custName = "Customer";
+
+        if (identifier && typeof identifier === "object") {
+          tktId = identifier.id || identifier.mongoId || identifier._id;
+          ticketNumber = identifier.ticketId || identifier.ticketNumber || tktId;
+          custName = identifier.customerName || identifier.name || "Customer";
+        } else if (typeof identifier === "string" && /^[a-f\d]{24}$/i.test(identifier.trim())) {
+          tktId = identifier.trim();
+          ticketNumber = tktId;
         }
 
-        const tktId = found.id;
-        const ticketNumber = found.ticket?.ticketNumber || identifier;
-        const custName = found.ticket?.customer?.name || "Customer";
+        if (!tktId) {
+          const found = await findRezolvTicket(identifier);
+          if (!found || !found.id) {
+            return `⚠️ Could not find ticket *${identifier}* on Rezolv. Please verify the ticket number.`;
+          }
+          tktId = found.id;
+          ticketNumber = found.ticket?.ticketNumber || identifier;
+          custName = found.ticket?.customer?.name || "Customer";
+        }
 
         const res = await rezolvApiRequest("/tickets/" + tktId + "/messages", {
           method: "POST",
@@ -7142,6 +7157,8 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                 });
 
                 return {
+                  id: fullTicket._id || t._id,
+                  mongoId: fullTicket._id || t._id,
                   ticketId: tNum,
                   customerName: custFullName,
                   mainIssue,
@@ -10734,7 +10751,7 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                   const targetDraft = pendingAction.drafts?.[idx];
                   if (targetDraft) {
                     const replyMsg = targetDraft.draftMessage || targetDraft.message || targetDraft.text;
-                    const res = await sendRezolvReply(targetDraft.ticketId, replyMsg);
+                    const res = await sendRezolvReply(targetDraft, replyMsg);
                     pendingAction.drafts.splice(idx, 1);
                     if (pendingAction.drafts.length > 0) {
                       await setOwnerPendingAction(from, pendingAction);
@@ -10758,7 +10775,7 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                   const targetDraft = pendingAction.drafts?.[idx];
                   if (targetDraft) {
                     const customMsg = editSingleMatch[2].trim();
-                    const res = await sendRezolvReply(targetDraft.ticketId, customMsg);
+                    const res = await sendRezolvReply(targetDraft, customMsg);
                     pendingAction.drafts.splice(idx, 1);
                     if (pendingAction.drafts.length > 0) {
                       await setOwnerPendingAction(from, pendingAction);
@@ -10813,15 +10830,15 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                   const drafts = pendingAction.drafts || [];
                   if (drafts.length === 0) return sendWhatsApp(from, "ℹ️ No staged drafts to send. Text *draft 5* to stage new tickets.");
 
-                  const results = [];
-                  for (const d of drafts) {
+                  const results = await Promise.all(drafts.map(async (d) => {
                     try {
-                      const res = await sendRezolvReply(d.ticketId, d.draftMessage || d.message || d.text);
-                      results.push({ ticketId: d.ticketId, name: d.customerName, ok: !res.startsWith("⚠️") });
+                      const replyText = d.draftMessage || d.message || d.text;
+                      const res = await sendRezolvReply(d, replyText);
+                      return { ticketId: d.ticketId || d.id, name: d.customerName, ok: !res.startsWith("⚠️"), res };
                     } catch (err) {
-                      results.push({ ticketId: d.ticketId, name: d.customerName, ok: false, error: err.message });
+                      return { ticketId: d.ticketId || d.id, name: d.customerName, ok: false, error: err.message };
                     }
-                  }
+                  }));
 
                   let report = `🚀 *DISPATCHED ALL ${results.length} SUPPORT REPLIES LIVE AS STONY 💙!*\n━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
                   results.forEach(r => {
