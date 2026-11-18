@@ -3737,7 +3737,11 @@ async function setOwnerPendingAction(phone, action) {
 }
 
 async function clearOwnerPendingAction(phone) {
+  const norm = String(phone || "").replace(/\D/g, "");
   await setOwnerPendingAction(phone, null);
+  try {
+    await supabase.from("settings").delete().in("key", [`owner_pending_${norm}`, `owner_pending_${phone}`, `latest_support_batch_${norm}`]);
+  } catch (_) { }
 }
 
 async function saveOwnerHistory(phone, historyList) {
@@ -10496,18 +10500,8 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
             }
             const activeMode = isInBotCheckoutStep ? "bot" : getUserMode(from, currentSession);
 
-            // If Owner is messaging:
-            // When owner is in active checkout (testing buying bundles, entering phone/momo numbers),
-            // let them complete checkout! Only switch to Owner AI if they explicitly message "stony", "admin", "owner", "exit", "cancel", "reset", or prefix with "stony ".
-            const isOwnerExplicitAiCommand = startsWithStony || /^(stony|admin|owner|exit|cancel|reset)$/i.test(text.trim());
-            const ownerTestingMenuDigit = isOwner && isMainMenuNumber;
-            const shouldEnterOwnerAi = isOwner && !hasAgent && (
-              isOwnerExplicitAiCommand ||
-              (!isInBotCheckoutStep && !ownerTestingMenuDigit && (activeMode === "ai" || activeMode === "support" || activeMode === "datamart" || !/^(menu|customer)$/i.test(text.trim())))
-            );
-
             /* =====================================================
-            STONY OWNER AI — Personal Business Assistant & Co-Pilot
+            OWNER AI CO-PILOT / PERSONAL ASSISTANT PIPELINE
             Active whenever user is Owner (or mode is 'ai' / started with Stony)
             ===================================================== */
             if (shouldEnterOwnerAi) {
@@ -10541,17 +10535,21 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
               }
               if (!pendingAction && supabase) {
                 try {
-                  const { data: setRow } = await supabase
+                  const { data: setRows } = await supabase
                     .from("settings")
-                    .select("value")
-                    .in("key", [`owner_pending_${normFrom}`, `owner_pending_${from}`])
-                    .maybeSingle();
-                  if (setRow?.value) {
-                    const parsed = typeof setRow.value === "string" ? JSON.parse(setRow.value) : setRow.value;
-                    if (parsed) {
-                      pendingAction = parsed;
-                      ownerPendingActions.set(normFrom, pendingAction);
-                      ownerPendingActions.set(String(from), pendingAction);
+                    .select("key, value")
+                    .in("key", [`owner_pending_${normFrom}`, `owner_pending_${from}`, `latest_support_batch_${normFrom}`]);
+                  if (setRows && setRows.length > 0) {
+                    const row = setRows.find(r => r.key === `owner_pending_${normFrom}` || r.key === `owner_pending_${from}`) || setRows.find(r => r.key === `latest_support_batch_${normFrom}`) || setRows[0];
+                    if (row?.value) {
+                      const parsed = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+                      if (parsed) {
+                        pendingAction = parsed.type === "batch_rezolv_reply" || parsed.drafts
+                          ? (parsed.type ? parsed : { type: "batch_rezolv_reply", drafts: Array.isArray(parsed) ? parsed : (parsed.drafts || []) })
+                          : parsed;
+                        ownerPendingActions.set(normFrom, pendingAction);
+                        ownerPendingActions.set(String(from), pendingAction);
+                      }
                     }
                   }
                 } catch (_) { }
@@ -10701,7 +10699,7 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
 
               // Recognize confirmation strictly when confirming a pending staged action
               const isConfirm = !isCancel && (
-                /^(yes|yeah|yep|ok|okay|sure|yh|y|sharp|confirm|proceed|go|done|execute|apply|go ahead|do it|please do|send it|make it|update it|yes update|confirm update|proceed with update|send|send all|dispatch|dispatch all)$/i.test(sanitizedInput)
+                /^(yes|yeah|yep|ok|okay|sure|yh|y|sharp|confirm|proceed|go|done|execute|apply|go ahead|do it|please do|send it|make it|update it|yes update|confirm update|proceed with update|send|send all|dispatch|dispatch all|reply all|reply|send them|yes send|send drafts|send all drafts|deliver all)$/i.test(sanitizedInput)
               );
 
               const sendSingleMatch = sanitizedInput.match(/^(?:send|dispatch)\s*(\d+)$/i);
@@ -10713,17 +10711,22 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
                 if (pendingAction && pendingAction.type === "batch_rezolv_reply" && pendingAction.drafts?.length > 0) return pendingAction;
                 // 1. Try settings
                 try {
-                  const { data: setRow } = await supabase
+                  const { data: setRows } = await supabase
                     .from("settings")
-                    .select("value")
-                    .in("key", [`owner_pending_${normFrom}`, `owner_pending_${from}`, `latest_support_batch_${normFrom}`])
-                    .maybeSingle();
-                  if (setRow?.value) {
-                    const parsed = typeof setRow.value === "string" ? JSON.parse(setRow.value) : setRow.value;
-                    if (parsed) {
-                      pendingAction = parsed.type === "batch_rezolv_reply" ? parsed : { type: "batch_rezolv_reply", drafts: Array.isArray(parsed) ? parsed : (parsed.drafts || []) };
-                      ownerPendingActions.set(normFrom, pendingAction);
-                      return pendingAction;
+                    .select("key, value")
+                    .in("key", [`owner_pending_${normFrom}`, `owner_pending_${from}`, `latest_support_batch_${normFrom}`]);
+                  if (setRows && setRows.length > 0) {
+                    const row = setRows.find(r => r.key === `owner_pending_${normFrom}` || r.key === `owner_pending_${from}`) || setRows.find(r => r.key === `latest_support_batch_${normFrom}`) || setRows[0];
+                    if (row?.value) {
+                      const parsed = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+                      if (parsed) {
+                        pendingAction = parsed.type === "batch_rezolv_reply" || parsed.drafts
+                          ? (parsed.type ? parsed : { type: "batch_rezolv_reply", drafts: Array.isArray(parsed) ? parsed : (parsed.drafts || []) })
+                          : parsed;
+                        ownerPendingActions.set(normFrom, pendingAction);
+                        ownerPendingActions.set(String(from), pendingAction);
+                        return pendingAction;
+                      }
                     }
                   }
                 } catch (_) { }
@@ -10790,7 +10793,7 @@ REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the 
               }
 
               // C: Send all staged drafts or YES confirmation
-              if (isBatchSendAll || (isConfirm && !pendingAction)) {
+              if (isBatchSendAll || isConfirm) {
                 await ensureSupportBatchPendingAction();
               }
 
