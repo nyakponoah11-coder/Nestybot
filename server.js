@@ -7137,7 +7137,9 @@ async function clearAllRezolvActiveTickets(from = null, mode = "resolve") {
 
     // Clear user pending review batch in memory
     if (from) {
-      userPendingReviewBatch.delete(from);
+      try {
+        await clearOwnerPendingAction(from);
+      } catch (_) { }
     }
 
     // Process in parallel batches of 15
