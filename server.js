@@ -1532,42 +1532,31 @@ async function sendWhatsApp(to, text) {
       }
     }
 
-    // 🚀 1. PRIMARY: Deliver directly via Live Baileys WhatsApp Socket
-    try {
-      let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
-      if (!sock) {
-        await initBaileysChannelClient();
-        for (let i = 0; i < 15; i++) {
-          if (baileysChannelReady && baileysChannelSock) {
-            sock = baileysChannelSock;
-            break;
-          }
-          await new Promise(r => setTimeout(r, 400));
-        }
-      }
-      if (sock) {
-        let targetJid = formattedTo;
-        if (!targetJid.includes("@")) {
-          targetJid = `${targetJid}@s.whatsapp.net`;
-        }
-        const sentMsg = await sock.sendMessage(targetJid, { text: safeText });
-        if (sentMsg?.key?.id) {
-          botSentMessageIds.add(sentMsg.key.id);
-          if (botSentMessageIds.size > 3000) {
-            const oldest = botSentMessageIds.values().next().value;
-            if (oldest) botSentMessageIds.delete(oldest);
+    // 🌐 1. If recipient is a WhatsApp Group (@g.us), route via Baileys (Meta API does not support groups)
+    if (formattedTo.includes("@g.us")) {
+      try {
+        let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
+        if (!sock) {
+          await initBaileysChannelClient();
+          for (let i = 0; i < 10; i++) {
+            if (baileysChannelReady && baileysChannelSock) {
+              sock = baileysChannelSock;
+              break;
+            }
+            await new Promise(r => setTimeout(r, 400));
           }
         }
-        console.log(`📤 [sendWhatsApp] Delivered via Baileys to [${targetJid}]`);
-        return { ok: true, via: "baileys", jid: targetJid };
-      } else {
-        console.warn(`[sendWhatsApp] Baileys socket not ready after wait for [${to}]`);
+        if (sock) {
+          await sock.sendMessage(formattedTo, { text: safeText });
+          console.log(`📤 [sendWhatsApp] Delivered group message via Baileys to [${formattedTo}]`);
+          return { ok: true, via: "baileys_group", jid: formattedTo };
+        }
+      } catch (bErr) {
+        console.warn(`[sendWhatsApp] Baileys group send error for [${to}]:`, bErr.message);
       }
-    } catch (bErr) {
-      console.warn(`[sendWhatsApp] Baileys direct send attempt for [${to}]:`, bErr.message);
     }
 
-    // 🌐 2. FALLBACK: Deliver via Meta Cloud API if configured
+    // 🚀 2. OFFICIAL BOT: Deliver via Meta WhatsApp Cloud API (Graph API)
     let token = ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
     let phoneId = PHONE_ID || process.env.PHONE_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
 
@@ -1597,8 +1586,8 @@ async function sendWhatsApp(to, text) {
     }
 
     if (!token || !phoneId) {
-      console.warn("⚠️ Both Baileys and Meta WhatsApp channels unavailable for message to:", to);
-      return { ok: false, error: "No delivery channel available" };
+      console.warn("⚠️ Meta WhatsApp Cloud API credentials missing (ACCESS_TOKEN or PHONE_ID). Message to:", to);
+      return { ok: false, error: "Meta WhatsApp credentials missing" };
     }
 
     const isBsuid = /^[a-zA-Z]{2}\./.test(formattedTo) || /[a-zA-Z]/.test(formattedTo);
@@ -2312,38 +2301,6 @@ async function initBaileysChannelClient(options = {}) {
             initBaileysChannelClient().catch(() => { });
           }, 8000);
         }
-      }
-    });
-
-    sock.ev.on("messages.upsert", async (upsert) => {
-      try {
-        const { messages, type } = upsert || {};
-        if (!Array.isArray(messages)) return;
-        for (const m of messages) {
-          if (!m.message) continue;
-          const remoteJid = m.key?.remoteJid || "";
-          if (!remoteJid || remoteJid === "status@broadcast") continue;
-
-          const msgId = m.key?.id;
-          if (msgId && (processedIncomingMessageIds.has(msgId) || botSentMessageIds.has(msgId))) {
-            continue;
-          }
-
-          // If fromMe is true: skip if remoteJid is not self (to avoid looping on bot's own outgoing messages)
-          // But allow if the owner is sending a command to their own number ("Message yourself")
-          if (m.key?.fromMe) {
-            const selfNum = sock.user?.id ? sock.user.id.split(":")[0].replace(/\D/g, "") : "";
-            const jidNum = remoteJid.replace(/@.+$/, "").replace(/\D/g, "");
-            if (!selfNum || selfNum !== jidNum) continue;
-          }
-
-          console.log(`📥 [Baileys Incoming Message] from: [${remoteJid}] id: [${msgId}]`);
-          handleIncomingWhatsAppMessage(m, "baileys").catch((hErr) => {
-            console.error("❌ [Baileys handleIncomingWhatsAppMessage Error]:", hErr.message);
-          });
-        }
-      } catch (err) {
-        console.error("❌ [Baileys messages.upsert Error]:", err.message);
       }
     });
 
