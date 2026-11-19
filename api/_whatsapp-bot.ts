@@ -939,17 +939,19 @@ export default async function handler(req: any, res: any) {
     const normFrom = senderPhone.replace(/\D/g, "");
 
     // Dynamic Admin Phone Detection
-    const adminPhones = ["233547100951", "0547100951", "233592753424", "0592753424"];
+    const adminPhones = [];
     if (process.env.ADMIN_ALERT_PHONE) adminPhones.push(String(process.env.ADMIN_ALERT_PHONE).replace(/\D/g, ""));
+    if (process.env.ADMIN_WHATSAPP_NUMBER) adminPhones.push(String(process.env.ADMIN_WHATSAPP_NUMBER).replace(/\D/g, ""));
     try {
       const { data: sRows } = await admin
         .from("settings")
         .select("key,value")
-        .in("key", ["admin_alert_phone", "support_phone"]);
+        .in("key", ["admin_whatsapp_number", "admin_alert_phone", "admin_payment_alert_phone", "support_phone"]);
       (sRows || []).forEach((r: any) => {
         if (r.value) adminPhones.push(String(r.value).replace(/\D/g, ""));
       });
     } catch (_) { }
+    if (adminPhones.length === 0) adminPhones.push("233547100951");
 
     const isAuthorizedAdmin = adminPhones.some(
       (p) => p && (normFrom === p || normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9)))

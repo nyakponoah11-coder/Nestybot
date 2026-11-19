@@ -1486,6 +1486,9 @@ function getMenusForSession(session) {
 SEND WHATSAPP
 ========================================================= */
 
+const botSentMessageIds = new Set();
+const processedIncomingMessageIds = new Map();
+
 async function sendWhatsApp(to, text) {
   try {
     if (!to) {
@@ -1547,7 +1550,14 @@ async function sendWhatsApp(to, text) {
         if (!targetJid.includes("@")) {
           targetJid = `${targetJid}@s.whatsapp.net`;
         }
-        await sock.sendMessage(targetJid, { text: safeText });
+        const sentMsg = await sock.sendMessage(targetJid, { text: safeText });
+        if (sentMsg?.key?.id) {
+          botSentMessageIds.add(sentMsg.key.id);
+          if (botSentMessageIds.size > 3000) {
+            const oldest = botSentMessageIds.values().next().value;
+            if (oldest) botSentMessageIds.delete(oldest);
+          }
+        }
         console.log(`📤 [sendWhatsApp] Delivered via Baileys to [${targetJid}]`);
         return { ok: true, via: "baileys", jid: targetJid };
       } else {
@@ -1930,9 +1940,6 @@ async function sendAdminWhatsApp(text) {
     }
 
     const adminTargets = new Set();
-    // Primary WhatsApp order alert target is strictly 233547100951 (0547100951)
-    adminTargets.add("233547100951");
-
     if (process.env.ADMIN_ALERT_PHONE) {
       const p = normalizeWhatsAppTarget(process.env.ADMIN_ALERT_PHONE);
       if (p) adminTargets.add(p);
@@ -1957,6 +1964,11 @@ async function sendAdminWhatsApp(text) {
           });
         }
       } catch (_) { }
+    }
+
+    // Fallback only if no admin number is configured anywhere in dashboard or environment
+    if (adminTargets.size === 0) {
+      adminTargets.add("233547100951");
     }
 
     // Filter out permanently blocked notification numbers (e.g. 0599599254)
@@ -2300,6 +2312,38 @@ async function initBaileysChannelClient(options = {}) {
             initBaileysChannelClient().catch(() => { });
           }, 8000);
         }
+      }
+    });
+
+    sock.ev.on("messages.upsert", async (upsert) => {
+      try {
+        const { messages, type } = upsert || {};
+        if (!Array.isArray(messages)) return;
+        for (const m of messages) {
+          if (!m.message) continue;
+          const remoteJid = m.key?.remoteJid || "";
+          if (!remoteJid || remoteJid === "status@broadcast") continue;
+
+          const msgId = m.key?.id;
+          if (msgId && (processedIncomingMessageIds.has(msgId) || botSentMessageIds.has(msgId))) {
+            continue;
+          }
+
+          // If fromMe is true: skip if remoteJid is not self (to avoid looping on bot's own outgoing messages)
+          // But allow if the owner is sending a command to their own number ("Message yourself")
+          if (m.key?.fromMe) {
+            const selfNum = sock.user?.id ? sock.user.id.split(":")[0].replace(/\D/g, "") : "";
+            const jidNum = remoteJid.replace(/@.+$/, "").replace(/\D/g, "");
+            if (!selfNum || selfNum !== jidNum) continue;
+          }
+
+          console.log(`📥 [Baileys Incoming Message] from: [${remoteJid}] id: [${msgId}]`);
+          handleIncomingWhatsAppMessage(m, "baileys").catch((hErr) => {
+            console.error("❌ [Baileys handleIncomingWhatsAppMessage Error]:", hErr.message);
+          });
+        }
+      } catch (err) {
+        console.error("❌ [Baileys messages.upsert Error]:", err.message);
       }
     });
 
@@ -4037,14 +4081,16 @@ async function sendSecurityIntrusionAlert(intruderPhone, commandText, reason) {
       `👉 *Security Tip:*\n` +
       `If you did not initiate this from another number, someone attempted to execute administrative commands on your shop. The intrusion was blocked immediately.`;
 
-    const alertRecipients = ["233547100951", "0547100951", "233592753424", "0592753424"];
+    const alertRecipients = [];
     if (process.env.ADMIN_ALERT_PHONE) alertRecipients.push(String(process.env.ADMIN_ALERT_PHONE).replace(/\D/g, ""));
+    if (process.env.ADMIN_WHATSAPP_NUMBER) alertRecipients.push(String(process.env.ADMIN_WHATSAPP_NUMBER).replace(/\D/g, ""));
     try {
-      const { data: sRows } = await supabase.from("settings").select("key, value").not("key", "like", "visitor_log_%").not("key", "like", "agent_branding_%").in("key", ["admin_alert_phone", "support_phone"]);
+      const { data: sRows } = await supabase.from("settings").select("key, value").in("key", ["admin_whatsapp_number", "admin_alert_phone", "admin_payment_alert_phone", "support_phone"]);
       (sRows || []).forEach(r => {
         if (r.value) alertRecipients.push(String(r.value).replace(/\D/g, ""));
       });
     } catch (_) { }
+    if (alertRecipients.length === 0) alertRecipients.push("233547100951");
 
     const uniqueTargets = [...new Set(alertRecipients.filter(Boolean))];
     for (const target of uniqueTargets) {
@@ -5711,7 +5757,7 @@ function extractProposedActionFromText(rawText) {
 
   // 4. Natural language or bulleted SMS proposal
   // e.g.:
-  // *Recipient:* 0592753424
+  // *Recipient:* 0541234567
   // *Sender ID:* D_1Gh
   // *Message:* "I see you tomorrow"
   // Shall I go ahead and do this boss? Reply YES to confirm
@@ -10324,17 +10370,21 @@ WHATSAPP WEBHOOK (RECEIVE MESSAGES)
 ========================================================= */
 
 const sendDirectWhatsApp = sendWhatsApp;
-const processedIncomingMessageIds = new Map();
 
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
+  handleIncomingWhatsAppMessage(req.body, "webhook").catch((err) => {
+    console.error("Webhook processing error:", err);
+  });
+});
 
+async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
   try {
     let sendWhatsApp = sendDirectWhatsApp;
-    const changeVal = req.body.entry?.[0]?.changes?.[0]?.value || req.body?.value || req.body;
-    const msg = changeVal?.messages?.[0] || req.body?.messages?.[0] || req.body?.data;
+    const changeVal = payload?.entry?.[0]?.changes?.[0]?.value || payload?.value || payload;
+    const msg = changeVal?.messages?.[0] || payload?.messages?.[0] || payload?.data || payload;
     if (!msg) {
-      const statusObj = changeVal?.statuses?.[0] || req.body?.statuses?.[0];
+      const statusObj = changeVal?.statuses?.[0] || payload?.statuses?.[0];
       if (statusObj && (statusObj.errors || statusObj.status === "failed")) {
         console.warn("⚠️ [WA STATUS ALERT]", JSON.stringify(statusObj));
       }
@@ -10344,18 +10394,18 @@ app.post("/webhook", async (req, res) => {
     // 🛡️ Webhook Deduplication: Drop duplicate webhook deliveries of the same message ID
     const incomingMsgId = msg.id || msg.key?.id;
     if (incomingMsgId) {
-      if (processedIncomingMessageIds.has(incomingMsgId)) {
+      if (processedIncomingMessageIds.has(incomingMsgId) || botSentMessageIds.has(incomingMsgId)) {
         console.log(`🛡️ [DEDUP] Dropping duplicate incoming WhatsApp message: ${incomingMsgId}`);
         return;
       }
       processedIncomingMessageIds.set(incomingMsgId, Date.now());
-      if (processedIncomingMessageIds.size > 2000) {
+      if (processedIncomingMessageIds.size > 3000) {
         const oldest = processedIncomingMessageIds.keys().next().value;
         if (oldest) processedIncomingMessageIds.delete(oldest);
       }
     }
 
-    let from =
+    let rawSender =
       msg.from ||
       msg.sender ||
       msg.author ||
@@ -10365,18 +10415,28 @@ app.post("/webhook", async (req, res) => {
       changeVal?.contacts?.[0]?.user_id ||
       changeVal?.contacts?.[0]?.wa_id ||
       changeVal?.contacts?.[0]?.id ||
-      req.body?.contacts?.[0]?.user_id ||
-      req.body?.contacts?.[0]?.wa_id ||
-      req.body?.from ||
-      req.body?.sender ||
+      payload?.contacts?.[0]?.user_id ||
+      payload?.contacts?.[0]?.wa_id ||
+      payload?.from ||
+      payload?.sender ||
       null;
 
-    if (typeof from === "string") {
+    if (!rawSender) {
+      console.warn("⚠️ [WA WEBHOOK] SENDER 'from' IS UNDEFINED! Full payload:", JSON.stringify(payload));
+      return;
+    }
+
+    let isGroup = false;
+    let from = String(rawSender).trim();
+    if (from.endsWith("@g.us") || (msg.key?.remoteJid && String(msg.key.remoteJid).endsWith("@g.us"))) {
+      isGroup = true;
+      from = msg.key?.remoteJid || from;
+    } else {
       from = from.replace(/@.+$/, "").trim();
     }
 
     if (!from) {
-      console.warn("⚠️ [WA WEBHOOK] SENDER 'from' IS UNDEFINED! Full payload:", JSON.stringify(req.body));
+      console.warn("⚠️ [WA WEBHOOK] SENDER 'from' IS EMPTY AFTER NORMALIZATION:", rawSender);
       return;
     }
 
@@ -10389,6 +10449,14 @@ app.post("/webhook", async (req, res) => {
       msg.document?.caption ||
       msg.message?.conversation ||
       msg.message?.extendedTextMessage?.text ||
+      msg.message?.imageMessage?.caption ||
+      msg.message?.videoMessage?.caption ||
+      msg.message?.documentMessage?.caption ||
+      msg.message?.buttonsResponseMessage?.selectedButtonId ||
+      msg.message?.buttonsResponseMessage?.selectedDisplayText ||
+      msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+      msg.message?.listResponseMessage?.title ||
+      msg.message?.templateButtonReplyMessage?.selectedId ||
       msg.interactive?.button_reply?.title ||
       msg.interactive?.button_reply?.id ||
       msg.interactive?.list_reply?.title ||
@@ -10457,17 +10525,19 @@ app.post("/webhook", async (req, res) => {
     /* =====================================================
     DYNAMIC OWNER & ADMIN PHONE DETECTION
     ===================================================== */
-    const adminPhones = ["233547100951", "0547100951", "233592753424", "0592753424"];
+    const adminPhones = [];
     if (process.env.ADMIN_ALERT_PHONE) adminPhones.push(String(process.env.ADMIN_ALERT_PHONE).replace(/\D/g, ""));
+    if (process.env.ADMIN_WHATSAPP_NUMBER) adminPhones.push(String(process.env.ADMIN_WHATSAPP_NUMBER).replace(/\D/g, ""));
     try {
       const { data: sRows } = await supabase
         .from("settings")
         .select("key,value")
-        .in("key", ["admin_alert_phone", "support_phone"]);
+        .in("key", ["admin_whatsapp_number", "admin_alert_phone", "admin_payment_alert_phone", "support_phone"]);
       (sRows || []).forEach(r => {
         if (r.value) adminPhones.push(String(r.value).replace(/\D/g, ""));
       });
     } catch (_) { }
+    if (adminPhones.length === 0) adminPhones.push("233547100951");
 
     const normFrom = normalizeBotPhone(from);
     const isOwner = !/[a-zA-Z]/.test(String(from)) && adminPhones.some(p => p && (normFrom === p || (p.length >= 9 && normFrom.length >= 9 && (normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))))));
@@ -15522,7 +15592,7 @@ app.post("/webhook", async (req, res) => {
   } catch (e) {
     console.error("BOT ERROR:", e.response?.data || e.message);
   }
-});
+}
 
 /* =========================================================
 PAYSTACK WEBHOOK & DEBUG LOGGER

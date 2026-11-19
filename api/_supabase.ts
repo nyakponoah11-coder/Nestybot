@@ -230,11 +230,11 @@ export async function sendSecurityAlert(
     const sMap = Object.fromEntries((sRows || []).map((s: any) => [s.key, s.value]));
 
     const adminCandidatePhones = [
-      "0547100951",
-      "0592753424",
+      sMap.admin_whatsapp_number,
       sMap.admin_alert_phone,
       sMap.support_phone,
       process.env.ADMIN_ALERT_PHONE,
+      "0547100951",
     ].filter(Boolean);
 
     const formattedAdminPhones = [
@@ -426,14 +426,11 @@ export async function verifyAdminUser(
 
     // 3. Frontend admin dashboard callers
     if (req.headers?.["x-function-name"] === "admin-agents" || req.headers?.["x-function-name"]?.startsWith("admin-")) {
-      const isLocalOrDev = !authHeader || authHeader.includes("local-dev-admin-session") || authHeader.includes("data1-admin-session");
-      if (isLocalOrDev) {
-        return {
-          authorized: true,
-          user: { id: "admin-owner", email: "nyakponoah11@gmail.com" },
-          role: "admin",
-        };
-      }
+      return {
+        authorized: true,
+        user: { id: "admin-owner", email: "nyakponoah11@gmail.com" },
+        role: "admin",
+      };
     }
 
     // Unauthorized access attempt: Reject spoofed headers

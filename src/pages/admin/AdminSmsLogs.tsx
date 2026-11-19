@@ -57,7 +57,7 @@ export default function AdminSmsLogs() {
 
   // Test SMS Modal state
   const [testModalOpen, setTestModalOpen] = useState<boolean>(false);
-  const [testPhone, setTestPhone] = useState<string>("0592753424");
+  const [testPhone, setTestPhone] = useState<string>("0547100951");
   const [testMode, setTestMode] = useState<"agent" | "main">("agent");
   const [testSending, setTestSending] = useState<boolean>(false);
 
@@ -712,7 +712,7 @@ export default function AdminSmsLogs() {
             <div>
               <label className="font-semibold text-foreground">Destination Phone Number</label>
               <Input
-                placeholder="e.g. 0592753424 or 0547100951"
+                placeholder="e.g. 0547100951 or 0241234567"
                 value={testPhone}
                 onChange={(e) => setTestPhone(e.target.value)}
                 className="mt-1 font-mono text-sm"

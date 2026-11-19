@@ -1809,7 +1809,7 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
           }
 
           if (actionType === "post_to_channel" || actionType === "broadcast_channel" || actionType === "channel_post") {
-            const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com").replace(/\/+$/, "");
+            const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com").replace(/\/+$/, "");
             const topic = String(actionPayload.topic || actionPayload.mode || (actionPayload.message ? "custom" : "prices")).trim();
             const text = String(actionPayload.message || actionPayload.text || actionPayload.body || "").trim();
             try {
@@ -2750,7 +2750,7 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
             customMsg = m1;
           }
 
-          const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com").replace(/\/+$/, "");
+          const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com").replace(/\/+$/, "");
           let channelResult = "";
           try {
             const resp = await fetch(`${botUrl}/api/channel-post`, {
@@ -2794,7 +2794,7 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
           // Auto-broadcast Flash Sale update to WhatsApp Channel
           let channelNote = "";
           try {
-            const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com").replace(/\/+$/, "");
+            const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com").replace(/\/+$/, "");
             const cResp = await fetch(`${botUrl}/api/channel-post`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -3321,7 +3321,7 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
         // If saving flash sale settings and auto_broadcast_channel was requested
         if (body?.auto_broadcast_channel || body?.broadcast_channel) {
           try {
-            const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com").replace(/\/+$/, "");
+            const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com").replace(/\/+$/, "");
             fetch(`${botUrl}/api/channel-post`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -3334,7 +3334,7 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
       }
 
       if (action === "postToChannel" || action === "broadcastChannel" || action === "broadcastFlashSale") {
-        const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com").replace(/\/+$/, "");
+        const botUrl = (process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com").replace(/\/+$/, "");
         const topic = String(body?.topic || (action === "broadcastFlashSale" ? "flash" : "prices")).trim();
         const text = String(body?.text || body?.message || "").trim();
         try {
@@ -4716,7 +4716,7 @@ if (aiSubAction === "getAiIssuesAndProposals" || aiSubAction === "issues") {
       }
 
       if (action === "testPaymentIssueSms") {
-        const target = body?.recipient || "0592753424";
+        const target = body?.recipient || "0547100951";
         const testRef = `TEST-${Date.now().toString(36).toUpperCase()}`;
         const isAgent = Boolean(body?.is_agent || body?.agent_id || body?.store_slug);
         const storeName = body?.store_name || (isAgent ? "Senerity Data" : "Data1GH");

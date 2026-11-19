@@ -401,7 +401,7 @@ export default async function handler(req: any, res: any) {
     ) as string[];
 
     if (recipients.length === 0) {
-      return res.status(400).json({ ok: false, error: "Please enter a valid Ghana phone number (e.g. 0541234567 or 0592753424)" });
+      return res.status(400).json({ ok: false, error: "Please enter a valid Ghana phone number (e.g. 0541234567 or 0241234567)" });
     }
 
     const supabase = getSupabase();

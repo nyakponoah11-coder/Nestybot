@@ -31,9 +31,9 @@ function formatPhoneForWhatsApp(raw: string): string {
 
 // Owner instruction:
 // 1. All Admin SMS alerts are BLOCKED per owner instruction.
-// 2. WhatsApp order alerts go to 0547100951 (normalized: 233547100951)
+// 2. WhatsApp order alerts go to Admin WhatsApp Alert Phone configured in settings (fallback: 0547100951)
 // 3. 0599599254 is permanently blocked from receiving ANY DATA 1 GH notifications (SMS, WhatsApp, Admin alerts)
-export const ADMIN_PRIMARY_SMS_PHONE = "0592753424";
+export const ADMIN_PRIMARY_SMS_PHONE = "0547100951";
 export const ADMIN_WHATSAPP_ONLY_PHONE = "233547100951";
 
 export function isBlockedFromData1Notification(raw?: string | null): boolean {
@@ -270,6 +270,7 @@ export async function sendPaymentReceivedNotification(
           .select("key, value")
           .in("key", [
             "admin_alert_phone",
+            "whatsapp_bot_server_url",
             "support_phone",
             "admin_payment_alert_phone",
             "admin_whatsapp_number",
@@ -312,22 +313,20 @@ export async function sendPaymentReceivedNotification(
       sMap.support_phone,
       process.env.ADMIN_ALERT_PHONE,
       process.env.ADMIN_WHATSAPP_NUMBER,
-      ADMIN_PRIMARY_SMS_PHONE,
     ].filter(Boolean) as string[];
 
     const adminSmsPhones = Array.from(
       new Set(
-        [
-          ADMIN_PRIMARY_SMS_PHONE,
-          ...candidatePhones.map(formatPhoneForArkesel),
-        ]
+        candidatePhones
+          .map(formatPhoneForArkesel)
           .filter(Boolean)
           .filter((p) => !isBlockedFromAdminSms(p))
       )
     );
     const adminWhatsAppPhones = Array.from(
       new Set(
-        [ADMIN_WHATSAPP_ONLY_PHONE, ...candidatePhones]
+        [sMap.admin_whatsapp_number, ...candidatePhones, ADMIN_WHATSAPP_ONLY_PHONE]
+          .filter(Boolean)
           .map(formatPhoneForWhatsApp)
           .filter(Boolean)
           .filter((p) => !isBlockedFromData1Notification(p))
@@ -584,16 +583,17 @@ ${deliveryStatusObj.fullLine}
       // Fallback to live Render WhatsApp bot if Meta Cloud API failed (e.g. 24h window closed)
       if (!adminWhatsAppSent) {
         try {
-          const botUrl = process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com";
+          const botUrl = sMap.whatsapp_bot_server_url || process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com";
+          const targetAdmin = adminWhatsAppPhones[0] || sMap.admin_whatsapp_number || sMap.admin_payment_alert_phone || sMap.admin_alert_phone || "233547100951";
           const fbRes = await fetch(`${botUrl.replace(/\/+$/, "")}/api/send-admin-alert`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: waAlertText }),
+            body: JSON.stringify({ text: waAlertText, to: targetAdmin }),
             signal: AbortSignal.timeout(6000),
           });
           if (fbRes.ok) {
             adminWhatsAppSent = true;
-            whatsappDetails = "WhatsApp alert sent via Render Bot.";
+            whatsappDetails = `WhatsApp alert sent via Render Bot to ${targetAdmin}.`;
           }
         } catch (_) {}
       }
@@ -898,6 +898,7 @@ export async function sendWithdrawalAlertNotification(
           .select("key, value")
           .in("key", [
             "admin_alert_phone",
+            "whatsapp_bot_server_url",
             "support_phone",
             "admin_payment_alert_phone",
             "admin_whatsapp_number",
@@ -938,12 +939,12 @@ export async function sendWithdrawalAlertNotification(
       sMap.support_phone,
       process.env.ADMIN_ALERT_PHONE,
       process.env.ADMIN_WHATSAPP_NUMBER,
-      ADMIN_PRIMARY_SMS_PHONE,
     ].filter(Boolean) as string[];
 
     const adminWhatsAppPhones = Array.from(
       new Set(
-        [ADMIN_WHATSAPP_ONLY_PHONE, ...candidatePhones]
+        [sMap.admin_whatsapp_number, ...candidatePhones, ADMIN_WHATSAPP_ONLY_PHONE]
+          .filter(Boolean)
           .map(formatPhoneForWhatsApp)
           .filter(Boolean)
           .filter((p) => !isBlockedFromData1Notification(p))
@@ -951,10 +952,8 @@ export async function sendWithdrawalAlertNotification(
     );
     const adminSmsPhones = Array.from(
       new Set(
-        [
-          ADMIN_PRIMARY_SMS_PHONE,
-          ...candidatePhones.map(formatPhoneForArkesel),
-        ]
+        candidatePhones
+          .map(formatPhoneForArkesel)
           .filter(Boolean)
           .filter((p) => !isBlockedFromAdminSms(p))
       )
@@ -1223,6 +1222,7 @@ ${storeUrl}`;
           .select("key, value")
           .in("key", [
             "admin_alert_phone",
+            "whatsapp_bot_server_url",
             "support_phone",
             "admin_payment_alert_phone",
             "admin_whatsapp_number",
@@ -1263,18 +1263,15 @@ ${storeUrl}`;
       sMap.support_phone,
       process.env.ADMIN_ALERT_PHONE,
       process.env.ADMIN_WHATSAPP_NUMBER,
-      ADMIN_PRIMARY_SMS_PHONE,
     ].filter(Boolean) as string[];
 
     const adminWhatsAppPhones = Array.from(
-      new Set([ADMIN_WHATSAPP_ONLY_PHONE, ...candidatePhones.map(formatPhoneForWhatsApp)].filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
+      new Set([sMap.admin_whatsapp_number, ...candidatePhones, ADMIN_WHATSAPP_ONLY_PHONE].filter(Boolean).map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
     );
     const adminSmsPhones = Array.from(
       new Set(
-        [
-          ADMIN_PRIMARY_SMS_PHONE,
-          ...candidatePhones.map(formatPhoneForArkesel),
-        ]
+        candidatePhones
+          .map(formatPhoneForArkesel)
           .filter(Boolean)
           .filter((p) => !isBlockedFromAdminSms(p))
       )
@@ -1533,8 +1530,8 @@ export async function checkAndAlertLowDatamartBalance(
       ]);
 
     const sMap = Object.fromEntries((sRows || []).map((s: any) => [s.key, s.value]));
-    const targetAdminWhatsApp = ADMIN_WHATSAPP_ONLY_PHONE; // "0547100951" - WhatsApp only
-    const targetAdminSms = ADMIN_PRIMARY_SMS_PHONE; // "0592753424" - SMS only
+    const targetAdminWhatsApp = sMap.admin_whatsapp_number || sMap.admin_alert_phone || ADMIN_WHATSAPP_ONLY_PHONE;
+    const targetAdminSms = sMap.admin_alert_phone || sMap.support_phone || "0547100951";
     const formattedAdminPhone = formatPhoneForWhatsApp(targetAdminWhatsApp);
     const shopName = sMap.shop_name || "Data 1 GH";
 
@@ -1589,7 +1586,7 @@ If your balance hits GH₵ 0.00, customer data bundle orders and free data promo
       }
     }
 
-    // 2. Arkesel SMS Fallback / Dual Alert (0547100951 blocked - SMS strictly to 0592753424 only!)
+    // 2. Arkesel SMS Fallback / Dual Alert
     if (arkeselKey && targetAdminSms && !isBlockedFromAdminSms(targetAdminSms)) {
       const smsPhone = formatPhoneForArkesel(targetAdminSms);
       const smsText = `LOW WALLET ALERT: Your DataMart balance is GH₵ ${num.toFixed(2)} (below GH₵ 50 threshold). Please top up now to avoid order dispatch failures. - ${shopName}`;
@@ -1680,6 +1677,7 @@ export async function sendAdminLowBalanceOrderFailedAlert(
           .select("key, value")
           .in("key", [
             "admin_alert_phone",
+            "whatsapp_bot_server_url",
             "support_phone",
             "admin_payment_alert_phone",
             "admin_whatsapp_number",
@@ -1703,8 +1701,7 @@ export async function sendAdminLowBalanceOrderFailedAlert(
 
     // Owner instruction:
     // 1. NO SMS to 0547100951 under any circumstance (WhatsApp alerts ONLY to 0547100951!)
-    // 2. Admin SMS alarms go ONLY to 0592753424
-    const adminSmsPhones = [formatPhoneForArkesel(ADMIN_PRIMARY_SMS_PHONE)].filter(
+    const adminSmsPhones = [sMap.admin_alert_phone, sMap.support_phone].filter(Boolean).map(formatPhoneForArkesel).filter(
       (p) => !isBlockedFromAdminSms(p)
     );
 
@@ -1755,7 +1752,7 @@ export async function sendAdminLowBalanceOrderFailedAlert(
       minute: "2-digit",
     });
 
-    // 1. Dispatch SMS directly to Admin (ONLY to 0592753424, never 0547100951)
+    // 1. Dispatch SMS directly to Admin
     let smsSent = false;
     let smsErr: string | undefined;
     if (arkeselKey && adminSmsPhones.length > 0) {
@@ -2243,6 +2240,7 @@ export async function sendAdminSpinWinnerAlert(
           .select("key, value")
           .in("key", [
             "admin_alert_phone",
+            "whatsapp_bot_server_url",
             "support_phone",
             "admin_payment_alert_phone",
             "admin_whatsapp_number",
@@ -2289,7 +2287,7 @@ export async function sendAdminSpinWinnerAlert(
 
     const adminSmsPhones = [
       sMap.admin_alert_phone ? formatPhoneForArkesel(sMap.admin_alert_phone) : null,
-      formatPhoneForArkesel(ADMIN_PRIMARY_SMS_PHONE),
+      sMap.support_phone ? formatPhoneForArkesel(sMap.support_phone) : null,
     ].filter(Boolean).filter((p) => !isBlockedFromAdminSms(p as string)) as string[];
 
     let arkeselKey = cleanApiKey(
@@ -2431,6 +2429,7 @@ export async function sendAdminAgentReferralWinnerAlert(
           .select("key, value")
           .in("key", [
             "admin_alert_phone",
+            "whatsapp_bot_server_url",
             "support_phone",
             "admin_payment_alert_phone",
             "admin_whatsapp_number",
@@ -2477,7 +2476,7 @@ export async function sendAdminAgentReferralWinnerAlert(
 
     const adminSmsPhones = [
       sMap.admin_alert_phone ? formatPhoneForArkesel(sMap.admin_alert_phone) : null,
-      formatPhoneForArkesel(ADMIN_PRIMARY_SMS_PHONE),
+      sMap.support_phone ? formatPhoneForArkesel(sMap.support_phone) : null,
     ].filter(Boolean).filter((p) => !isBlockedFromAdminSms(p as string)) as string[];
 
     let arkeselKey = cleanApiKey(
@@ -2875,7 +2874,7 @@ Keep sharing your store link to grow your daily sales!
     // Fallback to live Render WhatsApp bot if Meta Cloud API failed or credentials were not configured
     if (!sentOk) {
       try {
-        const botUrl = process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com";
+        const botUrl = process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com";
         const fbRes = await fetch(`${botUrl.replace(/\/+$/, "")}/api/send-admin-alert`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3054,12 +3053,11 @@ export async function sendOrderDeliveredNotification(
     const adminWhatsAppPhones = Array.from(
       new Set(
         [
-          ADMIN_WHATSAPP_ONLY_PHONE,
           sMap.admin_whatsapp_number,
+          ADMIN_WHATSAPP_ONLY_PHONE,
           sMap.admin_alert_phone,
           process.env.ADMIN_WHATSAPP_NUMBER,
           process.env.ADMIN_ALERT_PHONE,
-          ADMIN_PRIMARY_SMS_PHONE,
         ]
           .map(formatPhoneForWhatsApp)
           .filter(Boolean)
@@ -3196,11 +3194,12 @@ export async function sendOrderDeliveredNotification(
 
     if (!adminWhatsAppSent) {
       try {
-        const botUrl = process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com";
+        const botUrl = process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com";
+        const targetAdmin = adminWhatsAppPhones[0] || sMap.admin_whatsapp_number || sMap.admin_payment_alert_phone || sMap.admin_alert_phone || "233547100951";
         const fbRes = await fetch(`${botUrl.replace(/\/+$/, "")}/api/send-admin-alert`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: deliveredAlertText }),
+          body: JSON.stringify({ text: deliveredAlertText, to: targetAdmin }),
           signal: AbortSignal.timeout(6000),
         });
         if (fbRes.ok) adminWhatsAppSent = true;
@@ -3345,7 +3344,7 @@ export async function sendOrderDeliveredNotification(
           }
           if (!sentToAgent) {
             try {
-              const botUrl = process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot.onrender.com";
+              const botUrl = sMap.whatsapp_bot_server_url || process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com";
               await fetch(`${botUrl.replace(/\/+$/, "")}/api/send-admin-alert`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },

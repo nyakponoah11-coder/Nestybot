@@ -732,7 +732,7 @@ const AdminSettings = () => {
       { key: "spin_game_enabled", value: values.spin_game_enabled === "true" ? "true" : "false" },
       { key: "auto_payment_sms_enabled", value: values.auto_payment_sms_enabled === "false" ? "false" : "true" },
       { key: "admin_payment_alert_phone", value: (values.admin_payment_alert_phone ?? supportPhone).trim() },
-      { key: "admin_whatsapp_number", value: (values.admin_whatsapp_number ?? values.admin_payment_alert_phone ?? supportPhone ?? "0547100951").trim() },
+      { key: "admin_whatsapp_number", value: (values.admin_whatsapp_number || values.admin_payment_alert_phone || supportPhone || "0547100951").trim() },
       { key: "whatsapp_access_token", value: (values.whatsapp_access_token ?? "").trim() },
       { key: "ACCESS_TOKEN", value: (values.whatsapp_access_token ?? "").trim() },
       { key: "whatsapp_phone_id", value: (values.whatsapp_phone_id ?? "").trim() },
@@ -1445,7 +1445,7 @@ Time: 06/10/2026 12:30`}
                 </Label>
                 <Input
                   id="admin_whatsapp_number"
-                  value={values.admin_whatsapp_number ?? values.admin_payment_alert_phone ?? "0547100951"}
+                  value={values.admin_whatsapp_number || values.admin_payment_alert_phone || "0547100951"}
                   onChange={e => setValues(v => ({ ...v, admin_whatsapp_number: e.target.value }))}
                   placeholder="e.g. 0547100951 or 233547100951"
                   className="bg-background/60 border-emerald-500/30 focus-visible:ring-emerald-500/40"
