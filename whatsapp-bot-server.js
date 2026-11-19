@@ -2526,35 +2526,74 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
   try {
     await seedSubmittedPortalIdsCache();
 
-    // 1. Get configured group JID from Supabase settings
-    let groupJid = null;
-    const { data: sRow } = await supabase
-      .from("settings")
-      .select("value")
-      .eq("key", "failed_orders_group_jid")
-      .maybeSingle();
+    // 1. Resolve target group JID (User-specific group, or fallback to owner's default group)
+    const callerCandidate = meta.callerPhone || meta.from || meta.sender || meta.phone || null;
+    const normCaller = callerCandidate ? String(callerCandidate).replace(/\D/g, "") : null;
 
-    if (sRow?.value) {
-      groupJid = String(sRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
+    let groupJid = null;
+    let groupSubject = "Failed Orders Group";
+    let isUserGroup = false;
+
+    // Check if this specific user/agent connected their own WhatsApp group
+    if (normCaller) {
+      try {
+        const { data: uRow } = await supabase
+          .from("settings")
+          .select("value")
+          .eq("key", `failed_orders_group_${normCaller}`)
+          .maybeSingle();
+        if (uRow?.value) {
+          groupJid = String(uRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
+          isUserGroup = true;
+          const { data: uName } = await supabase
+            .from("settings")
+            .select("value")
+            .eq("key", `failed_orders_group_name_${normCaller}`)
+            .maybeSingle();
+          if (uName?.value) groupSubject = uName.value;
+        }
+      } catch (_) { }
     }
 
+    // FALLBACK: If user did NOT connect a custom group, use OWNER'S default group
     if (!groupJid) {
-      // Fallback: check stored invite link or code
-      const { data: invRow } = await supabase
-        .from("settings")
-        .select("value")
-        .eq("key", "failed_orders_group_invite_code")
-        .maybeSingle();
-      if (invRow?.value) {
-        await setFailedOrdersGroup(`https://chat.whatsapp.com/${invRow.value}`);
-        const { data: retryRow } = await supabase
+      try {
+        const { data: sRow } = await supabase
           .from("settings")
           .select("value")
           .eq("key", "failed_orders_group_jid")
           .maybeSingle();
-        if (retryRow?.value) {
-          groupJid = String(retryRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
+        if (sRow?.value) {
+          groupJid = String(sRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
+          const { data: sName } = await supabase
+            .from("settings")
+            .select("value")
+            .eq("key", "failed_orders_group_name")
+            .maybeSingle();
+          if (sName?.value) groupSubject = sName.value;
         }
+      } catch (_) { }
+
+      if (!groupJid) {
+        // Fallback: check stored default invite code
+        try {
+          const { data: invRow } = await supabase
+            .from("settings")
+            .select("value")
+            .eq("key", "failed_orders_group_invite_code")
+            .maybeSingle();
+          if (invRow?.value) {
+            await setFailedOrdersGroup(`https://chat.whatsapp.com/${invRow.value}`);
+            const { data: retryRow } = await supabase
+              .from("settings")
+              .select("value")
+              .eq("key", "failed_orders_group_jid")
+              .maybeSingle();
+            if (retryRow?.value) {
+              groupJid = String(retryRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
+            }
+          }
+        } catch (_) { }
       }
     }
 
@@ -2568,10 +2607,15 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     groupJid = groupJid.replace(/(@g\.us)+$/i, "") + "@g.us";
 
     // 2. Persistent Supabase registry check
+    // Track per-group to avoid duplicates in the same group
+    const registryKey = groupJid
+      ? `failed_orders_posted_${groupJid.replace(/[^a-zA-Z0-9]/g, "_")}`
+      : "failed_orders_posted_portal_ids";
+
     const { data: regRow } = await supabase
       .from("settings")
       .select("value")
-      .eq("key", "failed_orders_posted_portal_ids")
+      .eq("key", registryKey)
       .maybeSingle();
 
     let postedIds = [];
@@ -2585,10 +2629,10 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     // Sync in-memory cache with DB rows
     postedIds.forEach(id => submittedPortalIdsMemoryCache.add(String(id).replace(/\D/g, "")));
 
-    // Check if ID already exists in DB registry
+    // Check if ID already exists in this group's history
     if (postedIds.includes(cleanId) && !meta.force) {
-      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group history. Skipping duplicate submission.`);
-      return { ok: true, skipped: true, reason: "already_exists" };
+      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}). Skipping duplicate.`);
+      return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
     }
 
     // 3. Connect Baileys client to post strictly to group
@@ -2601,19 +2645,34 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
 
     // 4. Send ONLY the Portal ID (clean copyable ID as requested)
     await sock.sendMessage(groupJid, { text: String(cleanId) });
-    console.log(`🚀 [FAILED ORDER GROUP] Posted Portal ID ${cleanId} to WhatsApp group ${groupJid}`);
+    console.log(`🚀 [FAILED ORDER GROUP] Posted Portal ID ${cleanId} to ${groupSubject} (${groupJid}) [isUserGroup: ${isUserGroup}, caller: ${normCaller || "default_owner"}]`);
 
     // 5. Record cleanId in persistent registry
     postedIds.push(cleanId);
     postedIds = [...new Set(postedIds)]; // eliminate any duplicates
     if (postedIds.length > 2000) postedIds = postedIds.slice(-2000); // keep last 2000 IDs
     await supabase.from("settings").upsert({
-      key: "failed_orders_posted_portal_ids",
+      key: registryKey,
       value: JSON.stringify(postedIds),
       updated_at: new Date().toISOString()
     }, { onConflict: "key" });
 
-    return { ok: true, submitted: true, portalId: cleanId };
+    // Also update global registry for general stats
+    if (registryKey !== "failed_orders_posted_portal_ids") {
+      try {
+        const { data: gRow } = await supabase.from("settings").select("value").eq("key", "failed_orders_posted_portal_ids").maybeSingle();
+        let gIds = Array.isArray(gRow?.value) ? gRow.value : (typeof gRow?.value === "string" ? JSON.parse(gRow.value) : []);
+        gIds.push(cleanId);
+        gIds = [...new Set(gIds)].slice(-2000);
+        await supabase.from("settings").upsert({
+          key: "failed_orders_posted_portal_ids",
+          value: JSON.stringify(gIds),
+          updated_at: new Date().toISOString()
+        }, { onConflict: "key" });
+      } catch (_) { }
+    }
+
+    return { ok: true, submitted: true, portalId: cleanId, group: groupSubject, isUserGroup };
   } catch (err) {
     console.error(`❌ [FAILED ORDER GROUP] Error submitting ${cleanId} to group:`, err.message);
     submittedPortalIdsMemoryCache.delete(cleanId);
@@ -2673,17 +2732,72 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
     if (meta?.subject) groupSubject = meta.subject;
   } catch (_) { }
 
-  await supabase.from("settings").upsert([
-    { key: "failed_orders_group_jid", value: targetJid },
-    { key: "failed_orders_group_name", value: groupSubject },
-    { key: "failed_orders_group_invite", value: input }
-  ], { onConflict: "key" });
+  const normCaller = callerPhone ? String(callerPhone).replace(/\D/g, "") : null;
+  const isCallerOwner = callerPhone ? isOwnerPhone(callerPhone) : true;
 
+  // 1. If caller is an agent, save to their account settings
+  if (normCaller) {
+    await supabase.from("settings").upsert([
+      { key: `failed_orders_group_${normCaller}`, value: targetJid },
+      { key: `failed_orders_group_name_${normCaller}`, value: groupSubject },
+      { key: `failed_orders_group_invite_${normCaller}`, value: input }
+    ], { onConflict: "key" });
+  }
+
+  // 2. If caller is owner OR no global default exists yet, also save as the global default fallback
+  if (isCallerOwner || !normCaller) {
+    await supabase.from("settings").upsert([
+      { key: "failed_orders_group_jid", value: targetJid },
+      { key: "failed_orders_group_name", value: groupSubject },
+      { key: "failed_orders_group_invite", value: input }
+    ], { onConflict: "key" });
+  }
+
+  const roleLabel = isCallerOwner ? "Owner Default Group" : `Your Account (${callerPhone})`;
   return `✅ *FAILED ORDERS WHATSAPP GROUP CONNECTED!*\n\n` +
     `• *Group Name:* *${groupSubject}*\n` +
+    `• *Scope:* *${roleLabel}*\n` +
     `• *Group JID:* \`${targetJid}\`\n\n` +
     `🛡️ *How it works:*\n` +
-    `Whenever an order fails on DataMart or carrier delivery checks, Stony will search the group history first. If the Portal ID does not already exist, Stony will automatically submit **only the Portal ID** to this group!`;
+    `Whenever an order fails or stays in vendor queue > 24 hours under your account, Stony will automatically submit the numeric Portal ID to *${groupSubject}*!\n\n` +
+    `💡 Anyone who connects DataMart without connecting their own group will automatically default to the owner's group.`;
+}
+
+async function disconnectUserFailedOrdersGroup(phone) {
+  const norm = String(phone || "").replace(/\D/g, "");
+  if (!norm) return "⚠️ Could not identify phone number.";
+  await supabase.from("settings").delete().in("key", [
+    `failed_orders_group_${norm}`,
+    `failed_orders_group_name_${norm}`,
+    `failed_orders_group_invite_${norm}`
+  ]);
+  return "✅ *Disconnected custom WhatsApp group.* Your account will now use the owner's default failed orders group!";
+}
+
+async function getUserFailedOrdersGroupStatus(phone) {
+  const norm = String(phone || "").replace(/\D/g, "");
+  let customGroup = null;
+  let customName = null;
+  if (norm) {
+    const { data: uRow } = await supabase.from("settings").select("value").eq("key", `failed_orders_group_${norm}`).maybeSingle();
+    const { data: uName } = await supabase.from("settings").select("value").eq("key", `failed_orders_group_name_${norm}`).maybeSingle();
+    customGroup = uRow?.value;
+    customName = uName?.value;
+  }
+  const { data: dRow } = await supabase.from("settings").select("value").eq("key", "failed_orders_group_jid").maybeSingle();
+  const { data: dName } = await supabase.from("settings").select("value").eq("key", "failed_orders_group_name").maybeSingle();
+
+  if (customGroup) {
+    return `📋 *FAILED ORDERS GROUP STATUS:*\n\n` +
+      `• *Your Custom Group:* *${customName || "Connected"}*\n` +
+      `• *JID:* \`${customGroup}\`\n\n` +
+      `All your failed / >24h orders are submitted to your custom group. To revert to the default group, text: *disconnect group*.`;
+  }
+  return `📋 *FAILED ORDERS GROUP STATUS:*\n\n` +
+    `• *Status:* Using Owner's Default Group\n` +
+    `• *Default Group:* *${dName?.value || "Configured"}*\n` +
+    `• *JID:* \`${dRow?.value || "Default"}\`\n\n` +
+    `💡 To connect your own WhatsApp group for your DataMart orders, text:\n*connect group <invite_link>*`;
 }
 
 
@@ -6574,7 +6688,7 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
         else if (isQueued) status = "queued";
 
         if (failed > 0 && targetId) {
-          submitFailedPortalIdToGroup(targetId, { reason: "carrier_check_failed", failedCount: failed }).catch(() => { });
+          submitFailedPortalIdToGroup(targetId, { reason: "carrier_check_failed", failedCount: failed, callerPhone }).catch(() => { });
         }
 
         let orderCreatedAt = result.createdAt || result.orderDate || result.date || null;
@@ -6609,7 +6723,7 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
             if (!isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)) {
               isQueuedOver24Hours = true;
               queuedHours = Math.floor(ageMs / (60 * 60 * 1000));
-              submitFailedPortalIdToGroup(targetId, { reason: "vendor_queue_over_24h", queuedHours, orderDate: orderCreatedAt }).catch(() => { });
+              submitFailedPortalIdToGroup(targetId, { reason: "vendor_queue_over_24h", queuedHours, orderDate: orderCreatedAt, callerPhone }).catch(() => { });
             }
           }
         }
@@ -7272,7 +7386,7 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
   const isDeliveryIntent = trackInfo.hasDeliveryWords || /\b(data|bundle|order|deliver|received|drop|land|balance|ghc|gb|not\s*come|not\s*in|waiting|delay|send)\b/i.test(lowerAll);
   if (isDeliveryIntent) {
     if (targetQuery) {
-      const liveTrack = await trackSupportDeliveryTarget(targetQuery, null, {
+      const liveTrack = await trackSupportDeliveryTarget(targetQuery, from, {
         trackId: trackIdFound,
         orderRef: orderRefFound,
         phone: phoneFound
@@ -7292,7 +7406,7 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
 
         if (st === "failed" || st === "cancelled" || (liveTrack.failed && liveTrack.failed > 0)) {
           if (portalId && /^\d{4,9}$/.test(String(portalId))) {
-            submitFailedPortalIdToGroup(portalId, { reason: "support_draft_failed", failedCount: liveTrack.failed || 1 }).catch(() => { });
+            submitFailedPortalIdToGroup(portalId, { reason: "support_draft_failed", failedCount: liveTrack.failed || 1, callerPhone: from }).catch(() => { });
           }
 
           const batchItems = Array.isArray(liveTrack.items) ? liveTrack.items : [];
@@ -7340,14 +7454,15 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
               reason: "vendor_queue_over_24h",
               phone: ph,
               network: net,
-              date: orderDate
+              date: orderDate,
+              callerPhone: from
             }).catch(() => { });
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""} (Reported to team group)`;
-            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please don't worry at all, we are actively working on it right now to get it resolved and delivered for you as quickly as possible. Thank you for your patience!`;
+            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, we are actively working on it right now and it will be delivered for you shortly. Thank you for your patience!`;
           } else if (isOver24H) {
             // Over 24 hours but no numeric Portal ID assigned yet (Pending Export) -> Do NOT report to group
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please don't worry at all, we are actively working on it right now and your data will land shortly. Thank you for your patience!`;
+            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, we are working on it right now and your data will land shortly. Thank you for your patience!`;
           } else {
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
             draftText = `Hello ${firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing and will land on your number shortly. Kindly dial *124# or *126# to verify your balance. Thank you!`;
@@ -7820,7 +7935,8 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         reason: "carrier_delivery_check_failed",
         failedCount: failedItems.length,
         totalItems,
-        failedPhones: failedItems.map(it => it.phone)
+        failedPhones: failedItems.map(it => it.phone),
+        callerPhone
       }).catch(() => { });
     }
 
@@ -7942,7 +8058,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         if (qDate) {
           const ageMs = Date.now() - new Date(qDate).getTime();
           if (!isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000) && r.id && /^\d{4,9}$/.test(String(r.id))) {
-            submitFailedPortalIdToGroup(r.id, { reason: "vendor_queue_over_24h", queuedHours: Math.floor(ageMs / 3600000) }).catch(() => { });
+            submitFailedPortalIdToGroup(r.id, { reason: "vendor_queue_over_24h", queuedHours: Math.floor(ageMs / 3600000), callerPhone }).catch(() => { });
           }
         }
       }
@@ -7958,7 +8074,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       if (bFailed > 0 || failedInBatch.length > 0) {
         // Auto-submit failed portal ID to configured WhatsApp group
         if (r.id && /^\d{4,9}$/.test(String(r.id))) {
-          submitFailedPortalIdToGroup(r.id, { reason: "bulk_carrier_delivery_check_failed", failedCount: bFailed || failedInBatch.length }).catch(err => {
+          submitFailedPortalIdToGroup(r.id, { reason: "bulk_carrier_delivery_check_failed", failedCount: bFailed || failedInBatch.length, callerPhone }).catch(err => {
             console.error("❌ Auto-submit to group error:", err.message);
           });
         }
@@ -8492,7 +8608,7 @@ async function executeDatamartBulkPhoneCheck(rawPhoneList, callerPhone = null) {
       else if (r.isFailed) {
         failedCount++;
         if (r.portalId && /^\d{4,9}$/.test(String(r.portalId))) {
-          submitFailedPortalIdToGroup(r.portalId, { reason: "bulk_phone_failed", phone: r.phone }).catch(() => { });
+          submitFailedPortalIdToGroup(r.portalId, { reason: "bulk_phone_failed", phone: r.phone, callerPhone }).catch(() => { });
         }
       }
       else inProgressCount++;
@@ -9781,7 +9897,19 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     );
   }
 
-  // Set Failed Orders Group (Invite Link or JID)
+  // Check Group Status
+  if (/^(?:my\s*group|group\s*status|check\s*group)$/i.test(cleanInput)) {
+    const rep = await getUserFailedOrdersGroupStatus(from);
+    return sendWhatsApp(from, rep);
+  }
+
+  // Disconnect / Unlink Group
+  if (/^(?:disconnect\s*group|unlink\s*group|remove\s*group|reset\s*group)$/i.test(cleanInput)) {
+    const rep = await disconnectUserFailedOrdersGroup(from);
+    return sendWhatsApp(from, rep);
+  }
+
+  // Set / Connect Failed Orders Group (Invite Link or JID)
   const setGroupMatch =
     cleanInput.match(/https:\/\/chat\.whatsapp\.com\/([A-Za-z0-9_-]{15,35})/i) ||
     cleanInput.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
@@ -9802,12 +9930,13 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
 
   if (submitManualMatch) {
     const mId = submitManualMatch[1];
-    const subRes = await submitFailedPortalIdToGroup(mId, { manual: true });
+    const subRes = await submitFailedPortalIdToGroup(mId, { manual: true, callerPhone: from });
     if (subRes.ok) {
       if (subRes.skipped) {
         return sendWhatsApp(from, `ℹ️ Portal ID *${mId}* already exists in the group history! Skipped duplicate submission.`);
       }
-      return sendWhatsApp(from, `🚀 *Submitted Portal ID ${mId} to Failed Orders WhatsApp Group!*`);
+      const targetGrp = subRes.group ? ` *${subRes.group}*` : " the Failed Orders WhatsApp Group";
+      return sendWhatsApp(from, `🚀 *Submitted Portal ID ${mId} to${targetGrp}!*`);
     } else {
       return sendWhatsApp(from, `⚠️ Could not submit Portal ID *${mId}* to group: ${subRes.reason || subRes.error}`);
     }
@@ -10884,6 +11013,8 @@ app.post("/webhook", async (req, res) => {
         `🛠️ *You can now control your DataMart account right on WhatsApp!*\n` +
         `• Text *datamart mode* anytime to enter your Worker Console.\n` +
         `• Run live carrier delivery checks, inspect orders, check tickets, and manage customers.\n` +
+        `• 👥 *Failed Orders Group:* To submit failed / >24h orders to your team group, send *connect group <group_link>*. (If not connected, the owner's default group is used).\n` +
+        `• Text *my group* to check your connected group, or *disconnect group* to reset.\n` +
         `• Text *my datamart* to check account status, or *disconnect datamart* to unlink anytime.`;
 
       if (isOwner && explicitPhone && explicitPhone !== from) {
@@ -10975,6 +11106,7 @@ app.post("/webhook", async (req, res) => {
         `• *not received* ➔ Customer Complaints\n` +
         `• *recovery* ➔ Recovery Pipeline Status\n` +
         `• *stats* ➔ Volume & Performance Overview\n` +
+        `• *my group* ➔ Failed Orders WhatsApp Group Status\n` +
         `• *my datamart* ➔ Account Info\n\n` +
         `💡 To switch back to normal WhatsApp mode anytime, just text: *exit*.`
       );
