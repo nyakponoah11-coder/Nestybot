@@ -10335,16 +10335,25 @@ app.post("/webhook", async (req, res) => {
   });
 });
 
+const recentSenderActivity = new Map();
+
 async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
   try {
     let sendWhatsApp = sendDirectWhatsApp;
     const changeVal = payload?.entry?.[0]?.changes?.[0]?.value || payload?.value || payload;
-    const msg = changeVal?.messages?.[0] || payload?.messages?.[0] || payload?.data || payload;
-    if (!msg) {
+
+    // 🛡️ CRITICAL: If this is a Meta delivery/read status update, ACKNOWLEDGE AND DROP IMMEDIATELY!
+    // Never process status updates as incoming messages (prevents delivery-receipt infinite feedback loop!)
+    if (changeVal?.statuses || payload?.statuses) {
       const statusObj = changeVal?.statuses?.[0] || payload?.statuses?.[0];
       if (statusObj && (statusObj.errors || statusObj.status === "failed")) {
         console.warn("⚠️ [WA STATUS ALERT]", JSON.stringify(statusObj));
       }
+      return;
+    }
+
+    const msg = changeVal?.messages?.[0] || payload?.messages?.[0] || payload?.data;
+    if (!msg) {
       return;
     }
 
@@ -10475,6 +10484,24 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
           return sendWhatsApp(from, `🖼️ I received your image, bossu! But had an issue analyzing it (${imgErr.message}). Could you please resend it or describe what's on it?`);
         }
       }
+    }
+
+    // Drop empty messages (e.g. status receipts, empty events)
+    if (!text && !isVoiceNote && !isImageMsg) {
+      console.log(`ℹ️ [WA WEBHOOK] Dropping empty text message from: [${from}]`);
+      return;
+    }
+
+    // 🛡️ Per-sender flood/spam protection: Don't process rapid duplicate triggers from same sender within 2.5 seconds
+    const lastSenderTime = recentSenderActivity.get(from);
+    if (lastSenderTime && Date.now() - lastSenderTime < 2500) {
+      console.log(`🛡️ [DEBOUNCE] Dropping rapid duplicate message for [${from}]`);
+      return;
+    }
+    recentSenderActivity.set(from, Date.now());
+    if (recentSenderActivity.size > 3000) {
+      const oldest = recentSenderActivity.keys().next().value;
+      if (oldest) recentSenderActivity.delete(oldest);
     }
 
     console.log("📩", from, isVoiceNote ? `[VOICE NOTE]: "${text}"` : text);
