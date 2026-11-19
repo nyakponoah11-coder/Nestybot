@@ -5119,6 +5119,10 @@ async function executeOwnerDirectAction(type, payload = {}) {
       return await closeRezolvTicket(tId, payload.status || "resolved");
     }
 
+    if (cleanType === "rezolv_clear_all" || cleanType === "clear_all_tickets" || cleanType === "clear_tickets") {
+      return await clearAllRezolvActiveTickets(payload.from || payload.callerPhone || from, payload.mode || "resolve");
+    }
+
     // 36. Send Customer Message / Reply across DataMart RPT, Rezolv, or Direct WhatsApp
     if (cleanType === "send_customer_message" || cleanType === "message_customer" || cleanType === "reply_customer") {
       const rawTarget = payload.target || payload.customer || payload.phone || payload.ticketId || payload.reportId || payload.recipient;
@@ -7093,6 +7097,77 @@ async function cleanRezolvIdleGreetingTickets(maxToClean = 40) {
   } catch (err) {
     console.warn("cleanRezolvIdleGreetingTickets error:", err.message);
     return `⚠️ Error cleaning Rezolv inbox: ${err.message}`;
+  }
+}
+
+async function clearAllRezolvActiveTickets(from = null, mode = "resolve") {
+  try {
+    const rezolvCtx = await getUserRezolvContext(from);
+    const wsId = rezolvCtx.workspaceId || REZOLV_CONFIG.workspaceId;
+    const wsName = rezolvCtx.brandName || rezolvCtx.workspaceName || "DataMart";
+
+    let activeTickets = [];
+    // 1. Fetch all open tickets across pages
+    for (let p = 1; p <= 10; p++) {
+      const res = await rezolvApiRequest(`/tickets?workspaceId=${wsId}&status=open&page=${p}&limit=100`, {}, from);
+      const list = res.data?.data?.tickets || res.data?.tickets || [];
+      if (!Array.isArray(list) || list.length === 0) break;
+      activeTickets.push(...list);
+      if (list.length < 100) break;
+    }
+    // 2. Fetch all in_progress tickets across pages
+    for (let p = 1; p <= 10; p++) {
+      const res = await rezolvApiRequest(`/tickets?workspaceId=${wsId}&status=in_progress&page=${p}&limit=100`, {}, from);
+      const list = res.data?.data?.tickets || res.data?.tickets || [];
+      if (!Array.isArray(list) || list.length === 0) break;
+      activeTickets.push(...list);
+      if (list.length < 100) break;
+    }
+
+    // Deduplicate by _id
+    const seen = new Map();
+    activeTickets.forEach(t => {
+      if (t && t._id) seen.set(t._id, t);
+    });
+    const unique = Array.from(seen.values());
+
+    if (unique.length === 0) {
+      return `🎉 *${wsName.toUpperCase()} SUPPORT INBOX IS ALREADY CLEAR!* ✨\n\nNo active or open tickets waiting in your chat inbox. All chats are resolved!`;
+    }
+
+    // Clear user pending review batch in memory
+    if (from) {
+      userPendingReviewBatch.delete(from);
+    }
+
+    // Process in parallel batches of 15
+    let successCount = 0;
+    const BATCH_SIZE = 15;
+    for (let i = 0; i < unique.length; i += BATCH_SIZE) {
+      const chunk = unique.slice(i, i + BATCH_SIZE);
+      const settled = await Promise.allSettled(chunk.map(async (t) => {
+        if (mode === "delete") {
+          return rezolvApiRequest(`/tickets/${t._id}`, { method: "DELETE" }, from);
+        } else {
+          return rezolvApiRequest(`/tickets/${t._id}/status`, {
+            method: "PATCH",
+            body: { status: "resolved" }
+          }, from);
+        }
+      }));
+      successCount += settled.filter(s => s.status === "fulfilled" && (s.value?.status === 200 || s.value?.status === 204)).length;
+    }
+
+    const actionWord = mode === "delete" ? "Permanently deleted" : "Resolved & cleared";
+    return (
+      `🧹 *CLEARED ALL TICKETS!* ✨\n\n` +
+      `Successfully *${actionWord.toLowerCase()} ${successCount} active ticket(s)* in your *${wsName}* support inbox at once!\n\n` +
+      `🎉 *Active Tickets Remaining: 0*\n` +
+      `Your *All* chat queue is now completely clear!`
+    );
+  } catch (err) {
+    console.warn("clearAllRezolvActiveTickets error:", err.message);
+    return `⚠️ Error clearing tickets from Rezolv: ${err.message}`;
   }
 }
 
@@ -9822,10 +9897,19 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     }
   }
 
-  // 2d. Natural "mark all ticket as resolve" / "mark all as resolved" / "resolve all tickets"
-  if (/\b(?:mark\s+all\s+(?:tickets?\s+)?as\s+resolve|resolve\s+all|close\s+all|clean\s+all)\b/i.test(cleanInput)) {
-    const cleanupRep = await cleanRezolvIdleGreetingTickets(30);
-    return sendWhatsApp(from, cleanupRep);
+  // 2d. Natural "clear all ticket" / "clear all tickets" / "resolve all" / "close all"
+  const isPurgeDeleteCmd1 = /\b(?:delete\s+all\s+(?:tickets?|chats?)|purge\s+all\s+(?:tickets?|chats?))\b/i.test(cleanInput);
+  const isClearAllCmd1 =
+    /\b(?:clear\s+all\s+(?:tickets?|chats?)|clear\s+(?:tickets?|chats?)|resolve\s+all\s*(?:tickets?|chats?)?|close\s+all\s*(?:tickets?|chats?)?|mark\s+all\s+(?:as\s+)?(?:resolve|closed?)|clean\s+all\s*(?:tickets?|chats?)?)\b/i.test(cleanInput) ||
+    /^(?:clear\s+all|resolve\s+all|close\s+all|clean\s+all)$/i.test(cleanInput.trim());
+
+  if (isPurgeDeleteCmd1) {
+    const clearRep = await clearAllRezolvActiveTickets(from, "delete");
+    return sendWhatsApp(from, clearRep);
+  }
+  if (isClearAllCmd1) {
+    const clearRep = await clearAllRezolvActiveTickets(from, "resolve");
+    return sendWhatsApp(from, clearRep);
   }
 
   // 3a. Rezolv Draft Reply (checked first so it doesn't collide with direct reply)
@@ -10542,9 +10626,18 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    if (/\b(?:mark\s+all\s+(?:tickets?\s+)?as\s+resolve|resolve\s+all|close\s+all|clean\s+all)\b/i.test(cleanCmd)) {
-      const cleanupRep = await cleanRezolvIdleGreetingTickets(30);
-      return sendWhatsApp(from, cleanupRep);
+    const isPurgeDeleteCmd2 = /\b(?:delete\s+all\s+(?:tickets?|chats?)|purge\s+all\s+(?:tickets?|chats?))\b/i.test(cleanCmd);
+    const isClearAllCmd2 =
+      /\b(?:clear\s+all\s+(?:tickets?|chats?)|clear\s+(?:tickets?|chats?)|resolve\s+all\s*(?:tickets?|chats?)?|close\s+all\s*(?:tickets?|chats?)?|mark\s+all\s+(?:as\s+)?(?:resolve|closed?)|clean\s+all\s*(?:tickets?|chats?)?)\b/i.test(cleanCmd) ||
+      /^(?:clear\s+all|resolve\s+all|close\s+all|clean\s+all)$/i.test(cleanCmd.trim());
+
+    if (isPurgeDeleteCmd2) {
+      const clearRep = await clearAllRezolvActiveTickets(from, "delete");
+      return sendWhatsApp(from, clearRep);
+    }
+    if (isClearAllCmd2) {
+      const clearRep = await clearAllRezolvActiveTickets(from, "resolve");
+      return sendWhatsApp(from, clearRep);
     }
 
     // ── BATCH INBOX DRAFTING (5-BY-5 REVIEW & DISPATCH) ──
