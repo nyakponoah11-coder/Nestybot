@@ -7257,9 +7257,10 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
             draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on ${brand} and it is confirmed DELIVERED on the ${net} network to ${ph}. Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
           }
         } else if (st === "queued" || liveTrack.isQueued) {
+          // Strictly calculate age from verified order creation date ONLY (never ticket age, never customer text regex)
           const orderDate = liveTrack.orderCreatedAt;
-          const ageMs = orderDate ? (Date.now() - new Date(orderDate).getTime()) : (fullTicket?.createdAt ? (Date.now() - new Date(fullTicket.createdAt).getTime()) : null);
-          const isOver24H = liveTrack.isQueuedOver24Hours || (ageMs && !isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)) || /\b(?:24\s*hrs?|24\s*hours?|yesterday|days?|over\s*a\s*day|going\s*to\s*24)\b/i.test(lastMsg);
+          const ageMs = orderDate ? (Date.now() - new Date(orderDate).getTime()) : null;
+          const isOver24H = Boolean(liveTrack.isQueuedOver24Hours || (orderDate && !isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)));
 
           const hasValidPortalId = portalId && /^\d{4,9}$/.test(String(portalId));
 
