@@ -1488,6 +1488,64 @@ SEND WHATSAPP
 
 async function sendWhatsApp(to, text) {
   try {
+    if (!to) {
+      console.warn("⚠️ [sendWhatsApp] Aborting: 'to' recipient is empty or undefined!");
+      return { ok: false, error: "Empty recipient" };
+    }
+
+    const rawTo = String(to).trim();
+    let formattedTo = "";
+
+    // 1. WhatsApp JID format (already has @g.us, @s.whatsapp.net, or @newsletter)
+    if (rawTo.includes("@")) {
+      formattedTo = rawTo;
+    } else if (/[a-zA-Z]/.test(rawTo)) {
+      formattedTo = rawTo.replace(/@.+$/, "").trim();
+    } else {
+      // 2. Standard numeric phone number (e.g. "0547100951", "233547100951")
+      const digitsOnly = rawTo.replace(/\D/g, "");
+      if (digitsOnly.startsWith("0") && digitsOnly.length === 10) {
+        formattedTo = "233" + digitsOnly.slice(1);
+      } else {
+        formattedTo = digitsOnly;
+      }
+    }
+
+    if (!formattedTo) {
+      console.warn("⚠️ [sendWhatsApp] Aborting: formattedTo is empty after cleaning for recipient:", to);
+      return { ok: false, error: "Invalid recipient" };
+    }
+
+    const safeText = String(text || "").trim();
+    if (!safeText) return { ok: false, error: "Empty text" };
+
+    // 🛡️ BLOCKLIST: No DATA 1 GH store/admin/broadcast notification may ever be delivered to 0599599254
+    const normRecipientDigits = formattedTo.replace(/\D/g, "");
+    if (normRecipientDigits.endsWith("599599254")) {
+      const isStoreAlertOrPromo = /DATA ORDER DELIVERED|NEW ORDER PAYMENT|NEW PAID BOT ORDER|SECURITY INTRUSION|DATA 1 GH — ALL ADMIN|TODAY'S NON-EXPIRY|FLASH SALE IS LIVE|FREE DATA GIVEAWAY|ORDER CONFIRMATION|DELIVERY UPDATE|Your order .* has been|DATA 1 GH — FAILED ORDERS|LOW BALANCE/i.test(safeText);
+      if (isStoreAlertOrPromo) {
+        console.log(`🚫 [DATA 1 NOTIFICATION BLOCKED] Suppressed store alert to ${to}`);
+        return { ok: true, suppressed: true };
+      }
+    }
+
+    // 🚀 1. PRIMARY: Deliver directly via Live Baileys WhatsApp Socket
+    try {
+      const bClient = await initBaileysChannelClient();
+      if (bClient && bClient.sock) {
+        let targetJid = formattedTo;
+        if (!targetJid.includes("@")) {
+          targetJid = `${targetJid}@s.whatsapp.net`;
+        }
+        await bClient.sock.sendMessage(targetJid, { text: safeText });
+        console.log(`📤 [sendWhatsApp] Delivered via Baileys to [${targetJid}]`);
+        return { ok: true, via: "baileys" };
+      }
+    } catch (bErr) {
+      console.warn(`[sendWhatsApp] Baileys direct send attempt for [${to}]:`, bErr.message);
+    }
+
+    // 🌐 2. FALLBACK: Deliver via Meta Cloud API if configured
     let token = ACCESS_TOKEN || process.env.ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
     let phoneId = PHONE_ID || process.env.PHONE_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
 
@@ -1517,52 +1575,11 @@ async function sendWhatsApp(to, text) {
     }
 
     if (!token || !phoneId) {
-      console.warn("⚠️ WhatsApp API credentials missing, cannot send message to:", to);
-      return;
-    }
-
-    if (!to) {
-      console.warn("⚠️ [sendWhatsApp] Aborting: 'to' recipient is empty or undefined!");
-      return;
-    }
-
-    const rawTo = String(to).trim();
-    let formattedTo = "";
-
-    // 1. WhatsApp Username account (e.g. "GH.1765821157838205" or alphanumeric JID)
-    if (/[a-zA-Z]/.test(rawTo)) {
-      formattedTo = rawTo.replace(/@.+$/, "").trim();
-    } else {
-      // 2. Standard numeric phone number (e.g. "0547100951", "233547100951")
-      const digitsOnly = rawTo.replace(/\D/g, "");
-      if (digitsOnly.startsWith("0") && digitsOnly.length === 10) {
-        formattedTo = "233" + digitsOnly.slice(1);
-      } else {
-        formattedTo = digitsOnly;
-      }
-    }
-
-    if (!formattedTo) {
-      console.warn("⚠️ [sendWhatsApp] Aborting: formattedTo is empty after cleaning for recipient:", to);
-      return;
+      console.warn("⚠️ Both Baileys and Meta WhatsApp channels unavailable for message to:", to);
+      return { ok: false, error: "No delivery channel available" };
     }
 
     const isBsuid = /^[a-zA-Z]{2}\./.test(formattedTo) || /[a-zA-Z]/.test(formattedTo);
-    const safeText = String(text || "").trim();
-    if (!safeText) return;
-
-    // 🛡️ BLOCKLIST: No DATA 1 GH store/admin/broadcast notification may ever be delivered to 0599599254
-    const normRecipientDigits = formattedTo.replace(/\D/g, "");
-    if (normRecipientDigits.endsWith("599599254")) {
-      const isStoreAlertOrPromo = /DATA ORDER DELIVERED|NEW ORDER PAYMENT|NEW PAID BOT ORDER|SECURITY INTRUSION|DATA 1 GH — ALL ADMIN|TODAY'S NON-EXPIRY|FLASH SALE IS LIVE|FREE DATA GIVEAWAY|ORDER CONFIRMATION|DELIVERY UPDATE|Your order .* has been|DATA 1 GH — FAILED ORDERS|LOW BALANCE/i.test(safeText);
-      if (isStoreAlertOrPromo) {
-        console.log(`🚫 [DATA 1 NOTIFICATION BLOCKED] Suppressed store alert to ${to}`);
-        return;
-      }
-    }
-
-    // 🛡️ WhatsApp Meta API enforces a strict 4096-character limit on text.body.
-    // If text exceeds 4000 chars, split cleanly into parts and send sequentially!
     const MAX_CHUNK = 4000;
     const chunks = [];
     if (safeText.length <= MAX_CHUNK) {
@@ -1616,7 +1633,7 @@ async function sendWhatsApp(to, text) {
         await new Promise(r => setTimeout(r, 600));
       }
     }
-    return { ok: true };
+    return { ok: true, via: "meta" };
   } catch (e) {
     console.error(`WA ERROR sending to [${to}]:`, e.response?.data || e.message);
     return { ok: false, error: e.message };
@@ -1941,12 +1958,6 @@ async function sendAdminWhatsApp(text) {
     for (const target of adminTargets) {
       if (isBlockedNotificationTarget(target)) {
         console.log(`🚫 [DATA 1 NOTIFICATION BLOCKED] Suppressed admin WhatsApp alert to ${target}`);
-        continue;
-      }
-      // Check if admin is currently active in Support Mode
-      const currentMode = getUserMode(target);
-      if (currentMode === "support") {
-        console.log(`🔇 Suppressing store alert to ${target} because admin is currently active in Support Mode.`);
         continue;
       }
       await sendWhatsApp(target, text);
@@ -16801,6 +16812,7 @@ async function notifyAgentNewOrder(order) {
     const { data: ag } = await supabase
       .from("agents")
       .select("id, name, phone, whatsapp_number, momo_number, store_name, store_slug")
+      .or(`id.eq.${resolvedAgentId},store_slug.ilike.${resolvedAgentId}`)
       .maybeSingle();
 
     if (ag) {
