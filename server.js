@@ -7100,39 +7100,34 @@ async function cleanRezolvIdleGreetingTickets(maxToClean = 40) {
   }
 }
 
-async function clearAllRezolvActiveTickets(from = null, mode = "resolve") {
+async function clearAllRezolvActiveTickets(from = null, mode = "delete") {
   try {
     const rezolvCtx = await getUserRezolvContext(from);
     const wsId = rezolvCtx.workspaceId || REZOLV_CONFIG.workspaceId;
     const wsName = rezolvCtx.brandName || rezolvCtx.workspaceName || "DataMart";
 
-    let activeTickets = [];
-    // 1. Fetch all open tickets across pages
-    for (let p = 1; p <= 10; p++) {
-      const res = await rezolvApiRequest(`/tickets?workspaceId=${wsId}&status=open&page=${p}&limit=100`, {}, from);
+    let targetTickets = [];
+    // Fetch all tickets across pages
+    for (let p = 1; p <= 15; p++) {
+      const res = await rezolvApiRequest(`/tickets?workspaceId=${wsId}&page=${p}&limit=50`, {}, from);
       const list = res.data?.data?.tickets || res.data?.tickets || [];
       if (!Array.isArray(list) || list.length === 0) break;
-      activeTickets.push(...list);
-      if (list.length < 100) break;
-    }
-    // 2. Fetch all in_progress tickets across pages
-    for (let p = 1; p <= 10; p++) {
-      const res = await rezolvApiRequest(`/tickets?workspaceId=${wsId}&status=in_progress&page=${p}&limit=100`, {}, from);
-      const list = res.data?.data?.tickets || res.data?.tickets || [];
-      if (!Array.isArray(list) || list.length === 0) break;
-      activeTickets.push(...list);
-      if (list.length < 100) break;
+      targetTickets.push(...list);
+      if (list.length < 50) break;
     }
 
     // Deduplicate by _id
     const seen = new Map();
-    activeTickets.forEach(t => {
+    targetTickets.forEach(t => {
       if (t && t._id) seen.set(t._id, t);
     });
-    const unique = Array.from(seen.values());
+    const allList = Array.from(seen.values());
 
-    if (unique.length === 0) {
-      return `🎉 *${wsName.toUpperCase()} SUPPORT INBOX IS ALREADY CLEAR!* ✨\n\nNo active or open tickets waiting in your chat inbox. All chats are resolved!`;
+    // Target any active ticket (open/in_progress) or any ticket with unread messages (which triggers the Inbox badge)
+    const toClear = allList.filter(t => t.status === "open" || t.status === "in_progress" || (t.unreadCount || 0) > 0);
+
+    if (toClear.length === 0) {
+      return `🎉 *${wsName.toUpperCase()} SUPPORT INBOX IS ALREADY CLEAR!* ✨\n\nNo unread or active tickets waiting in your chat inbox. Both *Inbox* and *All* badges are 0!`;
     }
 
     // Clear user pending review batch in memory
@@ -7142,30 +7137,29 @@ async function clearAllRezolvActiveTickets(from = null, mode = "resolve") {
       } catch (_) { }
     }
 
-    // Process in parallel batches of 15
+    // Permanently purge each ticket using DELETE /tickets/:id so the Inbox badge drops to 0
     let successCount = 0;
     const BATCH_SIZE = 15;
-    for (let i = 0; i < unique.length; i += BATCH_SIZE) {
-      const chunk = unique.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < toClear.length; i += BATCH_SIZE) {
+      const chunk = toClear.slice(i, i + BATCH_SIZE);
       const settled = await Promise.allSettled(chunk.map(async (t) => {
-        if (mode === "delete") {
-          return rezolvApiRequest(`/tickets/${t._id}`, { method: "DELETE" }, from);
-        } else {
+        if (mode === "resolve") {
           return rezolvApiRequest(`/tickets/${t._id}/status`, {
             method: "PATCH",
             body: { status: "resolved" }
           }, from);
+        } else {
+          return rezolvApiRequest(`/tickets/${t._id}`, { method: "DELETE" }, from);
         }
       }));
       successCount += settled.filter(s => s.status === "fulfilled" && (s.value?.status === 200 || s.value?.status === 204)).length;
     }
 
-    const actionWord = mode === "delete" ? "Permanently deleted" : "Resolved & cleared";
     return (
-      `🧹 *CLEARED ALL TICKETS!* ✨\n\n` +
-      `Successfully *${actionWord.toLowerCase()} ${successCount} active ticket(s)* in your *${wsName}* support inbox at once!\n\n` +
-      `🎉 *Active Tickets Remaining: 0*\n` +
-      `Your *All* chat queue is now completely clear!`
+      `🧹 *CLEARED ALL INBOX TICKETS!* ✨\n\n` +
+      `Permanently removed and purged *${successCount} chat ticket(s)* in your *${wsName}* support inbox!\n\n` +
+      `🎉 *Active Tickets & Inbox Badge: 0*\n` +
+      `Both the *Inbox* and *All* chat badges on your dashboard are now completely cleared!`
     );
   } catch (err) {
     console.warn("clearAllRezolvActiveTickets error:", err.message);
