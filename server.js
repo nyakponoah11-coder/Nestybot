@@ -1531,15 +1531,27 @@ async function sendWhatsApp(to, text) {
 
     // 🚀 1. PRIMARY: Deliver directly via Live Baileys WhatsApp Socket
     try {
-      const bClient = await initBaileysChannelClient();
-      if (bClient && bClient.sock) {
+      let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
+      if (!sock) {
+        await initBaileysChannelClient();
+        for (let i = 0; i < 15; i++) {
+          if (baileysChannelReady && baileysChannelSock) {
+            sock = baileysChannelSock;
+            break;
+          }
+          await new Promise(r => setTimeout(r, 400));
+        }
+      }
+      if (sock) {
         let targetJid = formattedTo;
         if (!targetJid.includes("@")) {
           targetJid = `${targetJid}@s.whatsapp.net`;
         }
-        await bClient.sock.sendMessage(targetJid, { text: safeText });
+        await sock.sendMessage(targetJid, { text: safeText });
         console.log(`📤 [sendWhatsApp] Delivered via Baileys to [${targetJid}]`);
-        return { ok: true, via: "baileys" };
+        return { ok: true, via: "baileys", jid: targetJid };
+      } else {
+        console.warn(`[sendWhatsApp] Baileys socket not ready after wait for [${to}]`);
       }
     } catch (bErr) {
       console.warn(`[sendWhatsApp] Baileys direct send attempt for [${to}]:`, bErr.message);
@@ -16676,18 +16688,39 @@ app.post("/api/send-admin-alert", async (req, res) => {
   try {
     const { text, to } = req.body || {};
     if (!text) return res.status(400).json({ error: "Missing alert text" });
+    let delivery = null;
     if (to) {
       if (String(to).replace(/\D/g, "").endsWith("599599254")) {
         console.log(`🚫 [DATA 1 NOTIFICATION BLOCKED] /api/send-admin-alert suppressed for ${to}`);
         return res.json({ ok: true, suppressed: true });
       }
-      await sendWhatsApp(to, text);
+      delivery = await sendWhatsApp(to, text);
     } else {
-      await sendAdminWhatsApp(text);
+      delivery = await sendAdminWhatsApp(text);
     }
-    return res.json({ ok: true });
+    return res.json({ ok: true, delivery });
   } catch (err) {
     return res.status(500).json({ error: err?.message });
+  }
+});
+
+app.get("/api/test-wa-status", async (req, res) => {
+  try {
+    const to = req.query.to || "233547100951";
+    const text = req.query.text || "🔔 *TEST NOTIFICATION* — Baileys Direct Ping!";
+    let sockMe = null;
+    try {
+      if (baileysChannelSock?.user) sockMe = baileysChannelSock.user;
+    } catch (_) { }
+    const sendResult = await sendWhatsApp(to, text);
+    return res.json({
+      baileysReady: baileysChannelReady,
+      hasSock: Boolean(baileysChannelSock),
+      sockMe,
+      sendResult
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
