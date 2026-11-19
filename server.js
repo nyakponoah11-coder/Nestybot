@@ -17446,14 +17446,8 @@ async function runDatamartSupportWatcher() {
         const reason = latest.reportReason || "AI Escalation";
         const desc = (latest.description || "").replace(/\s+/g, " ").trim().slice(0, 160);
 
-        await sendWhatsApp(targetPhone,
-          `🚨 *NEW URGENT TICKET ON DATAMART AGENT SUPPORT!*\n\n` +
-          `🆔 *Ticket ID:* *${latest.reportId}*\n` +
-          `👤 *Customer:* ${custName} (${custPhone})\n` +
-          `🏷️ *Reason:* *${reason}*\n` +
-          `📝 *Issue:* ${desc}${desc.length >= 160 ? "..." : ""}\n\n` +
-          `💡 Reply: *view ticket ${latest.reportId}* to view full ticket & contact customer!`
-        ).catch(() => { });
+        // Support alert suppressed per owner command
+        // await sendWhatsApp(targetPhone, `🚨 *NEW URGENT TICKET ON DATAMART AGENT SUPPORT!*...`);
       }
     }
   } catch (err) {
@@ -17461,9 +17455,9 @@ async function runDatamartSupportWatcher() {
   }
 }
 
-// Check every 3 minutes for new urgent customer/agent escalations on DataMart
-setInterval(runDatamartSupportWatcher, 180000);
-setTimeout(runDatamartSupportWatcher, 20000);
+// Datamart support WhatsApp alert disabled per owner command ("stop this alert everywhere")
+// setInterval(runDatamartSupportWatcher, 180000);
+// setTimeout(runDatamartSupportWatcher, 20000);
 
 /* =========================================================
 24/7 REZOLV LIVE CUSTOMER SUPPORT URGENT TICKET WATCHER
@@ -17525,15 +17519,8 @@ async function runRezolvUrgentWatcher() {
             }
           } catch (_) { }
 
-          await sendWhatsApp(targetPhone,
-            `🚨 *DATAMART CUSTOMER SUPPORT ALERT (REZOLV)*\n\n` +
-            `🆔 *Ticket:* *${tktNum}*\n` +
-            `👤 *Customer:* ${custName}${custEmail}\n` +
-            `🚩 *Status:* Needs a Human\n` +
-            `💬 *Message:*\n"${lastMsg}${lastMsg.length >= 160 ? "..." : ""}"\n` +
-            draftHint +
-            `\n💡 *Or customize:* *reply ${tktNum} [your message]*`
-          ).catch(() => { });
+          // Rezolv alert suppressed per owner command ("stop this alert everywhere")
+          // await sendWhatsApp(targetPhone, `🚨 *DATAMART CUSTOMER SUPPORT ALERT (REZOLV)*...`);
         }
       }
     }
@@ -17565,9 +17552,9 @@ async function runRezolvUrgentWatcher() {
   }
 }
 
-// Check every 2 minutes for new urgent tickets on Rezolv
-setInterval(runRezolvUrgentWatcher, 120000);
-setTimeout(runRezolvUrgentWatcher, 25000);
+// Rezolv support WhatsApp alert disabled per owner command ("stop this alert everywhere")
+// setInterval(runRezolvUrgentWatcher, 120000);
+// setTimeout(runRezolvUrgentWatcher, 25000);
 
 /* =========================================================
 START SERVER
