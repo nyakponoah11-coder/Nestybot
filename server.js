@@ -2147,6 +2147,7 @@ let baileysChannelReady = false;
 let baileysChannelConnecting = false;
 let pendingChannelPostQueue = null;
 let lastPairingOwnerPhone = "233547100951";
+const recentBaileysMessages = [];
 
 async function restoreBaileysAuthFromSupabase() {
   try {
@@ -2279,6 +2280,30 @@ async function initBaileysChannelClient(options = {}) {
     sock.ev.on("creds.update", async () => {
       await saveCreds();
       scheduleBackupBaileysAuthToSupabase();
+    });
+
+    sock.ev.on("messages.upsert", async (upsert) => {
+      try {
+        const { messages } = upsert || {};
+        if (!Array.isArray(messages)) return;
+        for (const m of messages) {
+          if (!m.message) continue;
+          const remoteJid = m.key?.remoteJid || "";
+          const participant = m.key?.participant || m.participant || "";
+          const text = m.message?.conversation || m.message?.extendedTextMessage?.text || m.message?.imageMessage?.caption || "";
+          recentBaileysMessages.unshift({
+            time: new Date().toISOString(),
+            from: remoteJid,
+            participant,
+            text,
+            fromMe: Boolean(m.key?.fromMe)
+          });
+          if (recentBaileysMessages.length > 50) recentBaileysMessages.pop();
+          console.log(`📥 [Baileys Live Msg] from: [${remoteJid}] participant: [${participant}] text: "${text}" fromMe: ${m.key?.fromMe}`);
+        }
+      } catch (e) {
+        console.warn("messages.upsert log error:", e.message);
+      }
     });
 
     sock.ev.on("connection.update", async (update) => {
@@ -17730,6 +17755,13 @@ app.get("/api/debug-group", async (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
+});
+
+app.get("/api/recent-group-messages", (req, res) => {
+  return res.json({
+    count: recentBaileysMessages.length,
+    messages: recentBaileysMessages
+  });
 });
 
 app.get("/api/scan-and-submit-failed", async (req, res) => {
