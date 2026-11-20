@@ -256,6 +256,12 @@ const AdminOrders = () => {
       const res = await invokeApiFunction("admin-data", {
         body: { action: "syncLivePayment", reference: o.reference, id: o.id },
       });
+      if (res?.error) {
+        throw new Error(res.error.message || "Failed to sync payment status");
+      }
+      if (res?.data?.error) {
+        throw new Error(res.data.error);
+      }
       const updated = res?.data?.order;
       if (updated) {
         setOrders(prev =>
@@ -297,7 +303,7 @@ const AdminOrders = () => {
     try {
       const pendingRefs = orders
         .filter(o => o.source !== "free_data" && o.payment_status !== "paid")
-        .slice(0, 30)
+        .slice(0, 50)
         .map(o => o.reference);
 
       if (silent && pendingRefs.length === 0) return;
@@ -308,6 +314,13 @@ const AdminOrders = () => {
           references: pendingRefs.length > 0 ? pendingRefs : undefined,
         },
       });
+
+      if (res?.error) {
+        throw new Error(res.error.message || "Failed to sync live payments");
+      }
+      if (res?.data?.error) {
+        throw new Error(res.data.error);
+      }
 
       if (res?.data?.updatedOrders && Array.isArray(res.data.updatedOrders)) {
         const map = new Map<string, any>(res.data.updatedOrders.map((u: any) => [String(u.reference || ""), u]));
@@ -332,13 +345,16 @@ const AdminOrders = () => {
 
       invalidateCache("admin_orders_list");
 
-      const { paidCount = 0, failedCount = 0, stillPendingCount = 0, totalChecked = 0 } = res?.data || {};
+      const { paidCount = 0, failedCount = 0, stillPendingCount = 0, totalChecked = 0, missingPaystackKey, message } = res?.data || {};
       if (!silent) {
-        if (paidCount > 0) {
-          toast.success(`Live payment sync complete: ${paidCount} marked PAID, ${failedCount} failed (auto recovery SMS sent), ${stillPendingCount} still pending.`);
+        if (missingPaystackKey && stillPendingCount > 0) {
+          toast.warning(message || "Paystack Secret Key is missing in Admin Settings.");
+          load(true, true);
+        } else if (paidCount > 0 || failedCount > 0) {
+          toast.success(message || `Live payment sync complete: ${paidCount} marked PAID, ${failedCount} marked failed.`);
           load(true, true);
         } else if (totalChecked > 0) {
-          toast.info(`Checked ${totalChecked} payments: ${failedCount} failed (auto recovery SMS sent), ${stillPendingCount} still awaiting MoMo approval.`);
+          toast.info(`Checked ${totalChecked} payments: ${failedCount} failed, ${stillPendingCount} still awaiting MoMo approval.`);
           load(true, true);
         } else {
           toast.info("All payments are already up to date.");
