@@ -1552,9 +1552,7 @@ async function sendWhatsApp(to, text) {
               await sock.authState.keys.set({ 'sender-key-memory': { [formattedTo]: null } });
             }
           } catch (_) { }
-          const myLid = sock.user?.lid ? sock.user.lid.replace(/:.+@/, "@") : sock.user?.lid;
-          const sendOpts = myLid ? { userJid: myLid } : {};
-          const sent = await sock.sendMessage(formattedTo, { text: safeText }, sendOpts);
+          const sent = await sock.sendMessage(formattedTo, { text: safeText });
           if (sent?.key?.id && sent?.message) {
             recentSentMessagesStore.set(sent.key.id, sent.message);
             if (recentSentMessagesStore.size > 200) {
@@ -2617,7 +2615,7 @@ Pre-checks if Portal ID already exists to prevent duplicates!
 const failedPortalIdSubmissionsInFlight = new Set();
 const submittedPortalIdsTimestamps = new Map();
 const SUBMISSION_DEDUP_WINDOW_MS = 12 * 60 * 60 * 1000; // 12-hour rolling deduplication window
-const DEFAULT_FAILED_ORDERS_GROUP_JID = "120363410603023075@g.us";
+const DEFAULT_FAILED_ORDERS_GROUP_JID = "120363411273230975@g.us";
 const DEFAULT_FAILED_ORDERS_GROUP_NAME = "Unprocessed Orders";
 let portalIdCacheSeeded = false;
 
@@ -2830,9 +2828,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
         await sock.authState.keys.set({ 'sender-key-memory': { [groupJid]: null } });
       }
     } catch (_) { }
-    const myLid = sock.user?.lid ? sock.user.lid.replace(/:.+@/, "@") : sock.user?.lid;
-    const sendOpts = myLid ? { userJid: myLid } : {};
-    const sent = await sock.sendMessage(groupJid, { text: sendText }, sendOpts);
+    const sent = await sock.sendMessage(groupJid, { text: sendText });
     if (sent?.key?.id && sent?.message) {
       recentSentMessagesStore.set(sent.key.id, sent.message);
       if (recentSentMessagesStore.size > 200) {
