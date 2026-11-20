@@ -1547,7 +1547,9 @@ async function sendWhatsApp(to, text) {
           }
         }
         if (sock) {
-          const sent = await sock.sendMessage(formattedTo, { text: safeText });
+          const myLid = sock.user?.lid ? sock.user.lid.replace(/:.+@/, "@") : sock.user?.lid;
+          const sendOpts = myLid ? { userJid: myLid } : {};
+          const sent = await sock.sendMessage(formattedTo, { text: safeText }, sendOpts);
           console.log(`📤 [sendWhatsApp] Delivered group message via Baileys to [${formattedTo}] ID: [${sent?.key?.id}] status: [${sent?.status}]`);
           return { ok: true, via: "baileys_group", jid: formattedTo, msgId: sent?.key?.id, status: sent?.status, key: sent?.key };
         }
@@ -2761,7 +2763,9 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
 
     // 4. Send ONLY the Portal ID (clean copyable ID as requested) or test message
     const sendText = isTest ? "🔔 *Stony Bot Group Test Ping:* Connection active! Ready to receive unprocessed IDs." : String(cleanId);
-    const sent = await sock.sendMessage(groupJid, { text: sendText });
+    const myLid = sock.user?.lid ? sock.user.lid.replace(/:.+@/, "@") : sock.user?.lid;
+    const sendOpts = myLid ? { userJid: myLid } : {};
+    const sent = await sock.sendMessage(groupJid, { text: sendText }, sendOpts);
     submittedPortalIdsTimestamps.set(cleanId, Date.now());
     console.log(`🚀 [FAILED ORDER GROUP] Posted Portal ID ${cleanId} to ${groupSubject} (${groupJid}) [msgId: ${sent?.key?.id}, status: ${sent?.status}] [isUserGroup: ${isUserGroup}, caller: ${normCaller || "default_owner"}]`);
 
@@ -17759,7 +17763,12 @@ app.get("/api/debug-group", async (req, res) => {
       }
 
       try {
-        directSendResult = await baileysChannelSock.sendMessage("120363411273230975@g.us", { text: "🧪 Test send direct via Baileys" });
+        const myLid = baileysChannelSock.user?.lid ? baileysChannelSock.user.lid.replace(/:.+@/, "@") : baileysChannelSock.user?.lid;
+        directSendResult = await baileysChannelSock.sendMessage("120363411273230975@g.us", { 
+          text: "571108" 
+        }, {
+          userJid: myLid
+        });
       } catch (sErr) {
         directSendErr = {
           message: sErr.message,
