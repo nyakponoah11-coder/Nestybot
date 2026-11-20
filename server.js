@@ -9032,6 +9032,55 @@ async function scanDatamartUnappliedDelivered(dateQuery = null, callerPhone = nu
     const yesterdayDate = new Date(Date.now() - 24 * 3600 * 1000);
     const yesterdayGhana = yesterdayDate.toLocaleDateString("en-CA", { timeZone: "Africa/Accra" });
 
+    // Flexible date parser: handles 2026-11-8, 2026-11-08, 8/11/2026, Nov 8, 8th Nov, etc.
+    function parseCustomDate(str) {
+      if (!str) return null;
+      const s = String(str).trim().toLowerCase();
+
+      // YYYY-M-D or YYYY-MM-DD (e.g. 2026-11-8, 2026-11-08, 2026/11/8)
+      const ymd = s.match(/\b(202\d)[-\/.]([01]?\d)[-\/.]([0-3]?\d)\b/);
+      if (ymd) {
+        const y = ymd[1];
+        const m = String(parseInt(ymd[2], 10)).padStart(2, '0');
+        const d = String(parseInt(ymd[3], 10)).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+      }
+
+      // D-M-YYYY or DD-MM-YYYY (e.g. 8-11-2026, 08/11/2026)
+      const dmy = s.match(/\b([0-3]?\d)[-\/.]([01]?\d)[-\/.](202\d)\b/);
+      if (dmy) {
+        const d = String(parseInt(dmy[1], 10)).padStart(2, '0');
+        const m = String(parseInt(dmy[2], 10)).padStart(2, '0');
+        const y = dmy[3];
+        return `${y}-${m}-${d}`;
+      }
+
+      const monthMap = {
+        jan: "01", january: "01", feb: "02", february: "02", mar: "03", march: "03",
+        apr: "04", april: "04", may: "05", jun: "06", june: "06", jul: "07", july: "07",
+        aug: "08", august: "08", sep: "09", september: "09", oct: "10", october: "10",
+        nov: "11", november: "11", dec: "12", december: "12"
+      };
+
+      const monthFirst = s.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+([0-3]?\d)(?:st|nd|rd|th)?(?:\s+(202\d))?\b/i);
+      if (monthFirst) {
+        const m = monthMap[monthFirst[1].toLowerCase()];
+        const d = String(parseInt(monthFirst[2], 10)).padStart(2, '0');
+        const y = monthFirst[3] || new Date().getFullYear();
+        return `${y}-${m}-${d}`;
+      }
+
+      const dayFirst = s.match(/\b([0-3]?\d)(?:st|nd|rd|th)?\s+(?:of\s+)?(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(202\d))?\b/i);
+      if (dayFirst) {
+        const d = String(parseInt(dayFirst[1], 10)).padStart(2, '0');
+        const m = monthMap[dayFirst[2].toLowerCase()];
+        const y = dayFirst[3] || new Date().getFullYear();
+        return `${y}-${m}-${d}`;
+      }
+
+      return null;
+    }
+
     const isAll = cleanDateQ.includes("all") || cleanDateQ.includes("system") || cleanDateQ === "everything" || cleanDateQ === "total";
 
     let targetDateStr = todayGhana;
@@ -9043,13 +9092,13 @@ async function scanDatamartUnappliedDelivered(dateQuery = null, callerPhone = nu
     } else if (cleanDateQ.includes("yesterday")) {
       targetDateStr = yesterdayGhana;
       dateLabel = `Yesterday (${yesterdayGhana})`;
-    } else if (cleanDateQ.includes("today")) {
+    } else if (cleanDateQ.includes("today") || !cleanDateQ) {
       targetDateStr = todayGhana;
       dateLabel = `Today (${todayGhana})`;
     } else {
-      const matchIso = cleanDateQ.match(/\b(202\d-[01]\d-[0-3]\d)\b/);
-      if (matchIso) {
-        targetDateStr = matchIso[1];
+      const parsed = parseCustomDate(cleanDateQ);
+      if (parsed) {
+        targetDateStr = parsed;
         dateLabel = targetDateStr;
       }
     }
