@@ -2555,9 +2555,10 @@ async function seedSubmittedPortalIdsCache() {
 }
 
 async function submitFailedPortalIdToGroup(portalId, meta = {}) {
+  const isTest = meta.isTest || portalId === "TEST-PING";
   const rawId = String(portalId || "").trim();
-  // ONLY strictly 4-to-9 digit numeric Portal IDs are valid (NO letters, NO hyphens, NO references)
-  if (!/^\d{4,9}$/.test(rawId)) {
+  // ONLY strictly 4-to-9 digit numeric Portal IDs are valid (NO letters, NO hyphens, NO references) UNLESS test
+  if (!isTest && !/^\d{4,9}$/.test(rawId)) {
     console.log(`[FAILED ORDER GROUP] Rejected non-portal-ID target: "${portalId}". Group reporting is strictly for numeric Portal IDs.`);
     return { ok: false, reason: "invalid_id" };
   }
@@ -2733,8 +2734,9 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
       return { ok: false, reason: "baileys_not_ready" };
     }
 
-    // 4. Send ONLY the Portal ID (clean copyable ID as requested)
-    await sock.sendMessage(groupJid, { text: String(cleanId) });
+    // 4. Send ONLY the Portal ID (clean copyable ID as requested) or test message
+    const sendText = isTest ? "🔔 *Stony Bot Group Test Ping:* Connection active! Ready to receive unprocessed IDs." : String(cleanId);
+    await sock.sendMessage(groupJid, { text: sendText });
     submittedPortalIdsTimestamps.set(cleanId, Date.now());
     console.log(`🚀 [FAILED ORDER GROUP] Posted Portal ID ${cleanId} to ${groupSubject} (${groupJid}) [isUserGroup: ${isUserGroup}, caller: ${normCaller || "default_owner"}]`);
 
@@ -3072,6 +3074,12 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
         { key: "failed_orders_group_name", value: groupSubject },
         { key: "failed_orders_group_invite", value: input }
       ], { onConflict: "key" });
+    }
+
+    try {
+      await sock.sendMessage(targetJid, { text: "🔔 *Unprocessed Orders Bot Connected!* Failed portal IDs will now be posted here automatically." });
+    } catch (postErr) {
+      console.warn("Could not send welcome post to group:", postErr.message);
     }
 
     const roleLabel = isCallerOwner ? "Owner Default Group" : `Your Account (${callerPhone})`;
@@ -10673,6 +10681,16 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     return sendWhatsApp(from, rep);
   }
 
+  // Test / Ping Group
+  if (/^(?:test\s*group|ping\s*group|check\s*group\s*ping)$/i.test(cleanInput)) {
+    const res = await submitFailedPortalIdToGroup("TEST-PING", { isTest: true, manual: true, force: true, callerPhone: from });
+    if (res.ok) {
+      return sendWhatsApp(from, `🔔 *TEST PING SENT!* Sent a test message to group *${res.group || "Unprocessed Orders"}*.\n\n👉 If you do NOT see it in your group, send your group's invite link here (e.g. *https://chat.whatsapp.com/...*) to re-link it.`);
+    } else {
+      return sendWhatsApp(from, `⚠️ Could not send test ping to group: ${res.reason || res.error}\n\n💡 Send your group invite link (e.g. *https://chat.whatsapp.com/...*) to re-link.`);
+    }
+  }
+
   // Disconnect / Unlink Group
   if (/^(?:disconnect\s*group|unlink\s*group|remove\s*group|reset\s*group)$/i.test(cleanInput)) {
     const rep = await disconnectUserFailedOrdersGroup(from);
@@ -11330,6 +11348,15 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
     if (/^(?:my\s*group|group\s*status|check\s*group)$/i.test(cleanCmd)) {
       const rep = await getUserFailedOrdersGroupStatus(from);
       return sendWhatsApp(from, rep);
+    }
+
+    if (/^(?:test\s*group|ping\s*group|check\s*group\s*ping)$/i.test(cleanCmd)) {
+      const res = await submitFailedPortalIdToGroup("TEST-PING", { isTest: true, manual: true, force: true, callerPhone: from });
+      if (res.ok) {
+        return sendWhatsApp(from, `🔔 *TEST PING SENT!* Sent a test message to group *${res.group || "Unprocessed Orders"}*.\n\n👉 If you do NOT see it in your group, send your group's invite link here (e.g. *https://chat.whatsapp.com/...*) to re-link it.`);
+      } else {
+        return sendWhatsApp(from, `⚠️ Could not send test ping to group: ${res.reason || res.error}\n\n💡 Send your group invite link (e.g. *https://chat.whatsapp.com/...*) to re-link.`);
+      }
     }
 
     if (/^(?:disconnect\s*group|unlink\s*group|remove\s*group|reset\s*group)$/i.test(cleanCmd)) {
