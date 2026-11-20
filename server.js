@@ -1550,6 +1550,13 @@ async function sendWhatsApp(to, text) {
           const myLid = sock.user?.lid ? sock.user.lid.replace(/:.+@/, "@") : sock.user?.lid;
           const sendOpts = myLid ? { userJid: myLid } : {};
           const sent = await sock.sendMessage(formattedTo, { text: safeText }, sendOpts);
+          if (sent?.key?.id && sent?.message) {
+            recentSentMessagesStore.set(sent.key.id, sent.message);
+            if (recentSentMessagesStore.size > 200) {
+              const oldest = recentSentMessagesStore.keys().next().value;
+              recentSentMessagesStore.delete(oldest);
+            }
+          }
           console.log(`📤 [sendWhatsApp] Delivered group message via Baileys to [${formattedTo}] ID: [${sent?.key?.id}] status: [${sent?.status}]`);
           return { ok: true, via: "baileys_group", jid: formattedTo, msgId: sent?.key?.id, status: sent?.status, key: sent?.key };
         }
@@ -2219,6 +2226,28 @@ async function resolveNewsletterJidViaBaileys(sock, channelUrl = DEFAULT_WHATSAP
   return "";
 }
 
+const groupMetadataCache = new Map();
+const recentSentMessagesStore = new Map();
+
+async function getCachedGroupMetadata(jid) {
+  if (groupMetadataCache.has(jid)) {
+    const entry = groupMetadataCache.get(jid);
+    if (Date.now() - entry.time < 10 * 60 * 1000) {
+      return entry.data;
+    }
+  }
+  if (baileysChannelSock?.groupMetadata) {
+    try {
+      const meta = await baileysChannelSock.groupMetadata(jid);
+      if (meta) {
+        groupMetadataCache.set(jid, { time: Date.now(), data: meta });
+        return meta;
+      }
+    } catch (_) { }
+  }
+  return null;
+}
+
 async function initBaileysChannelClient(options = {}) {
   const { forceReset = false, requestPairForPhone = "" } = options;
   if (baileysChannelReady && baileysChannelSock && !forceReset && !requestPairForPhone) {
@@ -2274,8 +2303,14 @@ async function initBaileysChannelClient(options = {}) {
       printQRInTerminal: false,
       logger: pino({ level: "silent" }),
       browser: Browsers ? Browsers.ubuntu("Chrome") : ["Ubuntu", "Chrome", "20.0.04"],
-      syncFullHistory: false,
-      markOnlineOnConnect: false,
+      syncFullHistory: true,
+      shouldSyncHistoryMessage: () => true,
+      markOnlineOnConnect: true,
+      enableRecentMessageCache: true,
+      cachedGroupMetadata: getCachedGroupMetadata,
+      getMessage: async (key) => {
+        return recentSentMessagesStore.get(key.id) || null;
+      }
     });
 
     baileysChannelSock = sock;
@@ -2788,6 +2823,13 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     const myLid = sock.user?.lid ? sock.user.lid.replace(/:.+@/, "@") : sock.user?.lid;
     const sendOpts = myLid ? { userJid: myLid } : {};
     const sent = await sock.sendMessage(groupJid, { text: sendText }, sendOpts);
+    if (sent?.key?.id && sent?.message) {
+      recentSentMessagesStore.set(sent.key.id, sent.message);
+      if (recentSentMessagesStore.size > 200) {
+        const oldest = recentSentMessagesStore.keys().next().value;
+        recentSentMessagesStore.delete(oldest);
+      }
+    }
     submittedPortalIdsTimestamps.set(cleanId, Date.now());
     console.log(`🚀 [FAILED ORDER GROUP] Posted Portal ID ${cleanId} to ${groupSubject} (${groupJid}) [msgId: ${sent?.key?.id}, status: ${sent?.status}] [isUserGroup: ${isUserGroup}, caller: ${normCaller || "default_owner"}]`);
 
