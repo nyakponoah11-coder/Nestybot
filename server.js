@@ -2866,6 +2866,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     // 1. Resolve target group JID (User-specific group, or fallback to owner's default group)
     const callerCandidate = meta.callerPhone || meta.from || meta.sender || meta.phone || null;
     const normCaller = callerCandidate ? String(callerCandidate).replace(/\D/g, "") : null;
+    const isCallerOwner = normCaller ? isOwnerPhone(normCaller) : true;
 
     let groupJid = null;
     let groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
