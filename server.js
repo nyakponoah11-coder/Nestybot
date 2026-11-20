@@ -2305,7 +2305,7 @@ async function initBaileysChannelClient(options = {}) {
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: "silent" }),
-      browser: Browsers ? Browsers.ubuntu("Chrome") : ["Ubuntu", "Chrome", "20.0.04"],
+      browser: Browsers?.macOS ? Browsers.macOS("Desktop") : ["Mac OS", "Chrome", "14.4.1"],
       syncFullHistory: true,
       shouldSyncHistoryMessage: () => true,
       markOnlineOnConnect: true,
@@ -2375,7 +2375,7 @@ async function initBaileysChannelClient(options = {}) {
               supabase.from("settings").select("value").eq("key", gKey).maybeSingle().then(({ data: gRow }) => {
                 let existing = [];
                 if (gRow?.value) {
-                  try { existing = typeof gRow.value === "string" ? JSON.parse(gRow.value) : gRow.value; } catch (_) {}
+                  try { existing = typeof gRow.value === "string" ? JSON.parse(gRow.value) : gRow.value; } catch (_) { }
                 }
                 if (!Array.isArray(existing)) existing = [];
                 let changed = false;
@@ -2391,9 +2391,9 @@ async function initBaileysChannelClient(options = {}) {
                     key: gKey,
                     value: JSON.stringify(existing),
                     updated_at: new Date().toISOString()
-                  }, { onConflict: "key" }).catch(() => {});
+                  }, { onConflict: "key" }).catch(() => { });
                 }
-              }).catch(() => {});
+              }).catch(() => { });
             }
           }
         }
@@ -2437,10 +2437,11 @@ async function initBaileysChannelClient(options = {}) {
             fsChannel.rmSync(BAILEYS_AUTH_DIR, { recursive: true, force: true });
           }
           await supabase.from("settings").delete().eq("key", "baileys_channel_auth_bundle");
-        } else if (state.creds?.registered) {
+        } else {
+          console.log(`🔄 [Baileys Channel] Disconnected (${statusCode || "network"}), reconnecting to finalize session...`);
           setTimeout(() => {
             initBaileysChannelClient().catch(() => { });
-          }, 8000);
+          }, 1500);
         }
       }
     });
@@ -2505,7 +2506,7 @@ async function restoreAgentAuthFromSupabase(cleanPhone, authDir) {
       }
       return true;
     }
-  } catch (_) {}
+  } catch (_) { }
   return false;
 }
 
@@ -2523,12 +2524,12 @@ async function backupAgentAuthToSupabase(cleanPhone, authDir) {
         { onConflict: "key" }
       );
     }
-  } catch (_) {}
+  } catch (_) { }
 }
 
 async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
   const cleanPhone = normalizeAgentPhone(rawPhone);
-  if (!cleanPhone || isOwnerPhone(cleanPhone)) return null;
+  if (!cleanPhone) return null;
 
   const { requestPair = false, forceReset = false } = options;
   const existing = agentSockets.get(cleanPhone);
@@ -2538,7 +2539,7 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
 
   const authDir = getAgentAuthDir(cleanPhone);
   if (forceReset) {
-    try { if (existing?.sock?.ws) existing.sock.ws.close(); } catch (_) {}
+    try { if (existing?.sock?.ws) existing.sock.ws.close(); } catch (_) { }
     agentSockets.delete(cleanPhone);
     if (fsChannel.existsSync(authDir)) fsChannel.rmSync(authDir, { recursive: true, force: true });
     await supabase.from("settings").delete().eq("key", `baileys_agent_auth_${cleanPhone}`);
@@ -2555,7 +2556,18 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
   const makeWASocket = baileys.makeWASocket || baileys.default?.makeWASocket || baileys.default;
   const { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = baileys;
 
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  let { state, saveCreds } = await useMultiFileAuthState(authDir);
+
+  if (requestPair && !state.creds?.registered) {
+    try { if (existing?.sock?.ws) existing.sock.ws.close(); } catch (_) { }
+    if (fsChannel.existsSync(authDir)) {
+      try { fsChannel.rmSync(authDir, { recursive: true, force: true }); } catch (_) { }
+    }
+    fsChannel.mkdirSync(authDir, { recursive: true });
+    const fresh = await useMultiFileAuthState(authDir);
+    state = fresh.state;
+    saveCreds = fresh.saveCreds;
+  }
 
   if (!state.creds?.registered && !requestPair) {
     return { ok: false, ready: false, needsPairing: true };
@@ -2565,7 +2577,7 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
   try {
     const latest = await fetchLatestBaileysVersion();
     if (latest?.version) version = latest.version;
-  } catch (_) {}
+  } catch (_) { }
 
   const entry = { sock: null, ready: false, connecting: true };
   agentSockets.set(cleanPhone, entry);
@@ -2575,7 +2587,7 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: "silent" }),
-    browser: Browsers ? Browsers.ubuntu("Chrome") : ["Ubuntu", "Chrome", "20.0.04"],
+    browser: Browsers?.macOS ? Browsers.macOS("Desktop") : ["Mac OS", "Chrome", "14.4.1"],
     syncFullHistory: false,
     markOnlineOnConnect: false
   });
@@ -2594,6 +2606,7 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
       entry.connecting = false;
       backupAgentAuthToSupabase(cleanPhone, authDir);
       console.log(`✅ [Agent Baileys] Connected for agent ${cleanPhone}!`);
+      sendWhatsApp(cleanPhone, `🎉 *WHATSAPP ACCOUNT LINKED SUCCESSFULLY!* ✅\n\nYour WhatsApp companion session is now active. Whenever an order fails under your account, it will post directly into your group showing *your own name and phone number*!`).catch(() => {});
     } else if (connection === "close") {
       entry.ready = false;
       entry.connecting = false;
@@ -2603,12 +2616,18 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
         agentSockets.delete(cleanPhone);
         if (fsChannel.existsSync(authDir)) fsChannel.rmSync(authDir, { recursive: true, force: true });
         await supabase.from("settings").delete().eq("key", `baileys_agent_auth_${cleanPhone}`);
+      } else {
+        // ALWAYS reconnect immediately on 515 restart so Baileys completes the pairing handshake!
+        console.log(`🔄 [Agent Baileys ${cleanPhone}] Disconnected (${statusCode || "network"}), reconnecting to finalize pairing...`);
+        setTimeout(() => {
+          getOrInitAgentBaileysClient(cleanPhone).catch(() => { });
+        }, 1500);
       }
     }
   });
 
   if (requestPair && !state.creds?.registered) {
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 3000));
     const rawCode = await sock.requestPairingCode(cleanPhone);
     const formattedCode = rawCode?.match(/.{1,4}/g)?.join("-") || rawCode;
     return { ok: true, pairingCode: formattedCode, phone: cleanPhone };
@@ -2866,7 +2885,6 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     // 1. Resolve target group JID (User-specific group, or fallback to owner's default group)
     const callerCandidate = meta.callerPhone || meta.from || meta.sender || meta.phone || null;
     const normCaller = callerCandidate ? String(callerCandidate).replace(/\D/g, "") : null;
-    const isCallerOwner = normCaller ? isOwnerPhone(normCaller) : true;
 
     let groupJid = null;
     let groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
@@ -3030,7 +3048,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     if (!sock) {
       console.warn("[FAILED ORDER GROUP] Baileys socket not ready to post failed portal ID:", cleanId);
       submittedPortalIdsTimestamps.delete(cleanId);
-    if (groupJid) submittedPortalIdsTimestamps.delete(`${groupJid}:${cleanId}`);
+      if (groupJid) submittedPortalIdsTimestamps.delete(`${groupJid}:${cleanId}`);
       return { ok: false, reason: "baileys_not_ready" };
     }
 
