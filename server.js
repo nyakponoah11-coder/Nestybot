@@ -2368,7 +2368,9 @@ async function initBaileysChannelClient(options = {}) {
             const foundIds = text.match(/\b\d{4,9}\b/g);
             if (foundIds && foundIds.length > 0) {
               const now = Date.now();
-              foundIds.forEach(id => submittedPortalIdsTimestamps.set(id, now));
+              foundIds.forEach(id => {
+                submittedPortalIdsTimestamps.set(`${remoteJid}:${id}`, now);
+              });
               const gKey = `failed_orders_posted_${remoteJid.replace(/[^a-zA-Z0-9]/g, "_")}`;
               supabase.from("settings").select("value").eq("key", gKey).maybeSingle().then(({ data: gRow }) => {
                 let existing = [];
@@ -2856,29 +2858,10 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     return { ok: true, skipped: true, reason: "in_flight" };
   }
 
-  // 🛡️ SCAN 1: Check memory timestamp (Within last 24 hours) - unless manual submit or test
-  const lastSub = submittedPortalIdsTimestamps.get(cleanId);
-  if (lastSub && (Date.now() - lastSub < (24 * 3600 * 1000)) && !isTest && !meta.manual) {
-    console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} already posted or heard in group within last 24h. Skipping duplicate.`);
-    return { ok: true, skipped: true, reason: "already_exists", group: DEFAULT_FAILED_ORDERS_GROUP_NAME };
-  }
-
-  // 🛡️ SCAN 2: Scan live recent WhatsApp messages in memory
-  const foundInRecentGroup = recentBaileysMessages.some(m => {
-    if (!m.text) return false;
-    const nums = m.text.match(/\b\d{4,9}\b/g) || [];
-    return nums.includes(cleanId);
-  });
-  if (foundInRecentGroup && !isTest && !meta.manual) {
-    console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} found directly in recent WhatsApp group messages. Skipping duplicate.`);
-    return { ok: true, skipped: true, reason: "already_exists", group: DEFAULT_FAILED_ORDERS_GROUP_NAME };
-  }
-
   // Lock in-flight before async database calls
   failedPortalIdSubmissionsInFlight.add(cleanId);
 
   try {
-    await seedSubmittedPortalIdsCache();
 
     // 1. Resolve target group JID (User-specific group, or fallback to owner's default group)
     const callerCandidate = meta.callerPhone || meta.from || meta.sender || meta.phone || null;
@@ -2983,6 +2966,29 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     // STRICT NORMALIZATION: Ensure clean JID format
     groupJid = groupJid.replace(/(@g\.us)+$/i, "") + "@g.us";
 
+    // 🛡️ SCAN 1: Live recent WhatsApp messages in memory strictly for the TARGET GROUP (@g.us)
+    // CRITICAL FIX: Only match messages sent inside the actual group. Never match private user DMs!
+    const foundInRecentGroup = recentBaileysMessages.some(m => {
+      if (!m.text) return false;
+      const isFromTargetGroup = m.from && m.from.endsWith("@g.us") &&
+        (m.from === groupJid || m.from.split("@")[0] === groupJid.split("@")[0]);
+      if (!isFromTargetGroup) return false;
+      const nums = m.text.match(/\b\d{4,9}\b/g) || [];
+      return nums.includes(cleanId);
+    });
+    if (foundInRecentGroup && !isTest && !meta.manual) {
+      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} found directly in recent messages of group ${groupSubject} (${groupJid}). Skipping duplicate.`);
+      return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
+    }
+
+    // 🛡️ SCAN 2: Target group recent submission timestamp (within last 12 hours)
+    const targetGroupKey = `${groupJid}:${cleanId}`;
+    const lastSub = submittedPortalIdsTimestamps.get(targetGroupKey);
+    if (lastSub && (Date.now() - lastSub < (12 * 3600 * 1000)) && !isTest && !meta.manual) {
+      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} already posted to group ${groupSubject} within last 12h. Skipping duplicate.`);
+      return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
+    }
+
     // 2. Persistent Supabase registry check
     const registryKey = groupJid
       ? `failed_orders_posted_${groupJid.replace(/[^a-zA-Z0-9]/g, "_")}`
@@ -3023,6 +3029,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     if (!sock) {
       console.warn("[FAILED ORDER GROUP] Baileys socket not ready to post failed portal ID:", cleanId);
       submittedPortalIdsTimestamps.delete(cleanId);
+    if (groupJid) submittedPortalIdsTimestamps.delete(`${groupJid}:${cleanId}`);
       return { ok: false, reason: "baileys_not_ready" };
     }
 
@@ -3057,6 +3064,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
         recentSentMessagesStore.delete(oldest);
       }
     }
+    submittedPortalIdsTimestamps.set(`${groupJid}:${cleanId}`, Date.now());
     submittedPortalIdsTimestamps.set(cleanId, Date.now());
     console.log(`🚀 [FAILED ORDER GROUP] Posted Portal ID ${cleanId} to ${groupSubject} (${groupJid}) [msgId: ${sent?.key?.id}, status: ${sent?.status}] [isUserGroup: ${isUserGroup}, caller: ${normCaller || "default_owner"}]`);
 
@@ -3089,6 +3097,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
   } catch (err) {
     console.error(`❌ [FAILED ORDER GROUP] Error submitting ${cleanId} to group:`, err.message);
     submittedPortalIdsTimestamps.delete(cleanId);
+    if (groupJid) submittedPortalIdsTimestamps.delete(`${groupJid}:${cleanId}`);
     return { ok: false, error: err.message };
   } finally {
     failedPortalIdSubmissionsInFlight.delete(cleanId);
