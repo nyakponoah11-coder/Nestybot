@@ -2777,15 +2777,42 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
           try {
             const allGroups = await sock.groupFetchAllParticipating();
             for (const [gId, gMeta] of Object.entries(allGroups || {})) {
-              if (gMeta?.subject && groupSubject !== "Failed Orders Group" && gMeta.subject.toLowerCase() === groupSubject.toLowerCase()) {
+              if (gMeta?.subject && ((groupSubject !== "Failed Orders Group" && gMeta.subject.toLowerCase() === groupSubject.toLowerCase()) || /failed|order|unprocessed/i.test(gMeta.subject))) {
                 targetJid = `${String(gId).replace(/(@g\.us)+$/i, "")}@g.us`;
+                groupSubject = gMeta.subject;
                 break;
               }
             }
           } catch (_) { }
         } else if (!targetJid) {
-          return `⚠️ Could not join WhatsApp group with invite code "${inviteCode}": ${eMsg}. Please verify the invite link is valid and not revoked!`;
+          console.warn("groupAcceptInvite notice:", eMsg);
         }
+      }
+    }
+
+    if (!targetJid && inviteMatch) {
+      const inviteCode = inviteMatch[1];
+      try {
+        const { data: sRows } = await supabase.from("settings").select("key,value").in("key", ["failed_orders_group_invite", "failed_orders_group_invite_code", "failed_orders_group_jid", "failed_orders_group_name"]);
+        const sMap = {};
+        (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+        if (sMap["failed_orders_group_jid"] && (sMap["failed_orders_group_invite"]?.includes(inviteCode) || sMap["failed_orders_group_invite_code"] === inviteCode)) {
+          targetJid = sMap["failed_orders_group_jid"];
+          if (sMap["failed_orders_group_name"]) groupSubject = sMap["failed_orders_group_name"];
+        }
+      } catch (_) { }
+
+      if (!targetJid) {
+        try {
+          const allGroups = await sock.groupFetchAllParticipating();
+          for (const [gId, gMeta] of Object.entries(allGroups || {})) {
+            if (/failed|order|unprocessed/i.test(gMeta?.subject || "")) {
+              targetJid = `${String(gId).replace(/(@g\.us)+$/i, "")}@g.us`;
+              groupSubject = gMeta.subject || groupSubject;
+              break;
+            }
+          }
+        } catch (_) { }
       }
     }
 
