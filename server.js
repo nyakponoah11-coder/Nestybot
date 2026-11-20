@@ -2927,17 +2927,8 @@ async function scanAndSubmitFailedAndDelayedPortalIds(options = {}) {
   }
 }
 
-// Background recurring scanner: every 5 minutes
-setInterval(() => {
-  scanAndSubmitFailedAndDelayedPortalIds({ force: false }).catch(err => {
-    console.warn("Interval scan error:", err.message);
-  });
-}, 5 * 60 * 1000);
-
-// Initial background scan on server startup (15s after boot)
-setTimeout(() => {
-  scanAndSubmitFailedAndDelayedPortalIds({ force: false }).catch(() => { });
-}, 15000);
+// Note: Background recurring auto-scanner disabled per owner instruction.
+// Failed & >24h orders are submitted whenever delivery checks, Rezolv support actions, or explicit "submit failed" commands run.
 
 function isOwnerPhone(phone) {
   if (!phone) return false;
