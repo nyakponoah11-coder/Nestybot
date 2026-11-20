@@ -1547,6 +1547,11 @@ async function sendWhatsApp(to, text) {
           }
         }
         if (sock) {
+          try {
+            if (sock.authState?.keys?.set) {
+              await sock.authState.keys.set({ 'sender-key-memory': { [formattedTo]: null } });
+            }
+          } catch (_) { }
           const myLid = sock.user?.lid ? sock.user.lid.replace(/:.+@/, "@") : sock.user?.lid;
           const sendOpts = myLid ? { userJid: myLid } : {};
           const sent = await sock.sendMessage(formattedTo, { text: safeText }, sendOpts);
@@ -2820,6 +2825,11 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
 
     // 4. Send ONLY the Portal ID (clean copyable ID as requested) or test message
     const sendText = isTest ? "🔔 *Stony Bot Group Test Ping:* Connection active! Ready to receive unprocessed IDs." : String(cleanId);
+    try {
+      if (sock.authState?.keys?.set) {
+        await sock.authState.keys.set({ 'sender-key-memory': { [groupJid]: null } });
+      }
+    } catch (_) { }
     const myLid = sock.user?.lid ? sock.user.lid.replace(/:.+@/, "@") : sock.user?.lid;
     const sendOpts = myLid ? { userJid: myLid } : {};
     const sent = await sock.sendMessage(groupJid, { text: sendText }, sendOpts);
@@ -11162,29 +11172,6 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     return sendWhatsApp(from, out);
   }
 
-  // 13. Help / Tools Menu in DataMart Mode
-  if (/^(?:help|tools|menu|commands|\?)$/i.test(cleanInput)) {
-    return sendWhatsApp(from,
-      `🏢 *DATAMART AGENT SUPPORT TOOLS CONSOLE*\n\n` +
-      `You can text any of these commands directly:\n\n` +
-      `🚚 *Delivery Check:* Send single/bulk IDs (e.g. *2313443*) OR *bulk phone numbers* (e.g. *0559143388 0241234567*)\n` +
-      `⚡ *Scan & Mark Delivered:* Send *scan delivered* (or *scan delivered today/yesterday*) to find orders delivered on carrier but showing processing in DB, then reply *mark delivered all* to apply them!\n` +
-      `🔍 *Search / Investigate:* Send email, phone, or name\n` +
-      `🎫 *Tickets:* Send *tickets* or *urgent*\n` +
-      `❌ *Failed Orders:* Send *failed*\n` +
-      `📱 *MoMo Claims:* Send *claims* or *momo claims*\n` +
-      `⚠️ *Not Received:* Send *not received* or *complaints*\n` +
-      `🔄 *Recovery:* Send *recovery* or *failed recovery*\n` +
-      `💰 *Withdrawals:* Send *withdrawals*\n` +
-      `💳 *Deposits:* Send *deposits*\n` +
-      `🚨 *Flagged Users:* Send *flagged*\n` +
-      `📜 *Audit Logs:* Send *audits* or *recent checks*\n` +
-      `📊 *Dashboard / Stats:* Send *stats*\n` +
-      `👤 *My Account:* Send *my datamart*\n\n` +
-      `💡 Type *exit* to return to normal WhatsApp mode.`
-    );
-  }
-
   return sendWhatsApp(from,
     `🏢 *[DATAMART CONSOLE]* Command "*${cleanInput.slice(0, 20)}*" not recognized.\n\n` +
     `💡 Send *tools* or *help* to see all available commands, or *exit* to leave console mode.`
@@ -17829,8 +17816,8 @@ app.get("/api/debug-group", async (req, res) => {
       if (req.query.sendText) {
         try {
           const myLid = baileysChannelSock.user?.lid ? baileysChannelSock.user.lid.replace(/:.+@/, "@") : baileysChannelSock.user?.lid;
-          directSendResult = await baileysChannelSock.sendMessage("120363411273230975@g.us", { 
-            text: String(req.query.sendText) 
+          directSendResult = await baileysChannelSock.sendMessage("120363411273230975@g.us", {
+            text: String(req.query.sendText)
           }, {
             userJid: myLid
           });
@@ -17868,9 +17855,7 @@ app.get("/api/debug-group", async (req, res) => {
 app.get("/api/recent-group-messages", (req, res) => {
   return res.json({
     count: recentBaileysMessages.length,
-    messages: recentBaileysMessages,
-    framesCount: recentBaileysFrames.length,
-    frames: recentBaileysFrames.slice(0, 20)
+    messages: recentBaileysMessages
   });
 });
 
