@@ -17711,6 +17711,22 @@ app.get("/api/debug-group", async (req, res) => {
     let groupMeta = null;
     let directSendResult = null;
     let directSendErr = null;
+    let usyncDevicesTest = null;
+    let usyncErr = null;
+    if (baileysChannelSock) {
+      try {
+        if (typeof baileysChannelSock.getUSyncDevices === "function") {
+          usyncDevicesTest = await baileysChannelSock.getUSyncDevices([
+            "99609116471331@lid",
+            "212094628679827@lid",
+            "190972063387657@lid",
+            "138646325850210@lid"
+          ], false, false);
+        }
+      } catch (uErr) {
+        usyncErr = uErr.message;
+      }
+    }
 
     if (baileysChannelSock) {
       try {
@@ -17764,6 +17780,8 @@ app.get("/api/debug-group", async (req, res) => {
       joinErr,
       groupMeta,
       allGroups,
+      usyncDevicesTest,
+      usyncErr,
       directSendResult,
       directSendErr
     });
