@@ -2362,6 +2362,38 @@ async function initBaileysChannelClient(options = {}) {
           });
           if (recentBaileysMessages.length > 50) recentBaileysMessages.pop();
           console.log(`📥 [Baileys Live Msg] from: [${remoteJid}] participant: [${participant}] text: "${text}" fromMe: ${m.key?.fromMe}`);
+
+          // Automatic Group History Scanner: Whenever ANY member posts an ID in the group, record it so Stony never duplicates it
+          if (remoteJid && remoteJid.endsWith("@g.us") && text) {
+            const foundIds = text.match(/\b\d{4,9}\b/g);
+            if (foundIds && foundIds.length > 0) {
+              const now = Date.now();
+              foundIds.forEach(id => submittedPortalIdsTimestamps.set(id, now));
+              const gKey = `failed_orders_posted_${remoteJid.replace(/[^a-zA-Z0-9]/g, "_")}`;
+              supabase.from("settings").select("value").eq("key", gKey).maybeSingle().then(({ data: gRow }) => {
+                let existing = [];
+                if (gRow?.value) {
+                  try { existing = typeof gRow.value === "string" ? JSON.parse(gRow.value) : gRow.value; } catch (_) {}
+                }
+                if (!Array.isArray(existing)) existing = [];
+                let changed = false;
+                foundIds.forEach(id => {
+                  if (!existing.includes(id)) {
+                    existing.push(id);
+                    changed = true;
+                  }
+                });
+                if (changed) {
+                  if (existing.length > 3000) existing = existing.slice(-3000);
+                  supabase.from("settings").upsert({
+                    key: gKey,
+                    value: JSON.stringify(existing),
+                    updated_at: new Date().toISOString()
+                  }, { onConflict: "key" }).catch(() => {});
+                }
+              }).catch(() => {});
+            }
+          }
         }
       } catch (e) {
         console.warn("messages.upsert log error:", e.message);
@@ -2796,11 +2828,8 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
 
     // Check if ID already exists in this group's history (allow re-post if meta.force is true)
     if (postedIds.includes(cleanId) && !meta.force) {
-      const lastSentTime = submittedPortalIdsTimestamps.get(cleanId);
-      if (lastSentTime && (Date.now() - lastSentTime < SUBMISSION_DEDUP_WINDOW_MS)) {
-        console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}) within 12h. Skipping duplicate.`);
-        return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
-      }
+      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}). Skipping duplicate.`);
+      return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
     }
 
     // 3. Connect Baileys client to post strictly to group (with handshake wait retry)
