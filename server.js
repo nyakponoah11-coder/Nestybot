@@ -17762,20 +17762,22 @@ app.get("/api/debug-group", async (req, res) => {
         allGroups = { error: e.message };
       }
 
-      try {
-        const myLid = baileysChannelSock.user?.lid ? baileysChannelSock.user.lid.replace(/:.+@/, "@") : baileysChannelSock.user?.lid;
-        directSendResult = await baileysChannelSock.sendMessage("120363411273230975@g.us", { 
-          text: "571108" 
-        }, {
-          userJid: myLid
-        });
-      } catch (sErr) {
-        directSendErr = {
-          message: sErr.message,
-          stack: sErr.stack,
-          data: sErr.data || null,
-          name: sErr.name
-        };
+      if (req.query.sendText) {
+        try {
+          const myLid = baileysChannelSock.user?.lid ? baileysChannelSock.user.lid.replace(/:.+@/, "@") : baileysChannelSock.user?.lid;
+          directSendResult = await baileysChannelSock.sendMessage("120363411273230975@g.us", { 
+            text: String(req.query.sendText) 
+          }, {
+            userJid: myLid
+          });
+        } catch (sErr) {
+          directSendErr = {
+            message: sErr.message,
+            stack: sErr.stack,
+            data: sErr.data || null,
+            name: sErr.name
+          };
+        }
       }
     }
 
