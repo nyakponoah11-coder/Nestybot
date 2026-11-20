@@ -2820,25 +2820,7 @@ const DEFAULT_FAILED_ORDERS_GROUP_NAME = "Unprocessed Orders";
 let portalIdCacheSeeded = false;
 
 async function seedSubmittedPortalIdsCache() {
-  if (portalIdCacheSeeded) return;
-  try {
-    const { data: regRow } = await supabase
-      .from("settings")
-      .select("value")
-      .eq("key", "failed_orders_posted_portal_ids")
-      .maybeSingle();
-    if (regRow?.value) {
-      const arr = typeof regRow.value === "string" ? JSON.parse(regRow.value) : regRow.value;
-      if (Array.isArray(arr)) {
-        const now = Date.now();
-        arr.forEach(id => {
-          const clean = String(id).replace(/\D/g, "");
-          if (clean) submittedPortalIdsTimestamps.set(clean, now);
-        });
-      }
-    }
-    portalIdCacheSeeded = true;
-  } catch (_) { }
+  portalIdCacheSeeded = true;
 }
 
 async function submitFailedPortalIdToGroup(portalId, meta = {}) {
@@ -2885,6 +2867,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     // 1. Resolve target group JID (User-specific group, or fallback to owner's default group)
     const callerCandidate = meta.callerPhone || meta.from || meta.sender || meta.phone || null;
     const normCaller = callerCandidate ? String(callerCandidate).replace(/\D/g, "") : null;
+    const isCallerOwner = normCaller ? isOwnerPhone(normCaller) : true;
 
     let groupJid = null;
     let groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
@@ -3294,28 +3277,52 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
     const inviteMatch = input.match(/(?:chat\.whatsapp\.com\/|invite\/)([A-Za-z0-9_-]{15,35})/i);
     const jidMatch = input.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
 
+    const normCaller = callerPhone ? String(callerPhone).replace(/\D/g, "") : null;
+    const isCallerOwner = callerPhone ? isOwnerPhone(callerPhone) : true;
+
+    let targetJid = jidMatch ? jidMatch[1] : null;
+    let groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
+
+    const inviteCode = inviteMatch ? inviteMatch[1] : null;
+
+    // Fast-path: Owner default group invite code (immediate match without socket)
+    if (inviteCode && (inviteCode === "KXfhdb8dg7A6cLvehhGacB" || input.includes("KXfhdb8dg7A6cLvehhGacB"))) {
+      targetJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
+      groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
+    }
+
+    // Check saved settings if matching invite exists
+    if (!targetJid && inviteCode) {
+      try {
+        const { data: sRows } = await supabase
+          .from("settings")
+          .select("key,value")
+          .in("key", ["failed_orders_group_invite", "failed_orders_group_invite_code", "failed_orders_group_jid", "failed_orders_group_name"]);
+        const sMap = {};
+        (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+        if (sMap["failed_orders_group_jid"] && (sMap["failed_orders_group_invite"]?.includes(inviteCode) || sMap["failed_orders_group_invite_code"] === inviteCode)) {
+          targetJid = sMap["failed_orders_group_jid"];
+          if (sMap["failed_orders_group_name"]) groupSubject = sMap["failed_orders_group_name"];
+        }
+      } catch (_) { }
+    }
+
+    // Check Baileys socket non-blockingly (try up to 1.5s if not already ready)
     let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
     if (!sock) {
-      await initBaileysChannelClient();
-      for (let i = 0; i < 20; i++) {
+      initBaileysChannelClient().catch(() => {});
+      for (let i = 0; i < 6; i++) {
         if (baileysChannelReady && baileysChannelSock) {
           sock = baileysChannelSock;
           break;
         }
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 250));
       }
     }
-    if (!sock) {
-      return "⚠️ WhatsApp Baileys engine is currently connecting. Please try again in 10 seconds.";
-    }
 
-    let targetJid = jidMatch ? jidMatch[1] : null;
-    let groupSubject = "Failed Orders Group";
-
-    if (inviteMatch) {
-      const inviteCode = inviteMatch[1];
+    if (sock && inviteCode && (!targetJid || (targetJid === DEFAULT_FAILED_ORDERS_GROUP_JID && inviteCode !== "KXfhdb8dg7A6cLvehhGacB"))) {
       try {
-        // First inspect the invite to get group metadata
+        // Inspect invite to get actual group metadata
         const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
         if (inviteInfo?.id) {
           targetJid = `${String(inviteInfo.id).replace(/(@g\.us)+$/i, "")}@g.us`;
@@ -3332,52 +3339,23 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
       } catch (joinErr) {
         const eMsg = String(joinErr?.message || joinErr || "");
         if (eMsg.includes("409") || /already|conflict/i.test(eMsg)) {
-          // Already in group! Find matching JID from participating groups
           try {
             const allGroups = await sock.groupFetchAllParticipating();
             for (const [gId, gMeta] of Object.entries(allGroups || {})) {
-              if (gMeta?.subject && ((groupSubject !== "Failed Orders Group" && gMeta.subject.toLowerCase() === groupSubject.toLowerCase()) || /failed|order|unprocessed/i.test(gMeta.subject))) {
+              if (gMeta?.subject && ((groupSubject !== DEFAULT_FAILED_ORDERS_GROUP_NAME && gMeta.subject.toLowerCase() === groupSubject.toLowerCase()) || /failed|order|unprocessed/i.test(gMeta.subject))) {
                 targetJid = `${String(gId).replace(/(@g\.us)+$/i, "")}@g.us`;
                 groupSubject = gMeta.subject;
                 break;
               }
             }
           } catch (_) { }
-        } else if (!targetJid) {
-          console.warn("groupAcceptInvite notice:", eMsg);
         }
       }
     }
 
-    if (!targetJid && inviteMatch) {
-      const inviteCode = inviteMatch[1];
-      try {
-        const { data: sRows } = await supabase.from("settings").select("key,value").in("key", ["failed_orders_group_invite", "failed_orders_group_invite_code", "failed_orders_group_jid", "failed_orders_group_name"]);
-        const sMap = {};
-        (sRows || []).forEach(r => { sMap[r.key] = r.value; });
-        if (sMap["failed_orders_group_jid"] && (sMap["failed_orders_group_invite"]?.includes(inviteCode) || sMap["failed_orders_group_invite_code"] === inviteCode)) {
-          targetJid = sMap["failed_orders_group_jid"];
-          if (sMap["failed_orders_group_name"]) groupSubject = sMap["failed_orders_group_name"];
-        }
-      } catch (_) { }
-
-      if (!targetJid) {
-        try {
-          const allGroups = await sock.groupFetchAllParticipating();
-          for (const [gId, gMeta] of Object.entries(allGroups || {})) {
-            if (/failed|order|unprocessed/i.test(gMeta?.subject || "")) {
-              targetJid = `${String(gId).replace(/(@g\.us)+$/i, "")}@g.us`;
-              groupSubject = gMeta.subject || groupSubject;
-              break;
-            }
-          }
-        } catch (_) { }
-      }
-
-      if (!targetJid) {
-        targetJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
-        groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
-      }
+    if (!targetJid && inviteCode) {
+      targetJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
+      groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
     }
 
     if (!targetJid) {
@@ -3386,13 +3364,12 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
 
     targetJid = `${String(targetJid).replace(/(@g\.us)+$/i, "")}@g.us`;
 
-    try {
-      const meta = await sock.groupMetadata(targetJid);
-      if (meta?.subject) groupSubject = meta.subject;
-    } catch (_) { }
-
-    const normCaller = callerPhone ? String(callerPhone).replace(/\D/g, "") : null;
-    const isCallerOwner = callerPhone ? isOwnerPhone(callerPhone) : true;
+    if (sock) {
+      try {
+        const meta = await sock.groupMetadata(targetJid);
+        if (meta?.subject) groupSubject = meta.subject;
+      } catch (_) { }
+    }
 
     // 1. If caller is an agent / non-owner, save to their account settings
     if (normCaller && !isCallerOwner) {
@@ -8681,16 +8658,16 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         });
         if (subRes?.ok) {
           if (subRes.submitted) {
-            groupNotice = `\n\n🚀 *Submitted Portal ID ${targetId} to Unprocessed Orders group!*`;
+            groupNotice = `\n\n🚀 *Submitted Portal ID ${targetId} to ${subRes.group || "Unprocessed Orders"} group!*`;
           } else if (subRes.skipped) {
-            groupNotice = `\n\nℹ️ *Portal ID ${targetId} was already posted to the Unprocessed Orders group.*`;
+            groupNotice = `\n\nℹ️ *Portal ID ${targetId} was already posted to the ${subRes.group || "Unprocessed Orders"} group.*`;
           }
         } else {
           groupNotice = `\n\n⚠️ *Could not post Portal ID ${targetId} to group:* ${subRes.reason || subRes.error}`;
         }
       } catch (subErr) {
         console.warn("Delivery check submit to group error:", subErr.message);
-        groupNotice = `\n\n💡 *Action:* Text *submit ${targetId}* to forward this ID to the Unprocessed Orders group.`;
+        groupNotice = `\n\n💡 *Action:* Text *submit ${targetId}* to forward this ID to the group.`;
       }
     }
 
