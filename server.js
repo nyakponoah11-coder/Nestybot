@@ -2150,6 +2150,7 @@ let baileysChannelConnecting = false;
 let pendingChannelPostQueue = null;
 let lastPairingOwnerPhone = "233547100951";
 const recentBaileysMessages = [];
+const recentBaileysFrames = [];
 
 async function restoreBaileysAuthFromSupabase() {
   try {
@@ -2278,6 +2279,27 @@ async function initBaileysChannelClient(options = {}) {
     });
 
     baileysChannelSock = sock;
+
+    try {
+      if (sock.ws) {
+        sock.ws.on("frame", (frame) => {
+          try {
+            if (frame && typeof frame === "object" && frame.tag) {
+              const tag = frame.tag;
+              if (tag === "ack" || tag === "receipt" || tag === "error" || tag === "notification") {
+                recentBaileysFrames.unshift({
+                  time: new Date().toISOString(),
+                  tag,
+                  attrs: frame.attrs || {},
+                  contentCount: Array.isArray(frame.content) ? frame.content.length : 0
+                });
+                if (recentBaileysFrames.length > 50) recentBaileysFrames.pop();
+              }
+            }
+          } catch (_) { }
+        });
+      }
+    } catch (_) { }
 
     sock.ev.on("creds.update", async () => {
       await saveCreds();
@@ -17804,7 +17826,9 @@ app.get("/api/debug-group", async (req, res) => {
 app.get("/api/recent-group-messages", (req, res) => {
   return res.json({
     count: recentBaileysMessages.length,
-    messages: recentBaileysMessages
+    messages: recentBaileysMessages,
+    framesCount: recentBaileysFrames.length,
+    frames: recentBaileysFrames.slice(0, 20)
   });
 });
 
