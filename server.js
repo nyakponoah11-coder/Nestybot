@@ -11169,6 +11169,25 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     }
   }
 
+  // Toggle Delivered Order WhatsApp Alerts (e.g. "mute delivered alerts", "no delivered order alert anymore", "enable delivered alerts")
+  if (/^(?:mute\s*delivered\s*(?:order\s*)?alerts?|disable\s*delivered\s*(?:order\s*)?alerts?|turn\s*off\s*delivered\s*(?:order\s*)?alerts?|stop\s*delivered\s*(?:order\s*)?alerts?|no\s*delivered\s*(?:order\s*)?alerts?(?:\s*anymore)?)$/i.test(cleanInput.trim())) {
+    await supabase.from("settings").upsert({ key: "disable_delivered_alerts", value: "true", updated_at: new Date().toISOString() }, { onConflict: "key" });
+    return sendWhatsApp(from,
+      `🔇 *DELIVERED ORDER ALERTS MUTED!*\n\n` +
+      `You will no longer receive WhatsApp notifications whenever data orders are delivered.\n\n` +
+      `💡 To turn alerts back on anytime, simply reply: *enable delivered alerts*`
+    );
+  }
+
+  if (/^(?:enable\s*delivered\s*(?:order\s*)?alerts?|unmute\s*delivered\s*(?:order\s*)?alerts?|turn\s*on\s*delivered\s*(?:order\s*)?alerts?|start\s*delivered\s*(?:order\s*)?alerts?)$/i.test(cleanInput.trim())) {
+    await supabase.from("settings").upsert({ key: "disable_delivered_alerts", value: "false", updated_at: new Date().toISOString() }, { onConflict: "key" });
+    return sendWhatsApp(from,
+      `🔔 *DELIVERED ORDER ALERTS ENABLED!* ✅\n\n` +
+      `You will now receive a WhatsApp notification whenever a data order is delivered.\n\n` +
+      `💡 To mute alerts anytime, simply reply: *mute delivered alerts*`
+    );
+  }
+
   if (/^(?:unlink\s*whatsapp|disconnect\s*whatsapp|logout\s*whatsapp)$/i.test(cleanInput)) {
     if (isOwnerPhone(from)) {
       await initBaileysChannelClient({ forceReset: true });
@@ -11535,6 +11554,25 @@ const cmIds = cleanInput.match(/\b\d{4,9}\b/g);
 if (cmIds && cmIds.length > 0 && /^[0-9,\s\n\r]+$/.test(cleanInput.trim())) {
   const report = await executeDatamartDeliveryCheck(cmIds, from);
   if (report) return sendWhatsApp(from, report);
+}
+
+// 14. Toggle Delivered Order WhatsApp Alerts within console mode
+if (/^(?:mute\s*delivered\s*(?:order\s*)?alerts?|disable\s*delivered\s*(?:order\s*)?alerts?|turn\s*off\s*delivered\s*(?:order\s*)?alerts?|stop\s*delivered\s*(?:order\s*)?alerts?|no\s*delivered\s*(?:order\s*)?alerts?(?:\s*anymore)?)$/i.test(cleanInput.trim())) {
+  await supabase.from("settings").upsert({ key: "disable_delivered_alerts", value: "true", updated_at: new Date().toISOString() }, { onConflict: "key" });
+  return sendWhatsApp(from,
+    `🔇 *[DATAMART CONSOLE] DELIVERED ORDER ALERTS MUTED!*\n\n` +
+    `You will no longer receive WhatsApp notifications whenever data orders are delivered.\n\n` +
+    `💡 To turn alerts back on anytime, send: *enable delivered alerts*`
+  );
+}
+
+if (/^(?:enable\s*delivered\s*(?:order\s*)?alerts?|unmute\s*delivered\s*(?:order\s*)?alerts?|turn\s*on\s*delivered\s*(?:order\s*)?alerts?|start\s*delivered\s*(?:order\s*)?alerts?)$/i.test(cleanInput.trim())) {
+  await supabase.from("settings").upsert({ key: "disable_delivered_alerts", value: "false", updated_at: new Date().toISOString() }, { onConflict: "key" });
+  return sendWhatsApp(from,
+    `🔔 *[DATAMART CONSOLE] DELIVERED ORDER ALERTS ENABLED!* ✅\n\n` +
+    `You will now receive a WhatsApp notification whenever a data order is delivered.\n\n` +
+    `💡 To mute alerts anytime, send: *mute delivered alerts*`
+  );
 }
 
 return sendWhatsApp(from,
@@ -18537,6 +18575,19 @@ async function notifyOrderDelivered(order) {
   const ref = String(order.reference).trim();
   const refKey = ref.toUpperCase();
 
+  // Check if owner has disabled/muted delivered order alerts
+  try {
+    const { data: sMute } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", "disable_delivered_alerts")
+      .maybeSingle();
+    if (sMute && (String(sMute.value).toLowerCase() === "true" || sMute.value === true)) {
+      console.log(`🔇 [DELIVERED ALERT MUTED] Skipped delivered alert for ${ref} per settings`);
+      return;
+    }
+  } catch (_) { }
+
   // 1. Immediate synchronous in-memory lock
   if (deliveredAlertSentRefs.has(refKey)) return;
   if (String(order.notes || "").includes("[delivery_confirmed_sent]")) {
@@ -18798,8 +18849,8 @@ async function runActiveDeliveryWatcher() {
   WATCHER_TELEMETRY.deliveryWatcherRuns++;
   WATCHER_TELEMETRY.lastDeliveryWatcherAt = new Date().toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   try {
-    // Zero-egress optimization: normally query only the last 4 hours (limit 10); once every 10 ticks (~15 mins) check 24 hours
-    const lookbackMs = deliveryWatcherTick % 10 === 0 ? 24 * 60 * 60 * 1000 : 4 * 60 * 60 * 1000;
+    // Active delivery check: query up to 50 pending orders in the last 6 hours (24h every 10 ticks)
+    const lookbackMs = deliveryWatcherTick % 10 === 0 ? 24 * 60 * 60 * 1000 : 6 * 60 * 60 * 1000;
     const cutoffIso = new Date(Date.now() - lookbackMs).toISOString();
     const { data: pendingOrders, error } = await supabase
       .from("orders")
@@ -18808,7 +18859,7 @@ async function runActiveDeliveryWatcher() {
       .in("delivery_status", ["processing", "pending", "waiting", "in_progress"])
       .gte("created_at", cutoffIso)
       .order("created_at", { ascending: false })
-      .limit(10);
+      .limit(50);
 
     if (error || !Array.isArray(pendingOrders) || pendingOrders.length === 0) {
       isDeliveryWatcherRunning = false;
@@ -18840,13 +18891,6 @@ async function runActiveDeliveryWatcher() {
             status: "delivered",
             updated_at: new Date().toISOString(),
           }).eq("id", ord.id);
-
-          try {
-            data1db.getClient().from("orders").update({
-              delivery_status: "delivered",
-              datamart_status: "completed",
-            }).eq("id", ord.id);
-          } catch (_) { }
 
           await notifyOrderDelivered({
             ...ord,
@@ -19094,7 +19138,12 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.status(200).send("Bot is alive!");
+  res.status(200).json({
+    status: "alive",
+    watchers: WATCHER_TELEMETRY,
+    baileysReady: Boolean(baileysChannelReady && baileysChannelSock),
+    timestamp: new Date().toISOString()
+  });
 });
 
 app.listen(PORT, () => {
