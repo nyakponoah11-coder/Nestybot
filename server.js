@@ -17683,6 +17683,7 @@ app.get("/api/debug-group", async (req, res) => {
     let allGroups = null;
     let joinRes = null;
     let joinErr = null;
+    let groupMeta = null;
 
     if (baileysChannelSock) {
       try {
@@ -17695,7 +17696,6 @@ app.get("/api/debug-group", async (req, res) => {
       } catch (e) {
         joinErr = e.message;
       }
-      let groupMeta = null;
       try {
         groupMeta = await baileysChannelSock.groupMetadata("120363411273230975@g.us");
       } catch (e) {
