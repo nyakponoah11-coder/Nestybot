@@ -17709,6 +17709,8 @@ app.get("/api/debug-group", async (req, res) => {
     let joinRes = null;
     let joinErr = null;
     let groupMeta = null;
+    let directSendResult = null;
+    let directSendErr = null;
 
     if (baileysChannelSock) {
       try {
@@ -17740,8 +17742,6 @@ app.get("/api/debug-group", async (req, res) => {
         allGroups = { error: e.message };
       }
 
-      let directSendResult = null;
-      let directSendErr = null;
       try {
         directSendResult = await baileysChannelSock.sendMessage("120363411273230975@g.us", { text: "🧪 Test send direct via Baileys" });
       } catch (sErr) {
