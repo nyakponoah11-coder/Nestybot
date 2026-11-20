@@ -1547,9 +1547,9 @@ async function sendWhatsApp(to, text) {
           }
         }
         if (sock) {
-          await sock.sendMessage(formattedTo, { text: safeText });
-          console.log(`📤 [sendWhatsApp] Delivered group message via Baileys to [${formattedTo}]`);
-          return { ok: true, via: "baileys_group", jid: formattedTo };
+          const sent = await sock.sendMessage(formattedTo, { text: safeText });
+          console.log(`📤 [sendWhatsApp] Delivered group message via Baileys to [${formattedTo}] ID: [${sent?.key?.id}] status: [${sent?.status}]`);
+          return { ok: true, via: "baileys_group", jid: formattedTo, msgId: sent?.key?.id, status: sent?.status, key: sent?.key };
         }
       } catch (bErr) {
         console.warn(`[sendWhatsApp] Baileys group send error for [${to}]:`, bErr.message);
@@ -2736,9 +2736,9 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
 
     // 4. Send ONLY the Portal ID (clean copyable ID as requested) or test message
     const sendText = isTest ? "🔔 *Stony Bot Group Test Ping:* Connection active! Ready to receive unprocessed IDs." : String(cleanId);
-    await sock.sendMessage(groupJid, { text: sendText });
+    const sent = await sock.sendMessage(groupJid, { text: sendText });
     submittedPortalIdsTimestamps.set(cleanId, Date.now());
-    console.log(`🚀 [FAILED ORDER GROUP] Posted Portal ID ${cleanId} to ${groupSubject} (${groupJid}) [isUserGroup: ${isUserGroup}, caller: ${normCaller || "default_owner"}]`);
+    console.log(`🚀 [FAILED ORDER GROUP] Posted Portal ID ${cleanId} to ${groupSubject} (${groupJid}) [msgId: ${sent?.key?.id}, status: ${sent?.status}] [isUserGroup: ${isUserGroup}, caller: ${normCaller || "default_owner"}]`);
 
     // 5. Record cleanId in persistent registry
     postedIds.push(cleanId);
