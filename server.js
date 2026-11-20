@@ -7734,10 +7734,6 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
         const pidDisplay = portalId ? `🆔 *Portal ID:* *${portalId}*` : `🆔 *Portal ID:* *Pending Export*`;
 
         if (st === "failed" || st === "cancelled" || (liveTrack.failed && liveTrack.failed > 0)) {
-          if (portalId && /^\d{4,9}$/.test(String(portalId))) {
-            submitFailedPortalIdToGroup(portalId, { reason: "support_draft_failed", failedCount: liveTrack.failed || 1, callerPhone: from }).catch(() => { });
-          }
-
           const batchItems = Array.isArray(liveTrack.items) ? liveTrack.items : [];
           const norm9 = (num) => String(num || "").replace(/\D/g, "").slice(-9);
           const targetCustPhone = norm9(phoneFound || liveTrack.phone || fullTicket?.customer?.phone || (typeof targetQuery === "string" && /^0[2357]\d{8}$/.test(targetQuery) ? targetQuery : null));
@@ -8067,7 +8063,8 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
         const waitMins = Math.max(1, Math.round(waitTimeMs / (60 * 1000)));
         const waitLabel = waitMins >= 60 ? `${Math.floor(waitMins / 60)}h ${waitMins % 60}m` : `${waitMins} mins`;
 
-        const { mainIssue, draftText, trackingDiagnostic, actualCustomerLastMsg, portalId } = await composeIntelligentSupportDraft({
+        // Fast draft with timeout to ensure prompt delivery on WhatsApp
+        const draftPromise = composeIntelligentSupportDraft({
           firstName,
           custFullName,
           tNum,
@@ -8078,6 +8075,15 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
           brandName: rezolvCtx.brandName,
           from
         });
+        const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({
+          mainIssue: `Customer inquiry: "${(lastMsg || '').slice(0, 70)}"`,
+          draftText: `Hello ${firstName}, thank you for contacting ${rezolvCtx.brandName || 'Support'}. We are actively attending to your inquiry for ticket ${tNum} right now!`,
+          trackingDiagnostic: "",
+          actualCustomerLastMsg: lastMsg,
+          portalId: null
+        }), 3500));
+
+        const { mainIssue, draftText, trackingDiagnostic, actualCustomerLastMsg, portalId } = await Promise.race([draftPromise, timeoutPromise]);
 
         return {
           id: fullTicket._id || t._id,
@@ -8285,23 +8291,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
 
     let groupNotice = "";
     if ((isFailed || (isQueued && isOver24H)) && targetId && /^\d{4,9}$/.test(String(targetId))) {
-      try {
-        const subRes = await submitFailedPortalIdToGroup(targetId, {
-          reason: isFailed ? "carrier_delivery_check_failed" : "vendor_queue_over_24h",
-          failedCount: failed || failedItems.length || 1,
-          totalItems,
-          queuedHours,
-          orderDate: orderCreatedAt,
-          failedPhones: failedItems.map(it => it.phone),
-          force: true,
-          callerPhone
-        });
-        if (subRes?.ok) {
-          groupNotice = `\n\n🚀 *Submitted Portal ID ${targetId} to Unprocessed Orders group!*`;
-        }
-      } catch (subErr) {
-        console.warn("Delivery check submit to group error:", subErr.message);
-      }
+      groupNotice = `\n\n💡 *Action:* Text *submit ${targetId}* to forward this ID to the Unprocessed Orders group.`;
     }
 
     const failedPortalSummaries = (failedItems.length > 0 || isFailed) ? [{
@@ -9037,27 +9027,20 @@ const userScannedDeliveredBatchesCache = new Map();
 
 async function scanDatamartUnappliedDelivered(dateQuery = null, callerPhone = null) {
   try {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent', {}, callerPhone);
-    const raw = Array.isArray(resp?.data) ? resp.data : (Array.isArray(resp) ? resp : (resp?.data?.checks || []));
-    if (!Array.isArray(raw) || raw.length === 0) {
-      return `🚚 *[DATAMART AUDIT]* No recent delivery audit checks found on the system. Run a delivery check on your batch first!`;
-    }
-
-    // Determine target date filter if user provided one
-    let targetDateStr = null;
-    let dateLabel = "All Recent Audits";
     const cleanDateQ = String(dateQuery || "").trim().toLowerCase();
-
-    const todayGhana = new Date().toLocaleDateString("en-CA", { timeZone: "Africa/Accra" }); // YYYY-MM-DD
+    const todayGhana = new Date().toLocaleDateString("en-CA", { timeZone: "Africa/Accra" });
     const yesterdayDate = new Date(Date.now() - 24 * 3600 * 1000);
     const yesterdayGhana = yesterdayDate.toLocaleDateString("en-CA", { timeZone: "Africa/Accra" });
 
-    if (cleanDateQ.includes("today")) {
-      targetDateStr = todayGhana;
-      dateLabel = `Today (${todayGhana})`;
-    } else if (cleanDateQ.includes("yesterday")) {
+    let targetDateStr = todayGhana;
+    let dateLabel = `Today (${todayGhana})`;
+
+    if (cleanDateQ.includes("yesterday")) {
       targetDateStr = yesterdayGhana;
       dateLabel = `Yesterday (${yesterdayGhana})`;
+    } else if (cleanDateQ.includes("today")) {
+      targetDateStr = todayGhana;
+      dateLabel = `Today (${todayGhana})`;
     } else {
       const matchIso = cleanDateQ.match(/\b(202\d-[01]\d-[0-3]\d)\b/);
       if (matchIso) {
@@ -9066,95 +9049,105 @@ async function scanDatamartUnappliedDelivered(dateQuery = null, callerPhone = nu
       }
     }
 
-    // Filter checks
-    const filteredChecks = raw.filter(c => {
-      if (!c || !c.portalOrderId) return false;
-      if (targetDateStr) {
+    const batchMap = new Map();
+
+    // 1. Fetch skipped-recovery for this date (contains all unapplied/skipped carrier batches)
+    try {
+      const srRes = await fetchDatamartSupportEndpoint(`/api/support/skipped-recovery?date=${targetDateStr}`, {}, callerPhone);
+      const srBatches = srRes?.data?.batches || srRes?.batches || [];
+      for (const b of srBatches) {
+        if (!b.portalOrderId) continue;
+        const pid = String(b.portalOrderId).trim();
+        batchMap.set(pid, {
+          portalOrderId: pid,
+          batchNumber: b.batchNumber || "N/A",
+          totalItems: b.skippedCount || b.numbers?.length || 0,
+          sent: b.skippedCount || b.numbers?.length || 0,
+          failed: 0,
+          pending: 0,
+          value: b.value || 0,
+          gb: b.gb || 0,
+          source: "skipped_recovery",
+          checkedAt: b.oldestAt ? new Date(b.oldestAt).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "Recent"
+        });
+      }
+    } catch (e) {
+      console.warn("skipped-recovery error in scanDatamartUnappliedDelivered:", e.message);
+    }
+
+    // 2. Fetch recent delivery checks and overlay
+    try {
+      const rdcRes = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent', {}, callerPhone);
+      const rawChecks = Array.isArray(rdcRes?.data) ? rdcRes.data : (Array.isArray(rdcRes) ? rdcRes : (rdcRes?.data?.checks || []));
+      for (const c of rawChecks) {
+        if (!c || !c.portalOrderId) continue;
         const cDate = c.createdAt ? new Date(c.createdAt).toLocaleDateString("en-CA", { timeZone: "Africa/Accra" }) : "";
-        if (cDate !== targetDateStr) return false;
-      }
-      return true;
-    });
+        if (cDate !== targetDateStr && !cleanDateQ.includes("all")) continue;
 
-    if (filteredChecks.length === 0) {
-      return `🔍 *[DATAMART DELIVERY SCAN]* No delivery audits found for *${dateLabel}*.\n\n💡 Try *scan delivered* (all recent) or specify another date like *scan delivered yesterday* or *scan delivered ${todayGhana}*.`;
+        const pid = String(c.portalOrderId).trim();
+        const sent = Number(c.sent || c.deliveredCount || c.delivered || 0);
+        const updated = Number(c.ordersUpdatedToCompleted || 0);
+        if (sent > 0 && updated === 0) {
+          batchMap.set(pid, {
+            portalOrderId: pid,
+            batchNumber: c.batchNumber || "N/A",
+            totalItems: Number(c.totalItems || c.totalOrders || c.count || 0),
+            sent,
+            failed: Number(c.failed || c.failedCount || 0),
+            pending: Number(c.pending || c.pendingCount || 0),
+            source: "delivery_check",
+            checkedAt: c.createdAt ? new Date(c.createdAt).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "Recent"
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("delivery-checks/recent error in scanDatamartUnappliedDelivered:", e.message);
     }
 
-    // De-duplicate by portalOrderId (taking the latest check)
-    const latestByPortalId = new Map();
-    for (const c of filteredChecks) {
-      const pid = String(c.portalOrderId).trim();
-      if (!latestByPortalId.has(pid)) {
-        latestByPortalId.set(pid, c);
-      }
-    }
+    const batches = Array.from(batchMap.values());
+    const totalOrders = batches.reduce((sum, b) => sum + (b.sent || b.totalItems || 0), 0);
+    const totalFailed = batches.reduce((sum, b) => sum + (b.failed || 0), 0);
+    const totalVal = batches.reduce((sum, b) => sum + (Number(b.value) || 0), 0);
 
-    const unappliedBatches = [];
-
-    for (const [pid, c] of latestByPortalId.entries()) {
-      const sent = Number(c.sent || c.deliveredCount || c.delivered || 0);
-      const total = Number(c.totalItems || c.totalOrders || c.count || 0);
-      const updated = Number(c.ordersUpdatedToCompleted || 0);
-      const failed = Number(c.failed || c.failedCount || 0);
-      const pending = Number(c.pending || c.pendingCount || 0);
-
-      const batchObj = {
-        portalOrderId: pid,
-        batchNumber: c.batchNumber || "N/A",
-        totalItems: total,
-        sent,
-        failed,
-        pending,
-        updated,
-        allDelivered: !!c.allDelivered || (sent > 0 && sent === total),
-        checkedAt: c.createdAt ? new Date(c.createdAt).toLocaleString("en-GB", { timeZone: "Africa/Accra" }) : "Recent"
-      };
-
-      if (sent > 0 && updated === 0) {
-        unappliedBatches.push(batchObj);
-      }
-    }
-
-    // Cache unapplied batches for this user phone so they can run "mark delivered all"
+    // Cache unapplied batches for this user phone so they can run "mark delivered all" or "mark delivered 1"
     const norm = callerPhone ? String(callerPhone).replace(/\D/g, "") : "master";
-    userScannedDeliveredBatchesCache.set(norm, unappliedBatches);
-
-    let totalDeliveredFound = unappliedBatches.reduce((sum, b) => sum + b.sent, 0);
-    let totalFailedFound = unappliedBatches.reduce((sum, b) => sum + b.failed, 0);
+    userScannedDeliveredBatchesCache.set(norm, batches);
 
     let out = `🚚 *DATAMART DELIVERED AUDIT SCAN (${dateLabel})*\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `📊 *Scan Summary:*\n` +
-      `• 📦 *Unapplied Delivered Batches:* *${unappliedBatches.length} batches*\n` +
-      `• 🎉 *Orders Delivered on Carrier (Showing Processing in DB):* *${totalDeliveredFound.toLocaleString()} orders*\n` +
-      (totalFailedFound > 0 ? `• ⚠️ *Orders Failed on Carrier:* ${totalFailedFound}\n` : "") +
+      `• 📦 *Unapplied Delivered Batches:* *${batches.length} batches*\n` +
+      `• 🎉 *Orders Delivered on Carrier (Showing Processing in DB):* *${totalOrders.toLocaleString()} orders*\n` +
+      (totalVal > 0 ? `• 💰 *Total Value:* *GH₵ ${totalVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}*\n` : "") +
+      (totalFailed > 0 ? `• ⚠️ *Orders Failed on Carrier:* ${totalFailed}\n` : "") +
       `\n`;
 
-    if (unappliedBatches.length === 0) {
-      out += `✅ *ALL CLEAR!* Every audited batch on *${dateLabel}* is already synchronized & completed in DataMart's database!\n\n` +
-        `💡 To audit fresh batches, send their Portal IDs (e.g. *568960*) or specify a date (e.g. *scan delivered yesterday*).`;
+    if (batches.length === 0) {
+      out += `✅ *ALL CLEAR!* Zero unapplied delivered batches found on *${dateLabel}*!\n\n` +
+        `💡 To audit fresh batches, reply with their Portal IDs (e.g. *568960*) or select another day (e.g. *scan delivered yesterday*).`;
       return out;
     }
 
     out += `📋 *Batches Ready to Mark as DELIVERED:*\n`;
-    unappliedBatches.slice(0, 10).forEach((b, idx) => {
+    batches.slice(0, 10).forEach((b, idx) => {
       const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx] || `•`;
-      const pct = b.totalItems > 0 ? Math.round((b.sent / b.totalItems) * 100) : 100;
-      out += `${numEmoji} *Order #${b.portalOrderId}* (Batch #${b.batchNumber})\n` +
-        `  • Carrier: *${b.sent}/${b.totalItems} Delivered* (${pct}%)\n` +
-        (b.failed > 0 ? `  • Failed on Carrier: ${b.failed}\n` : "") +
+      const pkgInfo = b.gb ? ` (${b.gb}GB)` : "";
+      out += `${numEmoji} *Order #${b.portalOrderId}* (Batch #${b.batchNumber})${pkgInfo}\n` +
+        `  • Carrier: *${b.sent}/${b.totalItems} Delivered*\n` +
+        (b.failed > 0 ? `  • Failed: ${b.failed}\n` : "") +
         `  • Status in DB: 🟡 *Processing*\n\n`;
     });
 
-    if (unappliedBatches.length > 10) {
-      out += `_...and ${unappliedBatches.length - 10} more unapplied batches._\n\n`;
+    if (batches.length > 10) {
+      out += `_...and ${batches.length - 10} more unapplied batches._\n\n`;
     }
 
     out += `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
       `⚡ *HOW TO MARK THEM DELIVERED:*\n` +
-      `• *mark delivered all* ➔ Auto-apply & mark all ${totalDeliveredFound} orders as Delivered!\n` +
-      `• *mark delivered [Portal ID]* ➔ Apply a specific batch (e.g. *mark delivered ${unappliedBatches[0].portalOrderId}*)\n` +
-      `• Or select a date: *scan delivered yesterday* | *scan delivered 2026-11-19*`;
+      `• *mark delivered all* ➔ Auto-apply & mark all ${totalOrders.toLocaleString()} orders as Delivered in DB!\n` +
+      `• *mark delivered 1* ➔ Apply 1st batch (#${batches[0].portalOrderId})\n` +
+      `• *mark delivered [Portal ID]* ➔ Apply specific batch\n` +
+      `• Or switch day: *scan delivered today* | *scan delivered yesterday* | *scan delivered 2026-11-18*`;
 
     return out;
   } catch (err) {
@@ -9168,45 +9161,41 @@ async function markDatamartDeliveredBatches(target, callerPhone = null) {
     const norm = callerPhone ? String(callerPhone).replace(/\D/g, "") : "master";
     const cleanTarget = String(target || "").trim().toLowerCase();
 
+    let cached = userScannedDeliveredBatchesCache.get(norm) || [];
     let targetIds = [];
 
-    // 1. If user typed "all" or "today" or "yesterday", gather from cache or fresh scan
-    if (cleanTarget === "all" || cleanTarget === "today" || cleanTarget === "yesterday" || !cleanTarget) {
-      let cached = userScannedDeliveredBatchesCache.get(norm);
-      if (!cached || cached.length === 0) {
-        const resp = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent', {}, callerPhone);
-        const raw = Array.isArray(resp?.data) ? resp.data : (Array.isArray(resp) ? resp : (resp?.data?.checks || []));
-        const filtered = (raw || []).filter(c => {
-          if (!c || !c.portalOrderId) return false;
-          const sent = Number(c.sent || c.deliveredCount || c.delivered || 0);
-          const updated = Number(c.ordersUpdatedToCompleted || 0);
-          return sent > 0 && updated === 0;
-        });
-        const pMap = new Map();
-        filtered.forEach(c => pMap.set(String(c.portalOrderId), c));
-        cached = Array.from(pMap.values());
-      }
+    // If cache is empty, attempt a quick scan of today's or yesterday's batches
+    if (cached.length === 0) {
+      const targetDay = cleanTarget.includes("yesterday") ? "yesterday" : "today";
+      await scanDatamartUnappliedDelivered(targetDay, callerPhone);
+      cached = userScannedDeliveredBatchesCache.get(norm) || [];
+    }
 
-      if (cleanTarget === "yesterday") {
-        const yesterdayDate = new Date(Date.now() - 24 * 3600 * 1000).toLocaleDateString("en-CA", { timeZone: "Africa/Accra" });
-        cached = cached.filter(c => (c.checkedAt || c.createdAt || "").includes(yesterdayDate));
-      } else if (cleanTarget === "today") {
-        const todayDate = new Date().toLocaleDateString("en-CA", { timeZone: "Africa/Accra" });
-        cached = cached.filter(c => (c.checkedAt || c.createdAt || "").includes(todayDate));
-      }
-
+    // 1. If user typed "all" or empty
+    if (cleanTarget === "all" || !cleanTarget || cleanTarget === "everything") {
       targetIds = cached.map(b => String(b.portalOrderId).trim()).filter(Boolean);
     } else {
-      // User passed one or more portal IDs (e.g. "567893" or "567893 2317785")
-      const matches = cleanTarget.match(/\b\d{4,9}[a-zA-Z]?\b/g);
-      if (matches && matches.length > 0) {
-        targetIds = matches;
+      // 2. Check if user typed an index number: e.g. "1", "2", "3"
+      const singleNum = parseInt(cleanTarget, 10);
+      if (!isNaN(singleNum) && singleNum >= 1 && singleNum <= cached.length && cleanTarget.length <= 2) {
+        const item = cached[singleNum - 1];
+        if (item?.portalOrderId) {
+          targetIds = [String(item.portalOrderId).trim()];
+        }
+      }
+
+      // 3. Check if user passed one or more explicit portal IDs (e.g. "567893" or "567893 2317785")
+      if (targetIds.length === 0) {
+        const matches = cleanTarget.match(/\b\d{4,9}[a-zA-Z]?\b/g);
+        if (matches && matches.length > 0) {
+          targetIds = matches;
+        }
       }
     }
 
-    const uniqueIds = [...new Set(targetIds)].slice(0, 15);
+    const uniqueIds = [...new Set(targetIds)].slice(0, 20);
     if (uniqueIds.length === 0) {
-      return `⚠️ No unapplied batches found to mark as delivered.\n\n💡 Send *scan delivered* first to discover batches ready to be marked!`;
+      return `⚠️ No unapplied batches found to mark as delivered.\n\n💡 Send *scan delivered yesterday* or *scan delivered today* first!`;
     }
 
     // Process each target batch: start job -> get result items -> apply
@@ -9277,23 +9266,17 @@ async function markDatamartDeliveredBatches(target, callerPhone = null) {
       `━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `📊 *Execution Summary:*\n` +
       `• 📦 *Batches Processed:* ${successfulBatches}/${uniqueIds.length}\n` +
-      `• ✅ *Total Orders Marked DELIVERED in DataMart DB:* *${totalMarkedDelivered.toLocaleString()} orders*\n\n` +
-      `📋 *Batch Details:*\n`;
+      `• ✅ *Total Orders Marked DELIVERED in DataMart DB:* *${totalMarkedDelivered.toLocaleString()} orders*\n\n`;
 
-    results.forEach((r, idx) => {
-      const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx] || `•`;
+    results.forEach(r => {
       if (r.success) {
-        out += `${numEmoji} *Order #${r.portalOrderId}* (Batch #${r.batchNumber})\n` +
-          `  • ✅ *${r.sent || r.markedCount} marked delivered in DB*\n` +
-          (r.failed > 0 ? `  • ⚠️ ${r.failed} failed on carrier\n` : "") +
-          (r.pending > 0 ? `  • ⏳ ${r.pending} still in queue\n` : "") +
-          `\n`;
+        out += `✅ *Order #${r.portalOrderId}* (Batch #${r.batchNumber}): Marked *${r.markedCount || r.sent} orders* as Completed!\n`;
       } else {
-        out += `${numEmoji} *Order #${r.portalOrderId}:* ⚠️ ${r.error}\n\n`;
+        out += `⚠️ *Order #${r.portalOrderId}*: ${r.error}\n`;
       }
     });
 
-    out += `💡 All customer and agent order trackers on DataMart now reflect these delivered orders!`;
+    out += `\n💡 DataMart database has now been synchronized with actual carrier deliveries!`;
     return out;
   } catch (err) {
     console.error("markDatamartDeliveredBatches error:", err);
@@ -10523,6 +10506,28 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     );
   }
 
+  // 0a. Scan Delivered Orders on Carrier that are showing processing in DataMart DB
+  const isScanDeliveredMatch = cleanInput.match(/^(?:scan\s*delivered|delivered\s*scan|unapplied\s*deliveries|delivered\s*processing|scann?|audit\s*delivered)(?:\s+(.+))?$/i);
+  if (isScanDeliveredMatch) {
+    const dateArg = isScanDeliveredMatch[1] || null;
+    const report = await scanDatamartUnappliedDelivered(dateArg, from);
+    return sendWhatsApp(from, report);
+  }
+
+  // 0b. Mark / Apply Delivered Orders in DataMart DB
+  const isMarkDeliveredMatch = cleanInput.match(/^(?:mark\s*delivered|apply\s*delivered|sync\s*delivered|mark\s*completed|apply\s*deliveries)(?:\s+(.+))?$/i);
+  if (isMarkDeliveredMatch) {
+    const targetArg = isMarkDeliveredMatch[1] || "all";
+    const report = await markDatamartDeliveredBatches(targetArg, from);
+    return sendWhatsApp(from, report);
+  }
+
+  // 0c. Batch Support Inbox Drafts (e.g. "draft 5", "draft", "drafts", "draft replies")
+  if (/^(?:draft\s*(?:5|all|inbox|replies)?|drafts|inbox\s*drafts?)$/i.test(cleanInput)) {
+    const batchRep = await buildSupportInboxBatchDraft(from, 5);
+    return sendWhatsApp(from, batchRep);
+  }
+
   // Account Status
   if (/^(?:my\s*datamart|datamart\s*status|account\s*status|whoami)$/i.test(cleanInput)) {
     const acc = await getUserDatamartAccount(from);
@@ -10667,8 +10672,8 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     /^(?:(?:dm|datamart)\s+)?(?:ref|reference|trx|trxref|order\s*ref|order\s*reference)(?:\s*[:#=])?\s*[A-Za-z0-9_-]+/i.test(cleanInput) ||
     /^(?:track|verify|check)\s+(?:order\s+)?(?:ref\s+|reference\s+)?([A-Za-z0-9_-]{5,45})$/i.test(cleanInput);
 
-  const hasSentenceWords = /\b(?:what|how|why|when|where|who|is|are|can|could|will|would|do|did|does|tell|ask|mark|resolve|clean|clear|how\s+many|inbox|messages?|tickets?|now|about|please|saying|said|reply|give)\b/i.test(cleanInput);
-  const isNameOrWord = !hasSentenceWords && /^[a-zA-Z]{3,20}(?:\s+[a-zA-Z]{2,20})?$/.test(cleanInput.trim()) && !/^(?:exit|tickets?|urgent|pending|withdrawals?|deposits?|claims?|recovery|stats|my\s*datamart)$/i.test(cleanInput);
+  const hasSentenceWords = /\b(?:what|how|why|when|where|who|is|are|can|could|will|would|do|did|does|tell|ask|mark|resolve|clean|clear|how\s+many|inbox|messages?|tickets?|now|about|please|saying|said|reply|give|scan|scann|delivered|apply|sync|draft|drafts|audit)\b/i.test(cleanInput);
+  const isNameOrWord = !hasSentenceWords && /^[a-zA-Z]{3,20}(?:\s+[a-zA-Z]{2,20})?$/.test(cleanInput.trim()) && !/^(?:exit|tickets?|urgent|pending|withdrawals?|deposits?|claims?|recovery|stats|my\s*datamart|scan|delivered|mark|apply|sync|draft|drafts)$/i.test(cleanInput);
 
   if (emailMatch || phoneMatch || isSearchIntent || isNameOrWord || isRefPattern) {
     const report = await executeDatamartSearch(cleanInput, from);
@@ -10786,21 +10791,6 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     return sendWhatsApp(from, rep);
   }
 
-  // 3f. Scan Delivered Orders on Carrier that are showing processing in DataMart DB
-  const isScanDeliveredMatch = cleanInput.match(/^(?:scan\s*delivered|delivered\s*scan|unapplied\s*deliveries|delivered\s*processing|scann?)(?:\s+(.+))?$/i);
-  if (isScanDeliveredMatch) {
-    const dateArg = isScanDeliveredMatch[1] || null;
-    const report = await scanDatamartUnappliedDelivered(dateArg, from);
-    return sendWhatsApp(from, report);
-  }
-
-  // 3g. Mark / Apply Delivered Orders in DataMart DB
-  const isMarkDeliveredMatch = cleanInput.match(/^(?:mark\s*delivered|apply\s*delivered|sync\s*delivered|mark\s*completed|apply\s*deliveries)(?:\s+(.+))?$/i);
-  if (isMarkDeliveredMatch) {
-    const targetArg = isMarkDeliveredMatch[1] || "all";
-    const report = await markDatamartDeliveredBatches(targetArg, from);
-    return sendWhatsApp(from, report);
-  }
 
   // 3. Tickets
   if (/^(?:tickets?|urgent|pending)$/i.test(cleanInput)) {
