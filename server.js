@@ -11230,7 +11230,7 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
       `• ⏳ *> 24h IDs Submitted:* ${scanRes.delayedSubmitted || 0}\n` +
       `• 🚀 *Total IDs Sent to Group:* *${totalSubmitted}*\n` +
       `• ℹ️ *Skipped (Recent dupes):* ${scanRes.skipped || 0}\n\n` +
-      (scanRes.portalIds.length > 0 ? `🆔 *Submitted Portal IDs:* ${scanRes.portalIds.join(", ")}\n\n` : "") +
+      (scanRes.portalIds?.length > 0 ? `🆔 *Submitted Portal IDs:* ${scanRes.portalIds.join(", ")}\n\n` : "") +
       `👥 *Target Group:* Unprocessed Orders (${DEFAULT_FAILED_ORDERS_GROUP_JID})`;
     return sendWhatsApp(from, rep);
   }
@@ -11247,7 +11247,51 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   }
 
   // 1b. Portal IDs / Batch IDs Delivery Check
-// 2d. Natural "clear all ticket" / "clear all tickets" / "resolve all" / "close all"
+  if (isDeliveryCheckIntent || (allNums && allNums.length > 0 && /^[0-9a-zA-Z,\s\n\r]+$/.test(cleanInput))) {
+    const targetIds = allNums || [];
+    if (targetIds.length > 0) {
+      const report = await executeDatamartDeliveryCheck(targetIds, from);
+      if (report) return sendWhatsApp(from, report);
+    }
+  }
+
+  // 1c. Live DataMart Failed Orders (e.g. "Do we have failed order", "failed orders", "any failed order", "failed")
+  const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cleanInput) ||
+    /^(?:failed|failed\s*orders?|failed\s*queue|open\s*failed)$/i.test(cleanInput);
+  if (isLiveFailedQuery) {
+    const report = await getLiveFailedOrdersReport(from);
+    if (report) return sendWhatsApp(from, report);
+  }
+
+  // 1d. Query Failed IDs / Numbers from last Delivery Check (e.g. "give me the failed orders only data", "which ones failed")
+  const isAuditFailedQuery = /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cleanInput) ||
+    /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cleanInput);
+  if (isAuditFailedQuery) {
+    const norm = normalizeBotPhone(from);
+    const cached = lastDeliveryCheckCache.get(norm);
+    const reply = await formatFailedItemsReply(cached, from);
+    return sendWhatsApp(from, reply);
+  }
+
+  // 2. Email, Phone, Customer Search, or Order Reference
+  const emailMatch = cleanInput.match(/[\w.-]+@[\w.-]+\.\w+/);
+  const phoneMatch = cleanInput.match(/\b(0[2357]\d{8}|\+?233[2357]\d{8})\b/);
+  const isSearchIntent = /\b(?:search|lookup|find|investigate|track)\b/i.test(cleanInput) ||
+    /^(?:check|who\s+is)\s+[A-Za-z0-9_.-]+/i.test(cleanInput);
+  const isRefPattern = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(cleanInput) ||
+    /^(?:(?:dm|datamart)\s+)?(?:ref|reference|trx|trxref|order\s*ref|order\s*reference)(?:\s*[:#=])?\s*[A-Za-z0-9_-]+/i.test(cleanInput) ||
+    /^(?:track|verify|check)\s+(?:order\s+)?(?:ref\s+|reference\s+)?([A-Za-z0-9_-]{5,45})$/i.test(cleanInput);
+
+  const hasSentenceWords = /\b(?:what|how|why|when|where|who|is|are|can|could|will|would|do|did|does|tell|ask|mark|resolve|clean|clear|how\s+many|inbox|messages?|tickets?|now|about|please|saying|said|reply|give|scan|scann|delivered|apply|sync|draft|drafts|audit)\b/i.test(cleanInput);
+  const isNameOrWord = !hasSentenceWords && /^[a-zA-Z]{3,20}(?:\s+[a-zA-Z]{2,20})?$/.test(cleanInput.trim()) && !/^(?:exit|tickets?|urgent|pending|withdrawals?|deposits?|claims?|recovery|stats|my\s*datamart|scan|delivered|mark|apply|sync|draft|drafts)$/i.test(cleanInput);
+
+  if (emailMatch || phoneMatch || isSearchIntent || isNameOrWord || isRefPattern) {
+    const rawTarget = emailMatch ? emailMatch[0] : (phoneMatch ? phoneMatch[0] : (isRefPattern ? (cleanInput.match(/[A-Za-z0-9_-]{5,45}/) || [cleanInput])[0] : cleanInput.trim()));
+    const rep = await searchDatamartUnified(rawTarget, from);
+    if (rep) return sendWhatsApp(from, rep);
+  }
+
+  // 2d. Natural "clear all ticket" / "clear all tickets" / "resolve all" / "close all"
 const isPurgeDeleteCmd1 = /\b(?:delete\s+all\s+(?:tickets?|chats?)|purge\s+all\s+(?:tickets?|chats?))\b/i.test(cleanInput);
 const isClearAllCmd1 =
   /\b(?:clear\s+all\s+(?:tickets?|chats?)|clear\s+(?:tickets?|chats?)|resolve\s+all\s*(?:tickets?|chats?)?|close\s+all\s*(?:tickets?|chats?)?|mark\s+all\s+(?:as\s+)?(?:resolve|closed?)|clean\s+all\s*(?:tickets?|chats?)?)\b/i.test(cleanInput) ||
@@ -11484,6 +11528,13 @@ if (/^(?:audit\s*logs?|audits?|recent\s*checks?|delivery\s*checks?)$/i.test(clea
       `• Checked by: ${c.checkedBy || "Agent"} at ${c.createdAt ? new Date(c.createdAt).toLocaleTimeString("en-GB") : "Recently"}\n\n`;
   });
   return sendWhatsApp(from, out);
+}
+
+// 13. Direct Portal ID Delivery Check within console mode
+const cmIds = cleanInput.match(/\b\d{4,9}\b/g);
+if (cmIds && cmIds.length > 0 && /^[0-9,\s\n\r]+$/.test(cleanInput.trim())) {
+  const report = await executeDatamartDeliveryCheck(cmIds, from);
+  if (report) return sendWhatsApp(from, report);
 }
 
 return sendWhatsApp(from,
@@ -11768,13 +11819,12 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
           return sendWhatsApp(from,
             `🔐 *YOUR STONY BOT WHATSAPP PAIRING CODE:*\n\n` +
             `👉 Code: *${pairRes.pairingCode}*\n\n` +
-            `📲 *How to link on your phone (code is active for 3 minutes):*\n` +
+            `📲 *Link your phone in 10 seconds:*\n` +
             `1. Open WhatsApp on your phone\n` +
             `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
-            `3. *(Important: Check that you don't have 4 active devices already — log out an old one if full)*\n` +
-            `4. Tap *Link a Device*\n` +
-            `5. Tap *Link with phone number instead*\n` +
-            `6. Enter: *${pairRes.pairingCode}*\n\n` +
+            `3. Tap *Link a Device*\n` +
+            `4. Tap *Link with phone number instead*\n` +
+            `5. Enter: *${pairRes.pairingCode}*\n\n` +
             `✅ Once linked, all failed order IDs and channel broadcasts will send directly from your account (Stony)!`
           );
         } else if (pairRes?.ready) {
