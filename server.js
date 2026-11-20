@@ -17670,6 +17670,14 @@ app.get("/api/test-wa-status", async (req, res) => {
 app.get("/api/debug-group", async (req, res) => {
   try {
     const code = req.query.code || "KXfhdb8dg7A6cLvehhGacB";
+    if (!baileysChannelSock) {
+      await initBaileysChannelClient();
+      for (let i = 0; i < 20; i++) {
+        if (baileysChannelReady && baileysChannelSock) break;
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
     let inviteInfo = null;
     let inviteErr = null;
     let allGroups = null;
@@ -17704,6 +17712,7 @@ app.get("/api/debug-group", async (req, res) => {
 
     return res.json({
       baileysReady: baileysChannelReady,
+      sockMe: baileysChannelSock?.user || null,
       code,
       inviteInfo,
       inviteErr,
