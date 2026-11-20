@@ -2528,7 +2528,7 @@ Pre-checks if Portal ID already exists to prevent duplicates!
 const failedPortalIdSubmissionsInFlight = new Set();
 const submittedPortalIdsTimestamps = new Map();
 const SUBMISSION_DEDUP_WINDOW_MS = 12 * 60 * 60 * 1000; // 12-hour rolling deduplication window
-const DEFAULT_FAILED_ORDERS_GROUP_JID = "120363411273230975@g.us";
+const DEFAULT_FAILED_ORDERS_GROUP_JID = "120363410603023075@g.us";
 const DEFAULT_FAILED_ORDERS_GROUP_NAME = "Unprocessed Orders";
 let portalIdCacheSeeded = false;
 
