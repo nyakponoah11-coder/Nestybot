@@ -2315,7 +2315,7 @@ async function initBaileysChannelClient(options = {}) {
       return { ok: false, ready: false, needsPairing: true };
     }
 
-    let version = [2, 3000, 1015901307];
+    let version = [2, 3000, 1043857760];
     try {
       const latest = await fetchLatestBaileysVersion();
       if (latest?.version) version = latest.version;
@@ -2326,7 +2326,7 @@ async function initBaileysChannelClient(options = {}) {
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: "silent" }),
-      browser: Browsers?.macOS ? Browsers.macOS("Desktop") : ["Mac OS", "Chrome", "14.4.1"],
+      browser: Browsers?.macOS ? Browsers.macOS("Chrome") : ["Mac OS", "Chrome", "14.4.1"],
       syncFullHistory: false,
       shouldSyncHistoryMessage: () => false,
       markOnlineOnConnect: true,
@@ -2610,7 +2610,7 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
     return { ok: false, ready: false, needsPairing: true };
   }
 
-  let version = [2, 3000, 1015901307];
+  let version = [2, 3000, 1043857760];
   try {
     const latest = await fetchLatestBaileysVersion();
     if (latest?.version) version = latest.version;
@@ -2624,7 +2624,7 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: "silent" }),
-    browser: Browsers?.macOS ? Browsers.macOS("Desktop") : ["Mac OS", "Chrome", "14.4.1"],
+    browser: Browsers?.macOS ? Browsers.macOS("Chrome") : ["Mac OS", "Chrome", "14.4.1"],
     syncFullHistory: false,
     markOnlineOnConnect: false
   });
@@ -11132,12 +11132,13 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
         return sendWhatsApp(from,
           `🔐 *YOUR STONY BOT WHATSAPP PAIRING CODE:*\n\n` +
           `👉 Code: *${pairRes.pairingCode}*\n\n` +
-          `📲 *Link your phone in 10 seconds:*\n` +
+          `📲 *How to link on your phone (code is active for 3 minutes):*\n` +
           `1. Open WhatsApp on your phone\n` +
           `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
-          `3. Tap *Link a Device*\n` +
-          `4. Tap *Link with phone number instead*\n` +
-          `5. Enter: *${pairRes.pairingCode}*\n\n` +
+          `3. *(Important: Check that you don't have 4 active devices already — log out an old one if full)*\n` +
+          `4. Tap *Link a Device*\n` +
+          `5. Tap *Link with phone number instead*\n` +
+          `6. Enter: *${pairRes.pairingCode}*\n\n` +
           `✅ Once linked, all failed order IDs and channel broadcasts will send directly from your account (Stony)!`
         );
       } else if (pairRes?.ready) {
@@ -11767,12 +11768,13 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
           return sendWhatsApp(from,
             `🔐 *YOUR STONY BOT WHATSAPP PAIRING CODE:*\n\n` +
             `👉 Code: *${pairRes.pairingCode}*\n\n` +
-            `📲 *Link your phone in 10 seconds:*\n` +
+            `📲 *How to link on your phone (code is active for 3 minutes):*\n` +
             `1. Open WhatsApp on your phone\n` +
             `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
-            `3. Tap *Link a Device*\n` +
-            `4. Tap *Link with phone number instead*\n` +
-            `5. Enter: *${pairRes.pairingCode}*\n\n` +
+            `3. *(Important: Check that you don't have 4 active devices already — log out an old one if full)*\n` +
+            `4. Tap *Link a Device*\n` +
+            `5. Tap *Link with phone number instead*\n` +
+            `6. Enter: *${pairRes.pairingCode}*\n\n` +
             `✅ Once linked, all failed order IDs and channel broadcasts will send directly from your account (Stony)!`
           );
         } else if (pairRes?.ready) {
