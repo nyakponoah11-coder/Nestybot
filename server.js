@@ -8291,7 +8291,30 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
 
     let groupNotice = "";
     if ((isFailed || (isQueued && isOver24H)) && targetId && /^\d{4,9}$/.test(String(targetId))) {
-      groupNotice = `\n\n💡 *Action:* Text *submit ${targetId}* to forward this ID to the Unprocessed Orders group.`;
+      try {
+        const subRes = await submitFailedPortalIdToGroup(targetId, {
+          reason: isFailed ? "carrier_delivery_check_failed" : "vendor_queue_over_24h",
+          failedCount: failed || failedItems.length || 1,
+          totalItems,
+          queuedHours,
+          orderDate: orderCreatedAt,
+          failedPhones: failedItems.map(it => it.phone),
+          force: true,
+          callerPhone
+        });
+        if (subRes?.ok) {
+          if (subRes.submitted) {
+            groupNotice = `\n\n🚀 *Submitted Portal ID ${targetId} to Unprocessed Orders group!*`;
+          } else if (subRes.skipped) {
+            groupNotice = `\n\nℹ️ *Portal ID ${targetId} was already posted to the Unprocessed Orders group.*`;
+          }
+        } else {
+          groupNotice = `\n\n⚠️ *Could not post Portal ID ${targetId} to group:* ${subRes.reason || subRes.error}`;
+        }
+      } catch (subErr) {
+        console.warn("Delivery check submit to group error:", subErr.message);
+        groupNotice = `\n\n💡 *Action:* Text *submit ${targetId}* to forward this ID to the Unprocessed Orders group.`;
+      }
     }
 
     const failedPortalSummaries = (failedItems.length > 0 || isFailed) ? [{
