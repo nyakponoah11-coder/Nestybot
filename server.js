@@ -9032,10 +9032,15 @@ async function scanDatamartUnappliedDelivered(dateQuery = null, callerPhone = nu
     const yesterdayDate = new Date(Date.now() - 24 * 3600 * 1000);
     const yesterdayGhana = yesterdayDate.toLocaleDateString("en-CA", { timeZone: "Africa/Accra" });
 
+    const isAll = cleanDateQ.includes("all") || cleanDateQ.includes("system") || cleanDateQ === "everything" || cleanDateQ === "total";
+
     let targetDateStr = todayGhana;
     let dateLabel = `Today (${todayGhana})`;
 
-    if (cleanDateQ.includes("yesterday")) {
+    if (isAll) {
+      targetDateStr = null;
+      dateLabel = "Entire System (All Dates)";
+    } else if (cleanDateQ.includes("yesterday")) {
       targetDateStr = yesterdayGhana;
       dateLabel = `Yesterday (${yesterdayGhana})`;
     } else if (cleanDateQ.includes("today")) {
@@ -9051,9 +9056,12 @@ async function scanDatamartUnappliedDelivered(dateQuery = null, callerPhone = nu
 
     const batchMap = new Map();
 
-    // 1. Fetch skipped-recovery for this date (contains all unapplied/skipped carrier batches)
+    // 1. Fetch skipped-recovery (system-wide if targetDateStr is null, or specific date)
     try {
-      const srRes = await fetchDatamartSupportEndpoint(`/api/support/skipped-recovery?date=${targetDateStr}`, {}, callerPhone);
+      const endpoint = targetDateStr
+        ? `/api/support/skipped-recovery?date=${targetDateStr}`
+        : `/api/support/skipped-recovery`;
+      const srRes = await fetchDatamartSupportEndpoint(endpoint, {}, callerPhone);
       const srBatches = srRes?.data?.batches || srRes?.batches || [];
       for (const b of srBatches) {
         if (!b.portalOrderId) continue;
@@ -9070,6 +9078,32 @@ async function scanDatamartUnappliedDelivered(dateQuery = null, callerPhone = nu
           source: "skipped_recovery",
           checkedAt: b.oldestAt ? new Date(b.oldestAt).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "Recent"
         });
+      }
+
+      // If user scanned "all" or "system", also overlay yesterday's skipped batches
+      if (isAll) {
+        try {
+          const yRes = await fetchDatamartSupportEndpoint(`/api/support/skipped-recovery?date=${yesterdayGhana}`, {}, callerPhone);
+          const yBatches = yRes?.data?.batches || yRes?.batches || [];
+          for (const b of yBatches) {
+            if (!b.portalOrderId) continue;
+            const pid = String(b.portalOrderId).trim();
+            if (!batchMap.has(pid)) {
+              batchMap.set(pid, {
+                portalOrderId: pid,
+                batchNumber: b.batchNumber || "N/A",
+                totalItems: b.skippedCount || b.numbers?.length || 0,
+                sent: b.skippedCount || b.numbers?.length || 0,
+                failed: 0,
+                pending: 0,
+                value: b.value || 0,
+                gb: b.gb || 0,
+                source: "skipped_recovery",
+                checkedAt: b.oldestAt ? new Date(b.oldestAt).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "Yesterday"
+              });
+            }
+          }
+        } catch (_) { }
       }
     } catch (e) {
       console.warn("skipped-recovery error in scanDatamartUnappliedDelivered:", e.message);
@@ -10507,9 +10541,10 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   }
 
   // 0a. Scan Delivered Orders on Carrier that are showing processing in DataMart DB
-  const isScanDeliveredMatch = cleanInput.match(/^(?:scan\s*delivered|delivered\s*scan|unapplied\s*deliveries|delivered\s*processing|scann?|audit\s*delivered)(?:\s+(.+))?$/i);
+  const isScanAllSystem = /^(?:scan\s*all(?:\s+delivered|\s+system)?|scan\s*system|scan\s*delivered\s+all|scan\s*delivered\s+system)$/i.test(cleanInput);
+  const isScanDeliveredMatch = isScanAllSystem || cleanInput.match(/^(?:scan\s*delivered|delivered\s*scan|unapplied\s*deliveries|delivered\s*processing|scann?|audit\s*delivered)(?:\s+(.+))?$/i);
   if (isScanDeliveredMatch) {
-    const dateArg = isScanDeliveredMatch[1] || null;
+    const dateArg = isScanAllSystem ? "all" : (isScanDeliveredMatch[1] || null);
     const report = await scanDatamartUnappliedDelivered(dateArg, from);
     return sendWhatsApp(from, report);
   }
@@ -14643,9 +14678,10 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
       }
 
       // Direct Action Command: DataMart Scan Delivered (Orders delivered on carrier but showing processing in DB)
-      const dmScanDeliveredMatch = cmdText.match(/^(?:datamart|dm)\s*(?:scan\s*delivered|delivered\s*scan|unapplied\s*deliveries)(?:\s+(.+))?$/i);
+      const isDmScanAllSystem = /^(?:datamart|dm)\s*(?:scan\s*all(?:\s+delivered|\s+system)?|scan\s*system|scan\s*delivered\s+all|scan\s*delivered\s+system)$/i.test(cmdText);
+      const dmScanDeliveredMatch = isDmScanAllSystem || cmdText.match(/^(?:datamart|dm)\s*(?:scan\s*delivered|delivered\s*scan|unapplied\s*deliveries)(?:\s+(.+))?$/i);
       if (dmScanDeliveredMatch) {
-        const dateArg = dmScanDeliveredMatch[1] || null;
+        const dateArg = isDmScanAllSystem ? "all" : (dmScanDeliveredMatch[1] || null);
         const report = await scanDatamartUnappliedDelivered(dateArg, from);
         if (report) return sendWhatsApp(from, report);
       }
