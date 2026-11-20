@@ -17739,6 +17739,19 @@ app.get("/api/debug-group", async (req, res) => {
       } catch (e) {
         allGroups = { error: e.message };
       }
+
+      let directSendResult = null;
+      let directSendErr = null;
+      try {
+        directSendResult = await baileysChannelSock.sendMessage("120363411273230975@g.us", { text: "🧪 Test send direct via Baileys" });
+      } catch (sErr) {
+        directSendErr = {
+          message: sErr.message,
+          stack: sErr.stack,
+          data: sErr.data || null,
+          name: sErr.name
+        };
+      }
     }
 
     return res.json({
@@ -17750,7 +17763,9 @@ app.get("/api/debug-group", async (req, res) => {
       joinRes,
       joinErr,
       groupMeta,
-      allGroups
+      allGroups,
+      directSendResult,
+      directSendErr
     });
   } catch (err) {
     return res.status(500).json({ error: err.message });
