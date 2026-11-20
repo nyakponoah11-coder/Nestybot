@@ -2721,117 +2721,130 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
   }
 }
 
+function isOwnerPhone(phone) {
+  if (!phone) return false;
+  const norm = String(phone).replace(/\D/g, "");
+  if (!norm || norm.length < 9) return false;
+  const v9 = norm.slice(-9);
+  return v9 === "547100951";
+}
+
 async function setFailedOrdersGroup(rawInput, callerPhone = null) {
-  const input = String(rawInput || "").trim();
-  const inviteMatch = input.match(/(?:chat\.whatsapp\.com\/|invite\/)([A-Za-z0-9_-]{15,35})/i);
-  const jidMatch = input.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
+  try {
+    const input = String(rawInput || "").trim();
+    const inviteMatch = input.match(/(?:chat\.whatsapp\.com\/|invite\/)([A-Za-z0-9_-]{15,35})/i);
+    const jidMatch = input.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
 
-  let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
-  if (!sock) {
-    await initBaileysChannelClient();
-    for (let i = 0; i < 20; i++) {
-      if (baileysChannelReady && baileysChannelSock) {
-        sock = baileysChannelSock;
-        break;
+    let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
+    if (!sock) {
+      await initBaileysChannelClient();
+      for (let i = 0; i < 20; i++) {
+        if (baileysChannelReady && baileysChannelSock) {
+          sock = baileysChannelSock;
+          break;
+        }
+        await new Promise(r => setTimeout(r, 500));
       }
-      await new Promise(r => setTimeout(r, 500));
     }
-  }
-  if (!sock) {
-    return "⚠️ WhatsApp Baileys engine is currently connecting. Please try again in 10 seconds.";
-  }
+    if (!sock) {
+      return "⚠️ WhatsApp Baileys engine is currently connecting. Please try again in 10 seconds.";
+    }
 
-  let targetJid = jidMatch ? jidMatch[1] : null;
-  let groupSubject = "Failed Orders Group";
+    let targetJid = jidMatch ? jidMatch[1] : null;
+    let groupSubject = "Failed Orders Group";
 
-  if (inviteMatch) {
-    const inviteCode = inviteMatch[1];
-    try {
-      // First inspect the invite to get group metadata
-      const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
-      if (inviteInfo?.id) {
-        targetJid = `${String(inviteInfo.id).replace(/(@g\.us)+$/i, "")}@g.us`;
-        groupSubject = inviteInfo.subject || groupSubject;
+    if (inviteMatch) {
+      const inviteCode = inviteMatch[1];
+      try {
+        // First inspect the invite to get group metadata
+        const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
+        if (inviteInfo?.id) {
+          targetJid = `${String(inviteInfo.id).replace(/(@g\.us)+$/i, "")}@g.us`;
+          groupSubject = inviteInfo.subject || groupSubject;
+        }
+      } catch (_) { }
+
+      try {
+        // Join group if not already a member
+        const joinedId = await sock.groupAcceptInvite(inviteCode);
+        if (joinedId && !targetJid) {
+          targetJid = `${String(joinedId).replace(/(@g\.us)+$/i, "")}@g.us`;
+        }
+      } catch (joinErr) {
+        const eMsg = String(joinErr?.message || joinErr || "");
+        if (eMsg.includes("409") || /already|conflict/i.test(eMsg)) {
+          // Already in group! Find matching JID from participating groups
+          try {
+            const allGroups = await sock.groupFetchAllParticipating();
+            for (const [gId, gMeta] of Object.entries(allGroups || {})) {
+              if (gMeta?.subject && groupSubject !== "Failed Orders Group" && gMeta.subject.toLowerCase() === groupSubject.toLowerCase()) {
+                targetJid = `${String(gId).replace(/(@g\.us)+$/i, "")}@g.us`;
+                break;
+              }
+            }
+          } catch (_) { }
+        } else if (!targetJid) {
+          return `⚠️ Could not join WhatsApp group with invite code "${inviteCode}": ${eMsg}. Please verify the invite link is valid and not revoked!`;
+        }
       }
+    }
+
+    if (!targetJid) {
+      return "⚠️ Please provide a valid WhatsApp group link (e.g. `https://chat.whatsapp.com/...`) or group JID!";
+    }
+
+    targetJid = `${String(targetJid).replace(/(@g\.us)+$/i, "")}@g.us`;
+
+    try {
+      const meta = await sock.groupMetadata(targetJid);
+      if (meta?.subject) groupSubject = meta.subject;
     } catch (_) { }
 
-    try {
-      // Join group if not already a member
-      const joinedId = await sock.groupAcceptInvite(inviteCode);
-      if (joinedId && !targetJid) {
-        targetJid = `${String(joinedId).replace(/(@g\.us)+$/i, "")}@g.us`;
+    const normCaller = callerPhone ? String(callerPhone).replace(/\D/g, "") : null;
+    const isCallerOwner = callerPhone ? isOwnerPhone(callerPhone) : true;
+
+    // 1. If caller is an agent / non-owner, save to their account settings
+    if (normCaller && !isCallerOwner) {
+      const upserts = [
+        { key: `failed_orders_group_${normCaller}`, value: targetJid },
+        { key: `failed_orders_group_name_${normCaller}`, value: groupSubject },
+        { key: `failed_orders_group_invite_${normCaller}`, value: input }
+      ];
+      if (normCaller.length > 9) {
+        const v9 = normCaller.slice(-9);
+        upserts.push(
+          { key: `failed_orders_group_${v9}`, value: targetJid },
+          { key: `failed_orders_group_0${v9}`, value: targetJid },
+          { key: `failed_orders_group_233${v9}`, value: targetJid },
+          { key: `failed_orders_group_name_${v9}`, value: groupSubject },
+          { key: `failed_orders_group_name_0${v9}`, value: groupSubject },
+          { key: `failed_orders_group_name_233${v9}`, value: groupSubject }
+        );
       }
-    } catch (joinErr) {
-      const eMsg = String(joinErr?.message || joinErr || "");
-      if (eMsg.includes("409") || /already|conflict/i.test(eMsg)) {
-        // Already in group! Find matching JID from participating groups
-        try {
-          const allGroups = await sock.groupFetchAllParticipating();
-          for (const [gId, gMeta] of Object.entries(allGroups || {})) {
-            if (gMeta?.subject && groupSubject !== "Failed Orders Group" && gMeta.subject.toLowerCase() === groupSubject.toLowerCase()) {
-              targetJid = `${String(gId).replace(/(@g\.us)+$/i, "")}@g.us`;
-              break;
-            }
-          }
-        } catch (_) { }
-      } else if (!targetJid) {
-        return `⚠️ Could not join WhatsApp group with invite code "${inviteCode}": ${eMsg}. Please verify the invite link is valid and not revoked!`;
-      }
+      await supabase.from("settings").upsert(upserts, { onConflict: "key" });
     }
-  }
 
-  if (!targetJid) {
-    return "⚠️ Please provide a valid WhatsApp group link (e.g. `https://chat.whatsapp.com/...`) or group JID!";
-  }
-
-  targetJid = `${String(targetJid).replace(/(@g\.us)+$/i, "")}@g.us`;
-
-  try {
-    const meta = await sock.groupMetadata(targetJid);
-    if (meta?.subject) groupSubject = meta.subject;
-  } catch (_) { }
-
-  const normCaller = callerPhone ? String(callerPhone).replace(/\D/g, "") : null;
-  const isCallerOwner = callerPhone ? isOwnerPhone(callerPhone) : true;
-
-  // 1. If caller is an agent / non-owner, save to their account settings
-  if (normCaller && !isCallerOwner) {
-    const upserts = [
-      { key: `failed_orders_group_${normCaller}`, value: targetJid },
-      { key: `failed_orders_group_name_${normCaller}`, value: groupSubject },
-      { key: `failed_orders_group_invite_${normCaller}`, value: input }
-    ];
-    if (normCaller.length > 9) {
-      const v9 = normCaller.slice(-9);
-      upserts.push(
-        { key: `failed_orders_group_${v9}`, value: targetJid },
-        { key: `failed_orders_group_0${v9}`, value: targetJid },
-        { key: `failed_orders_group_233${v9}`, value: targetJid },
-        { key: `failed_orders_group_name_${v9}`, value: groupSubject },
-        { key: `failed_orders_group_name_0${v9}`, value: groupSubject },
-        { key: `failed_orders_group_name_233${v9}`, value: groupSubject }
-      );
+    // 2. If caller is owner OR no global default exists yet, also save as the global default fallback
+    if (isCallerOwner || !normCaller) {
+      await supabase.from("settings").upsert([
+        { key: "failed_orders_group_jid", value: targetJid },
+        { key: "failed_orders_group_name", value: groupSubject },
+        { key: "failed_orders_group_invite", value: input }
+      ], { onConflict: "key" });
     }
-    await supabase.from("settings").upsert(upserts, { onConflict: "key" });
-  }
 
-  // 2. If caller is owner OR no global default exists yet, also save as the global default fallback
-  if (isCallerOwner || !normCaller) {
-    await supabase.from("settings").upsert([
-      { key: "failed_orders_group_jid", value: targetJid },
-      { key: "failed_orders_group_name", value: groupSubject },
-      { key: "failed_orders_group_invite", value: input }
-    ], { onConflict: "key" });
+    const roleLabel = isCallerOwner ? "Owner Default Group" : `Your Account (${callerPhone})`;
+    return `✅ *FAILED ORDERS WHATSAPP GROUP CONNECTED!*\n\n` +
+      `• *Group Name:* *${groupSubject}*\n` +
+      `• *Scope:* *${roleLabel}*\n` +
+      `• *Group JID:* \`${targetJid}\`\n\n` +
+      `🛡️ *How it works:*\n` +
+      `Whenever an order fails or stays in vendor queue > 24 hours under your account, Stony will automatically submit the numeric Portal ID to *${groupSubject}*!\n\n` +
+      `💡 Anyone who connects DataMart without connecting their own group will automatically default to the owner's group.`;
+  } catch (err) {
+    console.error("setFailedOrdersGroup error:", err);
+    return `⚠️ Error connecting group: ${err.message}`;
   }
-
-  const roleLabel = isCallerOwner ? "Owner Default Group" : `Your Account (${callerPhone})`;
-  return `✅ *FAILED ORDERS WHATSAPP GROUP CONNECTED!*\n\n` +
-    `• *Group Name:* *${groupSubject}*\n` +
-    `• *Scope:* *${roleLabel}*\n` +
-    `• *Group JID:* \`${targetJid}\`\n\n` +
-    `🛡️ *How it works:*\n` +
-    `Whenever an order fails or stays in vendor queue > 24 hours under your account, Stony will automatically submit the numeric Portal ID to *${groupSubject}*!\n\n` +
-    `💡 Anyone who connects DataMart without connecting their own group will automatically default to the owner's group.`;
 }
 
 async function disconnectUserFailedOrdersGroup(phone) {
