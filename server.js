@@ -2468,6 +2468,153 @@ setTimeout(() => {
   initBaileysChannelClient().catch(() => { });
 }, 5000);
 
+/* =========================================================
+MULTI-AGENT WHATSAPP ACCOUNT PAIRING ENGINE
+Allows individual agents / resellers to pair their own WhatsApp numbers
+so that failed order IDs post into the group directly from THEIR OWN accounts!
+========================================================= */
+
+const agentSockets = new Map(); // cleanPhone -> { sock, ready, connecting }
+
+function normalizeAgentPhone(phone) {
+  if (!phone) return null;
+  let clean = String(phone).replace(/\D/g, "");
+  if (clean.startsWith("0") && clean.length === 10) clean = "233" + clean.slice(1);
+  else if (clean.length === 9) clean = "233" + clean;
+  return clean;
+}
+
+function getAgentAuthDir(cleanPhone) {
+  return pathChannel.join(process.cwd(), ".baileys_agent_" + cleanPhone);
+}
+
+async function restoreAgentAuthFromSupabase(cleanPhone, authDir) {
+  try {
+    if (!fsChannel.existsSync(authDir)) fsChannel.mkdirSync(authDir, { recursive: true });
+    const { data: row } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", `baileys_agent_auth_${cleanPhone}`)
+      .maybeSingle();
+    if (row?.value) {
+      const bundle = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+      for (const [fName, content] of Object.entries(bundle)) {
+        fsChannel.writeFileSync(pathChannel.join(authDir, fName), content, "utf8");
+      }
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
+async function backupAgentAuthToSupabase(cleanPhone, authDir) {
+  try {
+    if (!fsChannel.existsSync(authDir)) return;
+    const files = fsChannel.readdirSync(authDir).filter(f => f.endsWith(".json"));
+    const bundle = {};
+    for (const f of files) {
+      bundle[f] = fsChannel.readFileSync(pathChannel.join(authDir, f), "utf8");
+    }
+    if (Object.keys(bundle).length > 0) {
+      await supabase.from("settings").upsert(
+        [{ key: `baileys_agent_auth_${cleanPhone}`, value: JSON.stringify(bundle), updated_at: new Date().toISOString() }],
+        { onConflict: "key" }
+      );
+    }
+  } catch (_) {}
+}
+
+async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
+  const cleanPhone = normalizeAgentPhone(rawPhone);
+  if (!cleanPhone || isOwnerPhone(cleanPhone)) return null;
+
+  const { requestPair = false, forceReset = false } = options;
+  const existing = agentSockets.get(cleanPhone);
+  if (existing?.ready && existing?.sock && !requestPair && !forceReset) {
+    return { ok: true, ready: true, sock: existing.sock };
+  }
+
+  const authDir = getAgentAuthDir(cleanPhone);
+  if (forceReset) {
+    try { if (existing?.sock?.ws) existing.sock.ws.close(); } catch (_) {}
+    agentSockets.delete(cleanPhone);
+    if (fsChannel.existsSync(authDir)) fsChannel.rmSync(authDir, { recursive: true, force: true });
+    await supabase.from("settings").delete().eq("key", `baileys_agent_auth_${cleanPhone}`);
+    return { ok: true, reset: true };
+  } else {
+    await restoreAgentAuthFromSupabase(cleanPhone, authDir);
+  }
+
+  if (!fsChannel.existsSync(authDir)) fsChannel.mkdirSync(authDir, { recursive: true });
+
+  const baileys = await import("@whiskeysockets/baileys");
+  const pinoMod = await import("pino");
+  const pino = pinoMod.default || pinoMod;
+  const makeWASocket = baileys.makeWASocket || baileys.default?.makeWASocket || baileys.default;
+  const { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = baileys;
+
+  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+
+  if (!state.creds?.registered && !requestPair) {
+    return { ok: false, ready: false, needsPairing: true };
+  }
+
+  let version = [2, 3000, 1015901307];
+  try {
+    const latest = await fetchLatestBaileysVersion();
+    if (latest?.version) version = latest.version;
+  } catch (_) {}
+
+  const entry = { sock: null, ready: false, connecting: true };
+  agentSockets.set(cleanPhone, entry);
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    printQRInTerminal: false,
+    logger: pino({ level: "silent" }),
+    browser: Browsers ? Browsers.ubuntu("Chrome") : ["Ubuntu", "Chrome", "20.0.04"],
+    syncFullHistory: false,
+    markOnlineOnConnect: false
+  });
+
+  entry.sock = sock;
+
+  sock.ev.on("creds.update", async () => {
+    await saveCreds();
+    backupAgentAuthToSupabase(cleanPhone, authDir);
+  });
+
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect } = update;
+    if (connection === "open") {
+      entry.ready = true;
+      entry.connecting = false;
+      backupAgentAuthToSupabase(cleanPhone, authDir);
+      console.log(`✅ [Agent Baileys] Connected for agent ${cleanPhone}!`);
+    } else if (connection === "close") {
+      entry.ready = false;
+      entry.connecting = false;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const loggedOut = statusCode === DisconnectReason?.loggedOut || statusCode === 401;
+      if (loggedOut) {
+        agentSockets.delete(cleanPhone);
+        if (fsChannel.existsSync(authDir)) fsChannel.rmSync(authDir, { recursive: true, force: true });
+        await supabase.from("settings").delete().eq("key", `baileys_agent_auth_${cleanPhone}`);
+      }
+    }
+  });
+
+  if (requestPair && !state.creds?.registered) {
+    await new Promise(r => setTimeout(r, 2000));
+    const rawCode = await sock.requestPairingCode(cleanPhone);
+    const formattedCode = rawCode?.match(/.{1,4}/g)?.join("-") || rawCode;
+    return { ok: true, pairingCode: formattedCode, phone: cleanPhone };
+  }
+
+  return { ok: true, ready: entry.ready, sock };
+}
+
 async function postToWhatsAppChannel(messageText, options = {}) {
   const cleanPost = String(messageText || "").replace(/https?:\/\/data1gh\.vercel\.app/gi, "https://www.data1gh.com").trim();
   if (!cleanPost) return { ok: false, error: "Empty channel post text" };
@@ -2886,7 +3033,23 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
         await sock.authState.keys.set({ 'sender-key-memory': { [groupJid]: null } });
       }
     } catch (_) { }
-    const sent = await sock.sendMessage(groupJid, { text: sendText });
+
+    // If caller is an agent and has their own paired WhatsApp account, post directly from their account!
+    let senderSock = sock;
+    let senderLabel = "default_bot";
+    if (normCaller && !isCallerOwner) {
+      try {
+        const agentClient = await getOrInitAgentBaileysClient(normCaller);
+        if (agentClient?.ready && agentClient?.sock) {
+          senderSock = agentClient.sock;
+          senderLabel = `agent_${normCaller}`;
+          console.log(`🚀 [FAILED ORDER GROUP] Posting ID ${cleanId} directly through AGENT's own paired WhatsApp account (${normCaller})!`);
+        }
+      } catch (aErr) {
+        console.warn("Could not use agent socket, using default:", aErr.message);
+      }
+    }
+    const sent = await senderSock.sendMessage(groupJid, { text: sendText });
     if (sent?.key?.id && sent?.message) {
       recentSentMessagesStore.set(sent.key.id, sent.message);
       if (recentSentMessagesStore.size > 200) {
@@ -3233,10 +3396,23 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
       ], { onConflict: "key" });
     }
 
-    try {
-      await sock.sendMessage(targetJid, { text: "🔔 *Unprocessed Orders Bot Connected!* Failed portal IDs will now be posted here automatically." });
-    } catch (postErr) {
-      console.warn("Could not send welcome post to group:", postErr.message);
+    // 🛡️ CRITICAL INSTRUCTION: Never send any message to the group when a user connects!
+    // No welcome post, no alerts to group. The group remains completely undisturbed.
+
+    let pairCodeSection = "";
+    if (!isCallerOwner && normCaller) {
+      try {
+        const pairRes = await getOrInitAgentBaileysClient(normCaller, { requestPair: true });
+        if (pairRes?.pairingCode) {
+          pairCodeSection = `\n\n🔑 *POST FROM YOUR OWN WHATSAPP NUMBER:*\n` +
+            `To make failed orders post under **your own name and phone number** (instead of Stony), pair your WhatsApp:\n\n` +
+            `👉 Pairing Code: *${pairRes.pairingCode}*\n\n` +
+            `*(On your phone: WhatsApp > Settings > Linked Devices > Link a Device > Link with phone number instead)*\n\n` +
+            `💡 If you don't pair, failed orders will be submitted using the default bot.`;
+        }
+      } catch (pErr) {
+        console.warn("Agent pairing code request note:", pErr.message);
+      }
     }
 
     const roleLabel = isCallerOwner ? "Owner Default Group" : `Your Account (${callerPhone})`;
@@ -3245,8 +3421,9 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
       `• *Scope:* *${roleLabel}*\n` +
       `• *Group JID:* \`${targetJid}\`\n\n` +
       `🛡️ *How it works:*\n` +
-      `Whenever an order fails or stays in vendor queue > 24 hours under your account, Stony will automatically submit the numeric Portal ID to *${groupSubject}*!\n\n` +
-      `💡 Anyone who connects DataMart without connecting their own group will automatically default to the owner's group.`;
+      `Whenever an order fails or stays in vendor queue > 24 hours under your account, the numeric Portal ID will be submitted to *${groupSubject}*!\n\n` +
+      `💡 Anyone who connects DataMart without connecting their own group will automatically default to the owner's group.` +
+      pairCodeSection;
   } catch (err) {
     console.error("setFailedOrdersGroup error:", err);
     return `⚠️ Error connecting group: ${err.message}`;
@@ -3277,16 +3454,24 @@ async function getUserFailedOrdersGroupStatus(phone) {
   const { data: dRow } = await supabase.from("settings").select("value").eq("key", "failed_orders_group_jid").maybeSingle();
   const { data: dName } = await supabase.from("settings").select("value").eq("key", "failed_orders_group_name").maybeSingle();
 
+  const agentEntry = norm ? agentSockets.get(norm) : null;
+  const isAgentLinked = !!(agentEntry?.ready && agentEntry?.sock);
+  const senderInfo = isAgentLinked
+    ? `• *Sender Account:* *Your WhatsApp* (Linked ✅ - posts as you)`
+    : `• *Sender Account:* Default Bot (Text *pair whatsapp* to send as yourself)`;
+
   if (customGroup) {
     return `📋 *FAILED ORDERS GROUP STATUS:*\n\n` +
       `• *Your Custom Group:* *${customName || "Connected"}*\n` +
-      `• *JID:* \`${customGroup}\`\n\n` +
+      `• *JID:* \`${customGroup}\`\n` +
+      `${senderInfo}\n\n` +
       `All your failed / >24h orders are submitted to your custom group. To revert to the default group, text: *disconnect group*.`;
   }
   return `📋 *FAILED ORDERS GROUP STATUS:*\n\n` +
     `• *Status:* Using Owner's Default Group\n` +
     `• *Default Group:* *${dName?.value || "Configured"}*\n` +
-    `• *JID:* \`${dRow?.value || "Default"}\`\n\n` +
+    `• *JID:* \`${dRow?.value || "Default"}\`\n` +
+    `${senderInfo}\n\n` +
     `💡 To connect your own WhatsApp group for your DataMart orders, text:\n*connect group <invite_link>*`;
 }
 
@@ -10867,6 +11052,43 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     return sendWhatsApp(from, rep);
   }
 
+  // Agent WhatsApp Pairing Commands (for posting failed IDs directly under agent's own phone/name)
+  if (/^(?:pair\s*whatsapp|link\s*whatsapp|connect\s*whatsapp)$/i.test(cleanInput)) {
+    const pairRes = await getOrInitAgentBaileysClient(from, { requestPair: true });
+    if (pairRes?.pairingCode) {
+      return sendWhatsApp(from,
+        `🔑 *YOUR WHATSAPP PAIRING CODE:*\n\n` +
+        `👉 Code: *${pairRes.pairingCode}*\n\n` +
+        `📲 *How to link on your phone:*\n` +
+        `1. Open WhatsApp on your phone\n` +
+        `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
+        `3. Tap *Link a Device*\n` +
+        `4. Tap *Link with phone number instead*\n` +
+        `5. Enter the code above: *${pairRes.pairingCode}*\n\n` +
+        `✅ Once linked, any failed orders from your account will post into the group with *your own name and number*!\n` +
+        `*(No notifications are sent to the group upon connecting).*`
+      );
+    } else if (pairRes?.ready) {
+      return sendWhatsApp(from, `✅ *Your WhatsApp account is already linked and ready!*\nFailed order IDs are automatically posted to your group under your own number.`);
+    } else {
+      return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please ensure your phone number is valid."}`);
+    }
+  }
+
+  if (/^(?:unlink\s*whatsapp|disconnect\s*whatsapp|logout\s*whatsapp)$/i.test(cleanInput)) {
+    await getOrInitAgentBaileysClient(from, { forceReset: true });
+    return sendWhatsApp(from, `🔌 *Your WhatsApp session has been unlinked!*\nFailed orders will now be submitted using the default bot.`);
+  }
+
+  if (/^(?:pair\s*status|whatsapp\s*status|wa\s*status)$/i.test(cleanInput)) {
+    const checkRes = await getOrInitAgentBaileysClient(from);
+    if (checkRes?.ready) {
+      return sendWhatsApp(from, `✅ *Your WhatsApp Account Status: LINKED*\nFailed order submissions to your group will show as sent by your account.`);
+    } else {
+      return sendWhatsApp(from, `⚪ *Your WhatsApp Account Status: NOT LINKED*\nSubmissions currently use the default bot.\n\nType *pair whatsapp* to link your account.`);
+    }
+  }
+
   // Manual submission of Portal ID to group (e.g. "submit 561077" or "submit portal id 561077 to group")
   const submitManualMatch =
     cleanInput.match(/^(?:submit|send|post)\s+(?:portal\s*id\s*|track\s*id\s*|id\s*)?(\d{4,9})\s*(?:to|into)?\s*(?:the\s*)?(?:group)?$/i) ||
@@ -11495,6 +11717,43 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
     if (/^(?:disconnect\s*group|unlink\s*group|remove\s*group|reset\s*group)$/i.test(cleanCmd)) {
       const rep = await disconnectUserFailedOrdersGroup(from);
       return sendWhatsApp(from, rep);
+    }
+
+    // Agent WhatsApp Pairing Commands (for posting failed IDs directly under agent's own phone/name)
+    if (/^(?:pair\s*whatsapp|link\s*whatsapp|connect\s*whatsapp)$/i.test(cleanCmd)) {
+      const pairRes = await getOrInitAgentBaileysClient(from, { requestPair: true });
+      if (pairRes?.pairingCode) {
+        return sendWhatsApp(from,
+          `🔑 *YOUR WHATSAPP PAIRING CODE:*\n\n` +
+          `👉 Code: *${pairRes.pairingCode}*\n\n` +
+          `📲 *How to link on your phone:*\n` +
+          `1. Open WhatsApp on your phone\n` +
+          `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
+          `3. Tap *Link a Device*\n` +
+          `4. Tap *Link with phone number instead*\n` +
+          `5. Enter the code above: *${pairRes.pairingCode}*\n\n` +
+          `✅ Once linked, any failed orders from your account will post into the group with *your own name and number*!\n` +
+          `*(No notifications are sent to the group upon connecting).*`
+        );
+      } else if (pairRes?.ready) {
+        return sendWhatsApp(from, `✅ *Your WhatsApp account is already linked and ready!*\nFailed order IDs are automatically posted to your group under your own number.`);
+      } else {
+        return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please ensure your phone number is valid."}`);
+      }
+    }
+
+    if (/^(?:unlink\s*whatsapp|disconnect\s*whatsapp|logout\s*whatsapp)$/i.test(cleanCmd)) {
+      await getOrInitAgentBaileysClient(from, { forceReset: true });
+      return sendWhatsApp(from, `🔌 *Your WhatsApp session has been unlinked!*\nFailed orders will now be submitted using the default bot.`);
+    }
+
+    if (/^(?:pair\s*status|whatsapp\s*status|wa\s*status)$/i.test(cleanCmd)) {
+      const checkRes = await getOrInitAgentBaileysClient(from);
+      if (checkRes?.ready) {
+        return sendWhatsApp(from, `✅ *Your WhatsApp Account Status: LINKED*\nFailed order submissions to your group will show as sent by your account.`);
+      } else {
+        return sendWhatsApp(from, `⚪ *Your WhatsApp Account Status: NOT LINKED*\nSubmissions currently use the default bot.\n\nType *pair whatsapp* to link your account.`);
+      }
     }
 
     // Manual submission of Portal ID to group (e.g. "submit 561077" or "submit portal id 561077 to group")
