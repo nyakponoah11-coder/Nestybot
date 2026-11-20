@@ -7683,29 +7683,31 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
 
   const targetQuery = trackIdFound || orderRefFound || phoneFound;
 
-  // ── 1. SYNTHESIZE WHAT THE CUSTOMER IS ACTUALLY COMPLAINING ABOUT ──
+  // ── 1. FAST SYNTHESIS OF WHAT CUSTOMER IS COMPLAINING ABOUT ──
   let mainIssue = "";
-  if (customerTexts.length > 0) {
-    mainIssue = await synthesizeCustomerMainIssue(custFullName, customerTexts, targetQuery);
+  const joinedCust = customerTexts.join(" | ").toLowerCase();
+  if (/\b(still\s*not|haven'?t\s*come|not\s*delivered|not\s*in|waiting|since\s*morning|delay|hours|days|week|not\s*received|where\s*is\s*my)\b/i.test(joinedCust)) {
+    mainIssue = `Customer complaining that data ${targetQuery ? `(${targetQuery}) ` : ""}is delayed and has not landed yet`;
+  } else if (/\b(down|working|system)\b/i.test(joinedCust)) {
+    mainIssue = "Customer asking if network/service is currently down before buying";
+  } else if (/\b(momo|deduct|paid|debit)\b/i.test(joinedCust)) {
+    mainIssue = "Customer says money was deducted on MoMo but order is pending";
+  } else if (/\b(refund|reverse|money\s*back|wasted)\b/i.test(joinedCust)) {
+    mainIssue = "Customer requesting a refund for delayed or uncredited transaction";
+  } else if (/\b(withdraw|cashout|pin)\b/i.test(joinedCust)) {
+    mainIssue = "Agent asking for wallet cashout or withdrawal PIN reset";
+  } else if (targetQuery) {
+    mainIssue = `Customer checking why order (${targetQuery}) has not landed`;
+  } else if (actualCustomerLastMsg && actualCustomerLastMsg.length <= 70) {
+    mainIssue = `Customer inquiry: "${actualCustomerLastMsg}"`;
+  } else if (customerTexts.length > 0) {
+    try {
+      mainIssue = await synthesizeCustomerMainIssue(custFullName, customerTexts, targetQuery);
+    } catch (_) { }
   }
 
   if (!mainIssue || mainIssue.length < 6) {
-    const joinedCust = customerTexts.join(" | ").toLowerCase();
-    if (/\b(still\s*not|haven'?t\s*come|not\s*delivered|not\s*in|waiting|since\s*morning|delay|hours|days|week|not\s*received|where\s*is\s*my)\b/i.test(joinedCust)) {
-      mainIssue = `Customer complaining that data ${targetQuery ? `(${targetQuery}) ` : ""}is delayed and has not landed yet`;
-    } else if (/\b(down|working|system)\b/i.test(joinedCust)) {
-      mainIssue = "Customer asking if network/service is currently down before buying";
-    } else if (/\b(momo|deduct|paid|debit)\b/i.test(joinedCust)) {
-      mainIssue = "Customer says money was deducted on MoMo but order is pending";
-    } else if (/\b(refund|reverse|money\s*back|wasted)\b/i.test(joinedCust)) {
-      mainIssue = "Customer requesting a refund for delayed or uncredited transaction";
-    } else if (/\b(withdraw|cashout|pin)\b/i.test(joinedCust)) {
-      mainIssue = "Agent asking for wallet cashout or withdrawal PIN reset";
-    } else if (targetQuery) {
-      mainIssue = `Customer checking why order (${targetQuery}) has not landed`;
-    } else {
-      mainIssue = actualCustomerLastMsg ? `Customer inquiry: "${actualCustomerLastMsg.slice(0, 70)}"` : "Customer waiting for support assistance";
-    }
+    mainIssue = actualCustomerLastMsg ? `Customer inquiry: "${actualCustomerLastMsg.slice(0, 70)}"` : "Customer waiting for support assistance";
   }
 
   // ── 2. LIVE DELIVERY TRACKING & CONTEXT-AWARE DRAFT ──
@@ -8249,23 +8251,66 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       return s !== "sent" && s !== "delivered";
     });
 
-    const failedPortalSummaries = failedItems.length > 0 ? [{
+    const isFailed = failed > 0 || failedItems.length > 0;
+
+    let isOver24H = false;
+    let queuedHours = null;
+    let orderCreatedAt = result.createdAt || result.orderDate || result.date || null;
+
+    if (isQueued) {
+      if (!orderCreatedAt && targetId) {
+        try {
+          const sRes = await fetchDatamartSupportEndpoint(`/api/support/search?query=${targetId}`, {}, callerPhone);
+          const ordMatch = sRes?.data?.order || sRes?.order || (sRes?.data?.orders || sRes?.orders || [])[0];
+          if (ordMatch?.createdAt || ordMatch?.created_at || ordMatch?.date) {
+            orderCreatedAt = ordMatch.createdAt || ordMatch.created_at || ordMatch.date;
+          }
+        } catch (_) { }
+        if (!orderCreatedAt) {
+          try {
+            const { data: dbOrd } = await supabase.from("orders").select("created_at").eq("datamart_reference", String(targetId)).maybeSingle();
+            if (dbOrd?.created_at) orderCreatedAt = dbOrd.created_at;
+          } catch (_) { }
+        }
+      }
+
+      if (orderCreatedAt) {
+        const ageMs = Date.now() - new Date(orderCreatedAt).getTime();
+        if (!isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)) {
+          isOver24H = true;
+          queuedHours = Math.floor(ageMs / (60 * 60 * 1000));
+        }
+      }
+    }
+
+    let groupNotice = "";
+    if ((isFailed || (isQueued && isOver24H)) && targetId && /^\d{4,9}$/.test(String(targetId))) {
+      try {
+        const subRes = await submitFailedPortalIdToGroup(targetId, {
+          reason: isFailed ? "carrier_delivery_check_failed" : "vendor_queue_over_24h",
+          failedCount: failed || failedItems.length || 1,
+          totalItems,
+          queuedHours,
+          orderDate: orderCreatedAt,
+          failedPhones: failedItems.map(it => it.phone),
+          force: true,
+          callerPhone
+        });
+        if (subRes?.ok) {
+          groupNotice = `\n\n🚀 *Submitted Portal ID ${targetId} to Unprocessed Orders group!*`;
+        }
+      } catch (subErr) {
+        console.warn("Delivery check submit to group error:", subErr.message);
+      }
+    }
+
+    const failedPortalSummaries = (failedItems.length > 0 || isFailed) ? [{
       portalId: String(targetId),
       batchNumber: result.batchNumber,
-      failedCount: failedItems.length,
+      failedCount: failedItems.length || failed || 1,
       totalItems,
       failedPhones: failedItems.map(it => it.phone)
     }] : [];
-
-    if (failedItems.length > 0 && targetId && /^\d{4,9}$/.test(String(targetId))) {
-      submitFailedPortalIdToGroup(targetId, {
-        reason: "carrier_delivery_check_failed",
-        failedCount: failedItems.length,
-        totalItems,
-        failedPhones: failedItems.map(it => it.phone),
-        callerPhone
-      }).catch(() => { });
-    }
 
     if (callerPhone) {
       const norm = normalizeBotPhone(callerPhone);
@@ -8309,7 +8354,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       `🕒 *Processed:* ${dateStr}\n` +
       `👤 *Audited By:* ${checkedBy}\n` +
       `${failedSection}\n` +
-      `${conclusionMsg}`;
+      `${conclusionMsg}${groupNotice}`;
   }
 
   // Bulk IDs: Unified staged runner
@@ -8395,7 +8440,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         if (qDate) {
           const ageMs = Date.now() - new Date(qDate).getTime();
           if (!isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000) && r.id && /^\d{4,9}$/.test(String(r.id))) {
-            submitFailedPortalIdToGroup(r.id, { reason: "vendor_queue_over_24h", queuedHours: Math.floor(ageMs / 3600000), callerPhone }).catch(() => { });
+            submitFailedPortalIdToGroup(r.id, { reason: "vendor_queue_over_24h", queuedHours: Math.floor(ageMs / 3600000), force: true, callerPhone }).catch(() => { });
           }
         }
       }
@@ -8411,7 +8456,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       if (bFailed > 0 || failedInBatch.length > 0) {
         // Auto-submit failed portal ID to configured WhatsApp group
         if (r.id && /^\d{4,9}$/.test(String(r.id))) {
-          submitFailedPortalIdToGroup(r.id, { reason: "bulk_carrier_delivery_check_failed", failedCount: bFailed || failedInBatch.length, callerPhone }).catch(err => {
+          submitFailedPortalIdToGroup(r.id, { reason: "bulk_carrier_delivery_check_failed", failedCount: bFailed || failedInBatch.length, force: true, callerPhone }).catch(err => {
             console.error("❌ Auto-submit to group error:", err.message);
           });
         }
@@ -8945,10 +8990,17 @@ async function executeDatamartBulkPhoneCheck(rawPhoneList, callerPhone = null) {
       else if (r.isFailed) {
         failedCount++;
         if (r.portalId && /^\d{4,9}$/.test(String(r.portalId))) {
-          submitFailedPortalIdToGroup(r.portalId, { reason: "bulk_phone_failed", phone: r.phone, callerPhone }).catch(() => { });
+          submitFailedPortalIdToGroup(r.portalId, { reason: "bulk_phone_failed", phone: r.phone, force: true, callerPhone }).catch(() => { });
         }
       }
-      else inProgressCount++;
+      else {
+        inProgressCount++;
+        const rawDate = r.createdAt;
+        const isOver24H = rawDate ? (Date.now() - new Date(rawDate).getTime() >= 24 * 3600 * 1000) : false;
+        if (isOver24H && r.portalId && /^\d{4,9}$/.test(String(r.portalId))) {
+          submitFailedPortalIdToGroup(r.portalId, { reason: "phone_check_queued_over_24h", force: true, phone: r.phone, callerPhone }).catch(() => { });
+        }
+      }
 
       const pkgPart = r.capacity ? ` (${r.network} ${r.capacity})` : ` (${r.network})`;
       const batchPart = r.batchNumber ? ` (Batch #${r.batchNumber})` : "";
