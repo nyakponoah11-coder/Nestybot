@@ -2293,7 +2293,7 @@ async function initBaileysChannelClient(options = {}) {
         try { fsChannel.rmSync(BAILEYS_AUTH_DIR, { recursive: true, force: true }); } catch (_) { }
       }
       await supabase.from("settings").delete().eq("key", "baileys_channel_auth_bundle");
-    } else {
+    } else if (!fsChannel.existsSync(pathChannel.join(BAILEYS_AUTH_DIR, "creds.json"))) {
       await restoreBaileysAuthFromSupabase();
     }
 
@@ -2458,8 +2458,13 @@ async function initBaileysChannelClient(options = {}) {
             try { fsChannel.rmSync(BAILEYS_AUTH_DIR, { recursive: true, force: true }); } catch (_) { }
           }
           await supabase.from("settings").delete().eq("key", "baileys_channel_auth_bundle");
-        } else if (state.creds?.registered || statusCode === 515) {
-          console.log(`🔄 [Baileys Channel] Disconnected (${statusCode || "network"}), reconnecting to finalize session...`);
+        } else if (statusCode === 515 || statusCode === DisconnectReason?.restartRequired) {
+          console.log(`🔄 [Baileys Channel] 515 Restart Required (Pairing handshake), reconnecting immediately...`);
+          setTimeout(() => {
+            initBaileysChannelClient().catch(() => { });
+          }, 500);
+        } else if (state.creds?.registered) {
+          console.log(`🔄 [Baileys Channel] Disconnected (${statusCode || "network"}), reconnecting session...`);
           setTimeout(() => {
             initBaileysChannelClient().catch(() => { });
           }, 1500);
@@ -2576,7 +2581,7 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
     if (fsChannel.existsSync(authDir)) fsChannel.rmSync(authDir, { recursive: true, force: true });
     await supabase.from("settings").delete().eq("key", `baileys_agent_auth_${cleanPhone}`);
     return { ok: true, reset: true };
-  } else {
+  } else if (!fsChannel.existsSync(pathChannel.join(authDir, "creds.json"))) {
     await restoreAgentAuthFromSupabase(cleanPhone, authDir);
   }
 
@@ -2648,12 +2653,18 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
         agentSockets.delete(cleanPhone);
         if (fsChannel.existsSync(authDir)) fsChannel.rmSync(authDir, { recursive: true, force: true });
         await supabase.from("settings").delete().eq("key", `baileys_agent_auth_${cleanPhone}`);
-      } else {
-        // ALWAYS reconnect immediately on 515 restart so Baileys completes the pairing handshake!
-        console.log(`🔄 [Agent Baileys ${cleanPhone}] Disconnected (${statusCode || "network"}), reconnecting to finalize pairing...`);
+      } else if (statusCode === 515 || statusCode === DisconnectReason?.restartRequired) {
+        console.log(`🔄 [Agent Baileys ${cleanPhone}] 515 Restart Required (Pairing handshake), reconnecting immediately...`);
+        setTimeout(() => {
+          getOrInitAgentBaileysClient(cleanPhone).catch(() => { });
+        }, 500);
+      } else if (state.creds?.registered) {
+        console.log(`🔄 [Agent Baileys ${cleanPhone}] Disconnected (${statusCode || "network"}), reconnecting...`);
         setTimeout(() => {
           getOrInitAgentBaileysClient(cleanPhone).catch(() => { });
         }, 1500);
+      } else {
+        console.log(`⏸️ [Agent Baileys ${cleanPhone}] Closed (${statusCode || "unregistered"}), awaiting user pairing.`);
       }
     }
   });
@@ -11235,22 +11246,6 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   }
 
   // 1b. Portal IDs / Batch IDs Delivery Check
-  if (isDeliveryCheckIntent || (allNums && allNums.length > 0 && /^[0-9a-zA-Z,\s\n\r]+$/.test(cleanInput))) {
-    const targetIds = allNums || [];
-    if (targetIds.length > 0) {
-      const report = await executeDatamartDeliveryCheck(targetIds, from);
-      if (report) return sendWhatsApp(from, report);
-    }
-  }
-
-  // 1b. Live DataMart Failed Orders (e.g. "Do we have failed order", "failed orders", "any failed order", "failed")
-  const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cleanInput) ||
-    /^(?:failed|failed\s*orders?|failed\s*queue|open\s*failed)$/i.test(cleanInput);
-  if (isLiveFailedQuery) {
-    const report = await getLiveFailedOrdersReport(from);
-    if (report) return sendWhatsApp(from, report);
-  }
-
 // 2d. Natural "clear all ticket" / "clear all tickets" / "resolve all" / "close all"
 const isPurgeDeleteCmd1 = /\b(?:delete\s+all\s+(?:tickets?|chats?)|purge\s+all\s+(?:tickets?|chats?))\b/i.test(cleanInput);
 const isClearAllCmd1 =
