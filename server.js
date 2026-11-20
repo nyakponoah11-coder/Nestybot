@@ -2703,23 +2703,32 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     return { ok: true, suppressed: true, reason: "background_scans_disabled" };
   }
 
-  // 1. ABSOLUTE SYNCHRONOUS MUTEX & MEMORY DEDUPLICATION CHECK
-  // If this ID is currently in flight right now, prevent duplicate parallel posts
+  // 1. ABSOLUTE SYNCHRONOUS MUTEX
   if (failedPortalIdSubmissionsInFlight.has(cleanId)) {
     console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY in-flight. Skipping duplicate parallel execution.`);
     return { ok: true, skipped: true, reason: "in_flight" };
   }
 
-  // Rolling deduplication: Skip if posted recently UNLESS force is requested
+  // 🛡️ SCAN 1: Check memory timestamp (Within last 24 hours) - unless manual submit or test
   const lastSub = submittedPortalIdsTimestamps.get(cleanId);
-  if (!meta.force && lastSub && (Date.now() - lastSub < SUBMISSION_DEDUP_WINDOW_MS)) {
-    console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} already posted within the last 12 hours. Skipping duplicate.`);
-    return { ok: true, skipped: true, reason: "recently_submitted" };
+  if (lastSub && (Date.now() - lastSub < (24 * 3600 * 1000)) && !isTest && !meta.manual) {
+    console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} already posted or heard in group within last 24h. Skipping duplicate.`);
+    return { ok: true, skipped: true, reason: "already_exists", group: DEFAULT_FAILED_ORDERS_GROUP_NAME };
   }
 
-  // Lock synchronously in memory before ANY await
+  // 🛡️ SCAN 2: Scan live recent WhatsApp messages in memory
+  const foundInRecentGroup = recentBaileysMessages.some(m => {
+    if (!m.text) return false;
+    const nums = m.text.match(/\b\d{4,9}\b/g) || [];
+    return nums.includes(cleanId);
+  });
+  if (foundInRecentGroup && !isTest && !meta.manual) {
+    console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} found directly in recent WhatsApp group messages. Skipping duplicate.`);
+    return { ok: true, skipped: true, reason: "already_exists", group: DEFAULT_FAILED_ORDERS_GROUP_NAME };
+  }
+
+  // Lock in-flight before async database calls
   failedPortalIdSubmissionsInFlight.add(cleanId);
-  submittedPortalIdsTimestamps.set(cleanId, Date.now());
 
   try {
     await seedSubmittedPortalIdsCache();
@@ -2846,8 +2855,8 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     }
     if (!Array.isArray(postedIds)) postedIds = [];
 
-    // 🛡️ STRICT GROUP HISTORY SCAN: If this ID already exists anywhere in the group, NEVER send it again!
-    if (postedIds.includes(cleanId) && !isTest) {
+    // 🛡️ SCAN 3: Persistent group history database check
+    if (postedIds.includes(cleanId) && !isTest && !meta.manual) {
       console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}). Skipping duplicate submission.`);
       return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
     }
@@ -8455,7 +8464,6 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
           queuedHours,
           orderDate: orderCreatedAt,
           failedPhones: failedItems.map(it => it.phone),
-          force: true,
           callerPhone
         });
         if (subRes?.ok) {
@@ -8609,7 +8617,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
         if (qDate) {
           const ageMs = Date.now() - new Date(qDate).getTime();
           if (!isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000) && r.id && /^\d{4,9}$/.test(String(r.id))) {
-            submitFailedPortalIdToGroup(r.id, { reason: "vendor_queue_over_24h", queuedHours: Math.floor(ageMs / 3600000), force: true, callerPhone }).catch(() => { });
+            submitFailedPortalIdToGroup(r.id, { reason: "vendor_queue_over_24h", queuedHours: Math.floor(ageMs / 3600000), callerPhone }).catch(() => { });
           }
         }
       }
@@ -8625,7 +8633,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       if (bFailed > 0 || failedInBatch.length > 0) {
         // Auto-submit failed portal ID to configured WhatsApp group
         if (r.id && /^\d{4,9}$/.test(String(r.id))) {
-          submitFailedPortalIdToGroup(r.id, { reason: "bulk_carrier_delivery_check_failed", failedCount: bFailed || failedInBatch.length, force: true, callerPhone }).catch(err => {
+          submitFailedPortalIdToGroup(r.id, { reason: "bulk_carrier_delivery_check_failed", failedCount: bFailed || failedInBatch.length, callerPhone }).catch(err => {
             console.error("❌ Auto-submit to group error:", err.message);
           });
         }
@@ -9159,7 +9167,7 @@ async function executeDatamartBulkPhoneCheck(rawPhoneList, callerPhone = null) {
       else if (r.isFailed) {
         failedCount++;
         if (r.portalId && /^\d{4,9}$/.test(String(r.portalId))) {
-          submitFailedPortalIdToGroup(r.portalId, { reason: "bulk_phone_failed", phone: r.phone, force: true, callerPhone }).catch(() => { });
+          submitFailedPortalIdToGroup(r.portalId, { reason: "bulk_phone_failed", phone: r.phone, callerPhone }).catch(() => { });
         }
       }
       else {
@@ -9167,7 +9175,7 @@ async function executeDatamartBulkPhoneCheck(rawPhoneList, callerPhone = null) {
         const rawDate = r.createdAt;
         const isOver24H = rawDate ? (Date.now() - new Date(rawDate).getTime() >= 24 * 3600 * 1000) : false;
         if (isOver24H && r.portalId && /^\d{4,9}$/.test(String(r.portalId))) {
-          submitFailedPortalIdToGroup(r.portalId, { reason: "phone_check_queued_over_24h", force: true, phone: r.phone, callerPhone }).catch(() => { });
+          submitFailedPortalIdToGroup(r.portalId, { reason: "phone_check_queued_over_24h", phone: r.phone, callerPhone }).catch(() => { });
         }
       }
 
