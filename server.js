@@ -2196,8 +2196,24 @@ function scheduleBackupBaileysAuthToSupabase() {
     try {
       if (!fsChannel.existsSync(BAILEYS_AUTH_DIR)) return;
       const files = fsChannel.readdirSync(BAILEYS_AUTH_DIR).filter(f => f.endsWith(".json"));
+      
+      // Auto-prune old pre-keys to keep disk fast and bundle small
+      const preKeys = files.filter(f => f.startsWith("pre-key-"));
+      if (preKeys.length > 50) {
+        preKeys.sort((a, b) => {
+          const na = parseInt(a.replace(/\D/g, "") || 0);
+          const nb = parseInt(b.replace(/\D/g, "") || 0);
+          return na - nb;
+        });
+        const toDelete = preKeys.slice(0, preKeys.length - 50);
+        for (const deadKey of toDelete) {
+          try { fsChannel.unlinkSync(pathChannel.join(BAILEYS_AUTH_DIR, deadKey)); } catch (_) { }
+        }
+      }
+
+      const keptFiles = fsChannel.readdirSync(BAILEYS_AUTH_DIR).filter(f => f.endsWith(".json"));
       const bundle = {};
-      for (const f of files) {
+      for (const f of keptFiles) {
         bundle[f] = fsChannel.readFileSync(pathChannel.join(BAILEYS_AUTH_DIR, f), "utf8");
       }
       if (Object.keys(bundle).length > 0) {
@@ -3018,21 +3034,43 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
 
     // 3. Connect Baileys client to post strictly to group (with handshake wait retry)
     let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
+
+    // Check if caller (owner or agent) has an active companion session
+    if (!sock && normCaller) {
+      try {
+        const callerClient = await getOrInitAgentBaileysClient(normCaller);
+        if (callerClient?.ready && callerClient?.sock) {
+          sock = callerClient.sock;
+        }
+      } catch (_) { }
+    }
+
     if (!sock) {
       await initBaileysChannelClient();
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 15; i++) {
         if (baileysChannelReady && baileysChannelSock) {
           sock = baileysChannelSock;
           break;
         }
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 400));
       }
     }
+
+    // Secondary check for caller agent socket if primary still connecting
+    if (!sock && normCaller) {
+      try {
+        const callerClient = await getOrInitAgentBaileysClient(normCaller);
+        if (callerClient?.ready && callerClient?.sock) {
+          sock = callerClient.sock;
+        }
+      } catch (_) { }
+    }
+
     if (!sock) {
       console.warn("[FAILED ORDER GROUP] Baileys socket not ready to post failed portal ID:", cleanId);
       submittedPortalIdsTimestamps.delete(cleanId);
       if (groupJid) submittedPortalIdsTimestamps.delete(`${groupJid}:${cleanId}`);
-      return { ok: false, reason: "baileys_not_ready" };
+      return { ok: false, reason: "WhatsApp bot session is not linked. Text *pair whatsapp* to link your account in 10 seconds." };
     }
 
     // 4. Send ONLY the Portal ID (clean copyable ID as requested) or test message
@@ -3043,16 +3081,16 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
       }
     } catch (_) { }
 
-    // If caller is an agent and has their own paired WhatsApp account, post directly from their account!
+    // If caller has their own paired WhatsApp account, post directly from their account!
     let senderSock = sock;
     let senderLabel = "default_bot";
-    if (normCaller && !isCallerOwner) {
+    if (normCaller) {
       try {
         const agentClient = await getOrInitAgentBaileysClient(normCaller);
         if (agentClient?.ready && agentClient?.sock) {
           senderSock = agentClient.sock;
           senderLabel = `agent_${normCaller}`;
-          console.log(`🚀 [FAILED ORDER GROUP] Posting ID ${cleanId} directly through AGENT's own paired WhatsApp account (${normCaller})!`);
+          console.log(`🚀 [FAILED ORDER GROUP] Posting ID ${cleanId} directly through caller's paired WhatsApp account (${normCaller})!`);
         }
       } catch (aErr) {
         console.warn("Could not use agent socket, using default:", aErr.message);
@@ -11057,40 +11095,76 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     return sendWhatsApp(from, rep);
   }
 
-  // Agent WhatsApp Pairing Commands (for posting failed IDs directly under agent's own phone/name)
-  if (/^(?:pair\s*whatsapp|link\s*whatsapp|connect\s*whatsapp)$/i.test(cleanInput)) {
-    const pairRes = await getOrInitAgentBaileysClient(from, { requestPair: true });
-    if (pairRes?.pairingCode) {
-      return sendWhatsApp(from,
-        `🔑 *YOUR WHATSAPP PAIRING CODE:*\n\n` +
-        `👉 Code: *${pairRes.pairingCode}*\n\n` +
-        `📲 *How to link on your phone:*\n` +
-        `1. Open WhatsApp on your phone\n` +
-        `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
-        `3. Tap *Link a Device*\n` +
-        `4. Tap *Link with phone number instead*\n` +
-        `5. Enter the code above: *${pairRes.pairingCode}*\n\n` +
-        `✅ Once linked, any failed orders from your account will post into the group with *your own name and number*!\n` +
-        `*(No notifications are sent to the group upon connecting).*`
-      );
-    } else if (pairRes?.ready) {
-      return sendWhatsApp(from, `✅ *Your WhatsApp account is already linked and ready!*\nFailed order IDs are automatically posted to your group under your own number.`);
+  // WhatsApp Pairing Commands (Owner pairs primary bot session; Agents pair companion sessions)
+  if (/^(?:pair\s*whatsapp|link\s*whatsapp|connect\s*whatsapp|pair\s*bot)$/i.test(cleanInput)) {
+    const isOwner = isOwnerPhone(from);
+    if (isOwner) {
+      await sendWhatsApp(from, "⏳ *Generating your Stony Bot WhatsApp pairing code...*");
+      const pairRes = await initBaileysChannelClient({ forceReset: true, requestPairForPhone: from });
+      if (pairRes?.pairingCode) {
+        return sendWhatsApp(from,
+          `🔐 *YOUR STONY BOT WHATSAPP PAIRING CODE:*\n\n` +
+          `👉 Code: *${pairRes.pairingCode}*\n\n` +
+          `📲 *Link your phone in 10 seconds:*\n` +
+          `1. Open WhatsApp on your phone\n` +
+          `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
+          `3. Tap *Link a Device*\n` +
+          `4. Tap *Link with phone number instead*\n` +
+          `5. Enter: *${pairRes.pairingCode}*\n\n` +
+          `✅ Once linked, all failed order IDs and channel broadcasts will send directly from your account (Stony)!`
+        );
+      } else if (pairRes?.ready) {
+        return sendWhatsApp(from, `✅ *Your Stony Bot WhatsApp account is already linked and active!*`);
+      } else {
+        return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please try again in 10 seconds."}`);
+      }
     } else {
-      return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please ensure your phone number is valid."}`);
+      const pairRes = await getOrInitAgentBaileysClient(from, { requestPair: true });
+      if (pairRes?.pairingCode) {
+        return sendWhatsApp(from,
+          `🔑 *YOUR WHATSAPP PAIRING CODE:*\n\n` +
+          `👉 Code: *${pairRes.pairingCode}*\n\n` +
+          `📲 *How to link on your phone:*\n` +
+          `1. Open WhatsApp on your phone\n` +
+          `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
+          `3. Tap *Link a Device*\n` +
+          `4. Tap *Link with phone number instead*\n` +
+          `5. Enter the code above: *${pairRes.pairingCode}*\n\n` +
+          `✅ Once linked, any failed orders from your account will post into the group with *your own name and number*!\n` +
+          `*(No notifications are sent to the group upon connecting).*`
+        );
+      } else if (pairRes?.ready) {
+        return sendWhatsApp(from, `✅ *Your WhatsApp account is already linked and ready!*\nFailed order IDs are automatically posted to your group under your own number.`);
+      } else {
+        return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please ensure your phone number is valid."}`);
+      }
     }
   }
 
   if (/^(?:unlink\s*whatsapp|disconnect\s*whatsapp|logout\s*whatsapp)$/i.test(cleanInput)) {
-    await getOrInitAgentBaileysClient(from, { forceReset: true });
-    return sendWhatsApp(from, `🔌 *Your WhatsApp session has been unlinked!*\nFailed orders will now be submitted using the default bot.`);
+    if (isOwnerPhone(from)) {
+      await initBaileysChannelClient({ forceReset: true });
+      return sendWhatsApp(from, `🔌 *Stony Bot WhatsApp session unlinked!*\nText *pair whatsapp* whenever you want to re-link.`);
+    } else {
+      await getOrInitAgentBaileysClient(from, { forceReset: true });
+      return sendWhatsApp(from, `🔌 *Your WhatsApp session has been unlinked!*\nFailed orders will now be submitted using the default bot.`);
+    }
   }
 
   if (/^(?:pair\s*status|whatsapp\s*status|wa\s*status)$/i.test(cleanInput)) {
-    const checkRes = await getOrInitAgentBaileysClient(from);
-    if (checkRes?.ready) {
-      return sendWhatsApp(from, `✅ *Your WhatsApp Account Status: LINKED*\nFailed order submissions to your group will show as sent by your account.`);
+    if (isOwnerPhone(from)) {
+      if (baileysChannelReady && baileysChannelSock) {
+        return sendWhatsApp(from, `✅ *Stony Bot WhatsApp Status: LINKED & ACTIVE*\nConnected as Stony (${from}). Failed orders are submitted to the group under your account.`);
+      } else {
+        return sendWhatsApp(from, `⚪ *Stony Bot WhatsApp Status: NOT LINKED*\nText *pair whatsapp* to generate a pairing code and link your phone.`);
+      }
     } else {
-      return sendWhatsApp(from, `⚪ *Your WhatsApp Account Status: NOT LINKED*\nSubmissions currently use the default bot.\n\nType *pair whatsapp* to link your account.`);
+      const checkRes = await getOrInitAgentBaileysClient(from);
+      if (checkRes?.ready) {
+        return sendWhatsApp(from, `✅ *Your WhatsApp Account Status: LINKED*\nFailed order submissions to your group will show as sent by your account.`);
+      } else {
+        return sendWhatsApp(from, `⚪ *Your WhatsApp Account Status: NOT LINKED*\nSubmissions currently use the default bot.\n\nType *pair whatsapp* to link your account.`);
+      }
     }
   }
 
@@ -11724,40 +11798,76 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
       return sendWhatsApp(from, rep);
     }
 
-    // Agent WhatsApp Pairing Commands (for posting failed IDs directly under agent's own phone/name)
-    if (/^(?:pair\s*whatsapp|link\s*whatsapp|connect\s*whatsapp)$/i.test(cleanCmd)) {
-      const pairRes = await getOrInitAgentBaileysClient(from, { requestPair: true });
-      if (pairRes?.pairingCode) {
-        return sendWhatsApp(from,
-          `🔑 *YOUR WHATSAPP PAIRING CODE:*\n\n` +
-          `👉 Code: *${pairRes.pairingCode}*\n\n` +
-          `📲 *How to link on your phone:*\n` +
-          `1. Open WhatsApp on your phone\n` +
-          `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
-          `3. Tap *Link a Device*\n` +
-          `4. Tap *Link with phone number instead*\n` +
-          `5. Enter the code above: *${pairRes.pairingCode}*\n\n` +
-          `✅ Once linked, any failed orders from your account will post into the group with *your own name and number*!\n` +
-          `*(No notifications are sent to the group upon connecting).*`
-        );
-      } else if (pairRes?.ready) {
-        return sendWhatsApp(from, `✅ *Your WhatsApp account is already linked and ready!*\nFailed order IDs are automatically posted to your group under your own number.`);
+    // WhatsApp Pairing Commands (Owner pairs primary bot session; Agents pair companion sessions)
+    if (/^(?:pair\s*whatsapp|link\s*whatsapp|connect\s*whatsapp|pair\s*bot)$/i.test(cleanCmd)) {
+      const isOwner = isOwnerPhone(from);
+      if (isOwner) {
+        await sendWhatsApp(from, "⏳ *Generating your Stony Bot WhatsApp pairing code...*");
+        const pairRes = await initBaileysChannelClient({ forceReset: true, requestPairForPhone: from });
+        if (pairRes?.pairingCode) {
+          return sendWhatsApp(from,
+            `🔐 *YOUR STONY BOT WHATSAPP PAIRING CODE:*\n\n` +
+            `👉 Code: *${pairRes.pairingCode}*\n\n` +
+            `📲 *Link your phone in 10 seconds:*\n` +
+            `1. Open WhatsApp on your phone\n` +
+            `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
+            `3. Tap *Link a Device*\n` +
+            `4. Tap *Link with phone number instead*\n` +
+            `5. Enter: *${pairRes.pairingCode}*\n\n` +
+            `✅ Once linked, all failed order IDs and channel broadcasts will send directly from your account (Stony)!`
+          );
+        } else if (pairRes?.ready) {
+          return sendWhatsApp(from, `✅ *Your Stony Bot WhatsApp account is already linked and active!*`);
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please try again in 10 seconds."}`);
+        }
       } else {
-        return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please ensure your phone number is valid."}`);
+        const pairRes = await getOrInitAgentBaileysClient(from, { requestPair: true });
+        if (pairRes?.pairingCode) {
+          return sendWhatsApp(from,
+            `🔑 *YOUR WHATSAPP PAIRING CODE:*\n\n` +
+            `👉 Code: *${pairRes.pairingCode}*\n\n` +
+            `📲 *How to link on your phone:*\n` +
+            `1. Open WhatsApp on your phone\n` +
+            `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
+            `3. Tap *Link a Device*\n` +
+            `4. Tap *Link with phone number instead*\n` +
+            `5. Enter the code above: *${pairRes.pairingCode}*\n\n` +
+            `✅ Once linked, any failed orders from your account will post into the group with *your own name and number*!\n` +
+            `*(No notifications are sent to the group upon connecting).*`
+          );
+        } else if (pairRes?.ready) {
+          return sendWhatsApp(from, `✅ *Your WhatsApp account is already linked and ready!*\nFailed order IDs are automatically posted to your group under your own number.`);
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please ensure your phone number is valid."}`);
+        }
       }
     }
 
     if (/^(?:unlink\s*whatsapp|disconnect\s*whatsapp|logout\s*whatsapp)$/i.test(cleanCmd)) {
-      await getOrInitAgentBaileysClient(from, { forceReset: true });
-      return sendWhatsApp(from, `🔌 *Your WhatsApp session has been unlinked!*\nFailed orders will now be submitted using the default bot.`);
+      if (isOwnerPhone(from)) {
+        await initBaileysChannelClient({ forceReset: true });
+        return sendWhatsApp(from, `🔌 *Stony Bot WhatsApp session unlinked!*\nText *pair whatsapp* whenever you want to re-link.`);
+      } else {
+        await getOrInitAgentBaileysClient(from, { forceReset: true });
+        return sendWhatsApp(from, `🔌 *Your WhatsApp session has been unlinked!*\nFailed orders will now be submitted using the default bot.`);
+      }
     }
 
     if (/^(?:pair\s*status|whatsapp\s*status|wa\s*status)$/i.test(cleanCmd)) {
-      const checkRes = await getOrInitAgentBaileysClient(from);
-      if (checkRes?.ready) {
-        return sendWhatsApp(from, `✅ *Your WhatsApp Account Status: LINKED*\nFailed order submissions to your group will show as sent by your account.`);
+      if (isOwnerPhone(from)) {
+        if (baileysChannelReady && baileysChannelSock) {
+          return sendWhatsApp(from, `✅ *Stony Bot WhatsApp Status: LINKED & ACTIVE*\nConnected as Stony (${from}). Failed orders are submitted to the group under your account.`);
+        } else {
+          return sendWhatsApp(from, `⚪ *Stony Bot WhatsApp Status: NOT LINKED*\nText *pair whatsapp* to generate a pairing code and link your phone.`);
+        }
       } else {
-        return sendWhatsApp(from, `⚪ *Your WhatsApp Account Status: NOT LINKED*\nSubmissions currently use the default bot.\n\nType *pair whatsapp* to link your account.`);
+        const checkRes = await getOrInitAgentBaileysClient(from);
+        if (checkRes?.ready) {
+          return sendWhatsApp(from, `✅ *Your WhatsApp Account Status: LINKED*\nFailed order submissions to your group will show as sent by your account.`);
+        } else {
+          return sendWhatsApp(from, `⚪ *Your WhatsApp Account Status: NOT LINKED*\nSubmissions currently use the default bot.\n\nType *pair whatsapp* to link your account.`);
+        }
       }
     }
 
