@@ -2561,20 +2561,25 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     // Check if this specific user/agent connected their own WhatsApp group
     if (normCaller) {
       try {
-        const { data: uRow } = await supabase
-          .from("settings")
-          .select("value")
-          .eq("key", `failed_orders_group_${normCaller}`)
-          .maybeSingle();
-        if (uRow?.value) {
-          groupJid = String(uRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
-          isUserGroup = true;
-          const { data: uName } = await supabase
+        const v9 = normCaller.slice(-9);
+        const candidates = [normCaller, `233${v9}`, `0${v9}`, v9];
+        for (const cKey of candidates) {
+          const { data: uRow } = await supabase
             .from("settings")
             .select("value")
-            .eq("key", `failed_orders_group_name_${normCaller}`)
+            .eq("key", `failed_orders_group_${cKey}`)
             .maybeSingle();
-          if (uName?.value) groupSubject = uName.value;
+          if (uRow?.value) {
+            groupJid = String(uRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
+            isUserGroup = true;
+            const { data: uName } = await supabase
+              .from("settings")
+              .select("value")
+              .eq("key", `failed_orders_group_name_${cKey}`)
+              .maybeSingle();
+            if (uName?.value) groupSubject = uName.value;
+            break;
+          }
         }
       } catch (_) { }
     }
@@ -2659,9 +2664,19 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
       return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
     }
 
-    // 3. Connect Baileys client to post strictly to group
-    const { ok: bOk, sock } = await initBaileysChannelClient();
-    if (!bOk || !sock) {
+    // 3. Connect Baileys client to post strictly to group (with handshake wait retry)
+    let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
+    if (!sock) {
+      await initBaileysChannelClient();
+      for (let i = 0; i < 20; i++) {
+        if (baileysChannelReady && baileysChannelSock) {
+          sock = baileysChannelSock;
+          break;
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+    if (!sock) {
       console.warn("[FAILED ORDER GROUP] Baileys socket not ready to post failed portal ID:", cleanId);
       submittedPortalIdsMemoryCache.delete(cleanId);
       return { ok: false, reason: "baileys_not_ready" };
@@ -2708,11 +2723,21 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
 
 async function setFailedOrdersGroup(rawInput, callerPhone = null) {
   const input = String(rawInput || "").trim();
-  const inviteMatch = input.match(/(?:chat\.whatsapp\.com\/|invite\/)([A-Za-z0-9_-]{20,28})/i);
+  const inviteMatch = input.match(/(?:chat\.whatsapp\.com\/|invite\/)([A-Za-z0-9_-]{15,35})/i);
   const jidMatch = input.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
 
-  const { ok: bOk, sock } = await initBaileysChannelClient();
-  if (!bOk || !sock) {
+  let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
+  if (!sock) {
+    await initBaileysChannelClient();
+    for (let i = 0; i < 20; i++) {
+      if (baileysChannelReady && baileysChannelSock) {
+        sock = baileysChannelSock;
+        break;
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  if (!sock) {
     return "⚠️ WhatsApp Baileys engine is currently connecting. Please try again in 10 seconds.";
   }
 
@@ -2728,19 +2753,29 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
         targetJid = `${String(inviteInfo.id).replace(/(@g\.us)+$/i, "")}@g.us`;
         groupSubject = inviteInfo.subject || groupSubject;
       }
+    } catch (_) { }
+
+    try {
       // Join group if not already a member
-      try {
-        await sock.groupAcceptInvite(inviteCode);
-      } catch (joinErr) {
-        // If already in group or status 409, that's fine!
+      const joinedId = await sock.groupAcceptInvite(inviteCode);
+      if (joinedId && !targetJid) {
+        targetJid = `${String(joinedId).replace(/(@g\.us)+$/i, "")}@g.us`;
       }
-    } catch (invErr) {
-      // If groupGetInviteInfo fails, attempt accept directly
-      try {
-        const joinedId = await sock.groupAcceptInvite(inviteCode);
-        if (joinedId) targetJid = `${String(joinedId).replace(/(@g\.us)+$/i, "")}@g.us`;
-      } catch (e2) {
-        return `⚠️ Could not join WhatsApp group with invite code "${inviteCode}": ${e2.message}. Please verify the invite link is valid and not revoked!`;
+    } catch (joinErr) {
+      const eMsg = String(joinErr?.message || joinErr || "");
+      if (eMsg.includes("409") || /already|conflict/i.test(eMsg)) {
+        // Already in group! Find matching JID from participating groups
+        try {
+          const allGroups = await sock.groupFetchAllParticipating();
+          for (const [gId, gMeta] of Object.entries(allGroups || {})) {
+            if (gMeta?.subject && groupSubject !== "Failed Orders Group" && gMeta.subject.toLowerCase() === groupSubject.toLowerCase()) {
+              targetJid = `${String(gId).replace(/(@g\.us)+$/i, "")}@g.us`;
+              break;
+            }
+          }
+        } catch (_) { }
+      } else if (!targetJid) {
+        return `⚠️ Could not join WhatsApp group with invite code "${inviteCode}": ${eMsg}. Please verify the invite link is valid and not revoked!`;
       }
     }
   }
@@ -2759,13 +2794,25 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
   const normCaller = callerPhone ? String(callerPhone).replace(/\D/g, "") : null;
   const isCallerOwner = callerPhone ? isOwnerPhone(callerPhone) : true;
 
-  // 1. If caller is an agent, save to their account settings
-  if (normCaller) {
-    await supabase.from("settings").upsert([
+  // 1. If caller is an agent / non-owner, save to their account settings
+  if (normCaller && !isCallerOwner) {
+    const upserts = [
       { key: `failed_orders_group_${normCaller}`, value: targetJid },
       { key: `failed_orders_group_name_${normCaller}`, value: groupSubject },
       { key: `failed_orders_group_invite_${normCaller}`, value: input }
-    ], { onConflict: "key" });
+    ];
+    if (normCaller.length > 9) {
+      const v9 = normCaller.slice(-9);
+      upserts.push(
+        { key: `failed_orders_group_${v9}`, value: targetJid },
+        { key: `failed_orders_group_0${v9}`, value: targetJid },
+        { key: `failed_orders_group_233${v9}`, value: targetJid },
+        { key: `failed_orders_group_name_${v9}`, value: groupSubject },
+        { key: `failed_orders_group_name_0${v9}`, value: groupSubject },
+        { key: `failed_orders_group_name_233${v9}`, value: groupSubject }
+      );
+    }
+    await supabase.from("settings").upsert(upserts, { onConflict: "key" });
   }
 
   // 2. If caller is owner OR no global default exists yet, also save as the global default fallback
@@ -10549,6 +10596,47 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
     ===================================================== */
     const cleanCmd = (text || "").trim();
 
+    // ── FAILED ORDERS WHATSAPP GROUP CONNECT & MANAGEMENT (TOP-LEVEL FOR ALL USERS/MODES) ──
+    const topGroupMatch =
+      cleanCmd.match(/(?:connect\s*group|set\s*group|join\s*group|group\s*link|group)?\s*(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,35})/i) ||
+      cleanCmd.match(/^connect\s*group\s+(.+)$/i) ||
+      cleanCmd.match(/^(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)$/i);
+
+    if (topGroupMatch) {
+      const targetLinkOrJid = topGroupMatch[1] ? topGroupMatch[1].trim() : cleanCmd;
+      const rep = await setFailedOrdersGroup(targetLinkOrJid, from);
+      return sendWhatsApp(from, rep);
+    }
+
+    if (/^(?:my\s*group|group\s*status|check\s*group)$/i.test(cleanCmd)) {
+      const rep = await getUserFailedOrdersGroupStatus(from);
+      return sendWhatsApp(from, rep);
+    }
+
+    if (/^(?:disconnect\s*group|unlink\s*group|remove\s*group|reset\s*group)$/i.test(cleanCmd)) {
+      const rep = await disconnectUserFailedOrdersGroup(from);
+      return sendWhatsApp(from, rep);
+    }
+
+    // Manual submission of Portal ID to group (e.g. "submit 561077" or "submit portal id 561077 to group")
+    const submitManualMatch =
+      cleanCmd.match(/^(?:submit|send|post)\s+(?:portal\s*id\s*|track\s*id\s*|id\s*)?(\d{4,9})\s*(?:to|into)?\s*(?:the\s*)?(?:group)?$/i) ||
+      cleanCmd.match(/^submit\s+(\d{4,9})$/i);
+
+    if (submitManualMatch) {
+      const mId = submitManualMatch[1];
+      const subRes = await submitFailedPortalIdToGroup(mId, { manual: true, callerPhone: from });
+      if (subRes.ok) {
+        if (subRes.skipped) {
+          return sendWhatsApp(from, `ℹ️ Portal ID *${mId}* already exists in the group history! Skipped duplicate submission.`);
+        }
+        const targetGrp = subRes.group ? ` *${subRes.group}*` : " the Failed Orders WhatsApp Group";
+        return sendWhatsApp(from, `🚀 *Submitted Portal ID ${mId} to${targetGrp}!*`);
+      } else {
+        return sendWhatsApp(from, `⚠️ Could not submit Portal ID *${mId}* to group: ${subRes.reason || subRes.error}`);
+      }
+    }
+
     // ── EXPLICIT REZOLV CONNECT / LINK ACCOUNT COMMAND ──
     const connectRezolvMatch =
       cleanCmd.match(/^(?:connect|link)\s+(?:rezolv|resolv|support)\s+([^\s@]+@[^\s@]+\.[^\s@]+)\s+([^\s]+)/is) ||
@@ -17552,9 +17640,9 @@ async function runRezolvUrgentWatcher() {
   }
 }
 
-// Rezolv support WhatsApp alert disabled per owner command ("stop this alert everywhere")
-// setInterval(runRezolvUrgentWatcher, 120000);
-// setTimeout(runRezolvUrgentWatcher, 25000);
+// Run Rezolv watcher silently in background to auto-submit failed & >24h orders to group (WhatsApp DM alerts suppressed)
+setInterval(runRezolvUrgentWatcher, 60000);
+setTimeout(runRezolvUrgentWatcher, 10000);
 
 /* =========================================================
 START SERVER
