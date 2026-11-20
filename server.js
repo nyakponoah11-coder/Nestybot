@@ -2683,6 +2683,13 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
   }
   const cleanId = rawId;
 
+  // 🛡️ OWNER SAFETY LOCK: Auto-submitting to WhatsApp group is completely disabled per owner instruction.
+  // Group members must never be spammed. ONLY explicit manual submissions (e.g. "submit <id>") or explicit test pings are permitted.
+  if (!meta.manual && !meta.isTest) {
+    console.log(`🛡️ [GROUP AUTO-SEND BLOCKED] Auto-submission for Portal ID ${portalId} suppressed (reason: ${meta.reason || "auto"}). Group auto-send is turned off.`);
+    return { ok: true, suppressed: true, reason: "auto_send_disabled" };
+  }
+
   // 1. ABSOLUTE SYNCHRONOUS MUTEX & MEMORY DEDUPLICATION CHECK
   // If this ID is currently in flight right now, prevent duplicate parallel posts
   if (failedPortalIdSubmissionsInFlight.has(cleanId)) {
