@@ -2683,11 +2683,24 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
   }
   const cleanId = rawId;
 
-  // 🛡️ OWNER SAFETY LOCK: Auto-submitting to WhatsApp group is completely disabled per owner instruction.
-  // Group members must never be spammed. ONLY explicit manual submissions (e.g. "submit <id>") or explicit test pings are permitted.
-  if (!meta.manual && !meta.isTest) {
-    console.log(`🛡️ [GROUP AUTO-SEND BLOCKED] Auto-submission for Portal ID ${portalId} suppressed (reason: ${meta.reason || "auto"}). Group auto-send is turned off.`);
-    return { ok: true, suppressed: true, reason: "auto_send_disabled" };
+  // 🛡️ OWNER SAFETY LOCK:
+  // Auto-submitting to the group is STRICTLY permitted ONLY when:
+  // 1. An order is FAILED or QUEUED > 24 hours during an explicit delivery check (WhatsApp or Rezolv)
+  // 2. Explicit manual submission ("submit <id>") or explicit test ping ("test group")
+  // Aside from that, NO background auto-scanner, NO cron, NO batch sweeps may EVER post to the group.
+  const isDeliveryCheckOrRezolv = [
+    "carrier_check_failed",
+    "vendor_queue_over_24h",
+    "carrier_delivery_check_failed",
+    "bulk_carrier_delivery_check_failed",
+    "bulk_phone_failed",
+    "phone_check_queued_over_24h",
+    "support_draft_failed"
+  ].includes(meta.reason);
+
+  if (!meta.manual && !meta.isTest && !isDeliveryCheckOrRezolv) {
+    console.log(`🛡️ [GROUP AUTO-SEND BLOCKED] Auto-submission for Portal ID ${portalId} suppressed (reason: ${meta.reason || "background_scan"}). Background auto-scans are completely disabled.`);
+    return { ok: true, suppressed: true, reason: "background_scans_disabled" };
   }
 
   // 1. ABSOLUTE SYNCHRONOUS MUTEX & MEMORY DEDUPLICATION CHECK
@@ -2833,9 +2846,9 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     }
     if (!Array.isArray(postedIds)) postedIds = [];
 
-    // Check if ID already exists in this group's history (allow re-post if meta.force is true)
-    if (postedIds.includes(cleanId) && !meta.force) {
-      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}). Skipping duplicate.`);
+    // 🛡️ STRICT GROUP HISTORY SCAN: If this ID already exists anywhere in the group, NEVER send it again!
+    if (postedIds.includes(cleanId) && !isTest) {
+      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}). Skipping duplicate submission.`);
       return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
     }
 
