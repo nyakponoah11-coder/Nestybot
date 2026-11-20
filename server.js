@@ -1593,7 +1593,7 @@ async function sendWhatsApp(to, text) {
           await baileysChannelSock.sendMessage(targetBaileysJid, { text: safeText });
           console.log(`📤 [sendWhatsApp] Delivered via Baileys (no Meta creds) to [${targetBaileysJid}]`);
           return { ok: true, via: "baileys_direct", jid: targetBaileysJid };
-        } catch (_) {}
+        } catch (_) { }
       }
       console.warn("⚠️ Meta WhatsApp Cloud API credentials missing (ACCESS_TOKEN or PHONE_ID). Message to:", to);
       return { ok: false, error: "Meta WhatsApp credentials missing" };
@@ -2653,7 +2653,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
             groupJid = String(oRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
             break;
           }
-        } catch (_) {}
+        } catch (_) { }
       }
     }
 
@@ -17661,6 +17661,55 @@ app.get("/api/test-wa-status", async (req, res) => {
       hasSock: Boolean(baileysChannelSock),
       sockMe,
       sendResult
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/debug-group", async (req, res) => {
+  try {
+    const code = req.query.code || "KXfhdb8dg7A6cLvehhGacB";
+    let inviteInfo = null;
+    let inviteErr = null;
+    let allGroups = null;
+    let joinRes = null;
+    let joinErr = null;
+
+    if (baileysChannelSock) {
+      try {
+        inviteInfo = await baileysChannelSock.groupGetInviteInfo(code);
+      } catch (e) {
+        inviteErr = e.message;
+      }
+      try {
+        joinRes = await baileysChannelSock.groupAcceptInvite(code);
+      } catch (e) {
+        joinErr = e.message;
+      }
+      try {
+        const full = await baileysChannelSock.groupFetchAllParticipating();
+        allGroups = {};
+        for (const [id, meta] of Object.entries(full || {})) {
+          allGroups[id] = {
+            subject: meta.subject,
+            participantsCount: (meta.participants || []).length,
+            creation: meta.creation
+          };
+        }
+      } catch (e) {
+        allGroups = { error: e.message };
+      }
+    }
+
+    return res.json({
+      baileysReady: baileysChannelReady,
+      code,
+      inviteInfo,
+      inviteErr,
+      joinRes,
+      joinErr,
+      allGroups
     });
   } catch (err) {
     return res.status(500).json({ error: err.message });
