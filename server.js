@@ -4475,10 +4475,15 @@ async function updateOrderDeliveryStatusSafely(ref, newStatus) {
         updated_at: new Date().toISOString()
       })
       .or(filter)
-      .select("reference, recipient_phone, network, capacity, amount")
+      .select("id, reference, recipient_phone, network, capacity, amount, notes, agent_id, base_price, created_at")
       .maybeSingle();
 
-    if (ord) return { table: "orders", reference: ord.reference, phone: ord.recipient_phone, data: ord };
+    if (ord) {
+      if (newStatus === "delivered") {
+        notifyOrderDelivered(ord).catch(err => console.warn("notifyOrderDelivered error:", err.message));
+      }
+      return { table: "orders", reference: ord.reference, phone: ord.recipient_phone, data: ord };
+    }
 
     // 2. Check & update in service_orders table
     const sFilter = isUuid ? `reference.ilike.%${cleanRef}%,id.eq.${cleanRef}` : `reference.ilike.%${cleanRef}%`;
@@ -11256,8 +11261,8 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     }
   }
 
-  // Toggle Delivered Order WhatsApp Alerts (e.g. "mute delivered alerts", "no delivered order alert anymore", "enable delivered alerts")
-  if (/^(?:mute\s*delivered\s*(?:order\s*)?alerts?|disable\s*delivered\s*(?:order\s*)?alerts?|turn\s*off\s*delivered\s*(?:order\s*)?alerts?|stop\s*delivered\s*(?:order\s*)?alerts?|no\s*delivered\s*(?:order\s*)?alerts?(?:\s*anymore)?)$/i.test(cleanInput.trim())) {
+  // Toggle Delivered Order WhatsApp Alerts (explicit mute / unmute commands)
+  if (/^(?:mute\s*delivered\s*(?:order\s*)?alerts?|disable\s*delivered\s*(?:order\s*)?alerts?|turn\s*off\s*delivered\s*(?:order\s*)?alerts?|stop\s*delivered\s*(?:order\s*)?alerts?)$/i.test(cleanInput.trim())) {
     await supabase.from("settings").upsert({ key: "disable_delivered_alerts", value: "true", updated_at: new Date().toISOString() }, { onConflict: "key" });
     return sendWhatsApp(from,
       `🔇 *DELIVERED ORDER ALERTS MUTED!*\n\n` +
@@ -11356,17 +11361,8 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   if (isDeliveryCheckIntent || (allNums && allNums.length > 0 && /^[0-9a-zA-Z,\s\n\r]+$/.test(cleanInput))) {
     const targetIds = allNums || [];
     if (targetIds.length > 0) {
-      try {
-        const report = await executeDatamartDeliveryCheck(targetIds, from);
-        if (report) return sendWhatsApp(from, report);
-      } catch (checkErr) {
-        console.warn("executeDatamartDeliveryCheck error:", checkErr.message);
-      }
-      // Fallback: If carrier check didn't produce a report, search via executeDatamartSearch!
-      try {
-        const searchRep = await executeDatamartSearch(targetIds[0], from);
-        if (searchRep) return sendWhatsApp(from, searchRep);
-      } catch (_) {}
+      const report = await executeDatamartDeliveryCheck(targetIds, from);
+      if (report) return sendWhatsApp(from, report);
     }
   }
 
@@ -11402,13 +11398,8 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
 
   if (emailMatch || phoneMatch || isSearchIntent || isNameOrWord || isRefPattern) {
     const rawTarget = emailMatch ? emailMatch[0] : (phoneMatch ? phoneMatch[0] : (isRefPattern ? (cleanInput.match(/[A-Za-z0-9_-]{5,45}/) || [cleanInput])[0] : cleanInput.trim()));
-    try {
-      const rep = await executeDatamartSearch(rawTarget, from);
-      return sendWhatsApp(from, rep || `🔍 No DataMart support ticket, customer, agent, or order found matching "*${rawTarget}*".`);
-    } catch (searchErr) {
-      console.warn("executeDatamartSearch error:", searchErr.message);
-      return sendWhatsApp(from, `⚠️ Search error: ${searchErr.message || "Failed to search DataMart"}`);
-    }
+    const rep = await searchDatamartUnified(rawTarget, from);
+    if (rep) return sendWhatsApp(from, rep);
   }
 
   // 2d. Natural "clear all ticket" / "clear all tickets" / "resolve all" / "close all"
@@ -11653,18 +11644,12 @@ if (/^(?:audit\s*logs?|audits?|recent\s*checks?|delivery\s*checks?)$/i.test(clea
 // 13. Direct Portal ID Delivery Check within console mode
 const cmIds = cleanInput.match(/\b\d{4,9}\b/g);
 if (cmIds && cmIds.length > 0 && /^[0-9,\s\n\r]+$/.test(cleanInput.trim())) {
-  try {
-    const report = await executeDatamartDeliveryCheck(cmIds, from);
-    if (report) return sendWhatsApp(from, report);
-  } catch (_) {}
-  try {
-    const searchRep = await executeDatamartSearch(cmIds[0], from);
-    if (searchRep) return sendWhatsApp(from, searchRep);
-  } catch (_) {}
+  const report = await executeDatamartDeliveryCheck(cmIds, from);
+  if (report) return sendWhatsApp(from, report);
 }
 
-// 14. Toggle Delivered Order WhatsApp Alerts within console mode
-if (/^(?:mute\s*delivered\s*(?:order\s*)?alerts?|disable\s*delivered\s*(?:order\s*)?alerts?|turn\s*off\s*delivered\s*(?:order\s*)?alerts?|stop\s*delivered\s*(?:order\s*)?alerts?|no\s*delivered\s*(?:order\s*)?alerts?(?:\s*anymore)?)$/i.test(cleanInput.trim())) {
+// 14. Toggle Delivered Order WhatsApp Alerts within console mode (explicit mute/unmute)
+if (/^(?:mute\s*delivered\s*(?:order\s*)?alerts?|disable\s*delivered\s*(?:order\s*)?alerts?|turn\s*off\s*delivered\s*(?:order\s*)?alerts?|stop\s*delivered\s*(?:order\s*)?alerts?)$/i.test(cleanInput.trim())) {
   await supabase.from("settings").upsert({ key: "disable_delivered_alerts", value: "true", updated_at: new Date().toISOString() }, { onConflict: "key" });
   return sendWhatsApp(from,
     `🔇 *[DATAMART CONSOLE] DELIVERED ORDER ALERTS MUTED!*\n\n` +
@@ -18292,7 +18277,9 @@ app.get("/admin", (req, res) => {
 
 app.post("/api/send-admin-alert", async (req, res) => {
   try {
-    const { text, to } = req.body || {};
+    const rawBody = req.body || {};
+    const text = rawBody.text || rawBody.message || rawBody.body || rawBody.msg || "";
+    const to = rawBody.to || rawBody.phone || rawBody.target || rawBody.recipient || "";
     if (!text) return res.status(400).json({ error: "Missing alert text" });
     let delivery = null;
     if (to) {
