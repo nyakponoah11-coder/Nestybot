@@ -7403,7 +7403,7 @@ function extractTicketTrackingInfo(ticket, messages = []) {
   };
 }
 
-async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
+async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null, maxPolls = 25) {
   try {
     const targetId = String(portalOrderId || "").trim();
     if (!targetId) return null;
@@ -7415,7 +7415,8 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
     const jobId = startRes?.data?.jobId || startRes?.jobId;
     if (!jobId) return null;
 
-    for (let i = 0; i < 25; i++) {
+    const actualMax = Math.max(1, Number(maxPolls || 25));
+    for (let i = 0; i < actualMax; i++) {
       await new Promise(r => setTimeout(r, 800));
       const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
       const st = jobRes?.data?.jobStatus;
@@ -7504,7 +7505,7 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
   return null;
 }
 
-async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, extraCandidates = {}) {
+async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, extraCandidates = {}, isFastDraft = false) {
   if (!targetPhoneOrRef && !extraCandidates.trackId && !extraCandidates.orderRef && !extraCandidates.phone) return null;
   const q = String(targetPhoneOrRef || extraCandidates.trackId || extraCandidates.orderRef || extraCandidates.phone || "").trim();
   const trackCandidate = extraCandidates.trackId || (/^\d{4,9}$/.test(q) ? q : null);
@@ -7514,7 +7515,7 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
   // 1. Direct DataMart Portal Delivery Check if we have a numeric Track ID (e.g. 561077)
   if (trackCandidate && /^\d{4,9}$/.test(trackCandidate)) {
     try {
-      const carrierAudit = await checkDatamartCarrierRaw(trackCandidate, callerPhone);
+      const carrierAudit = await checkDatamartCarrierRaw(trackCandidate, callerPhone, isFastDraft ? 3 : 25);
       if (carrierAudit && carrierAudit.found) {
         return {
           found: true,
@@ -7580,7 +7581,7 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
   // If a valid numeric or carrier portalId is found, use it to run live carrier check!
   if (resolvedPortalId && /^\d{4,9}$/.test(String(resolvedPortalId))) {
     try {
-      const auditRes = await checkDatamartCarrierRaw(resolvedPortalId, callerPhone);
+      const auditRes = await checkDatamartCarrierRaw(resolvedPortalId, callerPhone, isFastDraft ? 3 : 25);
       if (auditRes && auditRes.found) {
         return {
           found: true,
@@ -8048,10 +8049,134 @@ async function synthesizeCustomerMainIssue(custName, customerTexts, targetRef) {
   return "";
 }
 
-async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, fullTicket, msgs, trackInfo, lastMsg, brandName = null, from = null }) {
+function analyzeTicketSmart(fullTicket, msgs = [], t = {}, brand = "DataMart") {
+  const custFullName = fullTicket?.customer?.name || t?.customer?.name || "Customer";
+  const firstName = custFullName.split(" ")[0] || "there";
+  const tNum = fullTicket?.ticketNumber || t?.ticketNumber || fullTicket?._id || t?._id || "Ticket";
+
+  // 1. Extract real customer messages (exclude Bot, Agent, System notes)
+  const customerMsgs = (msgs || []).filter(m => m.senderType === "customer" || (m.senderName && m.senderName !== "Bot" && m.senderType !== "agent" && m.senderType !== "system"));
+  const customerTexts = customerMsgs
+    .map(m => (m.text || "").replace(/\s+/g, " ").trim())
+    .filter(text => text && !text.startsWith("🚩 Needs a human") && !text.includes("wrote:"));
+
+  // Real last message from customer
+  const lastCustomerText = customerTexts.length > 0
+    ? customerTexts[customerTexts.length - 1]
+    : (t?.lastMessage?.text || fullTicket?.lastMessage?.text || fullTicket?.subject || "Customer inquiry").replace(/\s+/g, " ").trim();
+
+  // 2. FOCUS ON RECENT MESSAGES (the current conversation turn!)
+  const recentCustomerTexts = customerTexts.slice(-3);
+  const recentJoined = recentCustomerTexts.join(" | ");
+  const lowerRecent = recentJoined.toLowerCase();
+  const lowerLast = lastCustomerText.toLowerCase();
+
+  // All texts for backup reference lookup
+  const allTexts = [fullTicket?.subject || "", ...(msgs || []).map(m => m.text || "")].join(" ");
+
+  // Reference codes in recent turn vs entire history
+  const recentTrackMatch = recentJoined.match(/\b(?:track(?:ing)?\s*(?:id|#|number|code)?|portal\s*(?:id|#)?)\s*[:#=]?\s*([0-9]{4,9})\b/i);
+  const historyTrackMatch = allTexts.match(/\b(?:track(?:ing)?\s*(?:id|#|number|code)?|portal\s*(?:id|#)?)\s*[:#=]?\s*([0-9]{4,9})\b/i);
+  const trackId = recentTrackMatch ? recentTrackMatch[1] : (historyTrackMatch ? historyTrackMatch[1] : null);
+
+  const recentRefMatch = recentJoined.match(/\b(MOMO-[A-Z0-9-]+|AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|MN-[A-Z0-9]+)\b/i);
+  const historyRefMatch = allTexts.match(/\b(MOMO-[A-Z0-9-]+|AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|MN-[A-Z0-9]+)\b/i);
+  const orderRef = recentRefMatch ? recentRefMatch[0] : (historyRefMatch ? historyRefMatch[0] : null);
+
+  const recentPhoneMatch = recentJoined.match(/\b(0[2357]\d{8})\b/);
+  const historyPhoneMatch = allTexts.match(/\b(0[2357]\d{8})\b/);
+  const phone = recentPhoneMatch ? recentPhoneMatch[0] : (historyPhoneMatch ? historyPhoneMatch[0] : null);
+
+  let mainIssue = "";
   let draftText = "";
   let trackingDiagnostic = "";
+  let portalId = trackId;
+  let isSpecialIntent = false;
 
+  // 1. DEPOSIT / MOMO PAYMENT REFLECTION
+  if (/\b(?:deposit|deposited|momo\s*deduct|deducted|reflect|reflected|uncredited|credit\s*my|into\s*my\s*wallet)\b/i.test(lowerRecent)) {
+    const amtMatch = recentJoined.match(/(?:gh[c₵]?\s*|amt\s*|amount\s*)(\d+(?:\.\d{2})?)/i) || recentJoined.match(/deposited\s*(\d+)/i) || recentJoined.match(/(\d+)\s*(?:cedis|ghc|cedi)/i);
+    const amtStr = amtMatch ? `GH₵${amtMatch[1]}` : "money";
+    mainIssue = `Customer deposited ${amtStr} on MoMo but wallet has not reflected`;
+    trackingDiagnostic = `💳 MoMo Wallet Deposit Issue (${amtStr}) · Escalated to Finance`;
+    draftText = `Hello ${firstName}, thank you for reaching out to ${brand} support. We have received your deposit issue (${amtStr}). Our finance team is reconciling this with the payment gateway right now and your wallet will be credited shortly. Thank you for your patience!`;
+    isSpecialIntent = true;
+  }
+  // 2. ACKNOWLEDGMENT / THANKS / RECEIVED
+  else if (/^(?:thanks|thank\s*you|received|seen|alright|ok|okay|in\s*now|it\s*is\s*in|has\s*landed)\b/i.test(lowerLast) || /\b(thanks\s*received|received\s*now|data\s*in|in\s*now)\b/i.test(lowerLast)) {
+    mainIssue = `Customer confirmed: "${lastCustomerText}"`;
+    trackingDiagnostic = `✅ Customer Acknowledged Receipt`;
+    draftText = `Hello ${firstName}, you are very welcome! Glad to hear everything is sorted out. Please feel free to reach out anytime you need assistance with ${brand}!`;
+    isSpecialIntent = true;
+  }
+  // 3. REFUND REQUEST
+  else if (/\b(?:refund|reverse|reversal|money\s*back)\b/i.test(lowerRecent)) {
+    const refStr = orderRef ? ` (${orderRef})` : (trackId ? ` (Track ID: ${trackId})` : "");
+    mainIssue = `Customer requesting refund for delayed or failed order${refStr}`;
+    trackingDiagnostic = `💰 Refund Request${refStr}`;
+    draftText = `Hello ${firstName}, we have noted your refund request${refStr}. Our finance team is reviewing this order and the refund will be credited back to your ${brand} wallet balance shortly. Thank you!`;
+    isSpecialIntent = true;
+  }
+  // 4. AGENT WITHDRAWAL / CASHOUT / PIN
+  else if (/\b(?:withdraw|cashout|pin|withdrawal|change\s*pin|reset\s*pin)\b/i.test(lowerRecent)) {
+    mainIssue = `Agent asking for withdrawal or wallet cashout assistance`;
+    trackingDiagnostic = `💳 Agent Withdrawal / PIN Assistance`;
+    draftText = `Hello ${firstName}, regarding your withdrawal request, you can request your payout at https://www.datamartgh.shop/store/withdrawals . Let us know if you need assistance resetting your withdrawal PIN!`;
+    isSpecialIntent = true;
+  }
+  // 5. SPINS / PRIZES
+  else if (/\b(?:spin|prize|won|wheel)\b/i.test(lowerRecent)) {
+    const phStr = phone ? ` (${phone})` : "";
+    mainIssue = `Customer asking about uncredited spin wheel prize${phStr}`;
+    trackingDiagnostic = `🎁 Spin Prize Verification${phStr}`;
+    draftText = `Hello ${firstName}, we have noted your spin wheel data prize request${phStr}. Our team is tracing your spin reward and crediting the data bundle to your line shortly. Thank you!`;
+    isSpecialIntent = true;
+  }
+  // 6. ORDER TRACKING / DATA DELIVERY (when reference, track ID, or phone is provided)
+  else if (trackId || orderRef || (phone && /\b(?:data|bundle|order|deliver|land|sent|delayed?|not\s*come|waiting)\b/i.test(lowerRecent))) {
+    const idStr = trackId ? `Track ID: ${trackId}` : (orderRef ? `Ref: ${orderRef}` : `Phone: ${phone}`);
+    const phDisplay = phone ? ` to ${phone}` : "";
+    mainIssue = `Customer checking data bundle delivery status (${idStr}${phDisplay})`;
+    trackingDiagnostic = `🔍 Order Verification: ${idStr}${phDisplay}`;
+    draftText = `Hello ${firstName}, we have located your order (${idStr}) on ${brand}. We are tracking this with the telecom network right now to ensure your bundle is delivered immediately. Kindly dial *124# to verify your balance. Thank you!`;
+  }
+  // 7. GENERAL DELIVERY QUESTION WITHOUT CODE
+  else if (/\b(?:data|bundle|order|deliver|waiting|delay|not\s*come|not\s*received|hasn'?t\s*come|not\s*in|since\s*morning)\b/i.test(lowerRecent)) {
+    mainIssue = `Customer asking why data bundle is delayed (no reference provided)`;
+    trackingDiagnostic = `⚠️ Customer asking about delivery without Track ID or Reference`;
+    draftText = `Hello ${firstName}, thank you for reaching out. Please kindly provide your Track ID or Order Reference (and the recipient phone number) so we can track and speed up your data delivery on ${brand} immediately! Thank you!`;
+  }
+  // 8. SERVICE AVAILABILITY / BUYING DATA
+  else if (/\b(?:buy\s*data|purchase|is\s*mtn\s*working|is\s*telecel\s*working|can\s*i\s*buy|down|system)\b/i.test(lowerRecent)) {
+    mainIssue = `Customer inquiring about service/network availability before buying`;
+    trackingDiagnostic = `📶 Network & Service Availability Inquiry`;
+    draftText = `Hello ${firstName}, yes! Data deliveries across all networks (MTN, Telecel, AT) are active and processing. You can place your order now and it will deliver directly to the line. Let us know if you need any assistance!`;
+  }
+  // 9. GENERAL INQUIRY / FALLBACK
+  else {
+    const safeText = lastCustomerText.length > 0 ? lastCustomerText : "Customer inquiry";
+    mainIssue = `Customer inquiry: "${safeText.slice(0, 70)}"`;
+    trackingDiagnostic = `💬 Customer Support Inquiry`;
+    draftText = `Hello ${firstName}, thank you for contacting ${brand} support. We have reviewed your message ("${safeText.slice(0, 50)}") and our team is actively assisting you right now!`;
+  }
+
+  return {
+    ticketId: tNum,
+    customerName: custFullName,
+    firstName,
+    mainIssue,
+    lastMessage: lastCustomerText,
+    trackingDiagnostic,
+    portalId,
+    draftText,
+    isSpecialIntent,
+    trackId,
+    orderRef,
+    phone
+  };
+}
+
+async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, fullTicket, msgs, trackInfo, lastMsg, brandName = null, from = null, isFastDraft = false }) {
   let brand = brandName;
   if (!brand && from) {
     try {
@@ -8068,78 +8193,33 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
     }
   }
 
-  // Extract actual customer-written messages (excluding system bot responses and email quote noise)
-  const customerMsgs = (msgs || []).filter(m => m.senderType === "customer" || (m.senderName && m.senderName !== "Bot" && m.senderType !== "agent"));
-  const customerTexts = customerMsgs
-    .map(m => (m.text || "").trim())
-    .filter(t => t && !t.startsWith("🚩 Needs a human") && !t.includes("On Wed,") && !t.includes("On Thu,") && !t.includes("On Mon,") && !t.includes("On Tue,") && !t.includes("On Fri,") && !t.includes("wrote:"));
+  const smart = analyzeTicketSmart(fullTicket, msgs, { ticketNumber: tNum, customer: { name: custFullName }, _id: tNum }, brand);
 
-  const actualCustomerLastMsg = customerTexts.length > 0
-    ? customerTexts[customerTexts.length - 1]
-    : (lastMsg || fullTicket.subject || fullTicket.lastMessage?.text || "New support request").replace(/\s+/g, " ").trim();
+  // If already identified as a special intent (deposit, acknowledgment, refund, pin, spin), return smart result instantly!
+  if (smart.isSpecialIntent) {
+    return {
+      mainIssue: smart.mainIssue,
+      draftText: smart.draftText,
+      trackingDiagnostic: smart.trackingDiagnostic,
+      actualCustomerLastMsg: smart.lastMessage,
+      portalId: smart.portalId
+    };
+  }
 
-  // Scan ALL conversation history (subject + all messages)
-  const allTexts = [
-    fullTicket.subject || "",
-    ...(msgs || []).map(m => m.text || "")
-  ].join(" ").trim();
-  const lowerAll = allTexts.toLowerCase();
-  const lowerLast = String(actualCustomerLastMsg || lastMsg || "").toLowerCase();
+  let draftText = smart.draftText;
+  let trackingDiagnostic = smart.trackingDiagnostic;
+  let portalId = smart.portalId;
+  let mainIssue = smart.mainIssue;
 
-  // Extract reference codes & phone numbers across the whole conversation history
-  const explicitTrack = allTexts.match(/\b(?:track(?:ing)?\s*(?:id|#|number|code)?|portal\s*(?:id|#|order)?|batch\s*(?:id|#)?)\s*[:#=]?\s*([A-Za-z0-9_-]{4,15})\b/i);
-  const prefixTrack = allTexts.match(/\b(MNG-[A-Z0-9]+|TRK-[A-Z0-9-]+|TRACK-\d+|TRACK-[A-Z0-9]+)\b/i);
-  const trackIdFound = explicitTrack ? explicitTrack[1] : (prefixTrack ? prefixTrack[0] : trackInfo.trackId);
-
-  const explicitRef = allTexts.match(/\b(?:ref(?:erence)?|order\s*(?:id|ref|reference)?)\s*[:#=]?\s*([A-Za-z0-9_-]{5,25})\b/i);
-  const prefixRef = allTexts.match(/\b(AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|D1G[A-Z0-9-]+|ORD-[A-Z0-9-]+|MN-[A-Z0-9]+)\b/i);
-  const orderRefFound = explicitRef ? explicitRef[1] : (prefixRef ? prefixRef[0] : trackInfo.orderRef);
-
-  const phoneMatch = allTexts.match(/\b(?:phone|number|recipient|line)\s*[:#=]?\s*(0[2357]\d{8})\b/i) || allTexts.match(/\b(0[2357]\d{8})\b/);
-  const phoneFound = phoneMatch ? (phoneMatch[1] || phoneMatch[0]) : trackInfo.phone;
-
-  const momoMatch = allTexts.match(/\b(\d{10,12})\b/);
-  const validMomo = momoMatch && !phoneFound?.includes(momoMatch[1]) ? momoMatch[1] : null;
-
-  const targetQuery = trackIdFound || orderRefFound || phoneFound;
-
-  // ── 1. FAST SYNTHESIS OF WHAT CUSTOMER IS COMPLAINING ABOUT ──
-  let mainIssue = "";
-  const joinedCust = customerTexts.join(" | ").toLowerCase();
-  if (/\b(still\s*not|haven'?t\s*come|not\s*delivered|not\s*in|waiting|since\s*morning|delay|hours|days|week|not\s*received|where\s*is\s*my)\b/i.test(joinedCust)) {
-    mainIssue = `Customer complaining that data ${targetQuery ? `(${targetQuery}) ` : ""}is delayed and has not landed yet`;
-  } else if (/\b(down|working|system)\b/i.test(joinedCust)) {
-    mainIssue = "Customer asking if network/service is currently down before buying";
-  } else if (/\b(momo|deduct|paid|debit)\b/i.test(joinedCust)) {
-    mainIssue = "Customer says money was deducted on MoMo but order is pending";
-  } else if (/\b(refund|reverse|money\s*back|wasted)\b/i.test(joinedCust)) {
-    mainIssue = "Customer requesting a refund for delayed or uncredited transaction";
-  } else if (/\b(withdraw|cashout|pin)\b/i.test(joinedCust)) {
-    mainIssue = "Agent asking for wallet cashout or withdrawal PIN reset";
-  } else if (targetQuery) {
-    mainIssue = `Customer checking why order (${targetQuery}) has not landed`;
-  } else if (actualCustomerLastMsg && actualCustomerLastMsg.length <= 70) {
-    mainIssue = `Customer inquiry: "${actualCustomerLastMsg}"`;
-  } else if (customerTexts.length > 0) {
+  // If customer inquired about delivery or provided order reference / track id, try live delivery tracking
+  const targetQuery = smart.trackId || smart.orderRef || smart.phone;
+  if (targetQuery) {
     try {
-      mainIssue = await synthesizeCustomerMainIssue(custFullName, customerTexts, targetQuery);
-    } catch (_) { }
-  }
-
-  if (!mainIssue || mainIssue.length < 6) {
-    mainIssue = actualCustomerLastMsg ? `Customer inquiry: "${actualCustomerLastMsg.slice(0, 70)}"` : "Customer waiting for support assistance";
-  }
-
-  // ── 2. LIVE DELIVERY TRACKING & CONTEXT-AWARE DRAFT ──
-  let portalId = null;
-  const isDeliveryIntent = trackInfo.hasDeliveryWords || /\b(data|bundle|order|deliver|received|drop|land|balance|ghc|gb|not\s*come|not\s*in|waiting|delay|send)\b/i.test(lowerAll);
-  if (isDeliveryIntent) {
-    if (targetQuery) {
       const liveTrack = await trackSupportDeliveryTarget(targetQuery, from, {
-        trackId: trackIdFound,
-        orderRef: orderRefFound,
-        phone: phoneFound
-      });
+        trackId: smart.trackId,
+        orderRef: smart.orderRef,
+        phone: smart.phone
+      }, isFastDraft);
 
       const detectedPortalId = (liveTrack?.trackId && /^\d{4,9}$/.test(String(liveTrack.trackId))) ? String(liveTrack.trackId)
         : (/^\d{4,9}$/.test(String(targetQuery)) ? targetQuery : null);
@@ -8148,7 +8228,7 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
       if (liveTrack && liveTrack.found) {
         const st = (liveTrack.status || "").toLowerCase();
         const net = (liveTrack.network || "telecom").toUpperCase();
-        const ph = liveTrack.phone || phoneFound || targetQuery;
+        const ph = liveTrack.phone || smart.phone || targetQuery;
         const refCode = liveTrack.reference || targetQuery;
         const batchPart = liveTrack.batchNumber ? ` · Batch #${liveTrack.batchNumber}` : "";
         const pidDisplay = portalId ? `🆔 *Portal ID:* *${portalId}*` : `🆔 *Portal ID:* *Pending Export*`;
@@ -8156,7 +8236,7 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
         if (st === "failed" || st === "cancelled" || (liveTrack.failed && liveTrack.failed > 0)) {
           const batchItems = Array.isArray(liveTrack.items) ? liveTrack.items : [];
           const norm9 = (num) => String(num || "").replace(/\D/g, "").slice(-9);
-          const targetCustPhone = norm9(phoneFound || liveTrack.phone || fullTicket?.customer?.phone || (typeof targetQuery === "string" && /^0[2357]\d{8}$/.test(targetQuery) ? targetQuery : null));
+          const targetCustPhone = norm9(smart.phone || liveTrack.phone || fullTicket?.customer?.phone || (typeof targetQuery === "string" && /^0[2357]\d{8}$/.test(targetQuery) ? targetQuery : null));
 
           const failedBatchItems = batchItems.filter(it => {
             const itSt = String(it.status || "").toLowerCase();
@@ -8173,25 +8253,23 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
 
           if (batchItems.length > 0 && isCustPhoneInSent && !isCustPhoneInFailed) {
             trackingDiagnostic = `✅ ALREADY SENT to customer line (${ph}) · ${pidDisplay} (${liveTrack.failed || failedBatchItems.length} other lines failed in batch & submitted to team group)`;
-            draftText = `Hello ${firstName}, we have tracked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Your data bundle has already been successfully sent and delivered to your number (${ph})! Kindly dial *124# or *126# to verify your main balance. Thank you!`;
+            draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Your data bundle has already been successfully sent and delivered to your number (${ph})! Kindly dial *124# or *126# to verify your main balance. Thank you!`;
           } else {
             trackingDiagnostic = `❌ FAILED on ${brand} · ${pidDisplay} (Ref: ${refCode})${liveTrack.failed ? ` (${liveTrack.failed} Failed)` : ""}`;
-            draftText = `Hello ${firstName}, we have checked your order on ${brand} and noticed a delivery issue on your phone number (${ph}). Don't worry at all, we are working on it and re-processing it for you right away so your data delivers immediately. Thank you for your patience!`;
+            draftText = `Hello ${smart.firstName}, we have checked your order on ${brand} and noticed a delivery issue on your phone number (${ph}). Don't worry at all, we are working on it and re-processing it for you right away so your data delivers immediately. Thank you for your patience!`;
           }
         } else if (st === "delivered" || st === "completed" || st === "success") {
           if (liveTrack.isCarrierAudit) {
             trackingDiagnostic = `✅ ALL DELIVERED on ${brand} · ${pidDisplay}${batchPart} (${liveTrack.sent || liveTrack.totalItems} Sent)`;
-            draftText = `Hello ${firstName}, we have verified your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and it is confirmed ALL DELIVERED. Kindly dial *124# or *126# to verify your main balance. Thank you!`;
+            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and it is confirmed ALL DELIVERED. Kindly dial *124# or *126# to verify your main balance. Thank you!`;
           } else {
             trackingDiagnostic = `✅ DELIVERED on ${net} to ${ph} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on ${brand} and it is confirmed DELIVERED on the ${net} network to ${ph}. Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
+            draftText = `Hello ${smart.firstName}, we have tracked your order (${refCode}) on ${brand} and it is confirmed DELIVERED on the ${net} network to ${ph}. Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
           }
         } else if (st === "queued" || liveTrack.isQueued) {
-          // Strictly calculate age from verified order creation date ONLY (never ticket age, never customer text regex)
           const orderDate = liveTrack.orderCreatedAt;
           const ageMs = orderDate ? (Date.now() - new Date(orderDate).getTime()) : null;
           const isOver24H = Boolean(liveTrack.isQueuedOver24Hours || (orderDate && !isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)));
-
           const hasValidPortalId = portalId && /^\d{4,9}$/.test(String(portalId));
 
           if (isOver24H && hasValidPortalId) {
@@ -8203,113 +8281,29 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
               callerPhone: from
             }).catch(() => { });
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""} (Reported to team group)`;
-            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, we are actively working on it right now and it will be delivered for you shortly. Thank you for your patience!`;
+            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, we are actively working on it right now and it will be delivered for you shortly. Thank you for your patience!`;
           } else if (isOver24H) {
-            // Over 24 hours but no numeric Portal ID assigned yet (Pending Export) -> Do NOT report to group
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, we are working on it right now and your data will land shortly. Thank you for your patience!`;
+            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, we are working on it right now and your data will land shortly. Thank you for your patience!`;
           } else {
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing and will land on your number shortly. Kindly dial *124# or *126# to verify your balance. Thank you!`;
+            draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing and will land on your number shortly. Kindly dial *124# or *126# to verify your balance. Thank you!`;
           }
         } else if (st === "processing") {
           trackingDiagnostic = `⏳ PROCESSING on ${net} · ${pidDisplay} (Ref: ${refCode})`;
-          draftText = `Hello ${firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing on the network and will land on your phone shortly. Kindly dial *124# or *126# to check. Thank you!`;
-        } else {
-          trackingDiagnostic = `🔍 Order Ref: ${refCode} · ${pidDisplay} (Status: ${st})`;
-          draftText = `Hello ${firstName}, we are currently verifying your order (${refCode}) on ${brand}. Kindly dial *124# to check your balance, or let us know if it hasn't reflected yet. Thank you!`;
+          draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing on the network and will land on your phone shortly. Kindly dial *124# or *126# to check. Thank you!`;
         }
-      } else {
-        // Customer provided query but not found in logs
-        trackingDiagnostic = `⚠️ Order (${targetQuery}) not found on ${brand} delivery logs`;
-        draftText = `Hello ${firstName}, thank you for reaching out. We could not locate an active delivery matching "${targetQuery}" on our logs. Please kindly provide your Track ID or Order Reference (and the recipient phone number) so we can track and speed up your data delivery on ${brand} right away. Thank you!`;
-      }
-    } else {
-      // Missing both Track ID and Order Reference
-      trackingDiagnostic = `⚠️ Customer asking about delivery without Track ID or Reference`;
-      draftText = `Hello ${firstName}, thank you for reaching out. Please kindly provide your Track ID or Order Reference (and the recipient phone number) so we can track and speed up your data delivery on ${brand} immediately! Thank you!`;
-    }
-  }
-
-  // 3. CUSTOMER PROVIDED A PHONE NUMBER OR CODE WITHOUT DELIVERY WORDS
-  else if (targetQuery && !draftText) {
-    trackingDiagnostic = `📱 Customer provided reference: ${targetQuery}`;
-    draftText = `Hello ${firstName}, we have received your reference (${targetQuery}). We are tracking and processing this on ${brand} right now to ensure it delivers successfully. Kindly dial *124# to verify your balance. Thank you!`;
-  }
-
-  // 4. DELIVERY QUESTION BUT MISSING TRACK ID / PHONE
-  else if (trackInfo.hasDeliveryWords && !targetQuery) {
-    trackingDiagnostic = `⚠️ No Track ID or recipient phone provided by customer yet.`;
-    draftText = `Hello ${firstName}, thank you for reaching out. Please kindly provide your Track ID or Order Reference (and the recipient phone number) so we can track and speed up your data delivery on ${brand} immediately!`;
-  }
-
-  // 5. MOMO / PAYMENT DEDUCTION
-  else if (validMomo || trackInfo.hasPaymentWords || /\b(deposit|credited|uncredited|momo\s*deduct|deducted|paid)\b/i.test(lowerAll)) {
-    const trxStr = validMomo || trackInfo.momoTrxId ? ` (Trx ID: ${validMomo || trackInfo.momoTrxId})` : "";
-    trackingDiagnostic = `💳 Payment / MoMo deduction issue${trxStr} - Escalated to Finance`;
-    draftText = `Hello ${firstName}, thank you for reaching out. We have flagged your payment reconciliation${trxStr} with our finance team as top priority. Your balance will be resolved shortly. Thank you for your patience!`;
-  }
-
-  // 6. AGENT WITHDRAWAL / CASHOUT / PIN RESET
-  else if (/\b(withdraw|cashout|pin|change\s*pin|reset\s*pin|cant\s*withdraw|cannot\s*withdraw|withdrawal)\b/i.test(lowerAll)) {
-    trackingDiagnostic = `💳 Agent Withdrawal / PIN Assistance`;
-    draftText = `Hello ${firstName}, regarding your withdrawal request, please kindly provide your registered ${brand} phone number or email so we can verify your wallet and assist you in resetting your withdrawal PIN right away!`;
-  }
-
-  // 7. REFUND / WALLET REVERSAL
-  else if (/\b(refund|reverse|reversal|money\s*back)\b/i.test(lowerAll)) {
-    trackingDiagnostic = `💰 Refund / Wallet Balance Reversal`;
-    draftText = `Hello ${firstName}, we have received your refund request. Please provide your Order Reference or registered phone number so our team can verify the failed order and credit the amount back to your ${brand} wallet immediately!`;
-  }
-
-  // 8. CUSTOMER COMPLAINING ABOUT WAITING / DELAY / FRUSTRATION
-  else if (/\b(not\s*minding|mind\s*me|long\s*time|too\s*slow|since\s*morning|nonsense|delay|delaying|waiting|hours\s*since|where\s*is\s*my)\b/i.test(lowerAll)) {
-    trackingDiagnostic = `⚠️ Customer expressing frustration about waiting time`;
-    draftText = `Hello ${firstName}, we sincerely apologize for the delay and frustration! We are actively attending to your chat right now as priority. Please provide your phone number or Order ID so we can get this sorted for you immediately!`;
-  }
-
-  // 9. BUYING DATA / NETWORK UPTIME INQUIRY
-  else if (/\b(purchase\s*data|buy\s*data|will\s*the\s*person\s*receive|is\s*mtn\s*working|is\s*telecel\s*working|can\s*i\s*buy)\b/i.test(lowerAll)) {
-    trackingDiagnostic = `📶 Service Inquiry: Network availability & purchasing data`;
-    draftText = `Hello ${firstName}, yes! Data deliveries across all networks (MTN, Telecel, AT) are active and processing. You can place your order now and it will deliver directly to the line. Let us know if you need any assistance!`;
-  }
-
-  // 10. SIMPLE ACKNOWLEDGMENT ("OKAY", "THANK YOU")
-  else if (/^(?:ok|okay|thank\s*you|thanks|alright|noted|seen|fine)\b/i.test(lowerLast)) {
-    trackingDiagnostic = `🤝 Customer acknowledgment`;
-    draftText = `Hello ${firstName}, you're very welcome! We are monitoring everything closely for you. Please let us know if you need any further assistance!`;
-  }
-
-  // 11. AI GENERATION FOR ALL OTHER INQUIRIES & QUESTIONS
-  if (!draftText) {
-    try {
-      const aiRes = await executeBotAi({
-        systemPrompt: `You are a warm, professional, highly capable Customer Support Co-Pilot at ${brand}.
-Examine this customer's support ticket conversation.
-Output strictly in this format:
-ISSUE: [Brief 3-6 word summary of their main issue]
-REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the customer starting with "Hello ${firstName},". Keep under 40 words.]`,
-        userMessage: `Customer: ${custFullName}\nFull Conversation:\n${allTexts.slice(-400)}`,
-        maxTokens: 140,
-        temperature: 0.6
-      });
-      if (aiRes && aiRes.text && aiRes.text.trim().length > 10) {
-        const textOut = aiRes.text.trim();
-        const replyM = textOut.match(/REPLY:\s*([\s\S]+)$/i);
-        if (replyM) draftText = replyM[1].trim();
-        else draftText = textOut.replace(/ISSUE:.*?\n/i, "").trim();
-        trackingDiagnostic = `💬 Customer Inquiry: "${actualCustomerLastMsg.slice(0, 40)}"`;
       }
     } catch (_) { }
   }
 
-  // 12. Final fallback if offline
-  if (!draftText) {
-    trackingDiagnostic = `💬 Customer Support Inquiry`;
-    draftText = `Hello ${firstName}, thank you for reaching out to DataMart support. We are attending to your request right now to resolve this for you immediately!`;
-  }
-
-  return { mainIssue, draftText, trackingDiagnostic, actualCustomerLastMsg, portalId };
+  return {
+    mainIssue: mainIssue || smart.mainIssue,
+    draftText: draftText || smart.draftText,
+    trackingDiagnostic: trackingDiagnostic || smart.trackingDiagnostic,
+    actualCustomerLastMsg: smart.lastMessage,
+    portalId: portalId || smart.portalId
+  };
 }
 
 async function generateSupportDraftReply(identifier, from = null) {
@@ -8471,51 +8465,66 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
         const fullTicket = dData.ticket || t;
         const msgs = dData.messages || fullTicket.messages || [];
 
-        const custFullName = fullTicket.customer?.name || "Customer";
-        const firstName = custFullName.split(" ")[0] || "there";
-        const tNum = fullTicket.ticketNumber || fullTicket._id;
-
         const trackInfo = extractTicketTrackingInfo(fullTicket, msgs);
-        const lastMsg = (fullTicket.lastMessage?.text || "").replace(/\s+/g, " ").trim();
+        const smartFallback = analyzeTicketSmart(fullTicket, msgs, t, rezolvCtx.brandName);
+        const custFullName = smartFallback.customerName;
+        const firstName = smartFallback.firstName;
+        const tNum = smartFallback.ticketId;
+        const lastMsg = smartFallback.lastMessage;
 
         // Calculate how long this customer has been waiting
         const waitTimeMs = Date.now() - new Date(fullTicket.lastCustomerMessageAt || fullTicket.updatedAt || fullTicket.createdAt).getTime();
         const waitMins = Math.max(1, Math.round(waitTimeMs / (60 * 1000)));
         const waitLabel = waitMins >= 60 ? `${Math.floor(waitMins / 60)}h ${waitMins % 60}m` : `${waitMins} mins`;
 
-        // Fast draft with timeout to ensure prompt delivery on WhatsApp
-        const draftPromise = composeIntelligentSupportDraft({
-          firstName,
-          custFullName,
-          tNum,
-          fullTicket,
-          msgs,
-          trackInfo,
-          lastMsg,
-          brandName: rezolvCtx.brandName,
-          from
-        });
-        const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({
-          mainIssue: `Customer inquiry: "${(lastMsg || '').slice(0, 70)}"`,
-          draftText: `Hello ${firstName}, thank you for contacting ${rezolvCtx.brandName || 'Support'}. We are actively attending to your inquiry for ticket ${tNum} right now!`,
-          trackingDiagnostic: "",
-          actualCustomerLastMsg: lastMsg,
-          portalId: null
-        }), 3500));
+        // If smartFallback is already a special intent (deposit, acknowledgment, refund, pin, spin), use it immediately!
+        let draftResult;
+        if (smartFallback.isSpecialIntent) {
+          draftResult = {
+            mainIssue: smartFallback.mainIssue,
+            draftText: smartFallback.draftText,
+            trackingDiagnostic: smartFallback.trackingDiagnostic,
+            actualCustomerLastMsg: smartFallback.lastMessage,
+            portalId: smartFallback.portalId
+          };
+        } else {
+          // Fast draft with timeout to ensure prompt delivery on WhatsApp
+          const draftPromise = composeIntelligentSupportDraft({
+            firstName,
+            custFullName,
+            tNum,
+            fullTicket,
+            msgs,
+            trackInfo,
+            lastMsg,
+            brandName: rezolvCtx.brandName,
+            from,
+            isFastDraft: true
+          });
+          const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({
+            mainIssue: smartFallback.mainIssue,
+            draftText: smartFallback.draftText,
+            trackingDiagnostic: smartFallback.trackingDiagnostic,
+            actualCustomerLastMsg: smartFallback.lastMessage,
+            portalId: smartFallback.portalId
+          }), 6000));
 
-        const { mainIssue, draftText, trackingDiagnostic, actualCustomerLastMsg, portalId } = await Promise.race([draftPromise, timeoutPromise]);
+          draftResult = await Promise.race([draftPromise, timeoutPromise]);
+        }
+
+        const { mainIssue, draftText, trackingDiagnostic, actualCustomerLastMsg, portalId } = draftResult;
 
         return {
           id: fullTicket._id || t._id,
           mongoId: fullTicket._id || t._id,
           ticketId: tNum,
           customerName: custFullName,
-          mainIssue,
-          lastMessage: actualCustomerLastMsg || lastMsg || "New support request",
+          mainIssue: mainIssue || smartFallback.mainIssue,
+          lastMessage: actualCustomerLastMsg || smartFallback.lastMessage,
           waitLabel,
-          trackingDiagnostic,
-          portalId: portalId || null,
-          draftMessage: draftText,
+          trackingDiagnostic: trackingDiagnostic || smartFallback.trackingDiagnostic,
+          portalId: portalId || smartFallback.portalId || null,
+          draftMessage: draftText || smartFallback.draftText,
           from: from,
           workspaceId: rezolvCtx.workspaceId,
           workspaceName: rezolvCtx.workspaceName,
