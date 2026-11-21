@@ -1498,14 +1498,12 @@ async function sendWhatsApp(to, text) {
   const rawTo = String(to).trim();
   let formattedTo = "";
 
-  // 1. WhatsApp JID format (already has @g.us, @s.whatsapp.net, or @newsletter)
-  if (rawTo.includes("@")) {
+  // 1. WhatsApp Groups or Newsletters (@g.us, @newsletter)
+  if (rawTo.includes("@g.us") || rawTo.includes("@newsletter")) {
     formattedTo = rawTo;
-  } else if (/[a-zA-Z]/.test(rawTo)) {
-    formattedTo = rawTo.replace(/@.+$/, "").trim();
   } else {
-    // 2. Standard numeric phone number (e.g. "0547100951", "233547100951")
-    const digitsOnly = rawTo.replace(/\D/g, "");
+    // 2. Standard numeric phone number or direct contact JID (@s.whatsapp.net / @c.us)
+    const digitsOnly = rawTo.replace(/@.+$/, "").replace(/\D/g, "");
     if (digitsOnly.startsWith("0") && digitsOnly.length === 10) {
       formattedTo = "233" + digitsOnly.slice(1);
     } else {
@@ -10905,27 +10903,44 @@ async function initiateMomoCharge(from, session, bundle) {
     if (status === "pay_offline" || status === "pending" || status === "success") {
       await saveCustomerSession(from, { ref, step: 5 });
 
+      const storeDisplayName = session.agent_name || (session.agent_slug ? session.agent_slug : "DataOne GH");
+      const pkgDesc = `${effectiveBundle?.capacity || session.bundle || "1"}GB ${session.network || "MTN"}`;
+      const orderSummaryHeader =
+`🛍️ *ORDER PLACED — APPROVE MOMO PROMPT* ⏳\n` +
+`━━━━━━━━━━━━━━━━━━━━━\n` +
+`🏪 *Shop:* ${storeDisplayName}\n` +
+`🆔 *Order Ref:* ${ref}\n` +
+`📶 *Package:* ${pkgDesc}\n` +
+`📱 *Delivery to:* ${session.phone_number}\n` +
+`💳 *Payment from:* ${session.momo_number}\n` +
+`💰 *Amount:* GH₵ ${Number(effectiveBundle.price).toFixed(2)}\n` +
+`━━━━━━━━━━━━━━━━━━━━━\n`;
+
       if (status === "success") {
-        return sendWhatsApp(from, `✅ Payment received of ₵${bundle.price.toFixed(2)}! Processing your order now...`);
+        await saveCustomerSession(from, { step: 1, bundle: null, momo_number: null, ref: null });
+        return sendWhatsApp(
+          from,
+          `✅ *PAYMENT RECEIVED!* 🎉\n━━━━━━━━━━━━━━━━━━━━━\n🏪 *Shop:* ${storeDisplayName}\n🆔 *Order Ref:* ${ref}\n📶 *Package:* ${pkgDesc}\n📱 *Delivery to:* ${session.phone_number}\n💰 *Amount:* GH₵ ${Number(effectiveBundle.price).toFixed(2)}\n⚡ *Status:* Processing & Dispatching ⏳\n\nYour data bundle order has been placed and is currently being processed! It will land shortly. 📶\n\n💡 *Track Order:* https://www.data1gh.com/track?ref=${encodeURIComponent(ref)}\nReply *hi* to return to main menu.`
+        );
       }
 
       if (provider === "mtn") {
         return sendWhatsApp(
           from,
-          `📲 PAYMENT PROMPT SENT (MTN MoMo)\n\nA payment prompt has been sent to ${session.momo_number} for ₵${bundle.price.toFixed(2)}.\n\n👉 *Prompt didn't pop up?*\n1. Dial *170#\n2. Select 6 (My Wallet)\n3. Select 3 (My Approvals)\n4. Enter your PIN & select 1 to approve!\n\n⏳ Once approved, your order will be delivered automatically.\n\n_Reply LINK if you prefer to pay online._`
+          `${orderSummaryHeader}📲 *A payment prompt has been sent to your phone (${session.momo_number}).*\n\n👉 *Prompt didn't pop up?*\n1. Dial *170#\n2. Select 6 (My Wallet)\n3. Select 3 (My Approvals)\n4. Enter your PIN & select 1 to approve!\n\n⏳ Once approved, your data bundle will land automatically.\n💡 *Track:* https://www.data1gh.com/track?ref=${encodeURIComponent(ref)}\n_Reply LINK if you prefer to pay online._`
         );
       }
 
       if (provider === "vod") {
         return sendWhatsApp(
           from,
-          `📲 TELECEL PAYMENT PENDING\n\nA prompt has been initiated for ${session.momo_number} for ₵${bundle.price.toFixed(2)}.\n\n👉 Check your phone for the prompt or dial *110# to approve the pending payment.\n\n⏳ Once approved, your order will be delivered automatically.\n\n_Reply LINK if you prefer to pay online._`
+          `${orderSummaryHeader}📲 *A Telecel payment prompt has been initiated for ${session.momo_number}.*\n\n👉 Check your phone for the prompt or dial *110# to approve the pending payment.\n\n⏳ Once approved, your data bundle will land automatically.\n💡 *Track:* https://www.data1gh.com/track?ref=${encodeURIComponent(ref)}\n_Reply LINK if you prefer to pay online._`
         );
       }
 
       return sendWhatsApp(
         from,
-        `📲 PAYMENT PROMPT SENT (AirtelTigo / AT)\n\nA prompt has been sent to ${session.momo_number} for ₵${bundle.price.toFixed(2)}.\n\n👉 *Prompt didn't pop up?* Dial *110# to approve.\n\n⏳ Once approved, your order will be delivered automatically.\n\n_Reply LINK if you prefer to pay online._`
+        `${orderSummaryHeader}📲 *An AirtelTigo / AT payment prompt has been sent to ${session.momo_number}.*\n\n👉 *Prompt didn't pop up?* Dial *110# to approve.\n\n⏳ Once approved, your data bundle will land automatically.\n💡 *Track:* https://www.data1gh.com/track?ref=${encodeURIComponent(ref)}\n_Reply LINK if you prefer to pay online._`
       );
     }
 
@@ -11652,7 +11667,6 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
       return sendWhatsApp(from, `⚠️ Could not submit Portal ID *${mId}* to group: ${subRes.reason || subRes.error}`);
     }
   }
-
   // ── TRIGGER FAILED & >24H PORTAL ID GROUP SUBMISSION SCAN ──
   const scanAllFailedMatch =
     cleanInput.match(/^(?:submit|scan|post)\s+(?:all\s+)?(?:failed|unprocessed|>24|over\s*24h?)(?:\s+(?:orders?|ids?))?$/i) ||
@@ -18557,6 +18571,10 @@ app.post("/paystack-webhook", async (req, res) => {
           recordWebhookLog("CUSTOMER_NOTIFIED_IN_PROGRESS", { phone: session.phone });
         }
       }
+      // Reset customer session so they are not stuck in payment awaiting step!
+      try {
+        await saveCustomerSession(session.phone, { step: 1, bundle: null, momo_number: null, ref: null });
+      } catch (_) {}
 
       sendAdminSms(
         `NEW DATA ORDER: ${bundle.capacity}GB ${session.network} to ${session.phone_number}. Paid: ₵${paidAmount.toFixed(2)}. Status: ${mappedDeliveryStatus === "delivered" ? "Delivered" : "In Progress"} (${orderReference})`
