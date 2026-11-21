@@ -1490,37 +1490,38 @@ const botSentMessageIds = new Set();
 const processedIncomingMessageIds = new Map();
 
 async function sendWhatsApp(to, text) {
-  try {
-    if (!to) {
-      console.warn("⚠️ [sendWhatsApp] Aborting: 'to' recipient is empty or undefined!");
-      return { ok: false, error: "Empty recipient" };
-    }
+  if (!to) {
+    console.warn("⚠️ [sendWhatsApp] Aborting: 'to' recipient is empty or undefined!");
+    return { ok: false, error: "Empty recipient" };
+  }
 
-    const rawTo = String(to).trim();
-    let formattedTo = "";
+  const rawTo = String(to).trim();
+  let formattedTo = "";
 
-    // 1. WhatsApp JID format (already has @g.us, @s.whatsapp.net, or @newsletter)
-    if (rawTo.includes("@")) {
-      formattedTo = rawTo;
-    } else if (/[a-zA-Z]/.test(rawTo)) {
-      formattedTo = rawTo.replace(/@.+$/, "").trim();
+  // 1. WhatsApp JID format (already has @g.us, @s.whatsapp.net, or @newsletter)
+  if (rawTo.includes("@")) {
+    formattedTo = rawTo;
+  } else if (/[a-zA-Z]/.test(rawTo)) {
+    formattedTo = rawTo.replace(/@.+$/, "").trim();
+  } else {
+    // 2. Standard numeric phone number (e.g. "0547100951", "233547100951")
+    const digitsOnly = rawTo.replace(/\D/g, "");
+    if (digitsOnly.startsWith("0") && digitsOnly.length === 10) {
+      formattedTo = "233" + digitsOnly.slice(1);
     } else {
-      // 2. Standard numeric phone number (e.g. "0547100951", "233547100951")
-      const digitsOnly = rawTo.replace(/\D/g, "");
-      if (digitsOnly.startsWith("0") && digitsOnly.length === 10) {
-        formattedTo = "233" + digitsOnly.slice(1);
-      } else {
-        formattedTo = digitsOnly;
-      }
+      formattedTo = digitsOnly;
     }
+  }
 
-    if (!formattedTo) {
-      console.warn("⚠️ [sendWhatsApp] Aborting: formattedTo is empty after cleaning for recipient:", to);
-      return { ok: false, error: "Invalid recipient" };
-    }
+  if (!formattedTo) {
+    console.warn("⚠️ [sendWhatsApp] Aborting: formattedTo is empty after cleaning for recipient:", to);
+    return { ok: false, error: "Invalid recipient" };
+  }
 
-    const safeText = String(text || "").trim();
-    if (!safeText) return { ok: false, error: "Empty text" };
+  const safeText = String(text || "").trim();
+  if (!safeText) return { ok: false, error: "Empty text" };
+
+  try {
 
     // 🛡️ BLOCKLIST: No DATA 1 GH store/admin/broadcast notification may ever be delivered to 0599599254
     const normRecipientDigits = formattedTo.replace(/\D/g, "");
@@ -1547,9 +1548,21 @@ async function sendWhatsApp(to, text) {
           }
         }
         if (sock) {
-          await sock.sendMessage(formattedTo, { text: safeText });
-          console.log(`📤 [sendWhatsApp] Delivered group message via Baileys to [${formattedTo}]`);
-          return { ok: true, via: "baileys_group", jid: formattedTo };
+          try {
+            if (sock.authState?.keys?.set) {
+              await sock.authState.keys.set({ 'sender-key-memory': { [formattedTo]: null } });
+            }
+          } catch (_) { }
+          const sent = await sock.sendMessage(formattedTo, { text: safeText });
+          if (sent?.key?.id && sent?.message) {
+            recentSentMessagesStore.set(sent.key.id, sent.message);
+            if (recentSentMessagesStore.size > 200) {
+              const oldest = recentSentMessagesStore.keys().next().value;
+              recentSentMessagesStore.delete(oldest);
+            }
+          }
+          console.log(`📤 [sendWhatsApp] Delivered group message via Baileys to [${formattedTo}] ID: [${sent?.key?.id}] status: [${sent?.status}]`);
+          return { ok: true, via: "baileys_group", jid: formattedTo, msgId: sent?.key?.id, status: sent?.status, key: sent?.key };
         }
       } catch (bErr) {
         console.warn(`[sendWhatsApp] Baileys group send error for [${to}]:`, bErr.message);
@@ -1586,6 +1599,39 @@ async function sendWhatsApp(to, text) {
     }
 
     if (!token || !phoneId) {
+      let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
+      if (!sock && typeof agentSockets !== "undefined" && agentSockets.size > 0) {
+        for (const [_, aEntry] of agentSockets.entries()) {
+          if (aEntry?.ready && aEntry?.sock) {
+            sock = aEntry.sock;
+            break;
+          }
+        }
+      }
+      if (sock && formattedTo) {
+        try {
+          const cleanDigits = formattedTo.replace(/\D/g, "");
+          const targetBaileysJid = cleanDigits.includes("@") ? cleanDigits : `${cleanDigits}@s.whatsapp.net`;
+          await sock.sendMessage(targetBaileysJid, { text: safeText });
+          console.log(`📤 [sendWhatsApp] Delivered via Baileys (no Meta creds) to [${targetBaileysJid}]`);
+          return { ok: true, via: "baileys_direct", jid: targetBaileysJid };
+        } catch (_) { }
+      }
+      // If local Baileys not ready, call remote bot server
+      const remoteBotUrl = process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com";
+      if (remoteBotUrl && !remoteBotUrl.includes("localhost") && formattedTo) {
+        try {
+          const cleanDigits = formattedTo.replace(/\D/g, "");
+          const targetBaileysJid = cleanDigits.includes("@") ? cleanDigits : `${cleanDigits}@s.whatsapp.net`;
+          const rRes = await axios.post(`${remoteBotUrl.replace(/\/+$/, "")}/api/send-admin-alert`, {
+            to: targetBaileysJid,
+            text: safeText
+          }, { timeout: 6000 });
+          if (rRes.status >= 200 && rRes.status < 300) {
+            return { ok: true, via: "remote_bot_direct", jid: targetBaileysJid };
+          }
+        } catch (_) {}
+      }
       console.warn("⚠️ Meta WhatsApp Cloud API credentials missing (ACCESS_TOKEN or PHONE_ID). Message to:", to);
       return { ok: false, error: "Meta WhatsApp credentials missing" };
     }
@@ -1646,7 +1692,42 @@ async function sendWhatsApp(to, text) {
     }
     return { ok: true, via: "meta" };
   } catch (e) {
-    console.error(`WA ERROR sending to [${to}]:`, e.response?.data || e.message);
+    console.error(`WA ERROR sending to [${to}] via Meta:`, e.response?.data || e.message);
+    try {
+      const cleanDigits = (formattedTo || String(to)).replace(/\D/g, "");
+      const targetBaileysJid = cleanDigits.includes("@") ? cleanDigits : `${cleanDigits}@s.whatsapp.net`;
+      let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
+      if (!sock && typeof agentSockets !== "undefined" && agentSockets.size > 0) {
+        for (const [_, aEntry] of agentSockets.entries()) {
+          if (aEntry?.ready && aEntry?.sock) {
+            sock = aEntry.sock;
+            break;
+          }
+        }
+      }
+      if (sock) {
+        await sock.sendMessage(targetBaileysJid, { text: safeText || String(text || "") });
+        console.log(`📤 [sendWhatsApp] Fallback delivered via Baileys to [${targetBaileysJid}]`);
+        return { ok: true, via: "baileys_fallback", jid: targetBaileysJid };
+      }
+
+      // If local Baileys has no active socket, try remote bot server
+      const remoteBotUrl = process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com";
+      if (remoteBotUrl && !remoteBotUrl.includes("localhost")) {
+        try {
+          const rRes = await axios.post(`${remoteBotUrl.replace(/\/+$/, "")}/api/send-admin-alert`, {
+            to: targetBaileysJid,
+            text: safeText || String(text || "")
+          }, { timeout: 6000 });
+          if (rRes.status >= 200 && rRes.status < 300) {
+            console.log(`📤 [sendWhatsApp] Fallback delivered via Remote Bot API to [${targetBaileysJid}]`);
+            return { ok: true, via: "remote_bot_fallback", jid: targetBaileysJid };
+          }
+        } catch (_) {}
+      }
+    } catch (bFallbackErr) {
+      console.warn(`[sendWhatsApp] Baileys fallback error for [${to}]:`, bFallbackErr.message);
+    }
     return { ok: false, error: e.message };
   }
 }
@@ -2127,6 +2208,138 @@ let baileysChannelReady = false;
 let baileysChannelConnecting = false;
 let pendingChannelPostQueue = null;
 let lastPairingOwnerPhone = "233547100951";
+const recentBaileysMessages = [];
+const recentBaileysFrames = [];
+
+function extractBaileysMessageText(rawMsg) {
+  if (!rawMsg) return "";
+  let m = rawMsg;
+  while (m && (m.ephemeralMessage || m.viewOnceMessage || m.viewOnceMessageV2 || m.documentWithCaptionMessage || m.editedMessage)) {
+    m = m.ephemeralMessage?.message ||
+      m.viewOnceMessage?.message ||
+      m.viewOnceMessageV2?.message ||
+      m.documentWithCaptionMessage?.message ||
+      m.editedMessage?.message ||
+      m;
+  }
+  return String(
+    m?.conversation ||
+    m?.extendedTextMessage?.text ||
+    m?.imageMessage?.caption ||
+    m?.videoMessage?.caption ||
+    m?.documentMessage?.caption ||
+    m?.templateButtonReplyMessage?.selectedId ||
+    m?.buttonsResponseMessage?.selectedButtonId ||
+    ""
+  ).trim();
+}
+
+async function recordGroupPortalIdSubmitted(remoteJid, foundIds) {
+  if (!remoteJid || !foundIds || foundIds.length === 0) return;
+  const now = Date.now();
+  foundIds.forEach(id => {
+    submittedPortalIdsTimestamps.set(`${remoteJid}:${id}`, now);
+    submittedPortalIdsTimestamps.set(id, now);
+  });
+
+  const gKey = `failed_orders_posted_${remoteJid.replace(/[^a-zA-Z0-9]/g, "_")}`;
+  const globalKey = "failed_orders_posted_portal_ids";
+
+  try {
+    const { data: gRow } = await supabase.from("settings").select("value").eq("key", gKey).maybeSingle();
+    let existing = [];
+    if (gRow?.value) {
+      try { existing = typeof gRow.value === "string" ? JSON.parse(gRow.value) : gRow.value; } catch (_) { }
+    }
+    if (!Array.isArray(existing)) existing = [];
+    let changed = false;
+    foundIds.forEach(id => {
+      const clean = String(id).trim();
+      if (!existing.includes(clean)) {
+        existing.push(clean);
+        changed = true;
+      }
+    });
+    if (changed) {
+      if (existing.length > 3000) existing = existing.slice(-3000);
+      await supabase.from("settings").upsert({
+        key: gKey,
+        value: JSON.stringify(existing),
+        updated_at: new Date().toISOString()
+      }, { onConflict: "key" });
+    }
+  } catch (err) {
+    console.warn("recordGroupPortalIdSubmitted gKey error:", err.message);
+  }
+
+  try {
+    const { data: pRow } = await supabase.from("settings").select("value").eq("key", globalKey).maybeSingle();
+    let pExisting = [];
+    if (pRow?.value) {
+      try { pExisting = typeof pRow.value === "string" ? JSON.parse(pRow.value) : pRow.value; } catch (_) { }
+    }
+    if (!Array.isArray(pExisting)) pExisting = [];
+    let pChanged = false;
+    foundIds.forEach(id => {
+      const clean = String(id).trim();
+      if (!pExisting.includes(clean)) {
+        pExisting.push(clean);
+        pChanged = true;
+      }
+    });
+    if (pChanged) {
+      if (pExisting.length > 3000) pExisting = pExisting.slice(-3000);
+      await supabase.from("settings").upsert({
+        key: globalKey,
+        value: JSON.stringify(pExisting),
+        updated_at: new Date().toISOString()
+      }, { onConflict: "key" });
+    }
+  } catch (err) {
+    console.warn("recordGroupPortalIdSubmitted globalKey error:", err.message);
+  }
+}
+
+let persistGroupMsgsTimer = null;
+function schedulePersistRecentGroupMessages() {
+  if (persistGroupMsgsTimer) return;
+  persistGroupMsgsTimer = setTimeout(async () => {
+    persistGroupMsgsTimer = null;
+    try {
+      const toSave = recentBaileysMessages.filter(m => m.from && m.from.endsWith("@g.us")).slice(0, 300);
+      await supabase.from("settings").upsert({
+        key: "recent_group_messages_buffer",
+        value: JSON.stringify(toSave),
+        updated_at: new Date().toISOString()
+      }, { onConflict: "key" });
+    } catch (_) { }
+  }, 2500);
+}
+
+async function handleIncomingBaileysGroupMessage(m) {
+  if (!m || !m.message) return;
+  const remoteJid = m.key?.remoteJid || "";
+  const participant = m.key?.participant || m.participant || "";
+  const text = extractBaileysMessageText(m.message);
+
+  recentBaileysMessages.unshift({
+    time: new Date().toISOString(),
+    from: remoteJid,
+    participant,
+    text,
+    fromMe: Boolean(m.key?.fromMe)
+  });
+  if (recentBaileysMessages.length > 500) recentBaileysMessages.pop();
+
+  if (remoteJid && remoteJid.endsWith("@g.us") && text) {
+    schedulePersistRecentGroupMessages();
+    const foundIds = text.match(/\b\d{4,9}\b/g);
+    if (foundIds && foundIds.length > 0) {
+      console.log(`🛡️ [GROUP MESSAGE DETECTED] From [${participant || remoteJid}]: IDs found: ${foundIds.join(", ")}`);
+      await recordGroupPortalIdSubmitted(remoteJid, foundIds);
+    }
+  }
+}
 
 async function restoreBaileysAuthFromSupabase() {
   try {
@@ -2162,8 +2375,24 @@ function scheduleBackupBaileysAuthToSupabase() {
     try {
       if (!fsChannel.existsSync(BAILEYS_AUTH_DIR)) return;
       const files = fsChannel.readdirSync(BAILEYS_AUTH_DIR).filter(f => f.endsWith(".json"));
+
+      // Auto-prune old pre-keys to keep disk fast and bundle small
+      const preKeys = files.filter(f => f.startsWith("pre-key-"));
+      if (preKeys.length > 50) {
+        preKeys.sort((a, b) => {
+          const na = parseInt(a.replace(/\D/g, "") || 0);
+          const nb = parseInt(b.replace(/\D/g, "") || 0);
+          return na - nb;
+        });
+        const toDelete = preKeys.slice(0, preKeys.length - 50);
+        for (const deadKey of toDelete) {
+          try { fsChannel.unlinkSync(pathChannel.join(BAILEYS_AUTH_DIR, deadKey)); } catch (_) { }
+        }
+      }
+
+      const keptFiles = fsChannel.readdirSync(BAILEYS_AUTH_DIR).filter(f => f.endsWith(".json"));
       const bundle = {};
-      for (const f of files) {
+      for (const f of keptFiles) {
         bundle[f] = fsChannel.readFileSync(pathChannel.join(BAILEYS_AUTH_DIR, f), "utf8");
       }
       if (Object.keys(bundle).length > 0) {
@@ -2195,6 +2424,28 @@ async function resolveNewsletterJidViaBaileys(sock, channelUrl = DEFAULT_WHATSAP
   return "";
 }
 
+const groupMetadataCache = new Map();
+const recentSentMessagesStore = new Map();
+
+async function getCachedGroupMetadata(jid) {
+  if (groupMetadataCache.has(jid)) {
+    const entry = groupMetadataCache.get(jid);
+    if (Date.now() - entry.time < 10 * 60 * 1000) {
+      return entry.data;
+    }
+  }
+  if (baileysChannelSock?.groupMetadata) {
+    try {
+      const meta = await baileysChannelSock.groupMetadata(jid);
+      if (meta) {
+        groupMetadataCache.set(jid, { time: Date.now(), data: meta });
+        return meta;
+      }
+    } catch (_) { }
+  }
+  return null;
+}
+
 async function initBaileysChannelClient(options = {}) {
   const { forceReset = false, requestPairForPhone = "" } = options;
   if (baileysChannelReady && baileysChannelSock && !forceReset && !requestPairForPhone) {
@@ -2207,16 +2458,21 @@ async function initBaileysChannelClient(options = {}) {
   try {
     baileysChannelConnecting = true;
     if (forceReset) {
-      try {
-        if (baileysChannelSock?.ws) baileysChannelSock.ws.close();
-      } catch (_) { }
-      baileysChannelSock = null;
+      if (baileysChannelSock) {
+        try {
+          baileysChannelSock.ev.removeAllListeners("connection.update");
+          baileysChannelSock.ev.removeAllListeners("creds.update");
+          baileysChannelSock.ev.removeAllListeners("messages.upsert");
+          if (baileysChannelSock.ws) baileysChannelSock.ws.close();
+        } catch (_) { }
+        baileysChannelSock = null;
+      }
       baileysChannelReady = false;
       if (fsChannel.existsSync(BAILEYS_AUTH_DIR)) {
-        fsChannel.rmSync(BAILEYS_AUTH_DIR, { recursive: true, force: true });
+        try { fsChannel.rmSync(BAILEYS_AUTH_DIR, { recursive: true, force: true }); } catch (_) { }
       }
       await supabase.from("settings").delete().eq("key", "baileys_channel_auth_bundle");
-    } else {
+    } else if (!fsChannel.existsSync(pathChannel.join(BAILEYS_AUTH_DIR, "creds.json"))) {
       await restoreBaileysAuthFromSupabase();
     }
 
@@ -2238,7 +2494,7 @@ async function initBaileysChannelClient(options = {}) {
       return { ok: false, ready: false, needsPairing: true };
     }
 
-    let version = [2, 3000, 1015901307];
+    let version = [2, 3000, 1043857760];
     try {
       const latest = await fetchLatestBaileysVersion();
       if (latest?.version) version = latest.version;
@@ -2249,16 +2505,116 @@ async function initBaileysChannelClient(options = {}) {
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: "silent" }),
-      browser: Browsers ? Browsers.ubuntu("Chrome") : ["Ubuntu", "Chrome", "20.0.04"],
-      syncFullHistory: false,
-      markOnlineOnConnect: false,
+      browser: Browsers?.macOS ? Browsers.macOS("Chrome") : ["Mac OS", "Chrome", "14.4.1"],
+      syncFullHistory: true,
+      shouldSyncHistoryMessage: (msg) => {
+        const jid = msg?.key?.remoteJid || "";
+        return jid.endsWith("@g.us");
+      },
+      markOnlineOnConnect: true,
+      enableRecentMessageCache: true,
+      cachedGroupMetadata: getCachedGroupMetadata,
+      getMessage: async (key) => {
+        return recentSentMessagesStore.get(key.id) || null;
+      }
     });
 
     baileysChannelSock = sock;
 
+    try {
+      if (sock.ws) {
+        sock.ws.on("frame", (frame) => {
+          try {
+            if (frame && typeof frame === "object" && frame.tag) {
+              const tag = frame.tag;
+              if (tag === "ack" || tag === "receipt" || tag === "error" || tag === "notification") {
+                recentBaileysFrames.unshift({
+                  time: new Date().toISOString(),
+                  tag,
+                  attrs: frame.attrs || {},
+                  contentCount: Array.isArray(frame.content) ? frame.content.length : 0
+                });
+                if (recentBaileysFrames.length > 50) recentBaileysFrames.pop();
+              }
+            }
+          } catch (_) { }
+        });
+      }
+    } catch (_) { }
+
     sock.ev.on("creds.update", async () => {
       await saveCreds();
       scheduleBackupBaileysAuthToSupabase();
+    });
+
+    // 📥 WhatsApp Group Message History Sync: Pre-populate all historical IDs sent in groups
+    sock.ev.on("messaging-history.set", async (history) => {
+      try {
+        const msgs = history?.messages || [];
+        if (!Array.isArray(msgs) || msgs.length === 0) return;
+        const groupIdsMap = new Map();
+        for (const m of msgs) {
+          const remoteJid = m.key?.remoteJid || "";
+          if (!remoteJid || !remoteJid.endsWith("@g.us")) continue;
+          const text = extractBaileysMessageText(m.message);
+          if (!text) continue;
+          const ids = text.match(/\b\d{4,9}\b/g);
+          if (ids && ids.length > 0) {
+            if (!groupIdsMap.has(remoteJid)) groupIdsMap.set(remoteJid, new Set());
+            const set = groupIdsMap.get(remoteJid);
+            ids.forEach(id => set.add(id));
+          }
+        }
+
+        for (const [rJid, setOfIds] of groupIdsMap.entries()) {
+          const idsArr = Array.from(setOfIds);
+          console.log(`📥 [Baileys History Sync] Found ${idsArr.length} portal IDs in group ${rJid} history. Updating persistent registry...`);
+          await recordGroupPortalIdSubmitted(rJid, idsArr);
+        }
+      } catch (hErr) {
+        console.warn("messaging-history.set sync error:", hErr.message);
+      }
+    });
+
+    sock.ev.on("messages.upsert", async (upsert) => {
+      try {
+        const { messages } = upsert || {};
+        if (!Array.isArray(messages)) return;
+        for (const m of messages) {
+          const remoteJid = m.key?.remoteJid || "";
+          if (remoteJid.endsWith("@g.us")) {
+            await handleIncomingBaileysGroupMessage(m);
+          } else if (!m.key?.fromMe && remoteJid) {
+            const text = extractBaileysMessageText(m.message);
+            if (text) {
+              const cleanSender = remoteJid.replace(/@.+$/, "");
+              const incomingPayload = {
+                source: "baileys",
+                entry: [{
+                  changes: [{
+                    value: {
+                      contacts: [{ wa_id: cleanSender }],
+                      messages: [{
+                        id: m.key?.id,
+                        from: cleanSender,
+                        body: text,
+                        text: { body: text },
+                        timestamp: String(m.messageTimestamp || Math.floor(Date.now() / 1000)),
+                        type: "text",
+                        key: m.key,
+                        message: m.message
+                      }]
+                    }
+                  }]
+                }]
+              };
+              handleIncomingWhatsAppMessage(incomingPayload, "baileys").catch(e => console.error("Baileys private message handle error:", e));
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("messages.upsert log error:", e.message);
+      }
     });
 
     sock.ev.on("connection.update", async (update) => {
@@ -2293,13 +2649,21 @@ async function initBaileysChannelClient(options = {}) {
         const loggedOut = statusCode === DisconnectReason?.loggedOut || statusCode === 401;
         if (loggedOut) {
           if (fsChannel.existsSync(BAILEYS_AUTH_DIR)) {
-            fsChannel.rmSync(BAILEYS_AUTH_DIR, { recursive: true, force: true });
+            try { fsChannel.rmSync(BAILEYS_AUTH_DIR, { recursive: true, force: true }); } catch (_) { }
           }
           await supabase.from("settings").delete().eq("key", "baileys_channel_auth_bundle");
-        } else if (state.creds?.registered) {
+        } else if (statusCode === 515 || statusCode === DisconnectReason?.restartRequired) {
+          console.log(`🔄 [Baileys Channel] 515 Restart Required (Pairing handshake), reconnecting immediately...`);
           setTimeout(() => {
             initBaileysChannelClient().catch(() => { });
-          }, 8000);
+          }, 500);
+        } else if (state.creds?.registered) {
+          console.log(`🔄 [Baileys Channel] Disconnected (${statusCode || "network"}), reconnecting session...`);
+          setTimeout(() => {
+            initBaileysChannelClient().catch(() => { });
+          }, 1500);
+        } else {
+          console.log(`⏸️ [Baileys Channel] Closed (${statusCode || "unregistered"}), awaiting user pairing.`);
         }
       }
     });
@@ -2310,8 +2674,17 @@ async function initBaileysChannelClient(options = {}) {
       else if (cleanNum.length === 9) cleanNum = "233" + cleanNum;
       lastPairingOwnerPhone = cleanNum;
 
-      await new Promise(r => setTimeout(r, 2500));
-      const rawCode = await sock.requestPairingCode(cleanNum);
+      let rawCode = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await new Promise(r => setTimeout(r, attempt === 1 ? 3000 : 2500));
+          rawCode = await sock.requestPairingCode(cleanNum);
+          if (rawCode) break;
+        } catch (pairErr) {
+          console.warn(`[Baileys Channel] Pairing code attempt ${attempt} notice:`, pairErr.message);
+          if (attempt === 3) throw pairErr;
+        }
+      }
       const formattedCode = rawCode?.match(/.{1,4}/g)?.join("-") || rawCode;
       return { ok: true, pairingCode: formattedCode, phone: cleanNum };
     }
@@ -2328,6 +2701,243 @@ async function initBaileysChannelClient(options = {}) {
 setTimeout(() => {
   initBaileysChannelClient().catch(() => { });
 }, 5000);
+
+/* =========================================================
+MULTI-AGENT WHATSAPP ACCOUNT PAIRING ENGINE
+Allows individual agents / resellers to pair their own WhatsApp numbers
+so that failed order IDs post into the group directly from THEIR OWN accounts!
+========================================================= */
+
+const agentSockets = new Map(); // cleanPhone -> { sock, ready, connecting }
+
+function normalizeAgentPhone(phone) {
+  if (!phone) return null;
+  let clean = String(phone).replace(/\D/g, "");
+  if (clean.startsWith("0") && clean.length === 10) clean = "233" + clean.slice(1);
+  else if (clean.length === 9) clean = "233" + clean;
+  return clean;
+}
+
+function getAgentAuthDir(cleanPhone) {
+  return pathChannel.join(process.cwd(), ".baileys_agent_" + cleanPhone);
+}
+
+async function restoreAgentAuthFromSupabase(cleanPhone, authDir) {
+  try {
+    if (!fsChannel.existsSync(authDir)) fsChannel.mkdirSync(authDir, { recursive: true });
+    const { data: row } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", `baileys_agent_auth_${cleanPhone}`)
+      .maybeSingle();
+    if (row?.value) {
+      const bundle = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+      for (const [fName, content] of Object.entries(bundle)) {
+        fsChannel.writeFileSync(pathChannel.join(authDir, fName), content, "utf8");
+      }
+      return true;
+    }
+  } catch (_) { }
+  return false;
+}
+
+async function backupAgentAuthToSupabase(cleanPhone, authDir) {
+  try {
+    if (!fsChannel.existsSync(authDir)) return;
+    const files = fsChannel.readdirSync(authDir).filter(f => f.endsWith(".json"));
+    const bundle = {};
+    for (const f of files) {
+      bundle[f] = fsChannel.readFileSync(pathChannel.join(authDir, f), "utf8");
+    }
+    if (Object.keys(bundle).length > 0) {
+      await supabase.from("settings").upsert(
+        [{ key: `baileys_agent_auth_${cleanPhone}`, value: JSON.stringify(bundle), updated_at: new Date().toISOString() }],
+        { onConflict: "key" }
+      );
+    }
+  } catch (_) { }
+}
+
+async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
+  const cleanPhone = normalizeAgentPhone(rawPhone);
+  if (!cleanPhone) return null;
+
+  const { requestPair = false, forceReset = false } = options;
+  const existing = agentSockets.get(cleanPhone);
+  if (existing?.ready && existing?.sock && !requestPair && !forceReset) {
+    return { ok: true, ready: true, sock: existing.sock };
+  }
+
+  const authDir = getAgentAuthDir(cleanPhone);
+  if (forceReset) {
+    try { if (existing?.sock?.ws) existing.sock.ws.close(); } catch (_) { }
+    agentSockets.delete(cleanPhone);
+    if (fsChannel.existsSync(authDir)) fsChannel.rmSync(authDir, { recursive: true, force: true });
+    await supabase.from("settings").delete().eq("key", `baileys_agent_auth_${cleanPhone}`);
+    return { ok: true, reset: true };
+  } else if (!fsChannel.existsSync(pathChannel.join(authDir, "creds.json"))) {
+    await restoreAgentAuthFromSupabase(cleanPhone, authDir);
+  }
+
+  if (!fsChannel.existsSync(authDir)) fsChannel.mkdirSync(authDir, { recursive: true });
+
+  const baileys = await import("@whiskeysockets/baileys");
+  const pinoMod = await import("pino");
+  const pino = pinoMod.default || pinoMod;
+  const makeWASocket = baileys.makeWASocket || baileys.default?.makeWASocket || baileys.default;
+  const { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = baileys;
+
+  let { state, saveCreds } = await useMultiFileAuthState(authDir);
+
+  if (requestPair && !state.creds?.registered) {
+    try { if (existing?.sock?.ws) existing.sock.ws.close(); } catch (_) { }
+    if (fsChannel.existsSync(authDir)) {
+      try { fsChannel.rmSync(authDir, { recursive: true, force: true }); } catch (_) { }
+    }
+    fsChannel.mkdirSync(authDir, { recursive: true });
+    const fresh = await useMultiFileAuthState(authDir);
+    state = fresh.state;
+    saveCreds = fresh.saveCreds;
+  }
+
+  if (!state.creds?.registered && !requestPair) {
+    return { ok: false, ready: false, needsPairing: true };
+  }
+
+  let version = [2, 3000, 1043857760];
+  try {
+    const latest = await fetchLatestBaileysVersion();
+    if (latest?.version) version = latest.version;
+  } catch (_) { }
+
+  const entry = { sock: null, ready: false, connecting: true };
+  agentSockets.set(cleanPhone, entry);
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    printQRInTerminal: false,
+    logger: pino({ level: "silent" }),
+    browser: Browsers?.macOS ? Browsers.macOS("Chrome") : ["Mac OS", "Chrome", "14.4.1"],
+    syncFullHistory: true,
+    shouldSyncHistoryMessage: (msg) => {
+      const jid = msg?.key?.remoteJid || "";
+      return jid.endsWith("@g.us");
+    },
+    markOnlineOnConnect: false
+  });
+
+  entry.sock = sock;
+
+  sock.ev.on("creds.update", async () => {
+    await saveCreds();
+    backupAgentAuthToSupabase(cleanPhone, authDir);
+  });
+
+  sock.ev.on("messages.upsert", async (upsert) => {
+    try {
+      const { messages } = upsert || {};
+      if (!Array.isArray(messages)) return;
+      for (const m of messages) {
+        const remoteJid = m.key?.remoteJid || "";
+        if (remoteJid.endsWith("@g.us")) {
+          await handleIncomingBaileysGroupMessage(m);
+        } else if (!m.key?.fromMe && remoteJid) {
+          const text = extractBaileysMessageText(m.message);
+          if (text) {
+            const cleanSender = remoteJid.replace(/@.+$/, "");
+            const incomingPayload = {
+              source: "baileys",
+              entry: [{
+                changes: [{
+                  value: {
+                    contacts: [{ wa_id: cleanSender }],
+                    messages: [{
+                      id: m.key?.id,
+                      from: cleanSender,
+                      body: text,
+                      text: { body: text },
+                      timestamp: String(m.messageTimestamp || Math.floor(Date.now() / 1000)),
+                      type: "text",
+                      key: m.key,
+                      message: m.message
+                    }]
+                  }
+                }]
+              }]
+            };
+            handleIncomingWhatsAppMessage(incomingPayload, "baileys").catch(e => console.error("Agent Baileys message handle error:", e));
+          }
+        }
+      }
+    } catch (_) { }
+  });
+
+  sock.ev.on("messaging-history.set", async (history) => {
+    try {
+      const msgs = history?.messages || [];
+      if (!Array.isArray(msgs) || msgs.length === 0) return;
+      const groupIdsMap = new Map();
+      for (const m of msgs) {
+        const remoteJid = m.key?.remoteJid || "";
+        if (!remoteJid || !remoteJid.endsWith("@g.us")) continue;
+        const text = extractBaileysMessageText(m.message);
+        if (!text) continue;
+        const ids = text.match(/\b\d{4,9}\b/g);
+        if (ids && ids.length > 0) {
+          if (!groupIdsMap.has(remoteJid)) groupIdsMap.set(remoteJid, new Set());
+          const set = groupIdsMap.get(remoteJid);
+          ids.forEach(id => set.add(id));
+        }
+      }
+      for (const [rJid, setOfIds] of groupIdsMap.entries()) {
+        await recordGroupPortalIdSubmitted(rJid, Array.from(setOfIds));
+      }
+    } catch (_) { }
+  });
+
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect } = update;
+    if (connection === "open") {
+      entry.ready = true;
+      entry.connecting = false;
+      backupAgentAuthToSupabase(cleanPhone, authDir);
+      console.log(`✅ [Agent Baileys] Connected for agent ${cleanPhone}!`);
+      sendWhatsApp(cleanPhone, `🎉 *WHATSAPP ACCOUNT LINKED SUCCESSFULLY!* ✅\n\nYour WhatsApp companion session is now active. Whenever an order fails under your account, it will post directly into your group showing *your own name and phone number*!`).catch(() => { });
+    } else if (connection === "close") {
+      entry.ready = false;
+      entry.connecting = false;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const loggedOut = statusCode === DisconnectReason?.loggedOut || statusCode === 401;
+      if (loggedOut) {
+        agentSockets.delete(cleanPhone);
+        if (fsChannel.existsSync(authDir)) fsChannel.rmSync(authDir, { recursive: true, force: true });
+        await supabase.from("settings").delete().eq("key", `baileys_agent_auth_${cleanPhone}`);
+      } else if (statusCode === 515 || statusCode === DisconnectReason?.restartRequired) {
+        console.log(`🔄 [Agent Baileys ${cleanPhone}] 515 Restart Required (Pairing handshake), reconnecting immediately...`);
+        setTimeout(() => {
+          getOrInitAgentBaileysClient(cleanPhone).catch(() => { });
+        }, 500);
+      } else if (state.creds?.registered) {
+        console.log(`🔄 [Agent Baileys ${cleanPhone}] Disconnected (${statusCode || "network"}), reconnecting...`);
+        setTimeout(() => {
+          getOrInitAgentBaileysClient(cleanPhone).catch(() => { });
+        }, 1500);
+      } else {
+        console.log(`⏸️ [Agent Baileys ${cleanPhone}] Closed (${statusCode || "unregistered"}), awaiting user pairing.`);
+      }
+    }
+  });
+
+  if (requestPair && !state.creds?.registered) {
+    await new Promise(r => setTimeout(r, 3000));
+    const rawCode = await sock.requestPairingCode(cleanPhone);
+    const formattedCode = rawCode?.match(/.{1,4}/g)?.join("-") || rawCode;
+    return { ok: true, pairingCode: formattedCode, phone: cleanPhone };
+  }
+
+  return { ok: true, ready: entry.ready, sock };
+}
 
 async function postToWhatsAppChannel(messageText, options = {}) {
   const cleanPost = String(messageText || "").replace(/https?:\/\/data1gh\.vercel\.app/gi, "https://www.data1gh.com").trim();
@@ -2506,56 +3116,131 @@ Pre-checks if Portal ID already exists to prevent duplicates!
 ========================================================= */
 
 const failedPortalIdSubmissionsInFlight = new Set();
-const submittedPortalIdsMemoryCache = new Set();
+const submittedPortalIdsTimestamps = new Map();
+const SUBMISSION_DEDUP_WINDOW_MS = 12 * 60 * 60 * 1000; // 12-hour rolling deduplication window
+const DEFAULT_FAILED_ORDERS_GROUP_JID = "120363411273230975@g.us";
+const DEFAULT_FAILED_ORDERS_GROUP_NAME = "Unprocessed Orders";
 let portalIdCacheSeeded = false;
 
 async function seedSubmittedPortalIdsCache() {
   if (portalIdCacheSeeded) return;
+  portalIdCacheSeeded = true;
   try {
-    const { data: regRow } = await supabase
+    const { data: allRegRows } = await supabase
       .from("settings")
-      .select("value")
-      .eq("key", "failed_orders_posted_portal_ids")
-      .maybeSingle();
-    if (regRow?.value) {
-      const arr = typeof regRow.value === "string" ? JSON.parse(regRow.value) : regRow.value;
-      if (Array.isArray(arr)) {
-        arr.forEach(id => submittedPortalIdsMemoryCache.add(String(id).replace(/\D/g, "")));
-      }
+      .select("key, value")
+      .like("key", "failed_orders_posted_%");
+    const now = Date.now();
+    let count = 0;
+    for (const r of (allRegRows || [])) {
+      if (!r?.value) continue;
+      try {
+        const list = typeof r.value === "string" ? JSON.parse(r.value) : r.value;
+        if (Array.isArray(list)) {
+          list.forEach(id => {
+            const clean = String(id).trim();
+            if (/^\d{4,9}$/.test(clean)) {
+              submittedPortalIdsTimestamps.set(clean, now);
+              count++;
+            }
+          });
+        } else if (list && typeof list === "object") {
+          Object.keys(list).forEach(id => {
+            const clean = String(id).trim();
+            if (/^\d{4,9}$/.test(clean)) {
+              submittedPortalIdsTimestamps.set(clean, now);
+              count++;
+            }
+          });
+        }
+      } catch (_) { }
     }
-    portalIdCacheSeeded = true;
-  } catch (_) { }
+
+    try {
+      const { data: bufRow } = await supabase.from("settings").select("value").eq("key", "recent_group_messages_buffer").maybeSingle();
+      if (bufRow?.value) {
+        const buf = typeof bufRow.value === "string" ? JSON.parse(bufRow.value) : bufRow.value;
+        if (Array.isArray(buf)) {
+          buf.forEach(m => {
+            if (m && m.text && !recentBaileysMessages.some(existing => existing.time === m.time && existing.text === m.text)) {
+              recentBaileysMessages.push(m);
+              const ids = m.text.match(/\b\d{4,9}\b/g);
+              if (ids) {
+                ids.forEach(id => {
+                  const clean = String(id).trim();
+                  submittedPortalIdsTimestamps.set(clean, now);
+                });
+              }
+            }
+          });
+          console.log(`🛡️ [GROUP DEDUP] Restored ${buf.length} recent group messages from Supabase.`);
+        }
+      }
+    } catch (_) { }
+
+    console.log(`🛡️ [GROUP DEDUP] Pre-seeded ${count} previously submitted portal IDs into memory.`);
+  } catch (err) {
+    console.warn("seedSubmittedPortalIdsCache error:", err.message);
+  }
 }
+setTimeout(seedSubmittedPortalIdsCache, 2000);
 
 async function submitFailedPortalIdToGroup(portalId, meta = {}) {
+  const isTest = meta.isTest || portalId === "TEST-PING";
   const rawId = String(portalId || "").trim();
-  // ONLY strictly 4-to-9 digit numeric Portal IDs are valid (NO letters, NO hyphens, NO references)
-  if (!/^\d{4,9}$/.test(rawId)) {
+  // ONLY strictly 4-to-9 digit numeric Portal IDs are valid (NO letters, NO hyphens, NO references) UNLESS test
+  if (!isTest && !/^\d{4,9}$/.test(rawId)) {
     console.log(`[FAILED ORDER GROUP] Rejected non-portal-ID target: "${portalId}". Group reporting is strictly for numeric Portal IDs.`);
     return { ok: false, reason: "invalid_id" };
   }
   const cleanId = rawId;
 
-  // 1. ABSOLUTE SYNCHRONOUS MUTEX & MEMORY DEDUPLICATION CHECK
-  // If this ID is already in flight right now or already submitted, reject immediately with zero latency
-  if (failedPortalIdSubmissionsInFlight.has(cleanId) || submittedPortalIdsMemoryCache.has(cleanId)) {
-    console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY in-flight or submitted (mutex lock). Skipping duplicate.`);
-    return { ok: true, skipped: true, reason: "already_exists_or_in_flight" };
+  if (!portalIdCacheSeeded) {
+    await seedSubmittedPortalIdsCache();
   }
 
-  // Lock synchronously in memory before ANY await
+  // 🛡️ OWNER SAFETY LOCK:
+  // Auto-submitting to the group is STRICTLY permitted ONLY when:
+  // 1. An order is FAILED or QUEUED > 24 hours during an explicit delivery check (WhatsApp or Rezolv)
+  // 2. Explicit manual submission ("submit <id>") or explicit test ping ("test group")
+  // Aside from that, NO background auto-scanner, NO cron, NO batch sweeps may EVER post to the group.
+  const isDeliveryCheckOrRezolv = [
+    "carrier_check_failed",
+    "vendor_queue_over_24h",
+    "carrier_delivery_check_failed",
+    "bulk_carrier_delivery_check_failed",
+    "bulk_phone_failed",
+    "phone_check_queued_over_24h",
+    "support_draft_failed",
+    "customer_support_delivery_failed",
+    "orders_queued_over_24h",
+    "db_order_failed",
+    "db_order_queued_over_24h"
+  ].includes(meta.reason);
+
+  if (!meta.manual && !meta.isTest && !isDeliveryCheckOrRezolv) {
+    console.log(`🛡️ [GROUP AUTO-SEND BLOCKED] Auto-submission for Portal ID ${portalId} suppressed (reason: ${meta.reason || "background_scan"}). Background auto-scans are completely disabled.`);
+    return { ok: true, suppressed: true, reason: "background_scans_disabled" };
+  }
+
+  // 1. ABSOLUTE SYNCHRONOUS MUTEX
+  if (failedPortalIdSubmissionsInFlight.has(cleanId)) {
+    console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY in-flight. Skipping duplicate parallel execution.`);
+    return { ok: true, skipped: true, reason: "in_flight" };
+  }
+
+  // Lock in-flight before async database calls
   failedPortalIdSubmissionsInFlight.add(cleanId);
-  submittedPortalIdsMemoryCache.add(cleanId);
 
   try {
-    await seedSubmittedPortalIdsCache();
 
     // 1. Resolve target group JID (User-specific group, or fallback to owner's default group)
     const callerCandidate = meta.callerPhone || meta.from || meta.sender || meta.phone || null;
     const normCaller = callerCandidate ? String(callerCandidate).replace(/\D/g, "") : null;
+    const isCallerOwner = normCaller ? isOwnerPhone(normCaller) : true;
 
     let groupJid = null;
-    let groupSubject = "Failed Orders Group";
+    let groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
     let isUserGroup = false;
 
     // Check if this specific user/agent connected their own WhatsApp group
@@ -2584,7 +3269,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
       } catch (_) { }
     }
 
-    // FALLBACK: If user did NOT connect a custom group, use OWNER'S default group
+    // FALLBACK 1: If user did NOT connect a custom group, use OWNER'S default group
     if (!groupJid) {
       try {
         const { data: sRow } = await supabase
@@ -2602,89 +3287,198 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
           if (sName?.value) groupSubject = sName.value;
         }
       } catch (_) { }
+    }
 
-      if (!groupJid) {
-        // Fallback: check stored default invite code
+    // FALLBACK 2: Check owner phone variants in settings
+    if (!groupJid) {
+      const ownerKeys = ["233547100951", "0547100951", "547100951"];
+      for (const oKey of ownerKeys) {
         try {
-          const { data: invRow } = await supabase
+          const { data: oRow } = await supabase
             .from("settings")
             .select("value")
-            .eq("key", "failed_orders_group_invite_code")
+            .eq("key", `failed_orders_group_${oKey}`)
             .maybeSingle();
-          if (invRow?.value) {
-            await setFailedOrdersGroup(`https://chat.whatsapp.com/${invRow.value}`);
-            const { data: retryRow } = await supabase
-              .from("settings")
-              .select("value")
-              .eq("key", "failed_orders_group_jid")
-              .maybeSingle();
-            if (retryRow?.value) {
-              groupJid = String(retryRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
-            }
+          if (oRow?.value) {
+            groupJid = String(oRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
+            break;
           }
         } catch (_) { }
       }
     }
 
+    // FALLBACK 3: Check stored default invite code
     if (!groupJid) {
-      console.log(`[FAILED ORDER] Portal ID ${cleanId} failed, but no failed_orders_group_jid configured yet.`);
-      submittedPortalIdsMemoryCache.delete(cleanId);
-      return { ok: false, reason: "no_group_configured" };
+      try {
+        const { data: invRow } = await supabase
+          .from("settings")
+          .select("value")
+          .eq("key", "failed_orders_group_invite_code")
+          .maybeSingle();
+        if (invRow?.value) {
+          await setFailedOrdersGroup(`https://chat.whatsapp.com/${invRow.value}`);
+          const { data: retryRow } = await supabase
+            .from("settings")
+            .select("value")
+            .eq("key", "failed_orders_group_jid")
+            .maybeSingle();
+          if (retryRow?.value) {
+            groupJid = String(retryRow.value).replace(/(@g\.us)+$/i, "") + "@g.us";
+          }
+        }
+      } catch (_) { }
+    }
+
+    // FALLBACK 4: Guaranteed default - Unprocessed Orders group
+    if (!groupJid) {
+      groupJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
+      groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
     }
 
     // STRICT NORMALIZATION: Ensure clean JID format
     groupJid = groupJid.replace(/(@g\.us)+$/i, "") + "@g.us";
 
-    // 2. Persistent Supabase registry check
-    // Track per-group to avoid duplicates in the same group
+    // 🛡️ SCAN 1: Live recent WhatsApp messages in memory strictly for group messages (@g.us)
+    // Checks all messages sent inside the actual group or any linked group (by humans or bots)
+    const foundInRecentGroup = recentBaileysMessages.some(m => {
+      if (!m.text) return false;
+      const isGroupMsg = m.from && m.from.endsWith("@g.us");
+      if (!isGroupMsg) return false;
+      const nums = m.text.match(/\b\d{4,9}\b/g) || [];
+      return nums.includes(cleanId);
+    });
+
+    // 🛡️ SCAN 2: Target group recent submission timestamp (within last 7 days)
+    const targetGroupKey = `${groupJid}:${cleanId}`;
+    const lastSub = submittedPortalIdsTimestamps.get(targetGroupKey) || submittedPortalIdsTimestamps.get(cleanId);
+    const hasRecentTimestamp = Boolean(lastSub && (Date.now() - lastSub < (7 * 24 * 3600 * 1000)));
+
+    // 🛡️ SCAN 3: Persistent Supabase registry check across ALL registries
     const registryKey = groupJid
       ? `failed_orders_posted_${groupJid.replace(/[^a-zA-Z0-9]/g, "_")}`
       : "failed_orders_posted_portal_ids";
 
-    const { data: regRow } = await supabase
-      .from("settings")
-      .select("value")
-      .eq("key", registryKey)
-      .maybeSingle();
-
+    let isAlreadyPostedInDb = false;
     let postedIds = [];
-    if (regRow?.value) {
+    try {
+      const { data: allRegRows } = await supabase
+        .from("settings")
+        .select("key, value")
+        .like("key", "failed_orders_posted_%");
+      for (const r of (allRegRows || [])) {
+        if (!r?.value) continue;
+        try {
+          const list = typeof r.value === "string" ? JSON.parse(r.value) : r.value;
+          if (Array.isArray(list)) {
+            if (r.key === registryKey) postedIds = list;
+            if (list.map(String).includes(cleanId)) {
+              isAlreadyPostedInDb = true;
+            }
+          } else if (list && typeof list === "object") {
+            if (Object.keys(list).map(String).includes(cleanId)) {
+              isAlreadyPostedInDb = true;
+            }
+          }
+        } catch (_) { }
+      }
+    } catch (_) { }
+
+    // 🛡️ SCAN 4: Persistent group messages buffer check from Supabase
+    if (!isAlreadyPostedInDb) {
       try {
-        postedIds = typeof regRow.value === "string" ? JSON.parse(regRow.value) : regRow.value;
+        const { data: bRow } = await supabase.from("settings").select("value").eq("key", "recent_group_messages_buffer").maybeSingle();
+        if (bRow?.value) {
+          const buf = typeof bRow.value === "string" ? JSON.parse(bRow.value) : bRow.value;
+          if (Array.isArray(buf)) {
+            if (buf.some(m => m.text && (m.text.match(/\b\d{4,9}\b/g) || []).includes(cleanId))) {
+              isAlreadyPostedInDb = true;
+            }
+          }
+        }
       } catch (_) { }
     }
-    if (!Array.isArray(postedIds)) postedIds = [];
 
-    // Sync in-memory cache with DB rows
-    postedIds.forEach(id => submittedPortalIdsMemoryCache.add(String(id).replace(/\D/g, "")));
-
-    // Check if ID already exists in this group's history
-    if (postedIds.includes(cleanId) && !meta.force) {
-      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}). Skipping duplicate.`);
+    // If found in recent group messages, recent timestamp, or persistent database registry:
+    if ((foundInRecentGroup || hasRecentTimestamp || isAlreadyPostedInDb) && !isTest && !meta.explicitUserForce) {
+      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}) history or registry. Skipping duplicate submission.`);
       return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
     }
 
     // 3. Connect Baileys client to post strictly to group (with handshake wait retry)
     let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
+
+    // Check if caller (owner or agent) has an active companion session
+    if (!sock && normCaller) {
+      try {
+        const callerClient = await getOrInitAgentBaileysClient(normCaller);
+        if (callerClient?.ready && callerClient?.sock) {
+          sock = callerClient.sock;
+        }
+      } catch (_) { }
+    }
+
     if (!sock) {
       await initBaileysChannelClient();
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 15; i++) {
         if (baileysChannelReady && baileysChannelSock) {
           sock = baileysChannelSock;
           break;
         }
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 400));
       }
     }
-    if (!sock) {
-      console.warn("[FAILED ORDER GROUP] Baileys socket not ready to post failed portal ID:", cleanId);
-      submittedPortalIdsMemoryCache.delete(cleanId);
-      return { ok: false, reason: "baileys_not_ready" };
+
+    // Secondary check for caller agent socket if primary still connecting
+    if (!sock && normCaller) {
+      try {
+        const callerClient = await getOrInitAgentBaileysClient(normCaller);
+        if (callerClient?.ready && callerClient?.sock) {
+          sock = callerClient.sock;
+        }
+      } catch (_) { }
     }
 
-    // 4. Send ONLY the Portal ID (clean copyable ID as requested)
-    await sock.sendMessage(groupJid, { text: String(cleanId) });
-    console.log(`🚀 [FAILED ORDER GROUP] Posted Portal ID ${cleanId} to ${groupSubject} (${groupJid}) [isUserGroup: ${isUserGroup}, caller: ${normCaller || "default_owner"}]`);
+    if (!sock) {
+      console.warn("[FAILED ORDER GROUP] Baileys socket not ready to post failed portal ID:", cleanId);
+      submittedPortalIdsTimestamps.delete(cleanId);
+      if (groupJid) submittedPortalIdsTimestamps.delete(`${groupJid}:${cleanId}`);
+      return { ok: false, reason: "WhatsApp bot session is not linked. Text *pair whatsapp* to link your account in 10 seconds." };
+    }
+
+    // 4. Send ONLY the Portal ID (clean copyable ID as requested) or test message
+    const sendText = isTest ? "🔔 *Stony Bot Group Test Ping:* Connection active! Ready to receive unprocessed IDs." : String(cleanId);
+    try {
+      if (sock.authState?.keys?.set) {
+        await sock.authState.keys.set({ 'sender-key-memory': { [groupJid]: null } });
+      }
+    } catch (_) { }
+
+    // If caller has their own paired WhatsApp account, post directly from their account!
+    let senderSock = sock;
+    let senderLabel = "default_bot";
+    if (normCaller) {
+      try {
+        const agentClient = await getOrInitAgentBaileysClient(normCaller);
+        if (agentClient?.ready && agentClient?.sock) {
+          senderSock = agentClient.sock;
+          senderLabel = `agent_${normCaller}`;
+          console.log(`🚀 [FAILED ORDER GROUP] Posting ID ${cleanId} directly through caller's paired WhatsApp account (${normCaller})!`);
+        }
+      } catch (aErr) {
+        console.warn("Could not use agent socket, using default:", aErr.message);
+      }
+    }
+    const sent = await senderSock.sendMessage(groupJid, { text: sendText });
+    if (sent?.key?.id && sent?.message) {
+      recentSentMessagesStore.set(sent.key.id, sent.message);
+      if (recentSentMessagesStore.size > 200) {
+        const oldest = recentSentMessagesStore.keys().next().value;
+        recentSentMessagesStore.delete(oldest);
+      }
+    }
+    submittedPortalIdsTimestamps.set(`${groupJid}:${cleanId}`, Date.now());
+    submittedPortalIdsTimestamps.set(cleanId, Date.now());
+    console.log(`🚀 [FAILED ORDER GROUP] Posted Portal ID ${cleanId} to ${groupSubject} (${groupJid}) [msgId: ${sent?.key?.id}, status: ${sent?.status}] [isUserGroup: ${isUserGroup}, caller: ${normCaller || "default_owner"}]`);
 
     // 5. Record cleanId in persistent registry
     postedIds.push(cleanId);
@@ -2714,12 +3508,140 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     return { ok: true, submitted: true, portalId: cleanId, group: groupSubject, isUserGroup };
   } catch (err) {
     console.error(`❌ [FAILED ORDER GROUP] Error submitting ${cleanId} to group:`, err.message);
-    submittedPortalIdsMemoryCache.delete(cleanId);
+    submittedPortalIdsTimestamps.delete(cleanId);
+    if (groupJid) submittedPortalIdsTimestamps.delete(`${groupJid}:${cleanId}`);
     return { ok: false, error: err.message };
   } finally {
     failedPortalIdSubmissionsInFlight.delete(cleanId);
   }
 }
+
+/* =========================================================
+AUTOMATED BACKGROUND SCANNER: FAILED & >24H UNPROCESSED PORTAL IDS
+Continuously scans DataMart failed queues, delivery checks, and
+orders delayed > 24 hours, then submits numeric Portal IDs cleanly to group.
+========================================================= */
+
+async function scanAndSubmitFailedAndDelayedPortalIds(options = {}) {
+  const callerPhone = options.callerPhone || null;
+  const isForce = Boolean(options.force);
+  const results = {
+    scanned: 0,
+    failedSubmitted: 0,
+    delayedSubmitted: 0,
+    skipped: 0,
+    portalIds: [],
+    errors: []
+  };
+
+  console.log(`🔍 [SCANNER] Starting scan of DataMart failed orders & orders queued > 24h... (force: ${isForce})`);
+
+  try {
+    // 1. Scan live failed orders from DataMart (/api/support/failed-orders)
+    try {
+      const resp = await fetchDatamartSupportEndpoint('/api/support/failed-orders?limit=50', {}, callerPhone);
+      const orders = resp?.data?.orders || resp?.orders || [];
+      results.scanned += orders.length;
+
+      for (const ord of orders) {
+        const rawPid = extractDatamartPortalId(ord) || ord.apiOrderId || ord.portalOrderId || ord.portalId || ord.id;
+        const cleanPid = rawPid ? String(rawPid).replace(/\D/g, "") : null;
+        if (cleanPid && cleanPid.length >= 4 && cleanPid.length <= 9) {
+          const subRes = await submitFailedPortalIdToGroup(cleanPid, {
+            reason: "datamart_failed_orders_scan",
+            force: isForce,
+            callerPhone
+          });
+          if (subRes.ok && subRes.submitted) {
+            results.failedSubmitted++;
+            results.portalIds.push(cleanPid);
+          } else if (subRes.skipped) {
+            results.skipped++;
+          }
+        }
+      }
+    } catch (fErr) {
+      console.warn("[SCANNER] Failed orders scan error:", fErr.message);
+      results.errors.push(`failed-orders: ${fErr.message}`);
+    }
+
+    // 2. Note: We DO NOT auto-submit from /api/support/delivery-checks/recent to avoid re-submitting batches already audited and posted manually by other agents (like Crystal) in the group.
+
+    // 3. Scan orders queued > 24 hours from /api/support/not-received & complaints
+    try {
+      const resp = await fetchDatamartSupportEndpoint('/api/support/not-received', {}, callerPhone);
+      const reports = resp?.data?.reports || resp?.reports || [];
+      results.scanned += reports.length;
+
+      const now = Date.now();
+      for (const r of reports) {
+        const rawDate = r.createdAt || r.orderCreatedAt || r.date;
+        const ageMs = rawDate ? (now - new Date(rawDate).getTime()) : (25 * 3600 * 1000); // default to > 24h if queued without date
+        const rawPid = r.trackId || r.portalId || r.portalOrderId || r.id;
+        const cleanPid = rawPid ? String(rawPid).replace(/\D/g, "") : null;
+
+        if (cleanPid && cleanPid.length >= 4 && cleanPid.length <= 9 && ageMs >= (24 * 3600 * 1000)) {
+          const subRes = await submitFailedPortalIdToGroup(cleanPid, {
+            reason: "orders_queued_over_24h",
+            force: isForce,
+            callerPhone
+          });
+          if (subRes.ok && subRes.submitted) {
+            results.delayedSubmitted++;
+            results.portalIds.push(cleanPid);
+          } else if (subRes.skipped) {
+            results.skipped++;
+          }
+        }
+      }
+    } catch (nrErr) {
+      console.warn("[SCANNER] Not-received scan error:", nrErr.message);
+      results.errors.push(`not-received: ${nrErr.message}`);
+    }
+
+    // 4. Scan database for any orders marked 'failed' or 'pending' > 24 hours with a datamart_reference
+    try {
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const { data: dbOrders } = await supabase
+        .from("orders")
+        .select("id, reference, datamart_reference, delivery_status, datamart_status, created_at")
+        .or(`delivery_status.eq.failed,and(delivery_status.eq.pending,created_at.lte.${twentyFourHoursAgo})`)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      for (const ord of (dbOrders || [])) {
+        const rawPid = ord.datamart_reference;
+        const cleanPid = rawPid ? String(rawPid).replace(/\D/g, "") : null;
+        if (cleanPid && cleanPid.length >= 4 && cleanPid.length <= 9) {
+          const subRes = await submitFailedPortalIdToGroup(cleanPid, {
+            reason: ord.delivery_status === "failed" ? "db_order_failed" : "db_order_queued_over_24h",
+            force: isForce,
+            callerPhone
+          });
+          if (subRes.ok && subRes.submitted) {
+            if (ord.delivery_status === "failed") results.failedSubmitted++;
+            else results.delayedSubmitted++;
+            results.portalIds.push(cleanPid);
+          } else if (subRes.skipped) {
+            results.skipped++;
+          }
+        }
+      }
+    } catch (dbErr) {
+      console.warn("[SCANNER] DB scan error:", dbErr.message);
+    }
+
+    console.log(`✅ [SCANNER COMPLETE] Scanned: ${results.scanned}, Submitted: ${results.portalIds.length} (Failed: ${results.failedSubmitted}, >24h: ${results.delayedSubmitted}, Skipped dupes: ${results.skipped})`);
+    return results;
+  } catch (err) {
+    console.error("❌ [SCANNER ERROR]:", err.message);
+    results.errors.push(err.message);
+    return results;
+  }
+}
+
+// Note: Background recurring auto-scanner disabled per owner instruction.
+// Failed & >24h orders are submitted whenever delivery checks, Rezolv support actions, or explicit "submit failed" commands run.
 
 function isOwnerPhone(phone) {
   if (!phone) return false;
@@ -2735,28 +3657,52 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
     const inviteMatch = input.match(/(?:chat\.whatsapp\.com\/|invite\/)([A-Za-z0-9_-]{15,35})/i);
     const jidMatch = input.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
 
+    const normCaller = callerPhone ? String(callerPhone).replace(/\D/g, "") : null;
+    const isCallerOwner = callerPhone ? isOwnerPhone(callerPhone) : true;
+
+    let targetJid = jidMatch ? jidMatch[1] : null;
+    let groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
+
+    const inviteCode = inviteMatch ? inviteMatch[1] : null;
+
+    // Fast-path: Owner default group invite code (immediate match without socket)
+    if (inviteCode && (inviteCode === "KXfhdb8dg7A6cLvehhGacB" || input.includes("KXfhdb8dg7A6cLvehhGacB"))) {
+      targetJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
+      groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
+    }
+
+    // Check saved settings if matching invite exists
+    if (!targetJid && inviteCode) {
+      try {
+        const { data: sRows } = await supabase
+          .from("settings")
+          .select("key,value")
+          .in("key", ["failed_orders_group_invite", "failed_orders_group_invite_code", "failed_orders_group_jid", "failed_orders_group_name"]);
+        const sMap = {};
+        (sRows || []).forEach(r => { sMap[r.key] = r.value; });
+        if (sMap["failed_orders_group_jid"] && (sMap["failed_orders_group_invite"]?.includes(inviteCode) || sMap["failed_orders_group_invite_code"] === inviteCode)) {
+          targetJid = sMap["failed_orders_group_jid"];
+          if (sMap["failed_orders_group_name"]) groupSubject = sMap["failed_orders_group_name"];
+        }
+      } catch (_) { }
+    }
+
+    // Check Baileys socket non-blockingly (try up to 1.5s if not already ready)
     let sock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
     if (!sock) {
-      await initBaileysChannelClient();
-      for (let i = 0; i < 20; i++) {
+      initBaileysChannelClient().catch(() => { });
+      for (let i = 0; i < 6; i++) {
         if (baileysChannelReady && baileysChannelSock) {
           sock = baileysChannelSock;
           break;
         }
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 250));
       }
     }
-    if (!sock) {
-      return "⚠️ WhatsApp Baileys engine is currently connecting. Please try again in 10 seconds.";
-    }
 
-    let targetJid = jidMatch ? jidMatch[1] : null;
-    let groupSubject = "Failed Orders Group";
-
-    if (inviteMatch) {
-      const inviteCode = inviteMatch[1];
+    if (sock && inviteCode && (!targetJid || (targetJid === DEFAULT_FAILED_ORDERS_GROUP_JID && inviteCode !== "KXfhdb8dg7A6cLvehhGacB"))) {
       try {
-        // First inspect the invite to get group metadata
+        // Inspect invite to get actual group metadata
         const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
         if (inviteInfo?.id) {
           targetJid = `${String(inviteInfo.id).replace(/(@g\.us)+$/i, "")}@g.us`;
@@ -2773,47 +3719,23 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
       } catch (joinErr) {
         const eMsg = String(joinErr?.message || joinErr || "");
         if (eMsg.includes("409") || /already|conflict/i.test(eMsg)) {
-          // Already in group! Find matching JID from participating groups
           try {
             const allGroups = await sock.groupFetchAllParticipating();
             for (const [gId, gMeta] of Object.entries(allGroups || {})) {
-              if (gMeta?.subject && ((groupSubject !== "Failed Orders Group" && gMeta.subject.toLowerCase() === groupSubject.toLowerCase()) || /failed|order|unprocessed/i.test(gMeta.subject))) {
+              if (gMeta?.subject && ((groupSubject !== DEFAULT_FAILED_ORDERS_GROUP_NAME && gMeta.subject.toLowerCase() === groupSubject.toLowerCase()) || /failed|order|unprocessed/i.test(gMeta.subject))) {
                 targetJid = `${String(gId).replace(/(@g\.us)+$/i, "")}@g.us`;
                 groupSubject = gMeta.subject;
                 break;
               }
             }
           } catch (_) { }
-        } else if (!targetJid) {
-          console.warn("groupAcceptInvite notice:", eMsg);
         }
       }
     }
 
-    if (!targetJid && inviteMatch) {
-      const inviteCode = inviteMatch[1];
-      try {
-        const { data: sRows } = await supabase.from("settings").select("key,value").in("key", ["failed_orders_group_invite", "failed_orders_group_invite_code", "failed_orders_group_jid", "failed_orders_group_name"]);
-        const sMap = {};
-        (sRows || []).forEach(r => { sMap[r.key] = r.value; });
-        if (sMap["failed_orders_group_jid"] && (sMap["failed_orders_group_invite"]?.includes(inviteCode) || sMap["failed_orders_group_invite_code"] === inviteCode)) {
-          targetJid = sMap["failed_orders_group_jid"];
-          if (sMap["failed_orders_group_name"]) groupSubject = sMap["failed_orders_group_name"];
-        }
-      } catch (_) { }
-
-      if (!targetJid) {
-        try {
-          const allGroups = await sock.groupFetchAllParticipating();
-          for (const [gId, gMeta] of Object.entries(allGroups || {})) {
-            if (/failed|order|unprocessed/i.test(gMeta?.subject || "")) {
-              targetJid = `${String(gId).replace(/(@g\.us)+$/i, "")}@g.us`;
-              groupSubject = gMeta.subject || groupSubject;
-              break;
-            }
-          }
-        } catch (_) { }
-      }
+    if (!targetJid && inviteCode) {
+      targetJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
+      groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
     }
 
     if (!targetJid) {
@@ -2822,13 +3744,12 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
 
     targetJid = `${String(targetJid).replace(/(@g\.us)+$/i, "")}@g.us`;
 
-    try {
-      const meta = await sock.groupMetadata(targetJid);
-      if (meta?.subject) groupSubject = meta.subject;
-    } catch (_) { }
-
-    const normCaller = callerPhone ? String(callerPhone).replace(/\D/g, "") : null;
-    const isCallerOwner = callerPhone ? isOwnerPhone(callerPhone) : true;
+    if (sock) {
+      try {
+        const meta = await sock.groupMetadata(targetJid);
+        if (meta?.subject) groupSubject = meta.subject;
+      } catch (_) { }
+    }
 
     // 1. If caller is an agent / non-owner, save to their account settings
     if (normCaller && !isCallerOwner) {
@@ -2860,14 +3781,34 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
       ], { onConflict: "key" });
     }
 
+    // 🛡️ CRITICAL INSTRUCTION: Never send any message to the group when a user connects!
+    // No welcome post, no alerts to group. The group remains completely undisturbed.
+
+    let pairCodeSection = "";
+    if (!isCallerOwner && normCaller) {
+      try {
+        const pairRes = await getOrInitAgentBaileysClient(normCaller, { requestPair: true });
+        if (pairRes?.pairingCode) {
+          pairCodeSection = `\n\n🔑 *POST FROM YOUR OWN WHATSAPP NUMBER:*\n` +
+            `To make failed orders post under **your own name and phone number** (instead of Stony), pair your WhatsApp:\n\n` +
+            `👉 Pairing Code: *${pairRes.pairingCode}*\n\n` +
+            `*(On your phone: WhatsApp > Settings > Linked Devices > Link a Device > Link with phone number instead)*\n\n` +
+            `💡 If you don't pair, failed orders will be submitted using the default bot.`;
+        }
+      } catch (pErr) {
+        console.warn("Agent pairing code request note:", pErr.message);
+      }
+    }
+
     const roleLabel = isCallerOwner ? "Owner Default Group" : `Your Account (${callerPhone})`;
     return `✅ *FAILED ORDERS WHATSAPP GROUP CONNECTED!*\n\n` +
       `• *Group Name:* *${groupSubject}*\n` +
       `• *Scope:* *${roleLabel}*\n` +
       `• *Group JID:* \`${targetJid}\`\n\n` +
       `🛡️ *How it works:*\n` +
-      `Whenever an order fails or stays in vendor queue > 24 hours under your account, Stony will automatically submit the numeric Portal ID to *${groupSubject}*!\n\n` +
-      `💡 Anyone who connects DataMart without connecting their own group will automatically default to the owner's group.`;
+      `Whenever an order fails or stays in vendor queue > 24 hours under your account, the numeric Portal ID will be submitted to *${groupSubject}*!\n\n` +
+      `💡 Anyone who connects DataMart without connecting their own group will automatically default to the owner's group.` +
+      pairCodeSection;
   } catch (err) {
     console.error("setFailedOrdersGroup error:", err);
     return `⚠️ Error connecting group: ${err.message}`;
@@ -2898,16 +3839,24 @@ async function getUserFailedOrdersGroupStatus(phone) {
   const { data: dRow } = await supabase.from("settings").select("value").eq("key", "failed_orders_group_jid").maybeSingle();
   const { data: dName } = await supabase.from("settings").select("value").eq("key", "failed_orders_group_name").maybeSingle();
 
+  const agentEntry = norm ? agentSockets.get(norm) : null;
+  const isAgentLinked = !!(agentEntry?.ready && agentEntry?.sock);
+  const senderInfo = isAgentLinked
+    ? `• *Sender Account:* *Your WhatsApp* (Linked ✅ - posts as you)`
+    : `• *Sender Account:* Default Bot (Text *pair whatsapp* to send as yourself)`;
+
   if (customGroup) {
     return `📋 *FAILED ORDERS GROUP STATUS:*\n\n` +
       `• *Your Custom Group:* *${customName || "Connected"}*\n` +
-      `• *JID:* \`${customGroup}\`\n\n` +
+      `• *JID:* \`${customGroup}\`\n` +
+      `${senderInfo}\n\n` +
       `All your failed / >24h orders are submitted to your custom group. To revert to the default group, text: *disconnect group*.`;
   }
   return `📋 *FAILED ORDERS GROUP STATUS:*\n\n` +
     `• *Status:* Using Owner's Default Group\n` +
     `• *Default Group:* *${dName?.value || "Configured"}*\n` +
-    `• *JID:* \`${dRow?.value || "Default"}\`\n\n` +
+    `• *JID:* \`${dRow?.value || "Default"}\`\n` +
+    `${senderInfo}\n\n` +
     `💡 To connect your own WhatsApp group for your DataMart orders, text:\n*connect group <invite_link>*`;
 }
 
@@ -3753,10 +4702,15 @@ async function updateOrderDeliveryStatusSafely(ref, newStatus) {
         updated_at: new Date().toISOString()
       })
       .or(filter)
-      .select("reference, recipient_phone, network, capacity, amount")
+      .select("id, reference, recipient_phone, network, capacity, amount, notes, agent_id, base_price, created_at")
       .maybeSingle();
 
-    if (ord) return { table: "orders", reference: ord.reference, phone: ord.recipient_phone, data: ord };
+    if (ord) {
+      if (newStatus === "delivered") {
+        notifyOrderDelivered(ord).catch(err => console.warn("notifyOrderDelivered error:", err.message));
+      }
+      return { table: "orders", reference: ord.reference, phone: ord.recipient_phone, data: ord };
+    }
 
     // 2. Check & update in service_orders table
     const sFilter = isUuid ? `reference.ilike.%${cleanRef}%,id.eq.${cleanRef}` : `reference.ilike.%${cleanRef}%`;
@@ -5927,6 +6881,43 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
     }
   } catch (_) { }
 
+  // Primary & Fallback: Query via authenticated DataMart support search & carrier delivery check
+  try {
+    const dmRes = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(cleanId)}`);
+    const dmOrders = dmRes?.data?.results?.orders || (Array.isArray(dmRes?.data?.results) ? dmRes.data.results.filter(x => x.type === "order" || x.network) : []);
+    const foundOrd = dmOrders?.find(o =>
+      String(o.apiOrderId || o.exportTracking?.portalId || o.portalOrderId) === cleanId ||
+      String(o.geonetReference || o.reference) === cleanId ||
+      String(o._id) === cleanId
+    ) || dmOrders?.[0];
+
+    if (foundOrd) {
+      const st = String(foundOrd.status || foundOrd.orderStatus || foundOrd.deliveryStatus || "").toLowerCase();
+      if (st === "delivered" || st === "completed" || st === "done" || st === "fulfilled") {
+        return { deliveryStatus: "delivered", rawStatus: st };
+      }
+      if (st === "failed" || st === "cancelled" || st === "rejected") {
+        return { deliveryStatus: "failed", rawStatus: st };
+      }
+
+      const pId = foundOrd.exportTracking?.portalId || foundOrd.apiOrderId || foundOrd.trackingId || foundOrd.portalOrderId;
+      if (pId && /^\d{4,9}$/.test(String(pId))) {
+        const carrierAudit = await checkDatamartCarrierRaw(pId, null, 12);
+        if (carrierAudit) {
+          if (carrierAudit.allDelivered || carrierAudit.status === "delivered") {
+            return { deliveryStatus: "delivered", rawStatus: "delivered", carrierAudit };
+          }
+          if (carrierAudit.status === "failed" || (carrierAudit.failed && carrierAudit.failed > 0)) {
+            return { deliveryStatus: "failed", rawStatus: "failed", carrierAudit };
+          }
+        }
+      }
+
+      if (st === "waiting") return { deliveryStatus: "waiting", rawStatus: st };
+      return { deliveryStatus: "processing", rawStatus: st || "processing" };
+    }
+  } catch (_) { }
+
   if (keyCandidates.length === 0) return { deliveryStatus: "processing", rawStatus: "processing" };
 
   const urls = [
@@ -6710,8 +7701,8 @@ function extractDatamartPortalId(ord) {
     }
   }
 
-  // 3. Check portalOrderId
-  const pOrdId = ord.portalOrderId;
+  // 3. Check portalOrderId or portal_order_id
+  const pOrdId = ord.portalOrderId || ord.portal_order_id;
   if (pOrdId && pOrdId !== ref && pOrdId !== ord._id && pOrdId !== "pending") {
     const clean = String(pOrdId).trim();
     if (!/^(?:AGT-|WS-|D1G|ORD-)/i.test(clean)) {
@@ -6719,7 +7710,13 @@ function extractDatamartPortalId(ord) {
     }
   }
 
-  // 4. Check datamart_reference if numeric
+  // 4. Check trackingId or tracking_id (DataMart direct trackingId)
+  const trkId = ord.trackingId || ord.tracking_id;
+  if (trkId && trkId !== ref && trkId !== ord._id && /^\d{4,9}$/.test(String(trkId).trim())) {
+    return String(trkId).trim();
+  }
+
+  // 5. Check datamart_reference if numeric
   if (ord.datamart_reference && /^\d{4,9}$/.test(String(ord.datamart_reference))) {
     return String(ord.datamart_reference).trim();
   }
@@ -6769,7 +7766,7 @@ function extractTicketTrackingInfo(ticket, messages = []) {
   };
 }
 
-async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
+async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null, maxPolls = 25) {
   try {
     const targetId = String(portalOrderId || "").trim();
     if (!targetId) return null;
@@ -6781,8 +7778,9 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
     const jobId = startRes?.data?.jobId || startRes?.jobId;
     if (!jobId) return null;
 
-    for (let i = 0; i < 25; i++) {
-      await new Promise(r => setTimeout(r, 800));
+    const actualMax = Math.max(10, Number(maxPolls || 25));
+    for (let i = 0; i < actualMax; i++) {
+      await new Promise(r => setTimeout(r, 500));
       const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
       const st = jobRes?.data?.jobStatus;
       if (st === 'done' || st === 'completed') {
@@ -6799,10 +7797,6 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
         if (allDelivered) status = "delivered";
         else if (failed > 0) status = "failed";
         else if (isQueued) status = "queued";
-
-        if (failed > 0 && targetId) {
-          submitFailedPortalIdToGroup(targetId, { reason: "carrier_check_failed", failedCount: failed, callerPhone }).catch(() => { });
-        }
 
         let orderCreatedAt = result.createdAt || result.orderDate || result.date || null;
         let isQueuedOver24Hours = false;
@@ -6836,7 +7830,6 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
             if (!isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)) {
               isQueuedOver24Hours = true;
               queuedHours = Math.floor(ageMs / (60 * 60 * 1000));
-              submitFailedPortalIdToGroup(targetId, { reason: "vendor_queue_over_24h", queuedHours, orderDate: orderCreatedAt, callerPhone }).catch(() => { });
             }
           }
         }
@@ -6870,47 +7863,30 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null) {
   return null;
 }
 
-async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, extraCandidates = {}) {
+async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, extraCandidates = {}, isFastDraft = false) {
   if (!targetPhoneOrRef && !extraCandidates.trackId && !extraCandidates.orderRef && !extraCandidates.phone) return null;
   const q = String(targetPhoneOrRef || extraCandidates.trackId || extraCandidates.orderRef || extraCandidates.phone || "").trim();
   const trackCandidate = extraCandidates.trackId || (/^\d{4,9}$/.test(q) ? q : null);
   const refCandidate = extraCandidates.orderRef || (!/^\d{4,9}$/.test(q) && !/^0[2357]\d{8}$/.test(q) ? q : null);
   const phoneCandidate = extraCandidates.phone || (/^0[2357]\d{8}$/.test(q) ? q : null);
 
-  // 1. Direct DataMart Portal Delivery Check if we have a numeric Track ID (e.g. 561077)
-  if (trackCandidate && /^\d{4,9}$/.test(trackCandidate)) {
+  const queryCandidates = [q, refCandidate, phoneCandidate, trackCandidate].filter(Boolean);
+
+  // 1. FAST-PATH: Search DataMart Support (/api/support/search?query=...) - resolves in < 300ms!
+  let dmOrder = null;
+  for (const cand of queryCandidates) {
     try {
-      const carrierAudit = await checkDatamartCarrierRaw(trackCandidate, callerPhone);
-      if (carrierAudit && carrierAudit.found) {
-        return {
-          found: true,
-          isCarrierAudit: true,
-          reference: trackCandidate,
-          trackId: trackCandidate,
-          batchNumber: carrierAudit.batchNumber,
-          totalItems: carrierAudit.totalItems,
-          sent: carrierAudit.sent,
-          pending: carrierAudit.pending,
-          failed: carrierAudit.failed,
-          allDelivered: carrierAudit.allDelivered,
-          isQueued: carrierAudit.isQueued,
-          isQueuedOver24Hours: carrierAudit.isQueuedOver24Hours,
-          queuedHours: carrierAudit.queuedHours,
-          orderCreatedAt: carrierAudit.orderCreatedAt,
-          portalMessage: carrierAudit.portalMessage,
-          status: carrierAudit.status,
-          rawStatus: carrierAudit.rawStatus,
-          network: "MTN",
-          phone: phoneCandidate || q,
-          items: carrierAudit.items || []
-        };
+      const dmRes = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(cand)}`, {}, callerPhone);
+      const dOrders = dmRes?.data?.results?.orders || (Array.isArray(dmRes?.data?.results) ? dmRes.data.results.filter(x => x.type === "order" || x.network) : []);
+      if (dOrders && dOrders.length > 0) {
+        dmOrder = dOrders[0];
+        break;
       }
     } catch (_) { }
   }
 
   // 2. Check store database orders matching reference, phone, or datamart_reference
   let matchedOrder = null;
-  const queryCandidates = [q, refCandidate, phoneCandidate, trackCandidate].filter(Boolean);
   for (const cand of queryCandidates) {
     try {
       const { data: dbOrders } = await supabase
@@ -6926,108 +7902,114 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
     } catch (_) { }
   }
 
-  // 3. Search DataMart Support Search (/api/support/search?query=...)
-  let dmOrder = null;
-  for (const cand of queryCandidates) {
-    try {
-      const dmRes = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(cand)}`, {}, callerPhone);
-      const dOrders = dmRes?.data?.results?.orders || (Array.isArray(dmRes?.data?.results) ? dmRes.data.results.filter(x => x.type === "order" || x.network) : []);
-      if (dOrders && dOrders.length > 0) {
-        dmOrder = dOrders[0];
-        break;
-      }
-    } catch (_) { }
+  // 3. Resolve the order's true Portal ID from DataMart / store order
+  const resolvedPortalId = extractDatamartPortalId(dmOrder) || extractDatamartPortalId(matchedOrder) || trackCandidate;
+  const refVal = dmOrder?.geonetReference || dmOrder?.originalReference || dmOrder?.reference || dmOrder?.orderId || matchedOrder?.reference || refCandidate || q;
+  const phoneVal = dmOrder?.phoneNumber || matchedOrder?.recipient_phone || phoneCandidate || q;
+  const netVal = dmOrder?.network || matchedOrder?.network || "MTN";
+  const capVal = dmOrder?.capacity != null ? dmOrder.capacity : (matchedOrder?.capacity != null ? matchedOrder.capacity : null);
+
+  // 4. Instant resolution if DataMart or Store DB already marks COMPLETED / DELIVERED
+  const dmStatus = String(dmOrder?.status || matchedOrder?.delivery_status || "").toLowerCase();
+  const portalStatus = String(dmOrder?.exportTracking?.portalStatus || "").toLowerCase();
+  const isDirectCompleted = dmStatus === "completed" || dmStatus === "delivered" || portalStatus === "completed" || portalStatus === "delivered";
+
+  if (isDirectCompleted) {
+    return {
+      found: true,
+      isCarrierAudit: false,
+      reference: refVal,
+      trackId: resolvedPortalId,
+      portalId: resolvedPortalId,
+      allDelivered: true,
+      status: "delivered",
+      rawStatus: "completed",
+      network: netVal,
+      phone: phoneVal,
+      capacity: capVal,
+      orderCreatedAt: dmOrder?.createdAt || matchedOrder?.created_at || null,
+      items: [{ phone: phoneVal, status: "delivered" }]
+    };
   }
 
-  // 4. Resolve the order's true Portal ID from DataMart / store order
-  const resolvedPortalId = extractDatamartPortalId(dmOrder) || extractDatamartPortalId(matchedOrder);
-  const refVal = dmOrder?.geonetReference || dmOrder?.originalReference || dmOrder?.reference || dmOrder?.orderId || matchedOrder?.reference || refCandidate || q;
+  // 5. Instant resolution if DataMart or Store DB marks FAILED
+  const isDirectFailed = dmStatus === "failed" || dmStatus === "cancelled" || Boolean(dmOrder?.failureReason);
+  if (isDirectFailed) {
+    return {
+      found: true,
+      isCarrierAudit: false,
+      reference: refVal,
+      trackId: resolvedPortalId,
+      portalId: resolvedPortalId,
+      allDelivered: false,
+      failed: 1,
+      status: "failed",
+      rawStatus: "failed",
+      network: netVal,
+      phone: phoneVal,
+      capacity: capVal,
+      failureReason: dmOrder?.failureReason || dmOrder?.apiResponse?.error || "Order delivery failed on carrier dispatch",
+      orderCreatedAt: dmOrder?.createdAt || matchedOrder?.created_at || null,
+      items: [{ phone: phoneVal, status: "failed" }]
+    };
+  }
 
-  // If a valid numeric or carrier portalId is found, use it to run live carrier check!
-  if (resolvedPortalId && /^\d{4,9}$/.test(String(resolvedPortalId))) {
+  // 6. If numeric Portal ID is available, run live carrier check!
+  const targetCheckId = (resolvedPortalId && /^\d{4,9}$/.test(String(resolvedPortalId))) ? String(resolvedPortalId)
+    : (trackCandidate && /^\d{4,9}$/.test(String(trackCandidate)) ? String(trackCandidate) : null);
+
+  if (targetCheckId) {
     try {
-      const auditRes = await checkDatamartCarrierRaw(resolvedPortalId, callerPhone);
-      if (auditRes && auditRes.found) {
+      const carrierAudit = await checkDatamartCarrierRaw(targetCheckId, callerPhone, isFastDraft ? 12 : 25);
+      if (carrierAudit && carrierAudit.found) {
         return {
           found: true,
           isCarrierAudit: true,
           reference: refVal,
-          trackId: resolvedPortalId,
-          portalId: resolvedPortalId,
-          batchNumber: auditRes.batchNumber || dmOrder?.exportTracking?.batchNumber,
-          totalItems: auditRes.totalItems,
-          sent: auditRes.sent,
-          pending: auditRes.pending,
-          failed: auditRes.failed,
-          allDelivered: auditRes.allDelivered,
-          isQueued: auditRes.isQueued,
-          isQueuedOver24Hours: auditRes.isQueuedOver24Hours,
-          queuedHours: auditRes.queuedHours,
-          orderCreatedAt: auditRes.orderCreatedAt || dmOrder?.createdAt || dmOrder?.date || matchedOrder?.created_at,
-          status: auditRes.status,
-          rawStatus: auditRes.rawStatus,
-          network: dmOrder?.network || matchedOrder?.network || "MTN",
-          capacity: dmOrder?.capacity || matchedOrder?.capacity || "",
-          phone: dmOrder?.phoneNumber || dmOrder?.recipientPhone || matchedOrder?.recipient_phone || phoneCandidate || q,
-          items: auditRes.items || []
+          trackId: targetCheckId,
+          portalId: targetCheckId,
+          batchNumber: carrierAudit.batchNumber || dmOrder?.exportTracking?.batchNumber,
+          totalItems: carrierAudit.totalItems,
+          sent: carrierAudit.sent,
+          pending: carrierAudit.pending,
+          failed: carrierAudit.failed,
+          allDelivered: carrierAudit.allDelivered,
+          isQueued: carrierAudit.isQueued,
+          isQueuedOver24Hours: carrierAudit.isQueuedOver24Hours,
+          queuedHours: carrierAudit.queuedHours,
+          orderCreatedAt: carrierAudit.orderCreatedAt || dmOrder?.createdAt || matchedOrder?.created_at,
+          portalMessage: carrierAudit.portalMessage,
+          status: carrierAudit.status,
+          rawStatus: carrierAudit.rawStatus,
+          network: netVal,
+          phone: phoneVal,
+          capacity: capVal,
+          items: carrierAudit.items || []
         };
       }
     } catch (_) { }
   }
 
-  // 5. Check real-time carrier status for references
-  const refToCheck = matchedOrder?.datamart_reference || matchedOrder?.reference || dmOrder?.orderId || dmOrder?.reference || refCandidate;
-  let liveCarrierStatus = null;
-  if (refToCheck && /^[A-Za-z0-9_-]{5,}$/.test(refToCheck)) {
-    try {
-      liveCarrierStatus = await getRealDatamartDeliveryStatus(refToCheck);
-    } catch (_) { }
+  // 7. If order found without carrier audit
+  if (dmOrder || matchedOrder) {
+    return {
+      found: true,
+      isCarrierAudit: false,
+      reference: refVal,
+      trackId: resolvedPortalId,
+      portalId: resolvedPortalId,
+      allDelivered: false,
+      status: "processing",
+      rawStatus: "processing",
+      network: netVal,
+      phone: phoneVal,
+      capacity: capVal,
+      orderCreatedAt: dmOrder?.createdAt || matchedOrder?.created_at,
+      items: []
+    };
   }
 
-  const isConfirmedFound = Boolean(matchedOrder || dmOrder || (liveCarrierStatus && liveCarrierStatus.rawStatus !== "processing"));
-  let finalStatus = "unverified";
-  if (liveCarrierStatus && liveCarrierStatus.deliveryStatus) {
-    finalStatus = liveCarrierStatus.deliveryStatus;
-  } else if (matchedOrder && matchedOrder.delivery_status) {
-    finalStatus = matchedOrder.delivery_status;
-  } else if (dmOrder) {
-    const dmSt = String(dmOrder.status || dmOrder.deliveryStatus || "").toLowerCase();
-    if (dmSt === "completed" || dmSt === "delivered") finalStatus = "delivered";
-    else if (dmSt === "failed" || dmSt === "cancelled") finalStatus = "failed";
-    else if (dmSt === "processing" || dmSt === "in_progress") finalStatus = "processing";
-    else if (dmSt) finalStatus = dmSt;
-  }
-
-  const network = matchedOrder?.network || dmOrder?.network || "network";
-  const capacity = matchedOrder?.capacity || dmOrder?.capacity || "";
-  const phone = matchedOrder?.recipient_phone || dmOrder?.phoneNumber || dmOrder?.recipientPhone || phoneCandidate || q;
-  const ref = refVal;
-
-  const rawCreatedAt = dmOrder?.createdAt || dmOrder?.date || matchedOrder?.created_at;
-  const orderAgeMs = rawCreatedAt ? (Date.now() - new Date(rawCreatedAt).getTime()) : null;
-  const isQueued = finalStatus === "queued" || (dmOrder?.exportTracking?.portalStatus === "pending") || (dmOrder && !resolvedPortalId && (finalStatus === "processing" || finalStatus === "queued"));
-  const isQueuedOver24Hours = Boolean(isQueued && orderAgeMs && !isNaN(orderAgeMs) && orderAgeMs >= (24 * 60 * 60 * 1000));
-  const queuedHours = orderAgeMs && !isNaN(orderAgeMs) ? (orderAgeMs / 3600000).toFixed(1) : null;
-
-  return {
-    found: isConfirmedFound,
-    isCarrierAudit: false,
-    reference: ref,
-    trackId: resolvedPortalId,
-    portalId: resolvedPortalId,
-    network,
-    capacity,
-    phone,
-    status: finalStatus,
-    rawStatus: liveCarrierStatus?.rawStatus || finalStatus,
-    failureReason: liveCarrierStatus?.failureReason || null,
-    isQueued,
-    isQueuedOver24Hours,
-    queuedHours,
-    orderCreatedAt: rawCreatedAt,
-    matchedOrder,
-    dmOrder
-  };
+  return null;
 }
 
 async function getRezolvTicketConversation(identifier, from = null) {
@@ -7414,10 +8396,144 @@ async function synthesizeCustomerMainIssue(custName, customerTexts, targetRef) {
   return "";
 }
 
-async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, fullTicket, msgs, trackInfo, lastMsg, brandName = null, from = null }) {
+function analyzeTicketSmart(fullTicket, msgs = [], t = {}, brand = "DataMart") {
+  const custFullName = fullTicket?.customer?.name || t?.customer?.name || "Customer";
+  const firstName = custFullName.split(" ")[0] || "there";
+  const tNum = fullTicket?.ticketNumber || t?.ticketNumber || fullTicket?._id || t?._id || "Ticket";
+
+  // 1. Extract real customer messages (exclude Bot, Agent, System notes)
+  const customerMsgs = (msgs || []).filter(m => {
+    if (!m) return false;
+    const st = String(m.senderType || "").toLowerCase();
+    const sn = String(m.senderName || "").toLowerCase();
+    if (st === "agent" || st === "system") return false;
+    if (sn === "bot" || sn.includes("assistant") || sn.includes("system")) return false;
+    return true;
+  });
+  const customerTexts = customerMsgs
+    .map(m => (m.text || m.body || m.content || m.message || "").replace(/\s+/g, " ").trim())
+    .filter(text => text && !text.startsWith("🚩 Needs a human") && !text.includes("wrote:"));
+
+  // 2. FOCUS ON RECENT MESSAGES (the current conversation turn!)
+  const recentCustomerTexts = customerTexts.slice(-3);
+  const recentJoined = recentCustomerTexts.join(" | ");
+  const lowerRecent = recentJoined.toLowerCase();
+
+  // All texts for backup reference lookup
+  const allTexts = [fullTicket?.subject || "", ...(msgs || []).map(m => m.text || m.body || m.content || "")].join(" ");
+
+  // Reference codes in recent turn vs entire history
+  const recentTrackMatch = recentJoined.match(/\b(?:track(?:ing)?\s*(?:id|#|number|code)?|portal\s*(?:id|#)?)\s*[:#=]?\s*([0-9]{4,9})\b/i);
+  const historyTrackMatch = allTexts.match(/\b(?:track(?:ing)?\s*(?:id|#|number|code)?|portal\s*(?:id|#)?)\s*[:#=]?\s*([0-9]{4,9})\b/i);
+  const trackId = recentTrackMatch ? recentTrackMatch[1] : (historyTrackMatch ? historyTrackMatch[1] : null);
+
+  const recentRefMatch = recentJoined.match(/\b(MOMO-[A-Z0-9-]+|AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|MN-[A-Z0-9]+)\b/i);
+  const historyRefMatch = allTexts.match(/\b(MOMO-[A-Z0-9-]+|AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|MN-[A-Z0-9]+)\b/i);
+  const orderRef = recentRefMatch ? recentRefMatch[0] : (historyRefMatch ? historyRefMatch[0] : null);
+
+  const recentPhoneMatch = recentJoined.match(/\b(0[2357]\d{8})\b/);
+  const historyPhoneMatch = allTexts.match(/\b(0[2357]\d{8})\b/);
+  const rawProfilePhone = String(fullTicket?.customer?.phone || t?.customer?.phone || "").replace(/\D/g, "");
+  const profilePhoneMatch = rawProfilePhone.match(/^0([2357]\d{8})$/) ? rawProfilePhone : (rawProfilePhone.match(/^233([2357]\d{8})$/) ? `0${rawProfilePhone.slice(3)}` : null);
+  const phone = recentPhoneMatch ? recentPhoneMatch[0] : (historyPhoneMatch ? historyPhoneMatch[0] : (profilePhoneMatch || null));
+
+  // Real last message from customer
+  const rawLastCustomerText = customerTexts.length > 0
+    ? customerTexts[customerTexts.length - 1]
+    : (t?.lastMessage?.text || fullTicket?.lastMessage?.text || fullTicket?.subject || "").replace(/\s+/g, " ").trim();
+  const lastCustomerText = rawLastCustomerText || (phone ? `Recipient: ${phone}` : "Customer support inquiry");
+  const lowerLast = lastCustomerText.toLowerCase();
+
+  let mainIssue = "";
   let draftText = "";
   let trackingDiagnostic = "";
+  let portalId = trackId;
+  let isSpecialIntent = false;
 
+  // 1. DEPOSIT / MOMO PAYMENT REFLECTION
+  if (/\b(?:deposit|deposited|momo\s*deduct|deducted|reflect|reflected|uncredited|credit\s*my|into\s*my\s*wallet)\b/i.test(lowerRecent) || /\b(?:deposit|deposited)\b/i.test(lowerLast)) {
+    const amtMatch = recentJoined.match(/(?:gh[c₵]?\s*|amt\s*|amount\s*)(\d+(?:\.\d{2})?)/i) || recentJoined.match(/deposited\s*(\d+)/i) || recentJoined.match(/(\d+)\s*(?:cedis|ghc|cedi)/i);
+    const amtStr = amtMatch ? `GH₵${amtMatch[1]}` : "money";
+    mainIssue = `Customer deposited ${amtStr} on MoMo but wallet has not reflected`;
+    trackingDiagnostic = `💳 MoMo Wallet Deposit Issue (${amtStr}) · Escalated to Finance`;
+    draftText = `Hello ${firstName}, thank you for reaching out to ${brand} support. We have received your deposit issue (${amtStr}). Our finance team is reconciling this with the payment gateway right now and your wallet will be credited shortly. Thank you for your patience!`;
+    isSpecialIntent = true;
+  }
+  // 2. ACKNOWLEDGMENT / THANKS / RECEIVED
+  else if (/^(?:thanks|thank\s*you|received|seen|alright|ok|okay|in\s*now|it\s*is\s*in|has\s*landed)\b/i.test(lowerLast) || /\b(thanks\s*received|received\s*now|data\s*in|in\s*now)\b/i.test(lowerLast)) {
+    mainIssue = `Customer confirmed: "${lastCustomerText}"`;
+    trackingDiagnostic = `✅ Customer Acknowledged Receipt`;
+    draftText = `Hello ${firstName}, you are very welcome! Glad to hear everything is sorted out. Please feel free to reach out anytime you need assistance with ${brand}!`;
+    isSpecialIntent = true;
+  }
+  // 3. REFUND REQUEST
+  else if (/\b(?:refund|reverse|reversal|money\s*back)\b/i.test(lowerRecent) || /\b(?:refund|reverse)\b/i.test(lowerLast)) {
+    const refStr = orderRef ? ` (${orderRef})` : (trackId ? ` (Track ID: ${trackId})` : "");
+    mainIssue = `Customer requesting refund for delayed or failed order${refStr}`;
+    trackingDiagnostic = `💰 Refund Request${refStr}`;
+    draftText = `Hello ${firstName}, we have noted your refund request${refStr}. Our finance team is reviewing this order and the refund will be credited back to your ${brand} wallet balance shortly. Thank you!`;
+    isSpecialIntent = true;
+  }
+  // 4. AGENT WITHDRAWAL / CASHOUT / PIN
+  else if (/\b(?:withdraw|cashout|pin|withdrawal|change\s*pin|reset\s*pin)\b/i.test(lowerRecent)) {
+    mainIssue = `Agent asking for withdrawal or wallet cashout assistance`;
+    trackingDiagnostic = `💳 Agent Withdrawal / PIN Assistance`;
+    draftText = `Hello ${firstName}, regarding your withdrawal request, you can request your payout at https://www.datamartgh.shop/store/withdrawals . Let us know if you need assistance resetting your withdrawal PIN!`;
+    isSpecialIntent = true;
+  }
+  // 5. SPINS / PRIZES
+  else if (/\b(?:spin|prize|won|wheel)\b/i.test(lowerRecent)) {
+    const phStr = phone ? ` (${phone})` : "";
+    mainIssue = `Customer asking about uncredited spin wheel prize${phStr}`;
+    trackingDiagnostic = `🎁 Spin Prize Verification${phStr}`;
+    draftText = `Hello ${firstName}, we have noted your spin wheel data prize request${phStr}. Our team is tracing your spin reward and crediting the data bundle to your line shortly. Thank you!`;
+    isSpecialIntent = true;
+  }
+  // 6. ORDER TRACKING / DATA DELIVERY (when reference, track ID, or phone is provided)
+  else if (trackId || orderRef || phone) {
+    const idStr = trackId ? `Track ID: ${trackId}` : (orderRef ? `Ref: ${orderRef}` : `Phone: ${phone}`);
+    const phDisplay = phone && (trackId || orderRef) ? ` to ${phone}` : "";
+    mainIssue = `Customer checking data bundle delivery status (${idStr}${phDisplay})`;
+    trackingDiagnostic = `🔍 Order Verification: ${idStr}${phDisplay}`;
+    draftText = `Hello ${firstName}, we have located your order (${idStr}) on ${brand}. We are tracking this with the telecom network right now to ensure your bundle is delivered immediately. Kindly dial *124# or *126# to verify your balance. Thank you!`;
+  }
+  // 7. GENERAL DELIVERY QUESTION WITHOUT CODE
+  else if (/\b(?:data|bundle|order|deliver|waiting|delay|not\s*come|not\s*received|hasn'?t\s*come|not\s*in|since\s*morning)\b/i.test(lowerRecent)) {
+    mainIssue = `Customer asking why data bundle is delayed (no reference provided)`;
+    trackingDiagnostic = `⚠️ Customer asking about delivery without Track ID or Reference`;
+    draftText = `Hello ${firstName}, thank you for reaching out. Please kindly provide your Track ID or Order Reference (and the recipient phone number) so we can track and speed up your data delivery on ${brand} immediately! Thank you!`;
+  }
+  // 8. SERVICE AVAILABILITY / BUYING DATA
+  else if (/\b(?:buy\s*data|purchase|is\s*mtn\s*working|is\s*telecel\s*working|can\s*i\s*buy|down|system)\b/i.test(lowerRecent)) {
+    mainIssue = `Customer inquiring about service/network availability before buying`;
+    trackingDiagnostic = `📶 Network & Service Availability Inquiry`;
+    draftText = `Hello ${firstName}, yes! Data deliveries across all networks (MTN, Telecel, AT) are active and processing. You can place your order now and it will deliver directly to the line. Let us know if you need any assistance!`;
+  }
+  // 9. GENERAL INQUIRY / FALLBACK
+  else {
+    const safeText = lastCustomerText && lastCustomerText !== "Customer support inquiry" ? lastCustomerText : (phone ? `Order delivery to ${phone}` : "Customer assistance request");
+    mainIssue = `Customer inquiry: "${safeText.slice(0, 70)}"`;
+    trackingDiagnostic = `💬 Customer Support Inquiry`;
+    draftText = `Hello ${firstName}, thank you for contacting ${brand} support. We have reviewed your inquiry and our team is actively assisting you right now!`;
+  }
+
+  return {
+    ticketId: tNum,
+    customerName: custFullName,
+    firstName,
+    mainIssue,
+    lastMessage: lastCustomerText,
+    trackingDiagnostic,
+    portalId,
+    draftText,
+    isSpecialIntent,
+    trackId,
+    orderRef,
+    phone
+  };
+}
+
+async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, fullTicket, msgs, trackInfo, lastMsg, brandName = null, from = null, isFastDraft = false }) {
   let brand = brandName;
   if (!brand && from) {
     try {
@@ -7434,76 +8550,33 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
     }
   }
 
-  // Extract actual customer-written messages (excluding system bot responses and email quote noise)
-  const customerMsgs = (msgs || []).filter(m => m.senderType === "customer" || (m.senderName && m.senderName !== "Bot" && m.senderType !== "agent"));
-  const customerTexts = customerMsgs
-    .map(m => (m.text || "").trim())
-    .filter(t => t && !t.startsWith("🚩 Needs a human") && !t.includes("On Wed,") && !t.includes("On Thu,") && !t.includes("On Mon,") && !t.includes("On Tue,") && !t.includes("On Fri,") && !t.includes("wrote:"));
+  const smart = analyzeTicketSmart(fullTicket, msgs, { ticketNumber: tNum, customer: { name: custFullName }, _id: tNum }, brand);
 
-  const actualCustomerLastMsg = customerTexts.length > 0
-    ? customerTexts[customerTexts.length - 1]
-    : (lastMsg || fullTicket.subject || fullTicket.lastMessage?.text || "New support request").replace(/\s+/g, " ").trim();
-
-  // Scan ALL conversation history (subject + all messages)
-  const allTexts = [
-    fullTicket.subject || "",
-    ...(msgs || []).map(m => m.text || "")
-  ].join(" ").trim();
-  const lowerAll = allTexts.toLowerCase();
-  const lowerLast = String(actualCustomerLastMsg || lastMsg || "").toLowerCase();
-
-  // Extract reference codes & phone numbers across the whole conversation history
-  const explicitTrack = allTexts.match(/\b(?:track(?:ing)?\s*(?:id|#|number|code)?|portal\s*(?:id|#|order)?|batch\s*(?:id|#)?)\s*[:#=]?\s*([A-Za-z0-9_-]{4,15})\b/i);
-  const prefixTrack = allTexts.match(/\b(MNG-[A-Z0-9]+|TRK-[A-Z0-9-]+|TRACK-\d+|TRACK-[A-Z0-9]+)\b/i);
-  const trackIdFound = explicitTrack ? explicitTrack[1] : (prefixTrack ? prefixTrack[0] : trackInfo.trackId);
-
-  const explicitRef = allTexts.match(/\b(?:ref(?:erence)?|order\s*(?:id|ref|reference)?)\s*[:#=]?\s*([A-Za-z0-9_-]{5,25})\b/i);
-  const prefixRef = allTexts.match(/\b(AGT-[A-Z0-9-]+|WS-[A-Z0-9-]+|D1G[A-Z0-9-]+|ORD-[A-Z0-9-]+|MN-[A-Z0-9]+)\b/i);
-  const orderRefFound = explicitRef ? explicitRef[1] : (prefixRef ? prefixRef[0] : trackInfo.orderRef);
-
-  const phoneMatch = allTexts.match(/\b(?:phone|number|recipient|line)\s*[:#=]?\s*(0[2357]\d{8})\b/i) || allTexts.match(/\b(0[2357]\d{8})\b/);
-  const phoneFound = phoneMatch ? (phoneMatch[1] || phoneMatch[0]) : trackInfo.phone;
-
-  const momoMatch = allTexts.match(/\b(\d{10,12})\b/);
-  const validMomo = momoMatch && !phoneFound?.includes(momoMatch[1]) ? momoMatch[1] : null;
-
-  const targetQuery = trackIdFound || orderRefFound || phoneFound;
-
-  // ── 1. SYNTHESIZE WHAT THE CUSTOMER IS ACTUALLY COMPLAINING ABOUT ──
-  let mainIssue = "";
-  if (customerTexts.length > 0) {
-    mainIssue = await synthesizeCustomerMainIssue(custFullName, customerTexts, targetQuery);
+  // If already identified as a special intent (deposit, acknowledgment, refund, pin, spin), return smart result instantly!
+  if (smart.isSpecialIntent) {
+    return {
+      mainIssue: smart.mainIssue,
+      draftText: smart.draftText,
+      trackingDiagnostic: smart.trackingDiagnostic,
+      actualCustomerLastMsg: smart.lastMessage,
+      portalId: smart.portalId
+    };
   }
 
-  if (!mainIssue || mainIssue.length < 6) {
-    const joinedCust = customerTexts.join(" | ").toLowerCase();
-    if (/\b(still\s*not|haven'?t\s*come|not\s*delivered|not\s*in|waiting|since\s*morning|delay|hours|days|week|not\s*received|where\s*is\s*my)\b/i.test(joinedCust)) {
-      mainIssue = `Customer complaining that data ${targetQuery ? `(${targetQuery}) ` : ""}is delayed and has not landed yet`;
-    } else if (/\b(down|working|system)\b/i.test(joinedCust)) {
-      mainIssue = "Customer asking if network/service is currently down before buying";
-    } else if (/\b(momo|deduct|paid|debit)\b/i.test(joinedCust)) {
-      mainIssue = "Customer says money was deducted on MoMo but order is pending";
-    } else if (/\b(refund|reverse|money\s*back|wasted)\b/i.test(joinedCust)) {
-      mainIssue = "Customer requesting a refund for delayed or uncredited transaction";
-    } else if (/\b(withdraw|cashout|pin)\b/i.test(joinedCust)) {
-      mainIssue = "Agent asking for wallet cashout or withdrawal PIN reset";
-    } else if (targetQuery) {
-      mainIssue = `Customer checking why order (${targetQuery}) has not landed`;
-    } else {
-      mainIssue = actualCustomerLastMsg ? `Customer inquiry: "${actualCustomerLastMsg.slice(0, 70)}"` : "Customer waiting for support assistance";
-    }
-  }
+  let draftText = smart.draftText;
+  let trackingDiagnostic = smart.trackingDiagnostic;
+  let portalId = smart.portalId;
+  let mainIssue = smart.mainIssue;
 
-  // ── 2. LIVE DELIVERY TRACKING & CONTEXT-AWARE DRAFT ──
-  let portalId = null;
-  const isDeliveryIntent = trackInfo.hasDeliveryWords || /\b(data|bundle|order|deliver|received|drop|land|balance|ghc|gb|not\s*come|not\s*in|waiting|delay|send)\b/i.test(lowerAll);
-  if (isDeliveryIntent) {
-    if (targetQuery) {
+  // If customer inquired about delivery or provided order reference / track id, try live delivery tracking
+  const targetQuery = smart.trackId || smart.orderRef || smart.phone;
+  if (targetQuery) {
+    try {
       const liveTrack = await trackSupportDeliveryTarget(targetQuery, from, {
-        trackId: trackIdFound,
-        orderRef: orderRefFound,
-        phone: phoneFound
-      });
+        trackId: smart.trackId,
+        orderRef: smart.orderRef,
+        phone: smart.phone
+      }, isFastDraft);
 
       const detectedPortalId = (liveTrack?.trackId && /^\d{4,9}$/.test(String(liveTrack.trackId))) ? String(liveTrack.trackId)
         : (/^\d{4,9}$/.test(String(targetQuery)) ? targetQuery : null);
@@ -7512,172 +8585,104 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
       if (liveTrack && liveTrack.found) {
         const st = (liveTrack.status || "").toLowerCase();
         const net = (liveTrack.network || "telecom").toUpperCase();
-        const ph = liveTrack.phone || phoneFound || targetQuery;
+        const ph = liveTrack.phone || smart.phone || targetQuery;
         const refCode = liveTrack.reference || targetQuery;
         const batchPart = liveTrack.batchNumber ? ` · Batch #${liveTrack.batchNumber}` : "";
         const pidDisplay = portalId ? `🆔 *Portal ID:* *${portalId}*` : `🆔 *Portal ID:* *Pending Export*`;
 
-        if (st === "failed" || st === "cancelled" || (liveTrack.failed && liveTrack.failed > 0)) {
-          if (portalId && /^\d{4,9}$/.test(String(portalId))) {
-            submitFailedPortalIdToGroup(portalId, { reason: "support_draft_failed", failedCount: liveTrack.failed || 1, callerPhone: from }).catch(() => { });
-          }
+        const batchItems = Array.isArray(liveTrack.items) ? liveTrack.items : [];
+        const norm9 = (num) => String(num || "").replace(/\D/g, "").slice(-9);
+        const targetCustPhone = norm9(smart.phone || liveTrack.phone || fullTicket?.customer?.phone || (typeof targetQuery === "string" && /^0[2357]\d{8}$/.test(targetQuery) ? targetQuery : null));
 
-          const batchItems = Array.isArray(liveTrack.items) ? liveTrack.items : [];
-          const norm9 = (num) => String(num || "").replace(/\D/g, "").slice(-9);
-          const targetCustPhone = norm9(phoneFound || liveTrack.phone || fullTicket?.customer?.phone || (typeof targetQuery === "string" && /^0[2357]\d{8}$/.test(targetQuery) ? targetQuery : null));
+        const failedBatchItems = batchItems.filter(it => {
+          const itSt = String(it.status || "").toLowerCase();
+          return itSt === "failed" || itSt === "cancelled" || itSt === "rejected";
+        });
 
-          const failedBatchItems = batchItems.filter(it => {
-            const itSt = String(it.status || "").toLowerCase();
-            return itSt === "failed" || itSt === "cancelled" || itSt === "rejected" || (itSt !== "sent" && itSt !== "delivered");
-          });
+        const sentBatchItems = batchItems.filter(it => {
+          const itSt = String(it.status || "").toLowerCase();
+          return itSt === "sent" || itSt === "delivered" || itSt === "completed" || itSt === "success";
+        });
 
-          const sentBatchItems = batchItems.filter(it => {
-            const itSt = String(it.status || "").toLowerCase();
-            return itSt === "sent" || itSt === "delivered" || itSt === "completed" || itSt === "success";
-          });
+        const custItem = targetCustPhone && targetCustPhone.length >= 9
+          ? batchItems.find(it => norm9(it.phone) === targetCustPhone)
+          : null;
 
-          const isCustPhoneInFailed = targetCustPhone && targetCustPhone.length >= 9 && failedBatchItems.some(it => norm9(it.phone) === targetCustPhone);
-          const isCustPhoneInSent = targetCustPhone && targetCustPhone.length >= 9 && sentBatchItems.some(it => norm9(it.phone) === targetCustPhone);
+        const custItemStatus = custItem ? String(custItem.status || "").toLowerCase() : null;
+        const isCustPhoneInFailed = Boolean(custItemStatus && ["failed", "cancelled", "rejected"].includes(custItemStatus)) ||
+          Boolean(targetCustPhone && targetCustPhone.length >= 9 && failedBatchItems.some(it => norm9(it.phone) === targetCustPhone));
+        const isCustPhoneInSent = Boolean(custItemStatus && ["sent", "delivered", "completed", "success"].includes(custItemStatus)) ||
+          Boolean(targetCustPhone && targetCustPhone.length >= 9 && sentBatchItems.some(it => norm9(it.phone) === targetCustPhone)) ||
+          Boolean(liveTrack.allDelivered || st === "delivered" || st === "completed" || st === "success");
 
-          if (batchItems.length > 0 && isCustPhoneInSent && !isCustPhoneInFailed) {
-            trackingDiagnostic = `✅ ALREADY SENT to customer line (${ph}) · ${pidDisplay} (${liveTrack.failed || failedBatchItems.length} other lines failed in batch & submitted to team group)`;
-            draftText = `Hello ${firstName}, we have tracked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Your data bundle has already been successfully sent and delivered to your number (${ph})! Kindly dial *124# or *126# to verify your main balance. Thank you!`;
-          } else {
-            trackingDiagnostic = `❌ FAILED on ${brand} · ${pidDisplay} (Ref: ${refCode})${liveTrack.failed ? ` (${liveTrack.failed} Failed)` : ""}`;
-            draftText = `Hello ${firstName}, we have checked your order on ${brand} and noticed a delivery issue on your phone number (${ph}). Don't worry at all, we are working on it and re-processing it for you right away so your data delivers immediately. Thank you for your patience!`;
-          }
-        } else if (st === "delivered" || st === "completed" || st === "success") {
+        const orderDate = liveTrack.orderCreatedAt;
+        const ageMs = orderDate ? (Date.now() - new Date(orderDate).getTime()) : null;
+        const isOver24H = Boolean(liveTrack.isQueuedOver24Hours || (orderDate && !isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)));
+        const hasValidPortalId = portalId && /^\d{4,9}$/.test(String(portalId));
+
+        if (isCustPhoneInSent) {
+          mainIssue = `🎯 Order confirmed DELIVERED on carrier (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""})`;
           if (liveTrack.isCarrierAudit) {
-            trackingDiagnostic = `✅ ALL DELIVERED on ${brand} · ${pidDisplay}${batchPart} (${liveTrack.sent || liveTrack.totalItems} Sent)`;
-            draftText = `Hello ${firstName}, we have verified your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and it is confirmed ALL DELIVERED. Kindly dial *124# or *126# to verify your main balance. Thank you!`;
+            trackingDiagnostic = `✅ 100% DELIVERED on carrier to ${ph} · ${pidDisplay}${batchPart} (${liveTrack.sent || liveTrack.totalItems || 1} Sent)`;
+            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and it is confirmed ALL DELIVERED to your line (${ph})! Kindly dial *124# or *126# to verify your main data balance. Thank you!`;
           } else {
-            trackingDiagnostic = `✅ DELIVERED on ${net} to ${ph} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${firstName}, we have tracked your order (${refCode}) on ${brand} and it is confirmed DELIVERED on the ${net} network to ${ph}. Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
+            trackingDiagnostic = `✅ CONFIRMED DELIVERED on ${net} to ${ph} · ${pidDisplay} (Ref: ${refCode})`;
+            draftText = `Hello ${smart.firstName}, we have tracked your order (${refCode}) on ${brand} and it is confirmed DELIVERED on the ${net} network to your line (${ph}). Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
           }
-        } else if (st === "queued" || liveTrack.isQueued) {
-          // Strictly calculate age from verified order creation date ONLY (never ticket age, never customer text regex)
-          const orderDate = liveTrack.orderCreatedAt;
-          const ageMs = orderDate ? (Date.now() - new Date(orderDate).getTime()) : null;
-          const isOver24H = Boolean(liveTrack.isQueuedOver24Hours || (orderDate && !isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)));
-
-          const hasValidPortalId = portalId && /^\d{4,9}$/.test(String(portalId));
-
-          if (isOver24H && hasValidPortalId) {
+          if (failedBatchItems.length > 0 && hasValidPortalId) {
             submitFailedPortalIdToGroup(portalId, {
-              reason: "vendor_queue_over_24h",
-              phone: ph,
-              network: net,
-              date: orderDate,
+              reason: "customer_support_delivery_failed",
+              failedCount: failedBatchItems.length,
+              totalItems: liveTrack.totalItems || batchItems.length,
+              failedPhones: failedBatchItems.map(it => it.phone),
               callerPhone: from
-            }).catch(() => { });
-            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""} (Reported to team group)`;
-            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, we are actively working on it right now and it will be delivered for you shortly. Thank you for your patience!`;
-          } else if (isOver24H) {
-            // Over 24 hours but no numeric Portal ID assigned yet (Pending Export) -> Do NOT report to group
-            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, we are working on it right now and your data will land shortly. Thank you for your patience!`;
-          } else {
-            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing and will land on your number shortly. Kindly dial *124# or *126# to verify your balance. Thank you!`;
+            }).catch(e => console.warn("Submit failed ticket ID to group error:", e.message));
           }
-        } else if (st === "processing") {
-          trackingDiagnostic = `⏳ PROCESSING on ${net} · ${pidDisplay} (Ref: ${refCode})`;
-          draftText = `Hello ${firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing on the network and will land on your phone shortly. Kindly dial *124# or *126# to check. Thank you!`;
+        } else if (isCustPhoneInFailed || st === "failed" || st === "cancelled" || (liveTrack.failed && liveTrack.failed > 0)) {
+          mainIssue = `❌ Data bundle FAILED on carrier (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""}) — Submitted to Group`;
+          trackingDiagnostic = `❌ FAILED on carrier dispatch (${ph}) · ${pidDisplay} (Ref: ${refCode}) ➔ 🚀 Submitted to Unprocessed Orders group!`;
+          draftText = `Hello ${smart.firstName}, we have checked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and noticed that the data delivery to your line (${ph}) encountered a network dispatch issue. Don't worry at all, our technical team is fixing and re-processing it for you right now so your data delivers shortly. Thank you for your patience!`;
+
+          if (hasValidPortalId) {
+            submitFailedPortalIdToGroup(portalId, {
+              reason: "customer_support_delivery_failed",
+              failedCount: liveTrack.failed || failedBatchItems.length || 1,
+              totalItems: liveTrack.totalItems || 1,
+              failedPhones: failedBatchItems.map(it => it.phone),
+              callerPhone: from
+            }).catch(e => console.warn("Submit failed ticket ID to group error:", e.message));
+          }
+        } else if (isOver24H && hasValidPortalId) {
+          submitFailedPortalIdToGroup(portalId, {
+            reason: "vendor_queue_over_24h",
+            queuedHours: liveTrack.queuedHours,
+            orderDate: liveTrack.orderCreatedAt,
+            callerPhone: from
+          }).catch(e => console.warn("Submit queued portal ID error:", e.message));
+
+          mainIssue = `⏳ In vendor queue > 24 hours (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""}) — Submitted to Group`;
+          trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""} ➔ 🚀 Submitted to Group`;
+          draftText = `Hello ${smart.firstName}, we have checked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. It has been in the carrier vendor queue, so we have forwarded it directly to our technical team for immediate priority dispatch and it will be delivered for you shortly. Thank you for your patience!`;
+        } else if (isOver24H) {
+          mainIssue = `⏳ In vendor queue > 24 hours (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""})`;
+          trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
+          draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, our team has prioritized it and your data will land shortly. Thank you for your patience!`;
         } else {
-          trackingDiagnostic = `🔍 Order Ref: ${refCode} · ${pidDisplay} (Status: ${st})`;
-          draftText = `Hello ${firstName}, we are currently verifying your order (${refCode}) on ${brand}. Kindly dial *124# to check your balance, or let us know if it hasn't reflected yet. Thank you!`;
+          mainIssue = `⏳ Carrier dispatch PROCESSING (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""})`;
+          trackingDiagnostic = `⏳ PROCESSING on ${net} · ${pidDisplay} (Ref: ${refCode})`;
+          draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Please relax, your bundle is currently processing in the network queue and will land on your number (${ph}) shortly. Kindly dial *124# or *126# to verify your balance. Thank you!`;
         }
-      } else {
-        // Customer provided query but not found in logs
-        trackingDiagnostic = `⚠️ Order (${targetQuery}) not found on ${brand} delivery logs`;
-        draftText = `Hello ${firstName}, thank you for reaching out. We could not locate an active delivery matching "${targetQuery}" on our logs. Please kindly provide your Track ID or Order Reference (and the recipient phone number) so we can track and speed up your data delivery on ${brand} right away. Thank you!`;
-      }
-    } else {
-      // Missing both Track ID and Order Reference
-      trackingDiagnostic = `⚠️ Customer asking about delivery without Track ID or Reference`;
-      draftText = `Hello ${firstName}, thank you for reaching out. Please kindly provide your Track ID or Order Reference (and the recipient phone number) so we can track and speed up your data delivery on ${brand} immediately! Thank you!`;
-    }
-  }
-
-  // 3. CUSTOMER PROVIDED A PHONE NUMBER OR CODE WITHOUT DELIVERY WORDS
-  else if (targetQuery && !draftText) {
-    trackingDiagnostic = `📱 Customer provided reference: ${targetQuery}`;
-    draftText = `Hello ${firstName}, we have received your reference (${targetQuery}). We are tracking and processing this on ${brand} right now to ensure it delivers successfully. Kindly dial *124# to verify your balance. Thank you!`;
-  }
-
-  // 4. DELIVERY QUESTION BUT MISSING TRACK ID / PHONE
-  else if (trackInfo.hasDeliveryWords && !targetQuery) {
-    trackingDiagnostic = `⚠️ No Track ID or recipient phone provided by customer yet.`;
-    draftText = `Hello ${firstName}, thank you for reaching out. Please kindly provide your Track ID or Order Reference (and the recipient phone number) so we can track and speed up your data delivery on ${brand} immediately!`;
-  }
-
-  // 5. MOMO / PAYMENT DEDUCTION
-  else if (validMomo || trackInfo.hasPaymentWords || /\b(deposit|credited|uncredited|momo\s*deduct|deducted|paid)\b/i.test(lowerAll)) {
-    const trxStr = validMomo || trackInfo.momoTrxId ? ` (Trx ID: ${validMomo || trackInfo.momoTrxId})` : "";
-    trackingDiagnostic = `💳 Payment / MoMo deduction issue${trxStr} - Escalated to Finance`;
-    draftText = `Hello ${firstName}, thank you for reaching out. We have flagged your payment reconciliation${trxStr} with our finance team as top priority. Your balance will be resolved shortly. Thank you for your patience!`;
-  }
-
-  // 6. AGENT WITHDRAWAL / CASHOUT / PIN RESET
-  else if (/\b(withdraw|cashout|pin|change\s*pin|reset\s*pin|cant\s*withdraw|cannot\s*withdraw|withdrawal)\b/i.test(lowerAll)) {
-    trackingDiagnostic = `💳 Agent Withdrawal / PIN Assistance`;
-    draftText = `Hello ${firstName}, regarding your withdrawal request, please kindly provide your registered ${brand} phone number or email so we can verify your wallet and assist you in resetting your withdrawal PIN right away!`;
-  }
-
-  // 7. REFUND / WALLET REVERSAL
-  else if (/\b(refund|reverse|reversal|money\s*back)\b/i.test(lowerAll)) {
-    trackingDiagnostic = `💰 Refund / Wallet Balance Reversal`;
-    draftText = `Hello ${firstName}, we have received your refund request. Please provide your Order Reference or registered phone number so our team can verify the failed order and credit the amount back to your ${brand} wallet immediately!`;
-  }
-
-  // 8. CUSTOMER COMPLAINING ABOUT WAITING / DELAY / FRUSTRATION
-  else if (/\b(not\s*minding|mind\s*me|long\s*time|too\s*slow|since\s*morning|nonsense|delay|delaying|waiting|hours\s*since|where\s*is\s*my)\b/i.test(lowerAll)) {
-    trackingDiagnostic = `⚠️ Customer expressing frustration about waiting time`;
-    draftText = `Hello ${firstName}, we sincerely apologize for the delay and frustration! We are actively attending to your chat right now as priority. Please provide your phone number or Order ID so we can get this sorted for you immediately!`;
-  }
-
-  // 9. BUYING DATA / NETWORK UPTIME INQUIRY
-  else if (/\b(purchase\s*data|buy\s*data|will\s*the\s*person\s*receive|is\s*mtn\s*working|is\s*telecel\s*working|can\s*i\s*buy)\b/i.test(lowerAll)) {
-    trackingDiagnostic = `📶 Service Inquiry: Network availability & purchasing data`;
-    draftText = `Hello ${firstName}, yes! Data deliveries across all networks (MTN, Telecel, AT) are active and processing. You can place your order now and it will deliver directly to the line. Let us know if you need any assistance!`;
-  }
-
-  // 10. SIMPLE ACKNOWLEDGMENT ("OKAY", "THANK YOU")
-  else if (/^(?:ok|okay|thank\s*you|thanks|alright|noted|seen|fine)\b/i.test(lowerLast)) {
-    trackingDiagnostic = `🤝 Customer acknowledgment`;
-    draftText = `Hello ${firstName}, you're very welcome! We are monitoring everything closely for you. Please let us know if you need any further assistance!`;
-  }
-
-  // 11. AI GENERATION FOR ALL OTHER INQUIRIES & QUESTIONS
-  if (!draftText) {
-    try {
-      const aiRes = await executeBotAi({
-        systemPrompt: `You are a warm, professional, highly capable Customer Support Co-Pilot at ${brand}.
-Examine this customer's support ticket conversation.
-Output strictly in this format:
-ISSUE: [Brief 3-6 word summary of their main issue]
-REPLY: [Your concise, warm, professional 1-to-2 sentence direct response to the customer starting with "Hello ${firstName},". Keep under 40 words.]`,
-        userMessage: `Customer: ${custFullName}\nFull Conversation:\n${allTexts.slice(-400)}`,
-        maxTokens: 140,
-        temperature: 0.6
-      });
-      if (aiRes && aiRes.text && aiRes.text.trim().length > 10) {
-        const textOut = aiRes.text.trim();
-        const replyM = textOut.match(/REPLY:\s*([\s\S]+)$/i);
-        if (replyM) draftText = replyM[1].trim();
-        else draftText = textOut.replace(/ISSUE:.*?\n/i, "").trim();
-        trackingDiagnostic = `💬 Customer Inquiry: "${actualCustomerLastMsg.slice(0, 40)}"`;
       }
     } catch (_) { }
   }
 
-  // 12. Final fallback if offline
-  if (!draftText) {
-    trackingDiagnostic = `💬 Customer Support Inquiry`;
-    draftText = `Hello ${firstName}, thank you for reaching out to DataMart support. We are attending to your request right now to resolve this for you immediately!`;
-  }
-
-  return { mainIssue, draftText, trackingDiagnostic, actualCustomerLastMsg, portalId };
+  return {
+    mainIssue: mainIssue || smart.mainIssue,
+    draftText: draftText || smart.draftText,
+    trackingDiagnostic: trackingDiagnostic || smart.trackingDiagnostic,
+    actualCustomerLastMsg: smart.lastMessage,
+    portalId: portalId || smart.portalId
+  };
 }
 
 async function generateSupportDraftReply(identifier, from = null) {
@@ -7839,41 +8844,66 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
         const fullTicket = dData.ticket || t;
         const msgs = dData.messages || fullTicket.messages || [];
 
-        const custFullName = fullTicket.customer?.name || "Customer";
-        const firstName = custFullName.split(" ")[0] || "there";
-        const tNum = fullTicket.ticketNumber || fullTicket._id;
-
         const trackInfo = extractTicketTrackingInfo(fullTicket, msgs);
-        const lastMsg = (fullTicket.lastMessage?.text || "").replace(/\s+/g, " ").trim();
+        const smartFallback = analyzeTicketSmart(fullTicket, msgs, t, rezolvCtx.brandName);
+        const custFullName = smartFallback.customerName;
+        const firstName = smartFallback.firstName;
+        const tNum = smartFallback.ticketId;
+        const lastMsg = smartFallback.lastMessage;
 
         // Calculate how long this customer has been waiting
         const waitTimeMs = Date.now() - new Date(fullTicket.lastCustomerMessageAt || fullTicket.updatedAt || fullTicket.createdAt).getTime();
         const waitMins = Math.max(1, Math.round(waitTimeMs / (60 * 1000)));
         const waitLabel = waitMins >= 60 ? `${Math.floor(waitMins / 60)}h ${waitMins % 60}m` : `${waitMins} mins`;
 
-        const { mainIssue, draftText, trackingDiagnostic, actualCustomerLastMsg, portalId } = await composeIntelligentSupportDraft({
-          firstName,
-          custFullName,
-          tNum,
-          fullTicket,
-          msgs,
-          trackInfo,
-          lastMsg,
-          brandName: rezolvCtx.brandName,
-          from
-        });
+        // If smartFallback is already a special intent (deposit, acknowledgment, refund, pin, spin), use it immediately!
+        let draftResult;
+        if (smartFallback.isSpecialIntent) {
+          draftResult = {
+            mainIssue: smartFallback.mainIssue,
+            draftText: smartFallback.draftText,
+            trackingDiagnostic: smartFallback.trackingDiagnostic,
+            actualCustomerLastMsg: smartFallback.lastMessage,
+            portalId: smartFallback.portalId
+          };
+        } else {
+          // Fast draft with timeout to ensure prompt delivery on WhatsApp
+          const draftPromise = composeIntelligentSupportDraft({
+            firstName,
+            custFullName,
+            tNum,
+            fullTicket,
+            msgs,
+            trackInfo,
+            lastMsg,
+            brandName: rezolvCtx.brandName,
+            from,
+            isFastDraft: true
+          });
+          const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({
+            mainIssue: smartFallback.mainIssue,
+            draftText: smartFallback.draftText,
+            trackingDiagnostic: smartFallback.trackingDiagnostic,
+            actualCustomerLastMsg: smartFallback.lastMessage,
+            portalId: smartFallback.portalId
+          }), 18000));
+
+          draftResult = await Promise.race([draftPromise, timeoutPromise]);
+        }
+
+        const { mainIssue, draftText, trackingDiagnostic, actualCustomerLastMsg, portalId } = draftResult;
 
         return {
           id: fullTicket._id || t._id,
           mongoId: fullTicket._id || t._id,
           ticketId: tNum,
           customerName: custFullName,
-          mainIssue,
-          lastMessage: actualCustomerLastMsg || lastMsg || "New support request",
+          mainIssue: mainIssue || smartFallback.mainIssue,
+          lastMessage: actualCustomerLastMsg || smartFallback.lastMessage,
           waitLabel,
-          trackingDiagnostic,
-          portalId: portalId || null,
-          draftMessage: draftText,
+          trackingDiagnostic: trackingDiagnostic || smartFallback.trackingDiagnostic,
+          portalId: portalId || smartFallback.portalId || null,
+          draftMessage: draftText || smartFallback.draftText,
           from: from,
           workspaceId: rezolvCtx.workspaceId,
           workspaceName: rezolvCtx.workspaceName,
@@ -8035,23 +9065,72 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       return s !== "sent" && s !== "delivered";
     });
 
-    const failedPortalSummaries = failedItems.length > 0 ? [{
+    const isFailed = failed > 0 || failedItems.length > 0;
+
+    let isOver24H = false;
+    let queuedHours = null;
+    let orderCreatedAt = result.createdAt || result.orderDate || result.date || null;
+
+    if (isQueued) {
+      if (!orderCreatedAt && targetId) {
+        try {
+          const sRes = await fetchDatamartSupportEndpoint(`/api/support/search?query=${targetId}`, {}, callerPhone);
+          const ordMatch = sRes?.data?.order || sRes?.order || (sRes?.data?.orders || sRes?.orders || [])[0];
+          if (ordMatch?.createdAt || ordMatch?.created_at || ordMatch?.date) {
+            orderCreatedAt = ordMatch.createdAt || ordMatch.created_at || ordMatch.date;
+          }
+        } catch (_) { }
+        if (!orderCreatedAt) {
+          try {
+            const { data: dbOrd } = await supabase.from("orders").select("created_at").eq("datamart_reference", String(targetId)).maybeSingle();
+            if (dbOrd?.created_at) orderCreatedAt = dbOrd.created_at;
+          } catch (_) { }
+        }
+      }
+
+      if (orderCreatedAt) {
+        const ageMs = Date.now() - new Date(orderCreatedAt).getTime();
+        if (!isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)) {
+          isOver24H = true;
+          queuedHours = Math.floor(ageMs / (60 * 60 * 1000));
+        }
+      }
+    }
+
+    let groupNotice = "";
+    if ((isFailed || (isQueued && isOver24H)) && targetId && /^\d{4,9}$/.test(String(targetId))) {
+      try {
+        const subRes = await submitFailedPortalIdToGroup(targetId, {
+          reason: isFailed ? "carrier_delivery_check_failed" : "vendor_queue_over_24h",
+          failedCount: failed || failedItems.length || 1,
+          totalItems,
+          queuedHours,
+          orderDate: orderCreatedAt,
+          failedPhones: failedItems.map(it => it.phone),
+          callerPhone
+        });
+        if (subRes?.ok) {
+          if (subRes.submitted) {
+            groupNotice = `\n\n🚀 *Submitted Portal ID ${targetId} to ${subRes.group || "Unprocessed Orders"} group!*`;
+          } else if (subRes.skipped) {
+            groupNotice = `\n\nℹ️ *Portal ID ${targetId} was already posted to the ${subRes.group || "Unprocessed Orders"} group.*`;
+          }
+        } else {
+          groupNotice = `\n\n⚠️ *Could not post Portal ID ${targetId} to group:* ${subRes.reason || subRes.error}`;
+        }
+      } catch (subErr) {
+        console.warn("Delivery check submit to group error:", subErr.message);
+        groupNotice = `\n\n💡 *Action:* Text *submit ${targetId}* to forward this ID to the group.`;
+      }
+    }
+
+    const failedPortalSummaries = (failedItems.length > 0 || isFailed) ? [{
       portalId: String(targetId),
       batchNumber: result.batchNumber,
-      failedCount: failedItems.length,
+      failedCount: failedItems.length || failed || 1,
       totalItems,
       failedPhones: failedItems.map(it => it.phone)
     }] : [];
-
-    if (failedItems.length > 0 && targetId && /^\d{4,9}$/.test(String(targetId))) {
-      submitFailedPortalIdToGroup(targetId, {
-        reason: "carrier_delivery_check_failed",
-        failedCount: failedItems.length,
-        totalItems,
-        failedPhones: failedItems.map(it => it.phone),
-        callerPhone
-      }).catch(() => { });
-    }
 
     if (callerPhone) {
       const norm = normalizeBotPhone(callerPhone);
@@ -8095,7 +9174,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       `🕒 *Processed:* ${dateStr}\n` +
       `👤 *Audited By:* ${checkedBy}\n` +
       `${failedSection}\n` +
-      `${conclusionMsg}`;
+      `${conclusionMsg}${groupNotice}`;
   }
 
   // Bulk IDs: Unified staged runner
@@ -8152,7 +9231,8 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
   const allFailedNumbers = [];
   const failedPortalSummaries = [];
 
-  jobEntries.forEach((r, idx) => {
+  for (let idx = 0; idx < jobEntries.length; idx++) {
+    const r = jobEntries[idx];
     const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx] || `•`;
     if (r.result) {
       const b = r.result;
@@ -8167,7 +9247,16 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
 
       if (isQueued) {
         totalQueued++;
-        const qDate = b.createdAt || b.orderDate || b.date;
+        let qDate = b.createdAt || b.orderDate || b.date || r.createdAt || r.orderDate || r.date;
+        if (!qDate && r.id) {
+          try {
+            const sRes = await fetchDatamartSupportEndpoint(`/api/support/search?query=${r.id}`, {}, callerPhone);
+            const ordMatch = sRes?.data?.order || sRes?.order || (sRes?.data?.orders || sRes?.orders || [])[0];
+            if (ordMatch?.createdAt || ordMatch?.created_at || ordMatch?.date) {
+              qDate = ordMatch.createdAt || ordMatch.created_at || ordMatch.date;
+            }
+          } catch (_) { }
+        }
         if (qDate) {
           const ageMs = Date.now() - new Date(qDate).getTime();
           if (!isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000) && r.id && /^\d{4,9}$/.test(String(r.id))) {
@@ -8238,7 +9327,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
       const errReason = r.error ? ` (${r.error})` : "";
       batchSummaries += `${numEmoji} *ID: ${r.id}* ➔ ⚠️ Audit timed out on carrier${errReason}.\n`;
     }
-  });
+  }
 
   if (callerPhone) {
     const norm = normalizeBotPhone(callerPhone);
@@ -8383,6 +9472,8 @@ function formatMomoPaymentsList(payments, query = "", summary = null, isPending 
 
   return out;
 }
+
+const searchDatamartUnified = (...args) => executeDatamartSearch(...args);
 
 async function executeDatamartSearch(rawQuery, callerPhone = null) {
   let q = String(rawQuery || "").trim();
@@ -8724,7 +9815,14 @@ async function executeDatamartBulkPhoneCheck(rawPhoneList, callerPhone = null) {
           submitFailedPortalIdToGroup(r.portalId, { reason: "bulk_phone_failed", phone: r.phone, callerPhone }).catch(() => { });
         }
       }
-      else inProgressCount++;
+      else {
+        inProgressCount++;
+        const rawDate = r.createdAt;
+        const isOver24H = rawDate ? (Date.now() - new Date(rawDate).getTime() >= 24 * 3600 * 1000) : false;
+        if (isOver24H && r.portalId && /^\d{4,9}$/.test(String(r.portalId))) {
+          submitFailedPortalIdToGroup(r.portalId, { reason: "phone_check_queued_over_24h", phone: r.phone, callerPhone }).catch(() => { });
+        }
+      }
 
       const pkgPart = r.capacity ? ` (${r.network} ${r.capacity})` : ` (${r.network})`;
       const batchPart = r.batchNumber ? ` (Batch #${r.batchNumber})` : "";
@@ -8754,6 +9852,351 @@ async function executeDatamartBulkPhoneCheck(rawPhoneList, callerPhone = null) {
     `💡 *Quick Action:* Reply with any *Portal ID* (e.g. *561077*) to run live carrier check, or reply *retry [ID or Phone]* to re-dispatch!`;
 
   return msg;
+}
+
+// ── In-Memory Cache of Last Scanned Unapplied Delivered Batches ──
+const userScannedDeliveredBatchesCache = new Map();
+
+async function scanDatamartUnappliedDelivered(dateQuery = null, callerPhone = null) {
+  try {
+    const cleanDateQ = String(dateQuery || "").trim().toLowerCase();
+    const todayGhana = new Date().toLocaleDateString("en-CA", { timeZone: "Africa/Accra" });
+    const yesterdayDate = new Date(Date.now() - 24 * 3600 * 1000);
+    const yesterdayGhana = yesterdayDate.toLocaleDateString("en-CA", { timeZone: "Africa/Accra" });
+
+    // Flexible date parser: handles 2026-11-8, 2026-11-08, 8/11/2026, Nov 8, 8th Nov, etc.
+    function parseCustomDate(str) {
+      if (!str) return null;
+      const s = String(str).trim().toLowerCase();
+
+      // YYYY-M-D or YYYY-MM-DD (e.g. 2026-11-8, 2026-11-08, 2026/11/8)
+      const ymd = s.match(/\b(202\d)[-\/.]([01]?\d)[-\/.]([0-3]?\d)\b/);
+      if (ymd) {
+        const y = ymd[1];
+        const m = String(parseInt(ymd[2], 10)).padStart(2, '0');
+        const d = String(parseInt(ymd[3], 10)).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+      }
+
+      // D-M-YYYY or DD-MM-YYYY (e.g. 8-11-2026, 08/11/2026)
+      const dmy = s.match(/\b([0-3]?\d)[-\/.]([01]?\d)[-\/.](202\d)\b/);
+      if (dmy) {
+        const d = String(parseInt(dmy[1], 10)).padStart(2, '0');
+        const m = String(parseInt(dmy[2], 10)).padStart(2, '0');
+        const y = dmy[3];
+        return `${y}-${m}-${d}`;
+      }
+
+      const monthMap = {
+        jan: "01", january: "01", feb: "02", february: "02", mar: "03", march: "03",
+        apr: "04", april: "04", may: "05", jun: "06", june: "06", jul: "07", july: "07",
+        aug: "08", august: "08", sep: "09", september: "09", oct: "10", october: "10",
+        nov: "11", november: "11", dec: "12", december: "12"
+      };
+
+      const monthFirst = s.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+([0-3]?\d)(?:st|nd|rd|th)?(?:\s+(202\d))?\b/i);
+      if (monthFirst) {
+        const m = monthMap[monthFirst[1].toLowerCase()];
+        const d = String(parseInt(monthFirst[2], 10)).padStart(2, '0');
+        const y = monthFirst[3] || new Date().getFullYear();
+        return `${y}-${m}-${d}`;
+      }
+
+      const dayFirst = s.match(/\b([0-3]?\d)(?:st|nd|rd|th)?\s+(?:of\s+)?(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(202\d))?\b/i);
+      if (dayFirst) {
+        const d = String(parseInt(dayFirst[1], 10)).padStart(2, '0');
+        const m = monthMap[dayFirst[2].toLowerCase()];
+        const y = dayFirst[3] || new Date().getFullYear();
+        return `${y}-${m}-${d}`;
+      }
+
+      return null;
+    }
+
+    const isAll = cleanDateQ.includes("all") || cleanDateQ.includes("system") || cleanDateQ === "everything" || cleanDateQ === "total";
+
+    let targetDateStr = todayGhana;
+    let dateLabel = `Today (${todayGhana})`;
+
+    if (isAll) {
+      targetDateStr = null;
+      dateLabel = "Entire System (All Dates)";
+    } else if (cleanDateQ.includes("yesterday")) {
+      targetDateStr = yesterdayGhana;
+      dateLabel = `Yesterday (${yesterdayGhana})`;
+    } else if (cleanDateQ.includes("today") || !cleanDateQ) {
+      targetDateStr = todayGhana;
+      dateLabel = `Today (${todayGhana})`;
+    } else {
+      const parsed = parseCustomDate(cleanDateQ);
+      if (parsed) {
+        targetDateStr = parsed;
+        dateLabel = targetDateStr;
+      }
+    }
+
+    const batchMap = new Map();
+
+    // 1. Fetch skipped-recovery (system-wide if targetDateStr is null, or specific date)
+    try {
+      const endpoint = targetDateStr
+        ? `/api/support/skipped-recovery?date=${targetDateStr}`
+        : `/api/support/skipped-recovery`;
+      const srRes = await fetchDatamartSupportEndpoint(endpoint, {}, callerPhone);
+      const srBatches = srRes?.data?.batches || srRes?.batches || [];
+      for (const b of srBatches) {
+        if (!b.portalOrderId) continue;
+        const pid = String(b.portalOrderId).trim();
+        batchMap.set(pid, {
+          portalOrderId: pid,
+          batchNumber: b.batchNumber || "N/A",
+          totalItems: b.skippedCount || b.numbers?.length || 0,
+          sent: b.skippedCount || b.numbers?.length || 0,
+          failed: 0,
+          pending: 0,
+          value: b.value || 0,
+          gb: b.gb || 0,
+          source: "skipped_recovery",
+          checkedAt: b.oldestAt ? new Date(b.oldestAt).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "Recent"
+        });
+      }
+
+      // If user scanned "all" or "system", also overlay yesterday's skipped batches
+      if (isAll) {
+        try {
+          const yRes = await fetchDatamartSupportEndpoint(`/api/support/skipped-recovery?date=${yesterdayGhana}`, {}, callerPhone);
+          const yBatches = yRes?.data?.batches || yRes?.batches || [];
+          for (const b of yBatches) {
+            if (!b.portalOrderId) continue;
+            const pid = String(b.portalOrderId).trim();
+            if (!batchMap.has(pid)) {
+              batchMap.set(pid, {
+                portalOrderId: pid,
+                batchNumber: b.batchNumber || "N/A",
+                totalItems: b.skippedCount || b.numbers?.length || 0,
+                sent: b.skippedCount || b.numbers?.length || 0,
+                failed: 0,
+                pending: 0,
+                value: b.value || 0,
+                gb: b.gb || 0,
+                source: "skipped_recovery",
+                checkedAt: b.oldestAt ? new Date(b.oldestAt).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "Yesterday"
+              });
+            }
+          }
+        } catch (_) { }
+      }
+    } catch (e) {
+      console.warn("skipped-recovery error in scanDatamartUnappliedDelivered:", e.message);
+    }
+
+    // 2. Fetch recent delivery checks and overlay
+    try {
+      const rdcRes = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent', {}, callerPhone);
+      const rawChecks = Array.isArray(rdcRes?.data) ? rdcRes.data : (Array.isArray(rdcRes) ? rdcRes : (rdcRes?.data?.checks || []));
+      for (const c of rawChecks) {
+        if (!c || !c.portalOrderId) continue;
+        const cDate = c.createdAt ? new Date(c.createdAt).toLocaleDateString("en-CA", { timeZone: "Africa/Accra" }) : "";
+        if (cDate !== targetDateStr && !cleanDateQ.includes("all")) continue;
+
+        const pid = String(c.portalOrderId).trim();
+        const sent = Number(c.sent || c.deliveredCount || c.delivered || 0);
+        const updated = Number(c.ordersUpdatedToCompleted || 0);
+        if (sent > 0 && updated === 0) {
+          batchMap.set(pid, {
+            portalOrderId: pid,
+            batchNumber: c.batchNumber || "N/A",
+            totalItems: Number(c.totalItems || c.totalOrders || c.count || 0),
+            sent,
+            failed: Number(c.failed || c.failedCount || 0),
+            pending: Number(c.pending || c.pendingCount || 0),
+            source: "delivery_check",
+            checkedAt: c.createdAt ? new Date(c.createdAt).toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" }) : "Recent"
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("delivery-checks/recent error in scanDatamartUnappliedDelivered:", e.message);
+    }
+
+    const batches = Array.from(batchMap.values());
+    const totalOrders = batches.reduce((sum, b) => sum + (b.sent || b.totalItems || 0), 0);
+    const totalFailed = batches.reduce((sum, b) => sum + (b.failed || 0), 0);
+    const totalVal = batches.reduce((sum, b) => sum + (Number(b.value) || 0), 0);
+
+    // Cache unapplied batches for this user phone so they can run "mark delivered all" or "mark delivered 1"
+    const norm = callerPhone ? String(callerPhone).replace(/\D/g, "") : "master";
+    userScannedDeliveredBatchesCache.set(norm, batches);
+
+    let out = `🚚 *DATAMART DELIVERED AUDIT SCAN (${dateLabel})*\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `📊 *Scan Summary:*\n` +
+      `• 📦 *Unapplied Delivered Batches:* *${batches.length} batches*\n` +
+      `• 🎉 *Orders Delivered on Carrier (Showing Processing in DB):* *${totalOrders.toLocaleString()} orders*\n` +
+      (totalVal > 0 ? `• 💰 *Total Value:* *GH₵ ${totalVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}*\n` : "") +
+      (totalFailed > 0 ? `• ⚠️ *Orders Failed on Carrier:* ${totalFailed}\n` : "") +
+      `\n`;
+
+    if (batches.length === 0) {
+      out += `✅ *ALL CLEAR!* Zero unapplied delivered batches found on *${dateLabel}*!\n\n` +
+        `💡 To audit fresh batches, reply with their Portal IDs (e.g. *568960*) or select another day (e.g. *scan delivered yesterday*).`;
+      return out;
+    }
+
+    out += `📋 *Batches Ready to Mark as DELIVERED:*\n`;
+    batches.slice(0, 10).forEach((b, idx) => {
+      const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx] || `•`;
+      const pkgInfo = b.gb ? ` (${b.gb}GB)` : "";
+      out += `${numEmoji} *Order #${b.portalOrderId}* (Batch #${b.batchNumber})${pkgInfo}\n` +
+        `  • Carrier: *${b.sent}/${b.totalItems} Delivered*\n` +
+        (b.failed > 0 ? `  • Failed: ${b.failed}\n` : "") +
+        `  • Status in DB: 🟡 *Processing*\n\n`;
+    });
+
+    if (batches.length > 10) {
+      out += `_...and ${batches.length - 10} more unapplied batches._\n\n`;
+    }
+
+    out += `━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `⚡ *HOW TO MARK THEM DELIVERED:*\n` +
+      `• *mark delivered all* ➔ Auto-apply & mark all ${totalOrders.toLocaleString()} orders as Delivered in DB!\n` +
+      `• *mark delivered 1* ➔ Apply 1st batch (#${batches[0].portalOrderId})\n` +
+      `• *mark delivered [Portal ID]* ➔ Apply specific batch\n` +
+      `• Or switch day: *scan delivered today* | *scan delivered yesterday* | *scan delivered 2026-11-18*`;
+
+    return out;
+  } catch (err) {
+    console.error("scanDatamartUnappliedDelivered error:", err);
+    return `⚠️ Error scanning delivered orders: ${err.message}`;
+  }
+}
+
+async function markDatamartDeliveredBatches(target, callerPhone = null) {
+  try {
+    const norm = callerPhone ? String(callerPhone).replace(/\D/g, "") : "master";
+    const cleanTarget = String(target || "").trim().toLowerCase();
+
+    let cached = userScannedDeliveredBatchesCache.get(norm) || [];
+    let targetIds = [];
+
+    // If cache is empty, attempt a quick scan of today's or yesterday's batches
+    if (cached.length === 0) {
+      const targetDay = cleanTarget.includes("yesterday") ? "yesterday" : "today";
+      await scanDatamartUnappliedDelivered(targetDay, callerPhone);
+      cached = userScannedDeliveredBatchesCache.get(norm) || [];
+    }
+
+    // 1. If user typed "all" or empty
+    if (cleanTarget === "all" || !cleanTarget || cleanTarget === "everything") {
+      targetIds = cached.map(b => String(b.portalOrderId).trim()).filter(Boolean);
+    } else {
+      // 2. Check if user typed an index number: e.g. "1", "2", "3"
+      const singleNum = parseInt(cleanTarget, 10);
+      if (!isNaN(singleNum) && singleNum >= 1 && singleNum <= cached.length && cleanTarget.length <= 2) {
+        const item = cached[singleNum - 1];
+        if (item?.portalOrderId) {
+          targetIds = [String(item.portalOrderId).trim()];
+        }
+      }
+
+      // 3. Check if user passed one or more explicit portal IDs (e.g. "567893" or "567893 2317785")
+      if (targetIds.length === 0) {
+        const matches = cleanTarget.match(/\b\d{4,9}[a-zA-Z]?\b/g);
+        if (matches && matches.length > 0) {
+          targetIds = matches;
+        }
+      }
+    }
+
+    const uniqueIds = [...new Set(targetIds)].slice(0, 20);
+    if (uniqueIds.length === 0) {
+      return `⚠️ No unapplied batches found to mark as delivered.\n\n💡 Send *scan delivered yesterday* or *scan delivered today* first!`;
+    }
+
+    // Process each target batch: start job -> get result items -> apply
+    const results = [];
+    for (const pIdStr of uniqueIds) {
+      const pId = isNaN(Number(pIdStr)) ? pIdStr : Number(pIdStr);
+      try {
+        const startRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/start', {
+          method: 'POST',
+          body: { portalOrderId: pId }
+        }, callerPhone);
+        const jobId = startRes?.data?.jobId || startRes?.jobId;
+        if (!jobId) {
+          results.push({ portalOrderId: pIdStr, success: false, error: startRes?.message || "Could not start audit" });
+          continue;
+        }
+
+        let jobResult = null;
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 1000));
+          const jRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
+          const st = (jRes?.data?.jobStatus || jRes?.jobStatus || "").toLowerCase();
+          if (st === "done" || st === "completed") {
+            jobResult = jRes.data?.result || jRes.result;
+            break;
+          }
+          if (st === "failed" || st === "error") {
+            break;
+          }
+        }
+
+        if (!jobResult || !Array.isArray(jobResult.items) || jobResult.items.length === 0) {
+          results.push({ portalOrderId: pIdStr, success: false, error: "Carrier audit timed out" });
+          continue;
+        }
+
+        // Apply results to DataMart database
+        const applyRes = await fetchDatamartSupportEndpoint('/api/support/delivery-check/apply', {
+          method: 'POST',
+          body: { portalOrderId: pId, items: jobResult.items }
+        }, callerPhone);
+
+        const aData = applyRes?.data || applyRes || {};
+        const count = aData.ordersCompleted || aData.ordersUpdatedToCompleted || aData.updated || jobResult.sent || 0;
+
+        results.push({
+          portalOrderId: pIdStr,
+          batchNumber: jobResult.batchNumber || "N/A",
+          success: true,
+          total: jobResult.totalItems || 0,
+          sent: jobResult.sent || 0,
+          failed: jobResult.failed || 0,
+          pending: jobResult.pending || 0,
+          markedCount: count
+        });
+      } catch (e) {
+        results.push({ portalOrderId: pIdStr, success: false, error: e.message });
+      }
+    }
+
+    // Clear cache
+    userScannedDeliveredBatchesCache.delete(norm);
+
+    let totalMarkedDelivered = results.filter(r => r.success).reduce((sum, r) => sum + (r.markedCount || r.sent || 0), 0);
+    let successfulBatches = results.filter(r => r.success).length;
+
+    let out = `🎉 *DATAMART DELIVERIES APPLIED & MARKED DELIVERED!*\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `📊 *Execution Summary:*\n` +
+      `• 📦 *Batches Processed:* ${successfulBatches}/${uniqueIds.length}\n` +
+      `• ✅ *Total Orders Marked DELIVERED in DataMart DB:* *${totalMarkedDelivered.toLocaleString()} orders*\n\n`;
+
+    results.forEach(r => {
+      if (r.success) {
+        out += `✅ *Order #${r.portalOrderId}* (Batch #${r.batchNumber}): Marked *${r.markedCount || r.sent} orders* as Completed!\n`;
+      } else {
+        out += `⚠️ *Order #${r.portalOrderId}*: ${r.error}\n`;
+      }
+    });
+
+    out += `\n💡 DataMart database has now been synchronized with actual carrier deliveries!`;
+    return out;
+  } catch (err) {
+    console.error("markDatamartDeliveredBatches error:", err);
+    return `⚠️ Error applying delivered orders: ${err.message}`;
+  }
 }
 
 /* =========================================================
@@ -9258,60 +10701,88 @@ TRACK ORDERS
 
 async function trackOrders(from, phoneNumber) {
   const phone = normalizePhone(phoneNumber);
+  const clean9 = phone.slice(-9);
 
   try {
-    const { data: orders, error } = await supabase
-      .from("orders")
-      .select("*")
-      .eq("phone_number", phone)
-      .order("created_at", { ascending: false })
-      .limit(3);
+    // 1. Check local Supabase orders
+    let localOrders = [];
+    try {
+      const { data: dbOrders } = await supabase
+        .from("orders")
+        .select("*")
+        .or(`recipient_phone.ilike.%${clean9}%,phone.ilike.%${clean9}%,phone_number.ilike.%${clean9}%,reference.ilike.%${clean9}%`)
+        .order("created_at", { ascending: false })
+        .limit(5);
+      if (dbOrders && dbOrders.length > 0) localOrders = dbOrders;
+    } catch (_) { }
 
-    if (error) {
-      console.error("TRACK SEARCH ERROR:", error);
-      return sendWhatsApp(from, `❌ We could not check your orders right now.\n\nPlease try again later.`);
+    // 2. Check DataMart orders
+    let dmOrders = [];
+    try {
+      const dmRes = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(phone)}`, {}, from);
+      dmOrders = dmRes?.data?.results?.orders || (Array.isArray(dmRes?.data?.results) ? dmRes.data.results.filter(x => x.type === "order" || x.network) : []) || [];
+    } catch (_) { }
+
+    if (localOrders.length === 0 && dmOrders.length === 0) {
+      return sendWhatsApp(from, `❌ No orders found for:\n\n📱 *${phone}*\n\nMake sure you entered the correct recipient phone number or Order Reference code (e.g. WS-...).\n\nReply *HI* for the data menu.`);
     }
 
-    if (!orders || orders.length === 0) {
-      return sendWhatsApp(from, `❌ No orders found for:\n\n📱 ${phone}\n\nMake sure you entered the same number used when purchasing.`);
+    let message = `📦 *ORDER TRACKING FOR ${phone}*\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    if (dmOrders.length > 0) {
+      dmOrders.slice(0, 3).forEach((ord, i) => {
+        const net = ord.network || "MTN";
+        const cap = ord.capacity != null ? `${ord.capacity}GB` : "";
+        const rawPid = ord.exportTracking?.portalId || (ord.apiOrderId && /^\d{4,9}$/.test(String(ord.apiOrderId)) ? ord.apiOrderId : null);
+        const st = String(ord.status || "").toUpperCase();
+        const isDelivered = st === "COMPLETED" || st === "DELIVERED";
+        const isFailed = st === "FAILED" || st === "CANCELLED";
+        const icon = isDelivered ? "✅" : (isFailed ? "❌" : "⏳");
+        const statusLabel = isDelivered ? "DELIVERED" : (isFailed ? "DISPATCH DELAY (ATTENDING)" : "PROCESSING WITH CARRIER");
+        const dateStr = ord.createdAt ? formatGhanaTime(ord.createdAt) : "Recent";
+        const refStr = ord.geonetReference || ord.reference || "N/A";
+
+        message += `${icon} *ORDER #${i + 1} (${net} ${cap})*\n` +
+          `• 📱 *Line:* ${ord.phoneNumber || phone}\n` +
+          `• 🆔 *Track ID:* *${rawPid || refStr}*\n` +
+          `• 📊 *Status:* *${statusLabel}*\n` +
+          `• 📅 *Date Placed:* ${dateStr}\n`;
+        if (isDelivered) {
+          message += `👉 *Bundle delivered! Dial *124# or *138# to check balance.*\n\n`;
+        } else if (isFailed) {
+          message += `👉 *Our technical team is fixing and re-processing your bundle for immediate delivery.*\n\n`;
+        } else {
+          message += `👉 *Currently in telecom dispatch queue. Will land shortly!*\n\n`;
+        }
+      });
+    } else if (localOrders.length > 0) {
+      localOrders.slice(0, 3).forEach((order, i) => {
+        const ref = order.ref || order.reference;
+        const st = String(order.delivery_status || order.status || "pending").toUpperCase();
+        const isDelivered = st === "COMPLETED" || st === "DELIVERED";
+        const isFailed = st === "FAILED" || st === "CANCELLED";
+        const icon = isDelivered ? "✅" : (isFailed ? "❌" : "⏳");
+        const statusLabel = isDelivered ? "DELIVERED" : (isFailed ? "DISPATCH DELAY (ATTENDING)" : "PROCESSING");
+        const dateStr = order.created_at ? formatGhanaTime(order.created_at) : "Recent";
+
+        message += `${icon} *ORDER #${i + 1} (${order.network || "MTN"} ${order.capacity || ""}GB)*\n` +
+          `• 📱 *Line:* ${order.recipient_phone || phone}\n` +
+          `• 🆔 *Ref:* *${ref}*\n` +
+          `• 📊 *Status:* *${statusLabel}*\n` +
+          `• 📅 *Date:* ${dateStr}\n`;
+        if (isDelivered) {
+          message += `👉 *Bundle delivered! Dial *124# or *138# to check balance.*\n\n`;
+        } else {
+          message += `👉 *Your bundle is processing and will reflect shortly!*\n\n`;
+        }
+      });
     }
 
-    let message = `📦 YOUR LAST ${orders.length} ORDER${orders.length === 1 ? "" : "S"}\n\n`;
-
-    for (let i = 0; i < orders.length; i++) {
-      const order = orders[i];
-      const reference = order.ref || order.reference;
-      let live = null;
-
-      if (reference) {
-        live = await getOrderStatus(reference);
-      }
-
-      const status = live?.orderStatus || order.status || "pending";
-      const network = live?.network || order.network || "N/A";
-      const capacity = live?.capacity ?? order.capacity ?? "N/A";
-      const customerNumber = live?.phoneNumber || order.phone_number || phone;
-      const amount = Number(order.amount || 0);
-      const dateTime = formatDateTime(live?.createdAt || order.created_at);
-
-      message += `━━━━━━━━━━━━━━━━\n${i + 1}. 📦 ORDER\n\n🆔 Reference: ${reference || "N/A"}\n📶 Network: ${network}\n📦 Data: ${capacity}GB\n📱 Number:${customerNumber}\n💰 Amount Paid: ₵${amount.toFixed(2)}\n${statusEmoji(status)} Status: ${String(status).toUpperCase()}\n📅 Date: ${dateTime.date}\n🕐 Time: ${dateTime.time}\n\n━━━━━━━━━━━━━━━━\n\n`;
-
-      if (live && reference) {
-        await supabase
-          .from("orders")
-          .update({
-            status,
-            updated_at: live.updatedAt || new Date().toISOString()
-          })
-          .eq("ref", reference);
-      }
-    }
-
-    message += `\nReply HI to return to the main menu.`;
+    message += `━━━━━━━━━━━━━━━━━━━━\nReply *HI* to return to the main menu.`;
     return sendWhatsApp(from, message);
   } catch (e) {
     console.error("TRACK ERROR:", e.response?.data || e.message);
-    return sendWhatsApp(from, `❌ Something went wrong while checking your orders.\n\nPlease try again.`);
+    return sendWhatsApp(from, `❌ Something went wrong while checking your orders. Please try again.\n\nReply *HI* for menu.`);
   }
 }
 
@@ -9358,6 +10829,7 @@ async function initiateMomoCharge(from, session, bundle) {
         phone_number: normalizePhone(session.phone_number || session.phone || from),
         recipient_phone: normalizePhone(session.phone_number || session.phone || from),
         phone: normalizePhone(from),
+        whatsapp_phone: normalizePhone(from),
         network: session.network || "MTN",
         capacity: String(effectiveBundle?.capacity || session.bundle || "1"),
         bundle: String(effectiveBundle?.capacity || session.bundle || "1") + (String(effectiveBundle?.capacity || "").includes("GB") || String(effectiveBundle?.capacity || "").includes(" ") ? "" : "GB"),
@@ -9978,6 +11450,29 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     );
   }
 
+  // 0a. Scan Delivered Orders on Carrier that are showing processing in DataMart DB
+  const isScanAllSystem = /^(?:scan\s*all(?:\s+delivered|\s+system)?|scan\s*system|scan\s*delivered\s+all|scan\s*delivered\s+system)$/i.test(cleanInput);
+  const isScanDeliveredMatch = isScanAllSystem || cleanInput.match(/^(?:scan\s*delivered|delivered\s*scan|unapplied\s*deliveries|delivered\s*processing|scann?|audit\s*delivered)(?:\s+(.+))?$/i);
+  if (isScanDeliveredMatch) {
+    const dateArg = isScanAllSystem ? "all" : (isScanDeliveredMatch[1] || null);
+    const report = await scanDatamartUnappliedDelivered(dateArg, from);
+    return sendWhatsApp(from, report);
+  }
+
+  // 0b. Mark / Apply Delivered Orders in DataMart DB
+  const isMarkDeliveredMatch = cleanInput.match(/^(?:mark\s*delivered|apply\s*delivered|sync\s*delivered|mark\s*completed|apply\s*deliveries)(?:\s+(.+))?$/i);
+  if (isMarkDeliveredMatch) {
+    const targetArg = isMarkDeliveredMatch[1] || "all";
+    const report = await markDatamartDeliveredBatches(targetArg, from);
+    return sendWhatsApp(from, report);
+  }
+
+  // 0c. Batch Support Inbox Drafts (e.g. "draft 5", "draft", "drafts", "draft replies")
+  if (/^(?:draft\s*(?:5|all|inbox|replies)?|drafts|inbox\s*drafts?)$/i.test(cleanInput)) {
+    const batchRep = await buildSupportInboxBatchDraft(from, 5);
+    return sendWhatsApp(from, batchRep);
+  }
+
   // Account Status
   if (/^(?:my\s*datamart|datamart\s*status|account\s*status|whoami)$/i.test(cleanInput)) {
     const acc = await getUserDatamartAccount(from);
@@ -10016,6 +11511,16 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     return sendWhatsApp(from, rep);
   }
 
+  // Test / Ping Group
+  if (/^(?:test\s*group|ping\s*group|check\s*group\s*ping)$/i.test(cleanInput)) {
+    const res = await submitFailedPortalIdToGroup("TEST-PING", { isTest: true, manual: true, force: true, callerPhone: from });
+    if (res.ok) {
+      return sendWhatsApp(from, `🔔 *TEST PING SENT!* Sent a test message to group *${res.group || "Unprocessed Orders"}*.\n\n👉 If you do NOT see it in your group, send your group's invite link here (e.g. *https://chat.whatsapp.com/...*) to re-link it.`);
+    } else {
+      return sendWhatsApp(from, `⚠️ Could not send test ping to group: ${res.reason || res.error}\n\n💡 Send your group invite link (e.g. *https://chat.whatsapp.com/...*) to re-link.`);
+    }
+  }
+
   // Disconnect / Unlink Group
   if (/^(?:disconnect\s*group|unlink\s*group|remove\s*group|reset\s*group)$/i.test(cleanInput)) {
     const rep = await disconnectUserFailedOrdersGroup(from);
@@ -10034,6 +11539,99 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
       : `https://chat.whatsapp.com/${rawMatch}`;
     const rep = await setFailedOrdersGroup(linkOrJid, from);
     return sendWhatsApp(from, rep);
+  }
+
+  // WhatsApp Pairing Commands (Owner pairs primary bot session; Agents pair companion sessions)
+  if (/^(?:pair\s*whatsapp|link\s*whatsapp|connect\s*whatsapp|pair\s*bot)$/i.test(cleanInput)) {
+    const isOwner = isOwnerPhone(from);
+    if (isOwner) {
+      await sendWhatsApp(from, "⏳ *Generating your Stony Bot WhatsApp pairing code...*");
+      const pairRes = await initBaileysChannelClient({ forceReset: true, requestPairForPhone: from });
+      if (pairRes?.pairingCode) {
+        return sendWhatsApp(from,
+          `🔐 *YOUR STONY BOT WHATSAPP PAIRING CODE:*\n\n` +
+          `👉 Code: *${pairRes.pairingCode}*\n\n` +
+          `📲 *How to link on your phone (code is active for 3 minutes):*\n` +
+          `1. Open WhatsApp on your phone\n` +
+          `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
+          `3. *(Important: Check that you don't have 4 active devices already — log out an old one if full)*\n` +
+          `4. Tap *Link a Device*\n` +
+          `5. Tap *Link with phone number instead*\n` +
+          `6. Enter: *${pairRes.pairingCode}*\n\n` +
+          `✅ Once linked, all failed order IDs and channel broadcasts will send directly from your account (Stony)!`
+        );
+      } else if (pairRes?.ready) {
+        return sendWhatsApp(from, `✅ *Your Stony Bot WhatsApp account is already linked and active!*`);
+      } else {
+        return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please try again in 10 seconds."}`);
+      }
+    } else {
+      const pairRes = await getOrInitAgentBaileysClient(from, { requestPair: true });
+      if (pairRes?.pairingCode) {
+        return sendWhatsApp(from,
+          `🔑 *YOUR WHATSAPP PAIRING CODE:*\n\n` +
+          `👉 Code: *${pairRes.pairingCode}*\n\n` +
+          `📲 *How to link on your phone:*\n` +
+          `1. Open WhatsApp on your phone\n` +
+          `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
+          `3. Tap *Link a Device*\n` +
+          `4. Tap *Link with phone number instead*\n` +
+          `5. Enter the code above: *${pairRes.pairingCode}*\n\n` +
+          `✅ Once linked, any failed orders from your account will post into the group with *your own name and number*!\n` +
+          `*(No notifications are sent to the group upon connecting).*`
+        );
+      } else if (pairRes?.ready) {
+        return sendWhatsApp(from, `✅ *Your WhatsApp account is already linked and ready!*\nFailed order IDs are automatically posted to your group under your own number.`);
+      } else {
+        return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please ensure your phone number is valid."}`);
+      }
+    }
+  }
+
+  // Toggle Delivered Order WhatsApp Alerts (explicit mute / unmute commands)
+  if (/^(?:mute\s*delivered\s*(?:order\s*)?alerts?|disable\s*delivered\s*(?:order\s*)?alerts?|turn\s*off\s*delivered\s*(?:order\s*)?alerts?|stop\s*delivered\s*(?:order\s*)?alerts?)$/i.test(cleanInput.trim())) {
+    await supabase.from("settings").upsert({ key: "disable_delivered_alerts", value: "true", updated_at: new Date().toISOString() }, { onConflict: "key" });
+    return sendWhatsApp(from,
+      `🔇 *DELIVERED ORDER ALERTS MUTED!*\n\n` +
+      `You will no longer receive WhatsApp notifications whenever data orders are delivered.\n\n` +
+      `💡 To turn alerts back on anytime, simply reply: *enable delivered alerts*`
+    );
+  }
+
+  if (/^(?:enable\s*delivered\s*(?:order\s*)?alerts?|unmute\s*delivered\s*(?:order\s*)?alerts?|turn\s*on\s*delivered\s*(?:order\s*)?alerts?|start\s*delivered\s*(?:order\s*)?alerts?)$/i.test(cleanInput.trim())) {
+    await supabase.from("settings").upsert({ key: "disable_delivered_alerts", value: "false", updated_at: new Date().toISOString() }, { onConflict: "key" });
+    return sendWhatsApp(from,
+      `🔔 *DELIVERED ORDER ALERTS ENABLED!* ✅\n\n` +
+      `You will now receive a WhatsApp notification whenever a data order is delivered.\n\n` +
+      `💡 To mute alerts anytime, simply reply: *mute delivered alerts*`
+    );
+  }
+
+  if (/^(?:unlink\s*whatsapp|disconnect\s*whatsapp|logout\s*whatsapp)$/i.test(cleanInput)) {
+    if (isOwnerPhone(from)) {
+      await initBaileysChannelClient({ forceReset: true });
+      return sendWhatsApp(from, `🔌 *Stony Bot WhatsApp session unlinked!*\nText *pair whatsapp* whenever you want to re-link.`);
+    } else {
+      await getOrInitAgentBaileysClient(from, { forceReset: true });
+      return sendWhatsApp(from, `🔌 *Your WhatsApp session has been unlinked!*\nFailed orders will now be submitted using the default bot.`);
+    }
+  }
+
+  if (/^(?:pair\s*status|whatsapp\s*status|wa\s*status)$/i.test(cleanInput)) {
+    if (isOwnerPhone(from)) {
+      if (baileysChannelReady && baileysChannelSock) {
+        return sendWhatsApp(from, `✅ *Stony Bot WhatsApp Status: LINKED & ACTIVE*\nConnected as Stony (${from}). Failed orders are submitted to the group under your account.`);
+      } else {
+        return sendWhatsApp(from, `⚪ *Stony Bot WhatsApp Status: NOT LINKED*\nText *pair whatsapp* to generate a pairing code and link your phone.`);
+      }
+    } else {
+      const checkRes = await getOrInitAgentBaileysClient(from);
+      if (checkRes?.ready) {
+        return sendWhatsApp(from, `✅ *Your WhatsApp Account Status: LINKED*\nFailed order submissions to your group will show as sent by your account.`);
+      } else {
+        return sendWhatsApp(from, `⚪ *Your WhatsApp Account Status: NOT LINKED*\nSubmissions currently use the default bot.\n\nType *pair whatsapp* to link your account.`);
+      }
+    }
   }
 
   // Manual submission of Portal ID to group (e.g. "submit 561077" or "submit portal id 561077 to group")
@@ -10055,15 +11653,40 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     }
   }
 
+  // ── TRIGGER FAILED & >24H PORTAL ID GROUP SUBMISSION SCAN ──
+  const scanAllFailedMatch =
+    cleanInput.match(/^(?:submit|scan|post)\s+(?:all\s+)?(?:failed|unprocessed|>24|over\s*24h?)(?:\s+(?:orders?|ids?))?$/i) ||
+    cleanInput.match(/^(?:check\s+and\s+submit|submit\s+failed\s+and\s+>24|submit\s+>24\s+and\s+failed)$/i);
+
+  if (scanAllFailedMatch) {
+    await sendWhatsApp(from, "⏳ Scanning DataMart & database for failed orders and orders delayed > 24 hours... Submitting numeric Portal IDs to group now!");
+    const scanRes = await scanAndSubmitFailedAndDelayedPortalIds({ callerPhone: from });
+    const totalSubmitted = (scanRes.failedSubmitted || 0) + (scanRes.delayedSubmitted || 0);
+    const rep = `🚀 *DATAMART GROUP SUBMISSION COMPLETE!* ✅\n━━━━━━━━━━━━━━━━━━━━\n` +
+      `• 📦 *Orders Audited:* ${scanRes.scanned || 0}\n` +
+      `• ❌ *Failed IDs Submitted:* ${scanRes.failedSubmitted || 0}\n` +
+      `• ⏳ *> 24h IDs Submitted:* ${scanRes.delayedSubmitted || 0}\n` +
+      `• 🚀 *Total IDs Sent to Group:* *${totalSubmitted}*\n` +
+      `• ℹ️ *Skipped (Recent dupes):* ${scanRes.skipped || 0}\n\n` +
+      (scanRes.portalIds?.length > 0 ? `🆔 *Submitted Portal IDs:* ${scanRes.portalIds.join(", ")}\n\n` : "") +
+      `👥 *Target Group:* Unprocessed Orders (${DEFAULT_FAILED_ORDERS_GROUP_JID})`;
+    return sendWhatsApp(from, rep);
+  }
+
   // 1. Delivery Check (Single/Bulk Portal IDs & Bulk Phone Numbers)
   const allNums = cleanInput.match(/\b\d{4,9}[a-zA-Z]?\b/g);
   const allPhones = cleanInput.match(/\b(?:0[2357]\d{8}|\+?233[2357]\d{8})\b/g);
   const isDeliveryCheckIntent = /\b(?:delivery\s*check|check\s*delivery|audit|bulk\s*check|check\s*numbers?)\b/i.test(cleanInput);
 
-  // 1a. Bulk Phone Numbers Check (e.g. "0559143388 0241234567" or "bulk check 0559143388 0241234567")
-  if ((allPhones && allPhones.length > 1) || (allPhones && allPhones.length === 1 && isDeliveryCheckIntent)) {
-    const report = await executeDatamartBulkPhoneCheck(allPhones, from);
-    if (report) return sendWhatsApp(from, report);
+  // 1a. Phone Number Check or Lookup (e.g. "0240294040", "0559143388 0241234567")
+  if (allPhones && allPhones.length > 0) {
+    if (allPhones.length > 1 || isDeliveryCheckIntent) {
+      const report = await executeDatamartBulkPhoneCheck(allPhones, from);
+      if (report) return sendWhatsApp(from, report);
+    } else {
+      const rep = await searchDatamartUnified(allPhones[0], from);
+      if (rep) return sendWhatsApp(from, rep);
+    }
   }
 
   // 1b. Portal IDs / Batch IDs Delivery Check
@@ -10075,7 +11698,7 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     }
   }
 
-  // 1b. Live DataMart Failed Orders (e.g. "Do we have failed order", "failed orders", "any failed order", "failed")
+  // 1c. Live DataMart Failed Orders (e.g. "Do we have failed order", "failed orders", "any failed order", "failed")
   const isLiveFailedQuery = /^(?:do\s+we\s+have|are\s+there|check|show|view|get|list|any)\s+(?:any\s+)?failed\s*(?:orders?|numbers?|data|queue)?\??$/i.test(cleanInput) ||
     /^(?:failed|failed\s*orders?|failed\s*queue|open\s*failed)$/i.test(cleanInput);
   if (isLiveFailedQuery) {
@@ -10083,7 +11706,7 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     if (report) return sendWhatsApp(from, report);
   }
 
-  // 1c. Query Failed IDs / Numbers from last Delivery Check (e.g. "give me the failed orders only data", "which ones failed")
+  // 1d. Query Failed IDs / Numbers from last Delivery Check (e.g. "give me the failed orders only data", "which ones failed")
   const isAuditFailedQuery = /\b(?:failed\s*(?:orders?\s*)?only|failed\s*(?:numbers?|phones?|ids?)|which\s*(?:ones?|numbers?|orders?)\s*failed)\b/i.test(cleanInput) ||
     /^(?:give\s*me\s*(?:the\s*)?)?failed(?:\s*(?:numbers?|orders?|ids?|only|data|list))?$/i.test(cleanInput);
   if (isAuditFailedQuery) {
@@ -10102,303 +11725,284 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     /^(?:(?:dm|datamart)\s+)?(?:ref|reference|trx|trxref|order\s*ref|order\s*reference)(?:\s*[:#=])?\s*[A-Za-z0-9_-]+/i.test(cleanInput) ||
     /^(?:track|verify|check)\s+(?:order\s+)?(?:ref\s+|reference\s+)?([A-Za-z0-9_-]{5,45})$/i.test(cleanInput);
 
-  const hasSentenceWords = /\b(?:what|how|why|when|where|who|is|are|can|could|will|would|do|did|does|tell|ask|mark|resolve|clean|clear|how\s+many|inbox|messages?|tickets?|now|about|please|saying|said|reply|give)\b/i.test(cleanInput);
-  const isNameOrWord = !hasSentenceWords && /^[a-zA-Z]{3,20}(?:\s+[a-zA-Z]{2,20})?$/.test(cleanInput.trim()) && !/^(?:exit|tickets?|urgent|pending|withdrawals?|deposits?|claims?|recovery|stats|my\s*datamart)$/i.test(cleanInput);
+  const hasSentenceWords = /\b(?:what|how|why|when|where|who|is|are|can|could|will|would|do|did|does|tell|ask|mark|resolve|clean|clear|how\s+many|inbox|messages?|tickets?|now|about|please|saying|said|reply|give|scan|scann|delivered|apply|sync|draft|drafts|audit)\b/i.test(cleanInput);
+  const isNameOrWord = !hasSentenceWords && /^[a-zA-Z]{3,20}(?:\s+[a-zA-Z]{2,20})?$/.test(cleanInput.trim()) && !/^(?:exit|tickets?|urgent|pending|withdrawals?|deposits?|claims?|recovery|stats|my\s*datamart|scan|delivered|mark|apply|sync|draft|drafts)$/i.test(cleanInput);
 
   if (emailMatch || phoneMatch || isSearchIntent || isNameOrWord || isRefPattern) {
-    const report = await executeDatamartSearch(cleanInput, from);
-    if (report) return sendWhatsApp(from, report);
-  }
-
-  // 2b. Natural "What about [Name]" / "What of [Name]" / "How about [Name]"
-  const whatAboutMatch = cleanInput.match(/^(?:what\s+about|what\s+of|how\s+about|check\s+on)\s+([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\??$/i);
-  if (whatAboutMatch) {
-    const target = whatAboutMatch[1].trim();
-    const rep = await getRezolvTicketConversation(target);
-    return sendWhatsApp(from, rep);
-  }
-
-  // 2c. Natural "how many inbox messages now" / "how many in inbox" / "inbox count"
-  if (/\b(?:how\s+many\s+(?:inbox|messages?|tickets?)|inbox\s*(?:count|status|messages?|mesaages?)|how\s+many\s+(?:in\s+inbox|tickets))\b/i.test(cleanInput)) {
-    const stats = await getRezolvInboxStats();
-    if (stats) {
-      return sendWhatsApp(from,
-        `📬 *REZOLV INBOX STATUS UPDATE:*\n\n` +
-        `• 💬 *Total Active Conversations:* *${stats.totalActive}*\n` +
-        `• ⏳ *In Progress:* *${stats.inProgress}*\n` +
-        `• 🟢 *Open / Unassigned:* *${stats.open}*\n` +
-        `• 🚨 *Urgent / Needs Attention:* *${stats.urgent}*\n\n` +
-        `💡 *Recent in queue:*\n` +
-        stats.recentTickets.map(t => `• *${t.customerName}* (${t.ticketNumber}): "${t.lastMessage}"`).join("\n") +
-        `\n\nDrop any customer name or ticket number to view details or reply!`
-      );
-    }
+    const rawTarget = emailMatch ? emailMatch[0] : (phoneMatch ? phoneMatch[0] : (isRefPattern ? (cleanInput.match(/[A-Za-z0-9_-]{5,45}/) || [cleanInput])[0] : cleanInput.trim()));
+    const rep = await searchDatamartUnified(rawTarget, from);
+    if (rep) return sendWhatsApp(from, rep);
   }
 
   // 2d. Natural "clear all ticket" / "clear all tickets" / "resolve all" / "close all"
-  const isPurgeDeleteCmd1 = /\b(?:delete\s+all\s+(?:tickets?|chats?)|purge\s+all\s+(?:tickets?|chats?))\b/i.test(cleanInput);
-  const isClearAllCmd1 =
-    /\b(?:clear\s+all\s+(?:tickets?|chats?)|clear\s+(?:tickets?|chats?)|resolve\s+all\s*(?:tickets?|chats?)?|close\s+all\s*(?:tickets?|chats?)?|mark\s+all\s+(?:as\s+)?(?:resolve|closed?)|clean\s+all\s*(?:tickets?|chats?)?)\b/i.test(cleanInput) ||
-    /^(?:clear\s+all|resolve\s+all|close\s+all|clean\s+all)$/i.test(cleanInput.trim());
+const isPurgeDeleteCmd1 = /\b(?:delete\s+all\s+(?:tickets?|chats?)|purge\s+all\s+(?:tickets?|chats?))\b/i.test(cleanInput);
+const isClearAllCmd1 =
+  /\b(?:clear\s+all\s+(?:tickets?|chats?)|clear\s+(?:tickets?|chats?)|resolve\s+all\s*(?:tickets?|chats?)?|close\s+all\s*(?:tickets?|chats?)?|mark\s+all\s+(?:as\s+)?(?:resolve|closed?)|clean\s+all\s*(?:tickets?|chats?)?)\b/i.test(cleanInput) ||
+  /^(?:clear\s+all|resolve\s+all|close\s+all|clean\s+all)$/i.test(cleanInput.trim());
 
-  if (isPurgeDeleteCmd1) {
-    const clearRep = await clearAllRezolvActiveTickets(from, "delete");
-    return sendWhatsApp(from, clearRep);
-  }
-  if (isClearAllCmd1) {
-    const clearRep = await clearAllRezolvActiveTickets(from, "resolve");
-    return sendWhatsApp(from, clearRep);
-  }
+if (isPurgeDeleteCmd1) {
+  const clearRep = await clearAllRezolvActiveTickets(from, "delete");
+  return sendWhatsApp(from, clearRep);
+}
+if (isClearAllCmd1) {
+  const clearRep = await clearAllRezolvActiveTickets(from, "resolve");
+  return sendWhatsApp(from, clearRep);
+}
 
-  // 3a. Rezolv Draft Reply (checked first so it doesn't collide with direct reply)
-  const dmDraftMatch =
-    cleanInput.match(/^(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i) ||
-    cleanInput.match(/^(.+?)\s+(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)$/i);
-  if (dmDraftMatch) {
-    const targetId = (dmDraftMatch[1] || "").trim();
-    const draftRes = await generateSupportDraftReply(targetId);
-    if (!draftRes.ok) return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find ticket to draft reply."}`);
-    await setOwnerPendingAction(from, {
-      type: "rezolv_reply",
-      ticketId: draftRes.ticketId,
-      message: draftRes.draftMessage
-    });
-    return sendWhatsApp(from,
-      `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
-      `"${draftRes.draftMessage}"\n\n` +
-      `👉 Reply: *YES* or *SEND* to dispatch right now as *Stony 💙*!\n` +
-      `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
-    );
-  }
-
-  // 3b. Rezolv Live Reply to Customer ("Karlina Grey reply it will come okay" or "reply Karlina Grey it will come okay")
-  const dmRezolvReplyMatch =
-    cleanInput.match(/^(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\s*[:,-]?\s+([\s\S]+)$/i) ||
-    cleanInput.match(/^([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\s+(?:reply|tell)\s*[:,-]?\s+([\s\S]+)$/i);
-  if (dmRezolvReplyMatch && dmRezolvReplyMatch[1].toLowerCase() !== "draft") {
-    const rawTarget = dmRezolvReplyMatch[1].trim();
-    const tktId = cleanCustomerTarget(rawTarget);
-    const replyMsg = dmRezolvReplyMatch[2].trim();
-    const rep = await sendRezolvReply(tktId, replyMsg, from);
-    return sendWhatsApp(from, rep);
-  }
-
-  // 3c. Rezolv View Ticket Conversation ("Karlina Grey what is she saying", "what is Karlina saying", "ticket Karlina")
-  const dmRezolvViewMatch =
-    cleanInput.match(/^(?:what\s+(?:is\s+|did\s+)?(.+?)\s+(?:saying|say|complaining\s+about)|(.+?)\s+what\s+(?:is\s+(?:she|he|they)\s+saying|did\s+(?:she|he|they)\s+say|is\s+(?:she|he|they)\s+complaining\s+about|is\s+the\s+issue|is\s+saying))\??$/i) ||
-    cleanInput.match(/^(?:view\s+ticket|check\s+ticket|ticket)\s+(.+)$/i);
-  if (dmRezolvViewMatch) {
-    const rawTarget = (dmRezolvViewMatch[1] || dmRezolvViewMatch[2] || "").trim();
-    const tktId = cleanCustomerTarget(rawTarget);
-    const rep = await getRezolvTicketConversation(tktId, from);
-    return sendWhatsApp(from, rep);
-  }
-
-  // 3d. Rezolv Close/Resolve Ticket
-  const dmRezolvCloseMatch = cleanInput.match(/^(?:close|resolve)\s+(?:ticket\s+)?(.+)$/i);
-  if (dmRezolvCloseMatch) {
-    const rawTarget = dmRezolvCloseMatch[1].trim();
-    if (!/^(?:mode|support|rezolv|resolv|inbox|tickets?)$/i.test(rawTarget)) {
-      const tktId = cleanCustomerTarget(rawTarget);
-      const rep = await closeRezolvTicket(tktId);
-      return sendWhatsApp(from, rep);
-    }
-  }
-
-  // 3e_clean. Clean idle visitor / hi tickets
-  if (
-    /\b(?:clean|clear|close|resolve|purge)\s+(?:all\s+)?(?:hi|idle|empty|visitor|greetings?)\b/i.test(cleanInput) ||
-    /\b(?:clean|clear)\s+(?:up\s+)?(?:the\s+)?(?:inbox|queue)\b/i.test(cleanInput) ||
-    /^(?:auto\s*clean|clean\s*hi|close\s*hi)$/i.test(cleanInput)
-  ) {
-    const rep = await cleanRezolvIdleGreetingTickets(25);
-    return sendWhatsApp(from, rep);
-  }
-
-  // 3e. Rezolv Customer Live Tickets (supports typos like 'rezolv mode e', 'rezolv', etc.)
-  if (/\b(?:rezolv|resolv|rezolve|resovl)\b/i.test(cleanInput) || /^(?:customer\s*tickets?|live\s*tickets?)$/i.test(cleanInput)) {
-    const rep = await getRezolvTicketsReport("active");
-    return sendWhatsApp(from, rep);
-  }
-
-  // 3. Tickets
-  if (/^(?:tickets?|urgent|pending)$/i.test(cleanInput)) {
-    const data = await fetchDatamartSupportTickets({ status: cleanInput.toLowerCase() === "urgent" ? "pending" : "pending", priority: cleanInput.toLowerCase() === "urgent" ? "urgent" : undefined, limit: 5 }, from);
-    if (!data || !data.tickets) return sendWhatsApp(from, `⚠️ Could not fetch DataMart tickets.`);
-    let out = `🎫 *[DATAMART MODE] SUPPORT QUEUE (${data.pagination?.total || data.tickets.length} total):*\n\n`;
-    data.tickets.forEach((tk, idx) => {
-      const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-      const prio = (tk.priority || "normal").toUpperCase();
-      out += `${numEmoji} *[${tk.reportId || "ID"}]* *${tk.reportReason || "Support"}* (*${prio}*)\n` +
-        `• 👤 ${tk.userId?.name || "Customer"} (${tk.phoneNumber || tk.userId?.phoneNumber || "N/A"})\n` +
-        `• 📝 ${(tk.description || "").slice(0, 85)}...\n\n`;
-    });
-    out += `💡 Reply with any *ReportID* (e.g. *RPT005135*) to view details!`;
-    return sendWhatsApp(from, out);
-  }
-
-  // 4. Failed orders
-  if (/^(?:failed|failed\s*orders)$/i.test(cleanInput)) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/failed-orders?limit=5', {}, from);
-    const orders = resp?.data?.orders || [];
-    if (orders.length === 0) return sendWhatsApp(from, `🎉 *[DATAMART MODE]* Zero failed orders in queue! All carrier dispatches green.`);
-    let out = `⚠️ *[DATAMART MODE] FAILED ORDERS:*\n\n`;
-    orders.forEach((ord, idx) => {
-      const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-      out += `${num} *[${ord._id}]* ${ord.network} ${ord.capacity || ""}GB ➔ ${ord.phoneNumber}\n` +
-        `• Reason: ${ord.failureReason || ord.status || "Failed"}\n` +
-        `• Actions: *retry ${ord._id}* | *refund ${ord._id}*\n\n`;
-    });
-    return sendWhatsApp(from, out);
-  }
-
-  // 5. Withdrawals
-  if (/^(?:withdrawals?|cashouts?)$/i.test(cleanInput)) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/withdrawals?limit=5', {}, from);
-    const list = resp?.data?.withdrawals || [];
-    if (list.length === 0) return sendWhatsApp(from, `💰 *[DATAMART MODE]* No pending withdrawal requests.`);
-    let out = `💰 *[DATAMART MODE] WITHDRAWALS:*\n\n`;
-    list.forEach((w, idx) => {
-      const num = ["1️⃣", "2️⃣", "3️⃣"][idx] || `•`;
-      out += `${num} *[${w.withdrawalId || w._id}]* GH₵ ${Number(w.requestedAmount || 0).toFixed(2)} (${(w.status || "pending").toUpperCase()})\n` +
-        `• Agent: ${w.agentId?.name || "N/A"} (${w.storeId?.storeName || "Store"})\n\n`;
-    });
-    return sendWhatsApp(from, out);
-  }
-
-  // 6. Deposits
-  if (/^(?:deposits?|momo)$/i.test(cleanInput)) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/deposits?limit=5', {}, from);
-    const list = resp?.data?.deposits || [];
-    if (list.length === 0) return sendWhatsApp(from, `💳 *[DATAMART MODE]* No recent deposits found.`);
-    let out = `💳 *[DATAMART MODE] RECENT DEPOSITS:*\n\n`;
-    list.forEach((dep, idx) => {
-      const num = ["1️⃣", "2️⃣", "3️⃣"][idx] || `•`;
-      out += `${num} *GH₵ ${Number(dep.amount || 0).toFixed(2)}* (${(dep.type || "deposit").toUpperCase()})\n` +
-        `• User: ${dep.userId?.name || "User"} (${dep.userId?.phoneNumber || "N/A"})\n` +
-        `• Wallet After: GH₵ ${Number(dep.balanceAfter || 0).toFixed(2)}\n\n`;
-    });
-    return sendWhatsApp(from, out);
-  }
-
-  // 7. Dashboard / Stats
-  if (/^(?:stats|dashboard|overview|volume)$/i.test(cleanInput)) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/dashboard', {}, from);
-    const d = resp?.data;
-    if (!d) return sendWhatsApp(from, `⚠️ Could not fetch DataMart dashboard.`);
-    const today = d.today || {};
-    const tickets = d.tickets || {};
-    return sendWhatsApp(from,
-      `📊 *[DATAMART MODE] DASHBOARD*\n\n` +
-      `• 🛒 *Orders Today:* ${(today.totalOrders || 0).toLocaleString()}\n` +
-      `• ❌ *Failed Orders:* ${today.failedOrders || 0}\n` +
-      `• 💸 *Refunds Processed:* ${today.refundsProcessed || 0}\n` +
-      `• ⏳ *Pending Tickets:* ${(tickets.pending || 0).toLocaleString()}\n\n` +
-      `💡 Type *exit* to return to normal WhatsApp mode.`
-    );
-  }
-
-  // 8. MoMo Claims (List, Pending, Stats, Search by TrxID, Sender Name, or 10-12 digit MoMo ID)
-  const isMomoClaimsCommand =
-    /^(?:momo\s*claims?|claims?|pending\s*claims?|unclaimed\s*(?:claims?|momo)|claims?\s*stats|claims?\s*summary)$/i.test(cleanInput) ||
-    /^(?:momo\s*claim|claim|trx|trxid|check\s*claim|search\s*claim|verify\s*claim|find\s*claim)\s+(.+)$/i.test(cleanInput);
-
-  const isDirectMomoTrxId = /^\d{10,13}$/.test(cleanInput.trim());
-
-  if (isMomoClaimsCommand || isDirectMomoTrxId) {
-    const report = await executeDatamartMomoClaimsQuery(cleanInput, from);
-    if (report) return sendWhatsApp(from, report);
-  }
-
-  // 9. Not Received / Complaints
-  if (/^(?:not\s*received|complaints?|missing)$/i.test(cleanInput)) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/not-received', {}, from);
-    const reports = resp?.data?.reports || [];
-    if (reports.length === 0) return sendWhatsApp(from, `🎉 *[DATAMART MODE]* No unresolved "Not Received" complaints!`);
-    let out = `⚠️ *[DATAMART MODE] NOT RECEIVED COMPLAINTS (${reports.length}):*\n\n`;
-    reports.slice(0, 5).forEach((r, idx) => {
-      const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-      out += `${num} *TrackID:* *${r.trackId || "N/A"}* | *Ref:* ${r.reference || "N/A"}\n` +
-        `• Recipient: *${r.phone}* (${r.network} ${r.capacity || ""}GB)\n` +
-        `• Order Status: *${(r.ourStatus || "pending").toUpperCase()}*\n\n`;
-    });
-    out += `💡 Reply with order reference or ID to run a delivery check!`;
-    return sendWhatsApp(from, out);
-  }
-
-  // 10. Recovery (Failed & Skipped Recovery)
-  if (/^(?:failed\s*recovery|skipped\s*recovery|recovery)$/i.test(cleanInput)) {
-    const [fResp, sResp] = await Promise.all([
-      fetchDatamartSupportEndpoint('/api/support/failed-recovery', {}, from),
-      fetchDatamartSupportEndpoint('/api/support/skipped-recovery', {}, from)
-    ]);
-    const fData = fResp?.data || {};
-    const sData = sResp?.data || {};
-    return sendWhatsApp(from,
-      `🔄 *[DATAMART MODE] RECOVERY PIPELINE STATUS*\n\n` +
-      `• ❌ *Failed Recovery:* ${fData.totalFailed || 0} batches pending (${fData.recoveredCount || 0} recovered)\n` +
-      `• ⏭️ *Skipped Recovery:* ${sData.totalSkipped || 0} batches (Value: GH₵ ${Number(sData.totalValue || 0).toFixed(2)})\n` +
-      `• 📡 *Carrier Frontier:* Unibundle: #${sData.frontier?.unibundle?.max || "N/A"} | Etopup: #${sData.frontier?.etopup?.max || "N/A"}\n\n` +
-      `💡 All automated recovery loops are active.`
-    );
-  }
-
-  // 11. Flagged Users / Risk Review
-  if (/^(?:flagged|flagged\s*users|account\s*review)$/i.test(cleanInput)) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/flagged-users', {}, from);
-    const list = Array.isArray(resp?.data) ? resp.data : (resp?.data?.users || []);
-    if (list.length === 0) return sendWhatsApp(from, `🛡️ *[DATAMART MODE]* No high-risk flagged users currently.`);
-    let out = `🚨 *[DATAMART MODE] FLAGGED USERS (${list.length}):*\n\n`;
-    list.slice(0, 5).forEach((u, idx) => {
-      const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-      out += `${num} *${u.name || "User"}* (${u.phoneNumber || u.email || "N/A"})\n` +
-        `• Reason: ${u.flagReason || u.suspicionReason || "High velocity / Suspicious activity"}\n` +
-        `• Wallet: GH₵ ${Number(u.walletBalance || 0).toFixed(2)}\n\n`;
-    });
-    return sendWhatsApp(from, out);
-  }
-
-  // 12. Audit Logs / Recent Delivery Checks
-  if (/^(?:audit\s*logs?|audits?|recent\s*checks?|delivery\s*checks?)$/i.test(cleanInput)) {
-    const resp = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent', {}, from);
-    const list = Array.isArray(resp?.data) ? resp.data : [];
-    if (list.length === 0) return sendWhatsApp(from, `🚚 *[DATAMART MODE]* No recent delivery check logs.`);
-    let out = `🚚 *[DATAMART MODE] RECENT DELIVERY CHECKS:*\n\n`;
-    list.slice(0, 5).forEach((c, idx) => {
-      const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
-      out += `${num} *Order ID:* *${c.portalOrderId || c.orderId || "N/A"}* (Batch #${c.batchNumber || "N/A"})\n` +
-        `• Result: ${c.allDelivered ? "✅ 100% Delivered" : "⚠️ Partial / Pending"} (${c.sent || 0}/${c.totalItems || 0})\n` +
-        `• Checked by: ${c.checkedBy || "Agent"} at ${c.createdAt ? new Date(c.createdAt).toLocaleTimeString("en-GB") : "Recently"}\n\n`;
-    });
-    return sendWhatsApp(from, out);
-  }
-
-  // 13. Help / Tools Menu in DataMart Mode
-  if (/^(?:help|tools|menu|commands|\?)$/i.test(cleanInput)) {
-    return sendWhatsApp(from,
-      `🏢 *DATAMART AGENT SUPPORT TOOLS CONSOLE*\n\n` +
-      `You can text any of these commands directly:\n\n` +
-      `🚚 *Delivery Check:* Send single/bulk IDs (e.g. *2313443*) OR *bulk phone numbers* (e.g. *0559143388 0241234567*)\n` +
-      `🔍 *Search / Investigate:* Send email, phone, or name\n` +
-      `🎫 *Tickets:* Send *tickets* or *urgent*\n` +
-      `❌ *Failed Orders:* Send *failed*\n` +
-      `📱 *MoMo Claims:* Send *claims* or *momo claims*\n` +
-      `⚠️ *Not Received:* Send *not received* or *complaints*\n` +
-      `🔄 *Recovery:* Send *recovery* or *failed recovery*\n` +
-      `💰 *Withdrawals:* Send *withdrawals*\n` +
-      `💳 *Deposits:* Send *deposits*\n` +
-      `🚨 *Flagged Users:* Send *flagged*\n` +
-      `📜 *Audit Logs:* Send *audits* or *recent checks*\n` +
-      `📊 *Dashboard / Stats:* Send *stats*\n` +
-      `👤 *My Account:* Send *my datamart*\n\n` +
-      `💡 Type *exit* to return to normal WhatsApp mode.`
-    );
-  }
-
+// 3a. Rezolv Draft Reply (checked first so it doesn't collide with direct reply)
+const dmDraftMatch =
+  cleanInput.match(/^(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)(?:\s+(?:for|to))?\s*(.+)?$/i) ||
+  cleanInput.match(/^(.+?)\s+(?:draft(?:\s+a)?\s+reply|suggest(?:\s+a)?\s+reply)$/i);
+if (dmDraftMatch) {
+  const targetId = (dmDraftMatch[1] || "").trim();
+  const draftRes = await generateSupportDraftReply(targetId);
+  if (!draftRes.ok) return sendWhatsApp(from, `⚠️ ${draftRes.error || "Could not find ticket to draft reply."}`);
+  await setOwnerPendingAction(from, {
+    type: "rezolv_reply",
+    ticketId: draftRes.ticketId,
+    message: draftRes.draftMessage
+  });
   return sendWhatsApp(from,
-    `🏢 *[DATAMART CONSOLE]* Command "*${cleanInput.slice(0, 20)}*" not recognized.\n\n` +
-    `💡 Send *tools* or *help* to see all available commands, or *exit* to leave console mode.`
+    `📝 *AI DRAFTED REPLY FOR ${draftRes.customerName.toUpperCase()} (${draftRes.ticketId}):*\n\n` +
+    `"${draftRes.draftMessage}"\n\n` +
+    `👉 Reply: *YES* or *SEND* to dispatch right now as *Stony 💙*!\n` +
+    `👉 Or send: *reply ${draftRes.ticketId} [your custom message]*`
   );
+}
+
+// 3b. Rezolv Live Reply to Customer ("Karlina Grey reply it will come okay" or "reply Karlina Grey it will come okay")
+const dmRezolvReplyMatch =
+  cleanInput.match(/^(?:reply|tell)\s+(?:to\s+)?(?:ticket\s+)?([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\s*[:,-]?\s+([\s\S]+)$/i) ||
+  cleanInput.match(/^([A-Za-z0-9_#.-]+(?:\s+[A-Za-z0-9_#.-]+)?)\s+(?:reply|tell)\s*[:,-]?\s+([\s\S]+)$/i);
+if (dmRezolvReplyMatch && dmRezolvReplyMatch[1].toLowerCase() !== "draft") {
+  const rawTarget = dmRezolvReplyMatch[1].trim();
+  const tktId = cleanCustomerTarget(rawTarget);
+  const replyMsg = dmRezolvReplyMatch[2].trim();
+  const rep = await sendRezolvReply(tktId, replyMsg, from);
+  return sendWhatsApp(from, rep);
+}
+
+// 3c. Rezolv View Ticket Conversation ("Karlina Grey what is she saying", "what is Karlina saying", "ticket Karlina")
+const dmRezolvViewMatch =
+  cleanInput.match(/^(?:what\s+(?:is\s+|did\s+)?(.+?)\s+(?:saying|say|complaining\s+about)|(.+?)\s+what\s+(?:is\s+(?:she|he|they)\s+saying|did\s+(?:she|he|they)\s+say|is\s+(?:she|he|they)\s+complaining\s+about|is\s+the\s+issue|is\s+saying))\??$/i) ||
+  cleanInput.match(/^(?:view\s+ticket|check\s+ticket|ticket)\s+(.+)$/i);
+if (dmRezolvViewMatch) {
+  const rawTarget = (dmRezolvViewMatch[1] || dmRezolvViewMatch[2] || "").trim();
+  const tktId = cleanCustomerTarget(rawTarget);
+  const rep = await getRezolvTicketConversation(tktId, from);
+  return sendWhatsApp(from, rep);
+}
+
+// 3d. Rezolv Close/Resolve Ticket
+const dmRezolvCloseMatch = cleanInput.match(/^(?:close|resolve)\s+(?:ticket\s+)?(.+)$/i);
+if (dmRezolvCloseMatch) {
+  const rawTarget = dmRezolvCloseMatch[1].trim();
+  if (!/^(?:mode|support|rezolv|resolv|inbox|tickets?)$/i.test(rawTarget)) {
+    const tktId = cleanCustomerTarget(rawTarget);
+    const rep = await closeRezolvTicket(tktId);
+    return sendWhatsApp(from, rep);
+  }
+}
+
+// 3e_clean. Clean idle visitor / hi tickets
+if (
+  /\b(?:clean|clear|close|resolve|purge)\s+(?:all\s+)?(?:hi|idle|empty|visitor|greetings?)\b/i.test(cleanInput) ||
+  /\b(?:clean|clear)\s+(?:up\s+)?(?:the\s+)?(?:inbox|queue)\b/i.test(cleanInput) ||
+  /^(?:auto\s*clean|clean\s*hi|close\s*hi)$/i.test(cleanInput)
+) {
+  const rep = await cleanRezolvIdleGreetingTickets(25);
+  return sendWhatsApp(from, rep);
+}
+
+// 3e. Rezolv Customer Live Tickets (supports typos like 'rezolv mode e', 'rezolv', etc.)
+if (/\b(?:rezolv|resolv|rezolve|resovl)\b/i.test(cleanInput) || /^(?:customer\s*tickets?|live\s*tickets?)$/i.test(cleanInput)) {
+  const rep = await getRezolvTicketsReport("active");
+  return sendWhatsApp(from, rep);
+}
+
+
+// 3. Tickets
+if (/^(?:tickets?|urgent|pending)$/i.test(cleanInput)) {
+  const data = await fetchDatamartSupportTickets({ status: cleanInput.toLowerCase() === "urgent" ? "pending" : "pending", priority: cleanInput.toLowerCase() === "urgent" ? "urgent" : undefined, limit: 5 }, from);
+  if (!data || !data.tickets) return sendWhatsApp(from, `⚠️ Could not fetch DataMart tickets.`);
+  let out = `🎫 *[DATAMART MODE] SUPPORT QUEUE (${data.pagination?.total || data.tickets.length} total):*\n\n`;
+  data.tickets.forEach((tk, idx) => {
+    const numEmoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+    const prio = (tk.priority || "normal").toUpperCase();
+    out += `${numEmoji} *[${tk.reportId || "ID"}]* *${tk.reportReason || "Support"}* (*${prio}*)\n` +
+      `• 👤 ${tk.userId?.name || "Customer"} (${tk.phoneNumber || tk.userId?.phoneNumber || "N/A"})\n` +
+      `• 📝 ${(tk.description || "").slice(0, 85)}...\n\n`;
+  });
+  out += `💡 Reply with any *ReportID* (e.g. *RPT005135*) to view details!`;
+  return sendWhatsApp(from, out);
+}
+
+// 4. Failed orders
+if (/^(?:failed|failed\s*orders)$/i.test(cleanInput)) {
+  const resp = await fetchDatamartSupportEndpoint('/api/support/failed-orders?limit=5', {}, from);
+  const orders = resp?.data?.orders || [];
+  if (orders.length === 0) return sendWhatsApp(from, `🎉 *[DATAMART MODE]* Zero failed orders in queue! All carrier dispatches green.`);
+  let out = `⚠️ *[DATAMART MODE] FAILED ORDERS:*\n\n`;
+  orders.forEach((ord, idx) => {
+    const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+    out += `${num} *[${ord._id}]* ${ord.network} ${ord.capacity || ""}GB ➔ ${ord.phoneNumber}\n` +
+      `• Reason: ${ord.failureReason || ord.status || "Failed"}\n` +
+      `• Actions: *retry ${ord._id}* | *refund ${ord._id}*\n\n`;
+  });
+  return sendWhatsApp(from, out);
+}
+
+// 5. Withdrawals
+if (/^(?:withdrawals?|cashouts?)$/i.test(cleanInput)) {
+  const resp = await fetchDatamartSupportEndpoint('/api/support/withdrawals?limit=5', {}, from);
+  const list = resp?.data?.withdrawals || [];
+  if (list.length === 0) return sendWhatsApp(from, `💰 *[DATAMART MODE]* No pending withdrawal requests.`);
+  let out = `💰 *[DATAMART MODE] WITHDRAWALS:*\n\n`;
+  list.forEach((w, idx) => {
+    const num = ["1️⃣", "2️⃣", "3️⃣"][idx] || `•`;
+    out += `${num} *[${w.withdrawalId || w._id}]* GH₵ ${Number(w.requestedAmount || 0).toFixed(2)} (${(w.status || "pending").toUpperCase()})\n` +
+      `• Agent: ${w.agentId?.name || "N/A"} (${w.storeId?.storeName || "Store"})\n\n`;
+  });
+  return sendWhatsApp(from, out);
+}
+
+// 6. Deposits
+if (/^(?:deposits?|momo)$/i.test(cleanInput)) {
+  const resp = await fetchDatamartSupportEndpoint('/api/support/deposits?limit=5', {}, from);
+  const list = resp?.data?.deposits || [];
+  if (list.length === 0) return sendWhatsApp(from, `💳 *[DATAMART MODE]* No recent deposits found.`);
+  let out = `💳 *[DATAMART MODE] RECENT DEPOSITS:*\n\n`;
+  list.forEach((dep, idx) => {
+    const num = ["1️⃣", "2️⃣", "3️⃣"][idx] || `•`;
+    out += `${num} *GH₵ ${Number(dep.amount || 0).toFixed(2)}* (${(dep.type || "deposit").toUpperCase()})\n` +
+      `• User: ${dep.userId?.name || "User"} (${dep.userId?.phoneNumber || "N/A"})\n` +
+      `• Wallet After: GH₵ ${Number(dep.balanceAfter || 0).toFixed(2)}\n\n`;
+  });
+  return sendWhatsApp(from, out);
+}
+
+// 7. Dashboard / Stats
+if (/^(?:stats|dashboard|overview|volume)$/i.test(cleanInput)) {
+  const resp = await fetchDatamartSupportEndpoint('/api/support/dashboard', {}, from);
+  const d = resp?.data;
+  if (!d) return sendWhatsApp(from, `⚠️ Could not fetch DataMart dashboard.`);
+  const today = d.today || {};
+  const tickets = d.tickets || {};
+  return sendWhatsApp(from,
+    `📊 *[DATAMART MODE] DASHBOARD*\n\n` +
+    `• 🛒 *Orders Today:* ${(today.totalOrders || 0).toLocaleString()}\n` +
+    `• ❌ *Failed Orders:* ${today.failedOrders || 0}\n` +
+    `• 💸 *Refunds Processed:* ${today.refundsProcessed || 0}\n` +
+    `• ⏳ *Pending Tickets:* ${(tickets.pending || 0).toLocaleString()}\n\n` +
+    `💡 Type *exit* to return to normal WhatsApp mode.`
+  );
+}
+
+// 8. MoMo Claims (List, Pending, Stats, Search by TrxID, Sender Name, or 10-12 digit MoMo ID)
+const isMomoClaimsCommand =
+  /^(?:momo\s*claims?|claims?|pending\s*claims?|unclaimed\s*(?:claims?|momo)|claims?\s*stats|claims?\s*summary)$/i.test(cleanInput) ||
+  /^(?:momo\s*claim|claim|trx|trxid|check\s*claim|search\s*claim|verify\s*claim|find\s*claim)\s+(.+)$/i.test(cleanInput);
+
+const isDirectMomoTrxId = /^\d{10,13}$/.test(cleanInput.trim());
+
+if (isMomoClaimsCommand || isDirectMomoTrxId) {
+  const report = await executeDatamartMomoClaimsQuery(cleanInput, from);
+  if (report) return sendWhatsApp(from, report);
+}
+
+// 9. Not Received / Complaints
+if (/^(?:not\s*received|complaints?|missing)$/i.test(cleanInput)) {
+  const resp = await fetchDatamartSupportEndpoint('/api/support/not-received', {}, from);
+  const reports = resp?.data?.reports || [];
+  if (reports.length === 0) return sendWhatsApp(from, `🎉 *[DATAMART MODE]* No unresolved "Not Received" complaints!`);
+  let out = `⚠️ *[DATAMART MODE] NOT RECEIVED COMPLAINTS (${reports.length}):*\n\n`;
+  reports.slice(0, 5).forEach((r, idx) => {
+    const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+    out += `${num} *TrackID:* *${r.trackId || "N/A"}* | *Ref:* ${r.reference || "N/A"}\n` +
+      `• Recipient: *${r.phone}* (${r.network} ${r.capacity || ""}GB)\n` +
+      `• Order Status: *${(r.ourStatus || "pending").toUpperCase()}*\n\n`;
+  });
+  out += `💡 Reply with order reference or ID to run a delivery check!`;
+  return sendWhatsApp(from, out);
+}
+
+// 10. Recovery (Failed & Skipped Recovery)
+if (/^(?:failed\s*recovery|skipped\s*recovery|recovery)$/i.test(cleanInput)) {
+  const [fResp, sResp] = await Promise.all([
+    fetchDatamartSupportEndpoint('/api/support/failed-recovery', {}, from),
+    fetchDatamartSupportEndpoint('/api/support/skipped-recovery', {}, from)
+  ]);
+  const fData = fResp?.data || {};
+  const sData = sResp?.data || {};
+  return sendWhatsApp(from,
+    `🔄 *[DATAMART MODE] RECOVERY PIPELINE STATUS*\n\n` +
+    `• ❌ *Failed Recovery:* ${fData.totalFailed || 0} batches pending (${fData.recoveredCount || 0} recovered)\n` +
+    `• ⏭️ *Skipped Recovery:* ${sData.totalSkipped || 0} batches (Value: GH₵ ${Number(sData.totalValue || 0).toFixed(2)})\n` +
+    `• 📡 *Carrier Frontier:* Unibundle: #${sData.frontier?.unibundle?.max || "N/A"} | Etopup: #${sData.frontier?.etopup?.max || "N/A"}\n\n` +
+    `💡 All automated recovery loops are active.`
+  );
+}
+
+// 11. Flagged Users / Risk Review
+if (/^(?:flagged|flagged\s*users|account\s*review)$/i.test(cleanInput)) {
+  const resp = await fetchDatamartSupportEndpoint('/api/support/flagged-users', {}, from);
+  const list = Array.isArray(resp?.data) ? resp.data : (resp?.data?.users || []);
+  if (list.length === 0) return sendWhatsApp(from, `🛡️ *[DATAMART MODE]* No high-risk flagged users currently.`);
+  let out = `🚨 *[DATAMART MODE] FLAGGED USERS (${list.length}):*\n\n`;
+  list.slice(0, 5).forEach((u, idx) => {
+    const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+    out += `${num} *${u.name || "User"}* (${u.phoneNumber || u.email || "N/A"})\n` +
+      `• Reason: ${u.flagReason || u.suspicionReason || "High velocity / Suspicious activity"}\n` +
+      `• Wallet: GH₵ ${Number(u.walletBalance || 0).toFixed(2)}\n\n`;
+  });
+  return sendWhatsApp(from, out);
+}
+
+// 12. Audit Logs / Recent Delivery Checks
+if (/^(?:audit\s*logs?|audits?|recent\s*checks?|delivery\s*checks?)$/i.test(cleanInput)) {
+  const resp = await fetchDatamartSupportEndpoint('/api/support/delivery-checks/recent', {}, from);
+  const list = Array.isArray(resp?.data) ? resp.data : [];
+  if (list.length === 0) return sendWhatsApp(from, `🚚 *[DATAMART MODE]* No recent delivery check logs.`);
+  let out = `🚚 *[DATAMART MODE] RECENT DELIVERY CHECKS:*\n\n`;
+  list.slice(0, 5).forEach((c, idx) => {
+    const num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"][idx] || `•`;
+    out += `${num} *Order ID:* *${c.portalOrderId || c.orderId || "N/A"}* (Batch #${c.batchNumber || "N/A"})\n` +
+      `• Result: ${c.allDelivered ? "✅ 100% Delivered" : "⚠️ Partial / Pending"} (${c.sent || 0}/${c.totalItems || 0})\n` +
+      `• Checked by: ${c.checkedBy || "Agent"} at ${c.createdAt ? new Date(c.createdAt).toLocaleTimeString("en-GB") : "Recently"}\n\n`;
+  });
+  return sendWhatsApp(from, out);
+}
+
+// 13. Direct Portal ID Delivery Check within console mode
+const cmIds = cleanInput.match(/\b\d{4,9}\b/g);
+if (cmIds && cmIds.length > 0 && /^[0-9,\s\n\r]+$/.test(cleanInput.trim())) {
+  const report = await executeDatamartDeliveryCheck(cmIds, from);
+  if (report) return sendWhatsApp(from, report);
+}
+
+// 14. Toggle Delivered Order WhatsApp Alerts within console mode (explicit mute/unmute)
+if (/^(?:mute\s*delivered\s*(?:order\s*)?alerts?|disable\s*delivered\s*(?:order\s*)?alerts?|turn\s*off\s*delivered\s*(?:order\s*)?alerts?|stop\s*delivered\s*(?:order\s*)?alerts?)$/i.test(cleanInput.trim())) {
+  await supabase.from("settings").upsert({ key: "disable_delivered_alerts", value: "true", updated_at: new Date().toISOString() }, { onConflict: "key" });
+  return sendWhatsApp(from,
+    `🔇 *[DATAMART CONSOLE] DELIVERED ORDER ALERTS MUTED!*\n\n` +
+    `You will no longer receive WhatsApp notifications whenever data orders are delivered.\n\n` +
+    `💡 To turn alerts back on anytime, send: *enable delivered alerts*`
+  );
+}
+
+if (/^(?:enable\s*delivered\s*(?:order\s*)?alerts?|unmute\s*delivered\s*(?:order\s*)?alerts?|turn\s*on\s*delivered\s*(?:order\s*)?alerts?|start\s*delivered\s*(?:order\s*)?alerts?)$/i.test(cleanInput.trim())) {
+  await supabase.from("settings").upsert({ key: "disable_delivered_alerts", value: "false", updated_at: new Date().toISOString() }, { onConflict: "key" });
+  return sendWhatsApp(from,
+    `🔔 *[DATAMART CONSOLE] DELIVERED ORDER ALERTS ENABLED!* ✅\n\n` +
+    `You will now receive a WhatsApp notification whenever a data order is delivered.\n\n` +
+    `💡 To mute alerts anytime, send: *mute delivered alerts*`
+  );
+}
+
+return sendWhatsApp(from,
+  `🏢 *[DATAMART CONSOLE]* Command "*${cleanInput.slice(0, 20)}*" not recognized.\n\n` +
+  `💡 Send *tools* or *help* to see all available commands, or *exit* to leave console mode.`
+);
 }
 
 /* =========================================================
@@ -10427,6 +12031,24 @@ const recentSenderActivity = new Map();
 async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
   try {
     let sendWhatsApp = sendDirectWhatsApp;
+    if (source === "baileys") {
+      sendWhatsApp = async (to, text) => {
+        try {
+          const rawTo = String(to).trim();
+          let cleanDigits = rawTo.replace(/\D/g, "");
+          if (cleanDigits.startsWith("0") && cleanDigits.length === 10) cleanDigits = "233" + cleanDigits.slice(1);
+          const targetJid = rawTo.includes("@") ? rawTo : `${cleanDigits}@s.whatsapp.net`;
+          let bSock = baileysChannelReady && baileysChannelSock ? baileysChannelSock : null;
+          if (bSock) {
+            await bSock.sendMessage(targetJid, { text: String(text || "").trim() });
+            return { ok: true, via: "baileys_chat", jid: targetJid };
+          }
+        } catch (bErr) {
+          console.warn("Baileys chat direct send error, falling back:", bErr.message);
+        }
+        return sendDirectWhatsApp(to, text);
+      };
+    }
     const changeVal = payload?.entry?.[0]?.changes?.[0]?.value || payload?.value || payload;
 
     // 🛡️ CRITICAL: If this is a Meta delivery/read status update, ACKNOWLEDGE AND DROP IMMEDIATELY!
@@ -10653,9 +12275,91 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
       return sendWhatsApp(from, rep);
     }
 
+    if (/^(?:test\s*group|ping\s*group|check\s*group\s*ping)$/i.test(cleanCmd)) {
+      const res = await submitFailedPortalIdToGroup("TEST-PING", { isTest: true, manual: true, force: true, callerPhone: from });
+      if (res.ok) {
+        return sendWhatsApp(from, `🔔 *TEST PING SENT!* Sent a test message to group *${res.group || "Unprocessed Orders"}*.\n\n👉 If you do NOT see it in your group, send your group's invite link here (e.g. *https://chat.whatsapp.com/...*) to re-link it.`);
+      } else {
+        return sendWhatsApp(from, `⚠️ Could not send test ping to group: ${res.reason || res.error}\n\n💡 Send your group invite link (e.g. *https://chat.whatsapp.com/...*) to re-link.`);
+      }
+    }
+
     if (/^(?:disconnect\s*group|unlink\s*group|remove\s*group|reset\s*group)$/i.test(cleanCmd)) {
       const rep = await disconnectUserFailedOrdersGroup(from);
       return sendWhatsApp(from, rep);
+    }
+
+    // WhatsApp Pairing Commands (Owner pairs primary bot session; Agents pair companion sessions)
+    if (/^(?:pair\s*whatsapp|link\s*whatsapp|connect\s*whatsapp|pair\s*bot)$/i.test(cleanCmd)) {
+      const isOwner = isOwnerPhone(from);
+      if (isOwner) {
+        await sendWhatsApp(from, "⏳ *Generating your Stony Bot WhatsApp pairing code...*");
+        const pairRes = await initBaileysChannelClient({ forceReset: true, requestPairForPhone: from });
+        if (pairRes?.pairingCode) {
+          return sendWhatsApp(from,
+            `🔐 *YOUR STONY BOT WHATSAPP PAIRING CODE:*\n\n` +
+            `👉 Code: *${pairRes.pairingCode}*\n\n` +
+            `📲 *Link your phone in 10 seconds:*\n` +
+            `1. Open WhatsApp on your phone\n` +
+            `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
+            `3. Tap *Link a Device*\n` +
+            `4. Tap *Link with phone number instead*\n` +
+            `5. Enter: *${pairRes.pairingCode}*\n\n` +
+            `✅ Once linked, all failed order IDs and channel broadcasts will send directly from your account (Stony)!`
+          );
+        } else if (pairRes?.ready) {
+          return sendWhatsApp(from, `✅ *Your Stony Bot WhatsApp account is already linked and active!*`);
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please try again in 10 seconds."}`);
+        }
+      } else {
+        const pairRes = await getOrInitAgentBaileysClient(from, { requestPair: true });
+        if (pairRes?.pairingCode) {
+          return sendWhatsApp(from,
+            `🔑 *YOUR WHATSAPP PAIRING CODE:*\n\n` +
+            `👉 Code: *${pairRes.pairingCode}*\n\n` +
+            `📲 *How to link on your phone:*\n` +
+            `1. Open WhatsApp on your phone\n` +
+            `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
+            `3. Tap *Link a Device*\n` +
+            `4. Tap *Link with phone number instead*\n` +
+            `5. Enter the code above: *${pairRes.pairingCode}*\n\n` +
+            `✅ Once linked, any failed orders from your account will post into the group with *your own name and number*!\n` +
+            `*(No notifications are sent to the group upon connecting).*`
+          );
+        } else if (pairRes?.ready) {
+          return sendWhatsApp(from, `✅ *Your WhatsApp account is already linked and ready!*\nFailed order IDs are automatically posted to your group under your own number.`);
+        } else {
+          return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please ensure your phone number is valid."}`);
+        }
+      }
+    }
+
+    if (/^(?:unlink\s*whatsapp|disconnect\s*whatsapp|logout\s*whatsapp)$/i.test(cleanCmd)) {
+      if (isOwnerPhone(from)) {
+        await initBaileysChannelClient({ forceReset: true });
+        return sendWhatsApp(from, `🔌 *Stony Bot WhatsApp session unlinked!*\nText *pair whatsapp* whenever you want to re-link.`);
+      } else {
+        await getOrInitAgentBaileysClient(from, { forceReset: true });
+        return sendWhatsApp(from, `🔌 *Your WhatsApp session has been unlinked!*\nFailed orders will now be submitted using the default bot.`);
+      }
+    }
+
+    if (/^(?:pair\s*status|whatsapp\s*status|wa\s*status)$/i.test(cleanCmd)) {
+      if (isOwnerPhone(from)) {
+        if (baileysChannelReady && baileysChannelSock) {
+          return sendWhatsApp(from, `✅ *Stony Bot WhatsApp Status: LINKED & ACTIVE*\nConnected as Stony (${from}). Failed orders are submitted to the group under your account.`);
+        } else {
+          return sendWhatsApp(from, `⚪ *Stony Bot WhatsApp Status: NOT LINKED*\nText *pair whatsapp* to generate a pairing code and link your phone.`);
+        }
+      } else {
+        const checkRes = await getOrInitAgentBaileysClient(from);
+        if (checkRes?.ready) {
+          return sendWhatsApp(from, `✅ *Your WhatsApp Account Status: LINKED*\nFailed order submissions to your group will show as sent by your account.`);
+        } else {
+          return sendWhatsApp(from, `⚪ *Your WhatsApp Account Status: NOT LINKED*\nSubmissions currently use the default bot.\n\nType *pair whatsapp* to link your account.`);
+        }
+      }
     }
 
     // Manual submission of Portal ID to group (e.g. "submit 561077" or "submit portal id 561077 to group")
@@ -10675,6 +12379,26 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
       } else {
         return sendWhatsApp(from, `⚠️ Could not submit Portal ID *${mId}* to group: ${subRes.reason || subRes.error}`);
       }
+    }
+
+    // ── TRIGGER FAILED & >24H PORTAL ID GROUP SUBMISSION SCAN ──
+    const scanAllFailedMatch =
+      cleanCmd.match(/^(?:submit|scan|post)\s+(?:all\s+)?(?:failed|unprocessed|>24|over\s*24h?)(?:\s+(?:orders?|ids?))?$/i) ||
+      cleanCmd.match(/^(?:check\s+and\s+submit|submit\s+failed\s+and\s+>24|submit\s+>24\s+and\s+failed)$/i);
+
+    if (scanAllFailedMatch) {
+      await sendWhatsApp(from, "⏳ Scanning DataMart & database for failed orders and orders delayed > 24 hours... Submitting numeric Portal IDs to group now!");
+      const scanRes = await scanAndSubmitFailedAndDelayedPortalIds({ callerPhone: from });
+      const totalSubmitted = (scanRes.failedSubmitted || 0) + (scanRes.delayedSubmitted || 0);
+      const rep = `🚀 *DATAMART GROUP SUBMISSION COMPLETE!* ✅\n━━━━━━━━━━━━━━━━━━━━\n` +
+        `• 📦 *Orders Audited:* ${scanRes.scanned || 0}\n` +
+        `• ❌ *Failed IDs Submitted:* ${scanRes.failedSubmitted || 0}\n` +
+        `• ⏳ *> 24h IDs Submitted:* ${scanRes.delayedSubmitted || 0}\n` +
+        `• 🚀 *Total IDs Sent to Group:* *${totalSubmitted}*\n` +
+        `• ℹ️ *Skipped (Recent dupes):* ${scanRes.skipped || 0}\n\n` +
+        (scanRes.portalIds.length > 0 ? `🆔 *Submitted Portal IDs:* ${scanRes.portalIds.join(", ")}\n\n` : "") +
+        `👥 *Target Group:* Unprocessed Orders (${DEFAULT_FAILED_ORDERS_GROUP_JID})`;
+      return sendWhatsApp(from, rep);
     }
 
     // ── EXPLICIT REZOLV CONNECT / LINK ACCOUNT COMMAND ──
@@ -13918,6 +15642,24 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
         );
       }
 
+      // Direct Action Command: Scan & Submit Failed and >24h Orders to Group
+      const dmSubmitFailedMatch = cmdText.match(/^(?:datamart|dm)?\s*(?:submit|scan|post)\s+(?:all\s+)?(?:failed|unprocessed|>24|over\s*24h?)(?:\s+(?:orders?|ids?))?$/i) ||
+        cmdText.match(/^(?:submit\s+failed\s+and\s+>24|submit\s+>24\s+and\s+failed)$/i);
+      if (dmSubmitFailedMatch) {
+        await sendWhatsApp(from, "⏳ Scanning DataMart & database for failed orders and orders delayed > 24 hours... Submitting numeric Portal IDs to group now!");
+        const scanRes = await scanAndSubmitFailedAndDelayedPortalIds({ callerPhone: from });
+        const totalSubmitted = (scanRes.failedSubmitted || 0) + (scanRes.delayedSubmitted || 0);
+        const rep = `🚀 *DATAMART GROUP SUBMISSION COMPLETE!* ✅\n━━━━━━━━━━━━━━━━━━━━\n` +
+          `• 📦 *Orders Audited:* ${scanRes.scanned || 0}\n` +
+          `• ❌ *Failed IDs Submitted:* ${scanRes.failedSubmitted || 0}\n` +
+          `• ⏳ *> 24h IDs Submitted:* ${scanRes.delayedSubmitted || 0}\n` +
+          `• 🚀 *Total IDs Sent to Group:* *${totalSubmitted}*\n` +
+          `• ℹ️ *Skipped (Recent dupes):* ${scanRes.skipped || 0}\n\n` +
+          (scanRes.portalIds.length > 0 ? `🆔 *Submitted Portal IDs:* ${scanRes.portalIds.join(", ")}\n\n` : "") +
+          `👥 *Target Group:* Unprocessed Orders (${DEFAULT_FAILED_ORDERS_GROUP_JID})`;
+        return sendWhatsApp(from, rep);
+      }
+
       // Direct Action Command: DataMart Failed Orders
       const dmFailedOrdersMatch = cmdText.match(/^(?:datamart|dm)\s*(?:support\s*)?failed(?:\s*orders)?$/i);
       if (dmFailedOrdersMatch) {
@@ -14030,6 +15772,23 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
         out += `💡 To check a specific order batch: *dm delivery check [portalId]*\n` +
           `💡 To view undelivered complaints: *dm not received*`;
         return sendWhatsApp(from, out);
+      }
+
+      // Direct Action Command: DataMart Scan Delivered (Orders delivered on carrier but showing processing in DB)
+      const isDmScanAllSystem = /^(?:datamart|dm)\s*(?:scan\s*all(?:\s+delivered|\s+system)?|scan\s*system|scan\s*delivered\s+all|scan\s*delivered\s+system)$/i.test(cmdText);
+      const dmScanDeliveredMatch = isDmScanAllSystem || cmdText.match(/^(?:datamart|dm)\s*(?:scan\s*delivered|delivered\s*scan|unapplied\s*deliveries)(?:\s+(.+))?$/i);
+      if (dmScanDeliveredMatch) {
+        const dateArg = isDmScanAllSystem ? "all" : (dmScanDeliveredMatch[1] || null);
+        const report = await scanDatamartUnappliedDelivered(dateArg, from);
+        if (report) return sendWhatsApp(from, report);
+      }
+
+      // Direct Action Command: DataMart Mark / Apply Delivered
+      const dmMarkDeliveredMatch = cmdText.match(/^(?:datamart|dm)\s*(?:mark\s*delivered|apply\s*delivered|sync\s*delivered)(?:\s+(.+))?$/i);
+      if (dmMarkDeliveredMatch) {
+        const targetArg = dmMarkDeliveredMatch[1] || "all";
+        const report = await markDatamartDeliveredBatches(targetArg, from);
+        if (report) return sendWhatsApp(from, report);
       }
 
       // Direct Action Command: DataMart Failed Recovery
@@ -15010,6 +16769,15 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
         await saveCustomerSession(from, { step: 70 });
         return playScratchCard(from);
       } else {
+        const normInputPhone = normalizePhone(text);
+        if (normInputPhone && normInputPhone.length === 10 && normInputPhone.startsWith("0")) {
+          return trackOrders(from, normInputPhone);
+        }
+        const isRefOrId = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(text) ||
+          /^\d{4,9}$/.test(text.trim());
+        if (isRefOrId) {
+          return trackOrders(from, text.trim());
+        }
         return handleCustomerAi(from, text);
       }
 
@@ -15643,8 +17411,7 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
       const isRefOrId = /\b(?:AGT-[A-Za-z0-9_-]+|AGTTXN[A-Za-z0-9]+|D1G[A-Za-z0-9_-]+|ORD-[A-Za-z0-9_-]+|WS-[A-Za-z0-9_-]+)\b/i.test(text) ||
         /^[A-Za-z0-9_-]{5,35}$/.test(text.trim());
       if (isRefOrId) {
-        const report = await executeDatamartSearch(text.trim(), from);
-        if (report) return sendWhatsApp(from, report);
+        return trackOrders(from, text.trim());
       }
       return sendWhatsApp(from, `❌ Invalid input.\n\nPlease enter a valid Ghana phone number (e.g. 0241234567) or order reference (e.g. AGT-MTN-...).`);
     }
@@ -15990,6 +17757,11 @@ app.post("/paystack-webhook", async (req, res) => {
           const vRes = await axios.post(verifyEndpoint, { reference: ref }, { timeout: 25000 });
           if (vRes.status >= 200 && vRes.status < 300) {
             recordWebhookLog("WEBSITE_DATA_ORDER_VERIFIED_VIA_API", { ref, status: vRes.data?.status });
+            try {
+              await notifyCustomerOrderPlaced(webOrder || vRes.data?.order, paidAmount, ref);
+            } catch (custErr) {
+              console.warn("notifyCustomerOrderPlaced error:", custErr.message);
+            }
             return;
           }
         } catch (vErr) {
@@ -16106,13 +17878,10 @@ app.post("/paystack-webhook", async (req, res) => {
           }
         }
 
-        // Notify WhatsApp user if ordered via WhatsApp bot
-        if (webOrder.whatsapp_phone) {
-          sendWhatsApp(
-            webOrder.whatsapp_phone,
-            `✅ PAYMENT RECEIVED! 🎉\n\n📦 Package: ${webOrder.capacity || capacity}GB ${webOrder.network || ""}\n💰 Amount Paid: ₵${paidAmount.toFixed(2)}\n📱 Recipient: ${phone}\n\nYour data has been sent and will land shortly!\n\nSEND: hi / hello / start To buy again.`
-          ).catch(() => { });
-        }
+        // Notify customer on WhatsApp that their order has been placed
+        try {
+          await notifyCustomerOrderPlaced(webOrder, paidAmount, webOrder.reference || ref);
+        } catch (_) { }
 
         // Send instant WhatsApp order alert to admin directly from live bot!
         try {
@@ -16868,7 +18637,9 @@ app.get("/admin", (req, res) => {
 
 app.post("/api/send-admin-alert", async (req, res) => {
   try {
-    const { text, to } = req.body || {};
+    const rawBody = req.body || {};
+    const text = rawBody.text || rawBody.message || rawBody.body || rawBody.msg || "";
+    const to = rawBody.to || rawBody.phone || rawBody.target || rawBody.recipient || "";
     if (!text) return res.status(400).json({ error: "Missing alert text" });
     let delivery = null;
     if (to) {
@@ -16880,6 +18651,22 @@ app.post("/api/send-admin-alert", async (req, res) => {
     } else {
       delivery = await sendAdminWhatsApp(text);
     }
+    return res.json({ ok: true, delivery });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message });
+  }
+});
+
+app.post(["/api/send-customer-message", "/api/send-message"], async (req, res) => {
+  try {
+    const rawBody = req.body || {};
+    const text = rawBody.text || rawBody.message || rawBody.body || rawBody.msg || "";
+    const to = rawBody.to || rawBody.phone || rawBody.target || rawBody.recipient || "";
+    if (!text || !to) return res.status(400).json({ error: "Missing recipient (to) or message (text)" });
+    if (String(to).replace(/\D/g, "").endsWith("599599254")) {
+      return res.json({ ok: true, suppressed: true });
+    }
+    const delivery = await sendWhatsApp(to, text);
     return res.json({ ok: true, delivery });
   } catch (err) {
     return res.status(500).json({ error: err?.message });
@@ -16903,6 +18690,128 @@ app.get("/api/test-wa-status", async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/debug-group", async (req, res) => {
+  try {
+    const code = req.query.code || "KXfhdb8dg7A6cLvehhGacB";
+    if (!baileysChannelSock) {
+      await initBaileysChannelClient();
+      for (let i = 0; i < 20; i++) {
+        if (baileysChannelReady && baileysChannelSock) break;
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
+    let inviteInfo = null;
+    let inviteErr = null;
+    let allGroups = null;
+    let joinRes = null;
+    let joinErr = null;
+    let groupMeta = null;
+    let directSendResult = null;
+    let directSendErr = null;
+    let usyncDevicesTest = null;
+    let usyncErr = null;
+    if (baileysChannelSock) {
+      try {
+        if (typeof baileysChannelSock.getUSyncDevices === "function") {
+          usyncDevicesTest = await baileysChannelSock.getUSyncDevices([
+            "99609116471331@lid",
+            "212094628679827@lid",
+            "190972063387657@lid",
+            "138646325850210@lid"
+          ], false, false);
+        }
+      } catch (uErr) {
+        usyncErr = uErr.message;
+      }
+    }
+
+    if (baileysChannelSock) {
+      try {
+        inviteInfo = await baileysChannelSock.groupGetInviteInfo(code);
+      } catch (e) {
+        inviteErr = e.message;
+      }
+      try {
+        joinRes = await baileysChannelSock.groupAcceptInvite(code);
+      } catch (e) {
+        joinErr = e.message;
+      }
+      try {
+        groupMeta = await baileysChannelSock.groupMetadata("120363411273230975@g.us");
+      } catch (e) {
+        groupMeta = { error: e.message };
+      }
+      try {
+        const full = await baileysChannelSock.groupFetchAllParticipating();
+        allGroups = {};
+        for (const [id, meta] of Object.entries(full || {})) {
+          allGroups[id] = {
+            subject: meta.subject,
+            participantsCount: (meta.participants || []).length,
+            creation: meta.creation
+          };
+        }
+      } catch (e) {
+        allGroups = { error: e.message };
+      }
+
+      if (req.query.sendText) {
+        try {
+          const myLid = baileysChannelSock.user?.lid ? baileysChannelSock.user.lid.replace(/:.+@/, "@") : baileysChannelSock.user?.lid;
+          directSendResult = await baileysChannelSock.sendMessage("120363411273230975@g.us", {
+            text: String(req.query.sendText)
+          }, {
+            userJid: myLid
+          });
+        } catch (sErr) {
+          directSendErr = {
+            message: sErr.message,
+            stack: sErr.stack,
+            data: sErr.data || null,
+            name: sErr.name
+          };
+        }
+      }
+    }
+
+    return res.json({
+      baileysReady: baileysChannelReady,
+      sockMe: baileysChannelSock?.user || null,
+      code,
+      inviteInfo,
+      inviteErr,
+      joinRes,
+      joinErr,
+      groupMeta,
+      allGroups,
+      usyncDevicesTest,
+      usyncErr,
+      directSendResult,
+      directSendErr
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/recent-group-messages", (req, res) => {
+  return res.json({
+    count: recentBaileysMessages.length,
+    messages: recentBaileysMessages
+  });
+});
+
+app.get("/api/scan-and-submit-failed", async (req, res) => {
+  try {
+    const force = req.query.force === "true" || req.query.force === "1";
+    const scanRes = await scanAndSubmitFailedAndDelayedPortalIds({ force, callerPhone: req.query.phone || null });
+    return res.json({ ok: true, ...scanRes });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -17131,10 +19040,89 @@ async function notifyAgentNewOrder(order) {
   } catch (_) { }
 }
 
+async function notifyCustomerOrderPlaced(target, paidAmount, ref) {
+  if (!target && !ref) return;
+  const reference = ref || target?.reference || target?.ref || "N/A";
+  
+  // Guard against duplicate customer alerts for same reference
+  const refKey = `cust_placed_${reference.toUpperCase()}`;
+  if (deliveredAlertSentRefs.has(refKey)) return;
+  deliveredAlertSentRefs.add(refKey);
+
+  const notesStr = String(target?.notes || "");
+  const waMatch = notesStr.match(/\[whatsapp_phone:(\d+)\]/i) || notesStr.match(/\[phone:(\d+)\]/i);
+  let custPhone = target?.whatsapp_phone || target?.customer_phone || target?.phone || (waMatch ? waMatch[1] : null) || target?.phone_number || target?.recipient_phone;
+
+  if (!custPhone && reference && supabase) {
+    try {
+      const { data: oRow } = await supabase
+        .from("orders")
+        .select("phone, customer_phone, whatsapp_phone, recipient_phone, phone_number, notes, network, capacity, amount, store_name")
+        .eq("reference", reference)
+        .maybeSingle();
+      if (oRow) {
+        const oNotes = String(oRow.notes || "");
+        const oMatch = oNotes.match(/\[whatsapp_phone:(\d+)\]/i) || oNotes.match(/\[phone:(\d+)\]/i);
+        custPhone = oRow.whatsapp_phone || oRow.customer_phone || oRow.phone || (oMatch ? oMatch[1] : null) || oRow.recipient_phone || oRow.phone_number;
+        if (!target) target = oRow;
+      }
+    } catch (_) {}
+  }
+
+  if (!custPhone) return;
+  const cleanDigits = String(custPhone).replace(/\D/g, "");
+  if (!cleanDigits || cleanDigits.endsWith("599599254")) return;
+
+  const capacity = String(target?.capacity || target?.bundle || "1").replace(/GB/i, "").trim();
+  const network = String(target?.network || "MTN").toUpperCase().trim();
+  const recipient = target?.recipient_phone || target?.phone_number || custPhone;
+  const cleanRecipient = String(recipient).startsWith("233") ? "0" + String(recipient).slice(3) : recipient;
+  const amtNum = Number(paidAmount || target?.amount || 0);
+  const amountStr = amtNum > 0 ? amtNum.toFixed(2) : "0.00";
+
+  const noteStoreMatch = notesStr.match(/\[store:([^\]]+)\]/i);
+  const storeName = target?.store_name || (noteStoreMatch ? noteStoreMatch[1].trim() : "DataOne GH");
+
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit" });
+
+  const customerMsg =
+`✅ *PAYMENT RECEIVED!* 🎉
+━━━━━━━━━━━━━━━━━━━━━
+🏪 *Store:* ${storeName}
+🆔 *Order Ref:* ${reference}
+📶 *Package:* ${capacity}GB ${network} Data
+📱 *Recipient:* ${cleanRecipient}
+💰 *Amount Paid:* GH₵ ${amountStr}
+⚡ *Status:* Order placed & processing ⏳
+⏰ *Time:* ${timeStr}
+
+Your data bundle order has been placed and is being dispatched! It will land on your phone shortly. 📶
+
+💡 *Track order:* https://www.data1gh.com/track?ref=${encodeURIComponent(reference)}
+Reply *hi* to return to main menu.`;
+
+  await sendWhatsApp(custPhone, customerMsg);
+  console.log(`📲 [CUSTOMER NOTIFIED] Order placed confirmation sent to ${custPhone} (Ref: ${reference})`);
+}
+
 async function notifyOrderDelivered(order) {
   if (!order || !order.reference) return;
   const ref = String(order.reference).trim();
   const refKey = ref.toUpperCase();
+
+  // Check if owner has disabled/muted delivered order alerts
+  try {
+    const { data: sMute } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", "disable_delivered_alerts")
+      .maybeSingle();
+    if (sMute && (String(sMute.value).toLowerCase() === "true" || sMute.value === true)) {
+      console.log(`🔇 [DELIVERED ALERT MUTED] Skipped delivered alert for ${ref} per settings`);
+      return;
+    }
+  } catch (_) { }
 
   // 1. Immediate synchronous in-memory lock
   if (deliveredAlertSentRefs.has(refKey)) return;
@@ -17376,15 +19364,28 @@ async function notifyOrderDelivered(order) {
     } catch (_) { }
   }
 
-  // If customer ordered on the WhatsApp bot, notify them too
-  const customerWaPhone = order.phone || (order.notes && order.notes.match(/\[whatsapp_phone:(\d+)\]/)?.[1]);
+  // Send WhatsApp delivery confirmation to customer (100% Free via Bot / Baileys)
+  const customerWaPhone =
+    order.whatsapp_phone ||
+    order.customer_phone ||
+    order.phone ||
+    (order.notes && (order.notes.match(/\[whatsapp_phone:(\d+)\]/i)?.[1] || order.notes.match(/\[phone:(\d+)\]/i)?.[1])) ||
+    order.recipient_phone ||
+    order.phone_number;
+
   if (customerWaPhone) {
-    try {
-      await sendWhatsApp(
-        customerWaPhone,
-        `✅ *YOUR DATA HAS LANDED!* 🎉\n━━━━━━━━━━━━━━━━━━━━━\nYour data bundle has been successfully delivered by the network! 📶\n\n🆔 *Order Ref:* ${ref}\n📦 *Bundle:* ${itemDesc}\n📱 *Delivered To:* ${cleanPhone}\n\nEnjoy your browsing! Reply *HI* to buy again.`
-      );
-    } catch (_) { }
+    const cleanCustDigits = String(customerWaPhone).replace(/\D/g, "");
+    if (cleanCustDigits && !cleanCustDigits.endsWith("599599254")) {
+      try {
+        await sendWhatsApp(
+          customerWaPhone,
+          `🎉 *DATA ORDER DELIVERED!* ✅\n━━━━━━━━━━━━━━━━━━━━━\n🏪 *Shop:* ${shopName}\n🆔 *Order Ref:* ${ref}\n📶 *Package:* ${itemDesc}\n📱 *Delivered To:* ${cleanPhone}\n💰 *Amount:* GHS ${amount}\n⚡ *Status:* Delivered Successfully! ✅\n⏰ *Delivered At:* ${dateStr} ${timeStr}\n\n📶 Your data bundle has been successfully delivered by the network! Kindly check your balance (MTN: *124#) to confirm.\n\nThank you for choosing ${shopName}! 💙\nReply *hi* to buy again.`
+        );
+        console.log(`📲 [CUSTOMER NOTIFIED] Delivery confirmation sent to ${customerWaPhone} (Ref: ${ref})`);
+      } catch (custErr) {
+        console.warn("Error sending customer delivery notification:", custErr.message);
+      }
+    }
   }
 }
 
@@ -17397,8 +19398,8 @@ async function runActiveDeliveryWatcher() {
   WATCHER_TELEMETRY.deliveryWatcherRuns++;
   WATCHER_TELEMETRY.lastDeliveryWatcherAt = new Date().toLocaleTimeString("en-GB", { timeZone: "Africa/Accra", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   try {
-    // Zero-egress optimization: normally query only the last 4 hours (limit 10); once every 10 ticks (~15 mins) check 24 hours
-    const lookbackMs = deliveryWatcherTick % 10 === 0 ? 24 * 60 * 60 * 1000 : 4 * 60 * 60 * 1000;
+    // Active delivery check: query up to 50 pending orders in the last 6 hours (24h every 10 ticks)
+    const lookbackMs = deliveryWatcherTick % 10 === 0 ? 24 * 60 * 60 * 1000 : 6 * 60 * 60 * 1000;
     const cutoffIso = new Date(Date.now() - lookbackMs).toISOString();
     const { data: pendingOrders, error } = await supabase
       .from("orders")
@@ -17407,7 +19408,7 @@ async function runActiveDeliveryWatcher() {
       .in("delivery_status", ["processing", "pending", "waiting", "in_progress"])
       .gte("created_at", cutoffIso)
       .order("created_at", { ascending: false })
-      .limit(10);
+      .limit(50);
 
     if (error || !Array.isArray(pendingOrders) || pendingOrders.length === 0) {
       isDeliveryWatcherRunning = false;
@@ -17451,13 +19452,6 @@ async function runActiveDeliveryWatcher() {
             status: "delivered",
             updated_at: new Date().toISOString(),
           }).eq("id", ord.id);
-
-          try {
-            data1db.getClient().from("orders").update({
-              delivery_status: "delivered",
-              datamart_status: "completed",
-            }).eq("id", ord.id);
-          } catch (_) { }
 
           await notifyOrderDelivered({
             ...ord,
@@ -17712,7 +19706,12 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.status(200).send("Bot is alive!");
+  res.status(200).json({
+    status: "alive",
+    watchers: WATCHER_TELEMETRY,
+    baileysReady: Boolean(baileysChannelReady && baileysChannelSock),
+    timestamp: new Date().toISOString()
+  });
 });
 
 app.listen(PORT, () => {
