@@ -6654,6 +6654,43 @@ async function getRealDatamartDeliveryStatus(referenceOrOrderId) {
     }
   } catch (_) { }
 
+  // Primary & Fallback: Query via authenticated DataMart support search & carrier delivery check
+  try {
+    const dmRes = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(cleanId)}`);
+    const dmOrders = dmRes?.data?.results?.orders || (Array.isArray(dmRes?.data?.results) ? dmRes.data.results.filter(x => x.type === "order" || x.network) : []);
+    const foundOrd = dmOrders?.find(o =>
+      String(o.apiOrderId || o.exportTracking?.portalId || o.portalOrderId) === cleanId ||
+      String(o.geonetReference || o.reference) === cleanId ||
+      String(o._id) === cleanId
+    ) || dmOrders?.[0];
+
+    if (foundOrd) {
+      const st = String(foundOrd.status || foundOrd.orderStatus || foundOrd.deliveryStatus || "").toLowerCase();
+      if (st === "delivered" || st === "completed" || st === "done" || st === "fulfilled") {
+        return { deliveryStatus: "delivered", rawStatus: st };
+      }
+      if (st === "failed" || st === "cancelled" || st === "rejected") {
+        return { deliveryStatus: "failed", rawStatus: st };
+      }
+
+      const pId = foundOrd.exportTracking?.portalId || foundOrd.apiOrderId || foundOrd.trackingId || foundOrd.portalOrderId;
+      if (pId && /^\d{4,9}$/.test(String(pId))) {
+        const carrierAudit = await checkDatamartCarrierRaw(pId, null, 12);
+        if (carrierAudit) {
+          if (carrierAudit.allDelivered || carrierAudit.status === "delivered") {
+            return { deliveryStatus: "delivered", rawStatus: "delivered", carrierAudit };
+          }
+          if (carrierAudit.status === "failed" || (carrierAudit.failed && carrierAudit.failed > 0)) {
+            return { deliveryStatus: "failed", rawStatus: "failed", carrierAudit };
+          }
+        }
+      }
+
+      if (st === "waiting") return { deliveryStatus: "waiting", rawStatus: st };
+      return { deliveryStatus: "processing", rawStatus: st || "processing" };
+    }
+  } catch (_) { }
+
   if (keyCandidates.length === 0) return { deliveryStatus: "processing", rawStatus: "processing" };
 
   const urls = [
@@ -7437,8 +7474,8 @@ function extractDatamartPortalId(ord) {
     }
   }
 
-  // 3. Check portalOrderId
-  const pOrdId = ord.portalOrderId;
+  // 3. Check portalOrderId or portal_order_id
+  const pOrdId = ord.portalOrderId || ord.portal_order_id;
   if (pOrdId && pOrdId !== ref && pOrdId !== ord._id && pOrdId !== "pending") {
     const clean = String(pOrdId).trim();
     if (!/^(?:AGT-|WS-|D1G|ORD-)/i.test(clean)) {
@@ -7446,7 +7483,13 @@ function extractDatamartPortalId(ord) {
     }
   }
 
-  // 4. Check datamart_reference if numeric
+  // 4. Check trackingId or tracking_id (DataMart direct trackingId)
+  const trkId = ord.trackingId || ord.tracking_id;
+  if (trkId && trkId !== ref && trkId !== ord._id && /^\d{4,9}$/.test(String(trkId).trim())) {
+    return String(trkId).trim();
+  }
+
+  // 5. Check datamart_reference if numeric
   if (ord.datamart_reference && /^\d{4,9}$/.test(String(ord.datamart_reference))) {
     return String(ord.datamart_reference).trim();
   }
@@ -7508,9 +7551,9 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null, maxPol
     const jobId = startRes?.data?.jobId || startRes?.jobId;
     if (!jobId) return null;
 
-    const actualMax = Math.max(1, Number(maxPolls || 25));
+    const actualMax = Math.max(10, Number(maxPolls || 25));
     for (let i = 0; i < actualMax; i++) {
-      await new Promise(r => setTimeout(r, 800));
+      await new Promise(r => setTimeout(r, 500));
       const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
       const st = jobRes?.data?.jobStatus;
       if (st === 'done' || st === 'completed') {
@@ -7603,7 +7646,7 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
   // 1. Direct DataMart Portal Delivery Check if we have a numeric Track ID (e.g. 561077)
   if (trackCandidate && /^\d{4,9}$/.test(trackCandidate)) {
     try {
-      const carrierAudit = await checkDatamartCarrierRaw(trackCandidate, callerPhone, isFastDraft ? 3 : 25);
+      const carrierAudit = await checkDatamartCarrierRaw(trackCandidate, callerPhone, isFastDraft ? 12 : 25);
       if (carrierAudit && carrierAudit.found) {
         return {
           found: true,
@@ -7669,7 +7712,7 @@ async function trackSupportDeliveryTarget(targetPhoneOrRef, callerPhone = null, 
   // If a valid numeric or carrier portalId is found, use it to run live carrier check!
   if (resolvedPortalId && /^\d{4,9}$/.test(String(resolvedPortalId))) {
     try {
-      const auditRes = await checkDatamartCarrierRaw(resolvedPortalId, callerPhone, isFastDraft ? 3 : 25);
+      const auditRes = await checkDatamartCarrierRaw(resolvedPortalId, callerPhone, isFastDraft ? 12 : 25);
       if (auditRes && auditRes.found) {
         return {
           found: true,
@@ -8339,20 +8382,34 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
           const isCustPhoneInFailed = targetCustPhone && targetCustPhone.length >= 9 && failedBatchItems.some(it => norm9(it.phone) === targetCustPhone);
           const isCustPhoneInSent = targetCustPhone && targetCustPhone.length >= 9 && sentBatchItems.some(it => norm9(it.phone) === targetCustPhone);
 
-          if (batchItems.length > 0 && isCustPhoneInSent && !isCustPhoneInFailed) {
-            trackingDiagnostic = `✅ ALREADY SENT to customer line (${ph}) · ${pidDisplay} (${liveTrack.failed || failedBatchItems.length} other lines failed in batch & submitted to team group)`;
-            draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Your data bundle has already been successfully sent and delivered to your number (${ph})! Kindly dial *124# or *126# to verify your main balance. Thank you!`;
-          } else {
-            trackingDiagnostic = `❌ FAILED on ${brand} · ${pidDisplay} (Ref: ${refCode})${liveTrack.failed ? ` (${liveTrack.failed} Failed)` : ""}`;
-            draftText = `Hello ${smart.firstName}, we have checked your order on ${brand} and noticed a delivery issue on your phone number (${ph}). Don't worry at all, we are working on it and re-processing it for you right away so your data delivers immediately. Thank you for your patience!`;
+          // Submit failed ID to WhatsApp group automatically per operational mandate
+          if (portalId && /^\d{4,9}$/.test(String(portalId))) {
+            submitFailedPortalIdToGroup(portalId, {
+              reason: "customer_support_delivery_failed",
+              failedCount: liveTrack.failed || failedBatchItems.length || 1,
+              totalItems: liveTrack.totalItems || 1,
+              failedPhones: failedBatchItems.map(it => it.phone),
+              callerPhone: from
+            }).catch(e => console.warn("Submit failed ticket ID to group error:", e.message));
           }
-        } else if (st === "delivered" || st === "completed" || st === "success") {
-          if (liveTrack.isCarrierAudit) {
-            trackingDiagnostic = `✅ ALL DELIVERED on ${brand} · ${pidDisplay}${batchPart} (${liveTrack.sent || liveTrack.totalItems} Sent)`;
-            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and it is confirmed ALL DELIVERED. Kindly dial *124# or *126# to verify your main balance. Thank you!`;
+
+          if (batchItems.length > 0 && isCustPhoneInSent && !isCustPhoneInFailed) {
+            mainIssue = `✅ Customer line DELIVERED (${ph}) · ${pidDisplay} (${liveTrack.failed || failedBatchItems.length} other lines failed in batch — Submitted to Group)`;
+            trackingDiagnostic = `✅ ALREADY DELIVERED to customer line (${ph}) · ${pidDisplay}${batchPart} (${liveTrack.failed || failedBatchItems.length} other lines failed in batch ➔ 🚀 Submitted to team group)`;
+            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Your data bundle has already been successfully delivered to your number (${ph})! Kindly dial *124# or *126# to verify your main balance. Thank you!`;
           } else {
-            trackingDiagnostic = `✅ DELIVERED on ${net} to ${ph} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${smart.firstName}, we have tracked your order (${refCode}) on ${brand} and it is confirmed DELIVERED on the ${net} network to ${ph}. Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
+            mainIssue = `❌ Data bundle FAILED on carrier (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""}) — Submitted to Group`;
+            trackingDiagnostic = `❌ FAILED on carrier dispatch (${ph}) · ${pidDisplay} (Ref: ${refCode}) ➔ 🚀 Submitted to Unprocessed Orders group!`;
+            draftText = `Hello ${smart.firstName}, we have checked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and noticed that the data delivery to your line (${ph}) encountered a network dispatch issue. Don't worry at all, our technical team is fixing and re-processing it for you right now so your data delivers shortly. Thank you for your patience!`;
+          }
+        } else if (st === "delivered" || st === "completed" || st === "success" || liveTrack.allDelivered) {
+          mainIssue = `🎯 Order confirmed DELIVERED on carrier (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""})`;
+          if (liveTrack.isCarrierAudit) {
+            trackingDiagnostic = `✅ 100% DELIVERED on carrier to ${ph} · ${pidDisplay}${batchPart} (${liveTrack.sent || liveTrack.totalItems || 1} Sent)`;
+            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and it is confirmed ALL DELIVERED to your line (${ph})! Kindly dial *124# or *126# to verify your main data balance. Thank you!`;
+          } else {
+            trackingDiagnostic = `✅ CONFIRMED DELIVERED on ${net} to ${ph} · ${pidDisplay} (Ref: ${refCode})`;
+            draftText = `Hello ${smart.firstName}, we have tracked your order (${refCode}) on ${brand} and it is confirmed DELIVERED on the ${net} network to your line (${ph}). Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
           }
         } else if (st === "queued" || liveTrack.isQueued) {
           const orderDate = liveTrack.orderCreatedAt;
@@ -8361,18 +8418,29 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
           const hasValidPortalId = portalId && /^\d{4,9}$/.test(String(portalId));
 
           if (isOver24H && hasValidPortalId) {
-            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""}`;
-            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, we are actively working on it right now and it will be delivered for you shortly. Thank you for your patience!`;
+            submitFailedPortalIdToGroup(portalId, {
+              reason: "vendor_queue_over_24h",
+              queuedHours: liveTrack.queuedHours,
+              orderDate: liveTrack.orderCreatedAt,
+              callerPhone: from
+            }).catch(e => console.warn("Submit queued portal ID error:", e.message));
+
+            mainIssue = `⏳ In vendor queue > 24 hours (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}) — Submitted to Group`;
+            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""} ➔ 🚀 Submitted to Group`;
+            draftText = `Hello ${smart.firstName}, we have checked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. It has been in the carrier vendor queue, so we have forwarded it directly to our technical team for immediate priority dispatch and it will be delivered for you shortly. Thank you for your patience!`;
           } else if (isOver24H) {
+            mainIssue = `⏳ In vendor queue > 24 hours (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`})`;
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, we are working on it right now and your data will land shortly. Thank you for your patience!`;
+            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, our team has prioritized it and your data will land shortly. Thank you for your patience!`;
           } else {
+            mainIssue = `⏳ In carrier processing queue (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""})`;
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing and will land on your number shortly. Kindly dial *124# or *126# to verify your balance. Thank you!`;
+            draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Please relax, your bundle is currently processing in the network queue and will land on your number (${ph}) shortly. Kindly dial *124# or *126# to verify your balance. Thank you!`;
           }
         } else if (st === "processing") {
+          mainIssue = `⏳ Carrier dispatch PROCESSING (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""})`;
           trackingDiagnostic = `⏳ PROCESSING on ${net} · ${pidDisplay} (Ref: ${refCode})`;
-          draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}. Please relax, your bundle is currently processing on the network and will land on your phone shortly. Kindly dial *124# or *126# to check. Thank you!`;
+          draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Please relax, your bundle is currently processing on the network and will land on your phone (${ph}) shortly. Kindly dial *124# or *126# to check. Thank you!`;
         }
       }
     } catch (_) { }
@@ -8588,7 +8656,7 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
             trackingDiagnostic: smartFallback.trackingDiagnostic,
             actualCustomerLastMsg: smartFallback.lastMessage,
             portalId: smartFallback.portalId
-          }), 6000));
+          }), 9500));
 
           draftResult = await Promise.race([draftPromise, timeoutPromise]);
         }
