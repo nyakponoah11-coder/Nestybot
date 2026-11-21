@@ -9170,6 +9170,8 @@ function formatMomoPaymentsList(payments, query = "", summary = null, isPending 
   return out;
 }
 
+const searchDatamartUnified = (...args) => executeDatamartSearch(...args);
+
 async function executeDatamartSearch(rawQuery, callerPhone = null) {
   let q = String(rawQuery || "").trim();
   // 1. If an email address is present anywhere in the text, extract it directly!
@@ -11354,8 +11356,17 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   if (isDeliveryCheckIntent || (allNums && allNums.length > 0 && /^[0-9a-zA-Z,\s\n\r]+$/.test(cleanInput))) {
     const targetIds = allNums || [];
     if (targetIds.length > 0) {
-      const report = await executeDatamartDeliveryCheck(targetIds, from);
-      if (report) return sendWhatsApp(from, report);
+      try {
+        const report = await executeDatamartDeliveryCheck(targetIds, from);
+        if (report) return sendWhatsApp(from, report);
+      } catch (checkErr) {
+        console.warn("executeDatamartDeliveryCheck error:", checkErr.message);
+      }
+      // Fallback: If carrier check didn't produce a report, search via executeDatamartSearch!
+      try {
+        const searchRep = await executeDatamartSearch(targetIds[0], from);
+        if (searchRep) return sendWhatsApp(from, searchRep);
+      } catch (_) {}
     }
   }
 
@@ -11391,8 +11402,13 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
 
   if (emailMatch || phoneMatch || isSearchIntent || isNameOrWord || isRefPattern) {
     const rawTarget = emailMatch ? emailMatch[0] : (phoneMatch ? phoneMatch[0] : (isRefPattern ? (cleanInput.match(/[A-Za-z0-9_-]{5,45}/) || [cleanInput])[0] : cleanInput.trim()));
-    const rep = await searchDatamartUnified(rawTarget, from);
-    if (rep) return sendWhatsApp(from, rep);
+    try {
+      const rep = await executeDatamartSearch(rawTarget, from);
+      return sendWhatsApp(from, rep || `🔍 No DataMart support ticket, customer, agent, or order found matching "*${rawTarget}*".`);
+    } catch (searchErr) {
+      console.warn("executeDatamartSearch error:", searchErr.message);
+      return sendWhatsApp(from, `⚠️ Search error: ${searchErr.message || "Failed to search DataMart"}`);
+    }
   }
 
   // 2d. Natural "clear all ticket" / "clear all tickets" / "resolve all" / "close all"
@@ -11637,8 +11653,14 @@ if (/^(?:audit\s*logs?|audits?|recent\s*checks?|delivery\s*checks?)$/i.test(clea
 // 13. Direct Portal ID Delivery Check within console mode
 const cmIds = cleanInput.match(/\b\d{4,9}\b/g);
 if (cmIds && cmIds.length > 0 && /^[0-9,\s\n\r]+$/.test(cleanInput.trim())) {
-  const report = await executeDatamartDeliveryCheck(cmIds, from);
-  if (report) return sendWhatsApp(from, report);
+  try {
+    const report = await executeDatamartDeliveryCheck(cmIds, from);
+    if (report) return sendWhatsApp(from, report);
+  } catch (_) {}
+  try {
+    const searchRep = await executeDatamartSearch(cmIds[0], from);
+    if (searchRep) return sendWhatsApp(from, searchRep);
+  } catch (_) {}
 }
 
 // 14. Toggle Delivered Order WhatsApp Alerts within console mode
