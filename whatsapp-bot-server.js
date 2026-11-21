@@ -17419,6 +17419,18 @@ async function runActiveDeliveryWatcher() {
         const isFlash = Boolean(String(ord.notes || "").includes("FLASH_SALE"));
         if (isFlash) continue;
 
+        const isManual = Boolean(
+          String(ord.notes || "").includes("[manual_status]") ||
+          String(ord.notes || "").includes("[manual_override]")
+        );
+        if (isManual) continue;
+
+        // Skip orders that were already set to terminal states by admin
+        const currentDelivery = String(ord.delivery_status || "").toLowerCase().trim();
+        if (["delivered", "completed", "failed", "cancelled", "refunded"].includes(currentDelivery)) {
+          continue;
+        }
+
         // If paid order was never dispatched to DataMart (and is at least 30s old so we never race an active checkout),
         // trigger /api/paystack to fulfill & alert idempotently.
         const orderAgeMs = ord.created_at ? Date.now() - new Date(ord.created_at).getTime() : 60000;
@@ -17506,6 +17518,13 @@ async function runPendingPaymentWatcher() {
         if (!ord.reference || ord.datamart_reference || ord.supplier_status === "dispatching") continue;
         const isFlash = Boolean(String(ord.notes || "").includes("FLASH_SALE"));
         if (ord.payment_status === "paid" && isFlash) continue;
+
+        const isManual = Boolean(
+          String(ord.notes || "").includes("[manual_status]") ||
+          String(ord.notes || "").includes("[manual_override]") ||
+          String(ord.notes || "").includes("[manual_payment]")
+        );
+        if (isManual) continue;
 
         try {
           if (ord.payment_status === "paid") {
