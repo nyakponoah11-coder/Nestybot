@@ -2187,11 +2187,17 @@ function extractBaileysMessageText(rawMsg) {
 
 async function recordGroupPortalIdSubmitted(remoteJid, foundIds) {
   if (!remoteJid || !foundIds || foundIds.length === 0) return;
+  const cleanFound = foundIds.map(String).map(s => s.trim()).filter(id => /^\d{4,9}$/.test(id));
+  if (cleanFound.length === 0) return;
+
+  // Ultra-Low Egress Filter: If all IDs are ALREADY known in memory, skip Supabase completely!
+  const newIds = cleanFound.filter(id => !submittedPortalIdsTimestamps.has(id));
   const now = Date.now();
-  foundIds.forEach(id => {
+  cleanFound.forEach(id => {
     submittedPortalIdsTimestamps.set(`${remoteJid}:${id}`, now);
     submittedPortalIdsTimestamps.set(id, now);
   });
+  if (newIds.length === 0) return; // ZERO Supabase calls, 0 KB egress!
 
   const gKey = `failed_orders_posted_${remoteJid.replace(/[^a-zA-Z0-9]/g, "_")}`;
   const globalKey = "failed_orders_posted_portal_ids";
@@ -2204,8 +2210,7 @@ async function recordGroupPortalIdSubmitted(remoteJid, foundIds) {
     }
     if (!Array.isArray(existing)) existing = [];
     let changed = false;
-    foundIds.forEach(id => {
-      const clean = String(id).trim();
+    newIds.forEach(clean => {
       if (!existing.includes(clean)) {
         existing.push(clean);
         changed = true;
@@ -2231,8 +2236,7 @@ async function recordGroupPortalIdSubmitted(remoteJid, foundIds) {
     }
     if (!Array.isArray(pExisting)) pExisting = [];
     let pChanged = false;
-    foundIds.forEach(id => {
-      const clean = String(id).trim();
+    newIds.forEach(clean => {
       if (!pExisting.includes(clean)) {
         pExisting.push(clean);
         pChanged = true;
@@ -3200,7 +3204,13 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     const lastSub = submittedPortalIdsTimestamps.get(targetGroupKey) || submittedPortalIdsTimestamps.get(cleanId);
     const hasRecentTimestamp = Boolean(lastSub && (Date.now() - lastSub < (24 * 3600 * 1000)));
 
-    // 🛡️ SCAN 3: Persistent Supabase registry check across ALL registries
+    // Fast-path in-memory check (0 bytes egress): If already known in memory, return immediately!
+    if ((foundInRecentGroup || hasRecentTimestamp) && !isTest && !meta.force) {
+      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY in memory or group messages. Skipping duplicate submission (0 bytes egress).`);
+      return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
+    }
+
+    // 🛡️ SCAN 3: Persistent Supabase registry check (only executed if not already in memory)
     const registryKey = groupJid
       ? `failed_orders_posted_${groupJid.replace(/[^a-zA-Z0-9]/g, "_")}`
       : "failed_orders_posted_portal_ids";
@@ -3226,9 +3236,9 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
       }
     } catch (_) { }
 
-    // If found in recent group messages, recent timestamp, or persistent database registry:
-    if ((foundInRecentGroup || hasRecentTimestamp || isAlreadyPostedInDb) && !isTest && !meta.force) {
-      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}) history or registry. Skipping duplicate submission.`);
+    if (isAlreadyPostedInDb && !isTest && !meta.force) {
+      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY in database registry. Skipping duplicate submission.`);
+      submittedPortalIdsTimestamps.set(cleanId, Date.now());
       return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
     }
 
