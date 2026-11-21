@@ -2187,17 +2187,11 @@ function extractBaileysMessageText(rawMsg) {
 
 async function recordGroupPortalIdSubmitted(remoteJid, foundIds) {
   if (!remoteJid || !foundIds || foundIds.length === 0) return;
-  const cleanFound = foundIds.map(String).map(s => s.trim()).filter(id => /^\d{4,9}$/.test(id));
-  if (cleanFound.length === 0) return;
-
-  // Ultra-Low Egress Filter: If all IDs are ALREADY known in memory, skip Supabase completely!
-  const newIds = cleanFound.filter(id => !submittedPortalIdsTimestamps.has(id));
   const now = Date.now();
-  cleanFound.forEach(id => {
+  foundIds.forEach(id => {
     submittedPortalIdsTimestamps.set(`${remoteJid}:${id}`, now);
     submittedPortalIdsTimestamps.set(id, now);
   });
-  if (newIds.length === 0) return; // ZERO Supabase calls, 0 KB egress!
 
   const gKey = `failed_orders_posted_${remoteJid.replace(/[^a-zA-Z0-9]/g, "_")}`;
   const globalKey = "failed_orders_posted_portal_ids";
@@ -2210,7 +2204,8 @@ async function recordGroupPortalIdSubmitted(remoteJid, foundIds) {
     }
     if (!Array.isArray(existing)) existing = [];
     let changed = false;
-    newIds.forEach(clean => {
+    foundIds.forEach(id => {
+      const clean = String(id).trim();
       if (!existing.includes(clean)) {
         existing.push(clean);
         changed = true;
@@ -2236,7 +2231,8 @@ async function recordGroupPortalIdSubmitted(remoteJid, foundIds) {
     }
     if (!Array.isArray(pExisting)) pExisting = [];
     let pChanged = false;
-    newIds.forEach(clean => {
+    foundIds.forEach(id => {
+      const clean = String(id).trim();
       if (!pExisting.includes(clean)) {
         pExisting.push(clean);
         pChanged = true;
@@ -2255,6 +2251,22 @@ async function recordGroupPortalIdSubmitted(remoteJid, foundIds) {
   }
 }
 
+let persistGroupMsgsTimer = null;
+function schedulePersistRecentGroupMessages() {
+  if (persistGroupMsgsTimer) return;
+  persistGroupMsgsTimer = setTimeout(async () => {
+    persistGroupMsgsTimer = null;
+    try {
+      const toSave = recentBaileysMessages.filter(m => m.from && m.from.endsWith("@g.us")).slice(0, 300);
+      await supabase.from("settings").upsert({
+        key: "recent_group_messages_buffer",
+        value: JSON.stringify(toSave),
+        updated_at: new Date().toISOString()
+      }, { onConflict: "key" });
+    } catch (_) { }
+  }, 2500);
+}
+
 async function handleIncomingBaileysGroupMessage(m) {
   if (!m || !m.message) return;
   const remoteJid = m.key?.remoteJid || "";
@@ -2271,6 +2283,7 @@ async function handleIncomingBaileysGroupMessage(m) {
   if (recentBaileysMessages.length > 500) recentBaileysMessages.pop();
 
   if (remoteJid && remoteJid.endsWith("@g.us") && text) {
+    schedulePersistRecentGroupMessages();
     const foundIds = text.match(/\b\d{4,9}\b/g);
     if (foundIds && foundIds.length > 0) {
       console.log(`🛡️ [GROUP MESSAGE DETECTED] From [${participant || remoteJid}]: IDs found: ${foundIds.join(", ")}`);
@@ -3024,9 +3037,40 @@ async function seedSubmittedPortalIdsCache() {
               count++;
             }
           });
+        } else if (list && typeof list === "object") {
+          Object.keys(list).forEach(id => {
+            const clean = String(id).trim();
+            if (/^\d{4,9}$/.test(clean)) {
+              submittedPortalIdsTimestamps.set(clean, now);
+              count++;
+            }
+          });
         }
       } catch (_) { }
     }
+
+    try {
+      const { data: bufRow } = await supabase.from("settings").select("value").eq("key", "recent_group_messages_buffer").maybeSingle();
+      if (bufRow?.value) {
+        const buf = typeof bufRow.value === "string" ? JSON.parse(bufRow.value) : bufRow.value;
+        if (Array.isArray(buf)) {
+          buf.forEach(m => {
+            if (m && m.text && !recentBaileysMessages.some(existing => existing.time === m.time && existing.text === m.text)) {
+              recentBaileysMessages.push(m);
+              const ids = m.text.match(/\b\d{4,9}\b/g);
+              if (ids) {
+                ids.forEach(id => {
+                  const clean = String(id).trim();
+                  submittedPortalIdsTimestamps.set(clean, now);
+                });
+              }
+            }
+          });
+          console.log(`🛡️ [GROUP DEDUP] Restored ${buf.length} recent group messages from Supabase.`);
+        }
+      }
+    } catch (_) { }
+
     console.log(`🛡️ [GROUP DEDUP] Pre-seeded ${count} previously submitted portal IDs into memory.`);
   } catch (err) {
     console.warn("seedSubmittedPortalIdsCache error:", err.message);
@@ -3199,18 +3243,12 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
       return nums.includes(cleanId);
     });
 
-    // 🛡️ SCAN 2: Target group recent submission timestamp (within last 24 hours)
+    // 🛡️ SCAN 2: Target group recent submission timestamp (within last 7 days)
     const targetGroupKey = `${groupJid}:${cleanId}`;
     const lastSub = submittedPortalIdsTimestamps.get(targetGroupKey) || submittedPortalIdsTimestamps.get(cleanId);
-    const hasRecentTimestamp = Boolean(lastSub && (Date.now() - lastSub < (24 * 3600 * 1000)));
+    const hasRecentTimestamp = Boolean(lastSub && (Date.now() - lastSub < (7 * 24 * 3600 * 1000)));
 
-    // Fast-path in-memory check (0 bytes egress): If already known in memory, return immediately!
-    if ((foundInRecentGroup || hasRecentTimestamp) && !isTest && !meta.force) {
-      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY in memory or group messages. Skipping duplicate submission (0 bytes egress).`);
-      return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
-    }
-
-    // 🛡️ SCAN 3: Persistent Supabase registry check (only executed if not already in memory)
+    // 🛡️ SCAN 3: Persistent Supabase registry check across ALL registries
     const registryKey = groupJid
       ? `failed_orders_posted_${groupJid.replace(/[^a-zA-Z0-9]/g, "_")}`
       : "failed_orders_posted_portal_ids";
@@ -3231,14 +3269,18 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
             if (list.map(String).includes(cleanId)) {
               isAlreadyPostedInDb = true;
             }
+          } else if (list && typeof list === "object") {
+            if (Object.keys(list).map(String).includes(cleanId)) {
+              isAlreadyPostedInDb = true;
+            }
           }
         } catch (_) { }
       }
     } catch (_) { }
 
-    if (isAlreadyPostedInDb && !isTest && !meta.force) {
-      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY in database registry. Skipping duplicate submission.`);
-      submittedPortalIdsTimestamps.set(cleanId, Date.now());
+    // If found in recent group messages, recent timestamp, or persistent database registry:
+    if ((foundInRecentGroup || hasRecentTimestamp || isAlreadyPostedInDb) && !isTest && !meta.force) {
+      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}) history or registry. Skipping duplicate submission.`);
       return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
     }
 
@@ -8281,24 +8323,25 @@ function analyzeTicketSmart(fullTicket, msgs = [], t = {}, brand = "DataMart") {
   const tNum = fullTicket?.ticketNumber || t?.ticketNumber || fullTicket?._id || t?._id || "Ticket";
 
   // 1. Extract real customer messages (exclude Bot, Agent, System notes)
-  const customerMsgs = (msgs || []).filter(m => m.senderType === "customer" || (m.senderName && m.senderName !== "Bot" && m.senderType !== "agent" && m.senderType !== "system"));
+  const customerMsgs = (msgs || []).filter(m => {
+    if (!m) return false;
+    const st = String(m.senderType || "").toLowerCase();
+    const sn = String(m.senderName || "").toLowerCase();
+    if (st === "agent" || st === "system") return false;
+    if (sn === "bot" || sn.includes("assistant") || sn.includes("system")) return false;
+    return true;
+  });
   const customerTexts = customerMsgs
-    .map(m => (m.text || "").replace(/\s+/g, " ").trim())
+    .map(m => (m.text || m.body || m.content || m.message || "").replace(/\s+/g, " ").trim())
     .filter(text => text && !text.startsWith("🚩 Needs a human") && !text.includes("wrote:"));
-
-  // Real last message from customer
-  const lastCustomerText = customerTexts.length > 0
-    ? customerTexts[customerTexts.length - 1]
-    : (t?.lastMessage?.text || fullTicket?.lastMessage?.text || fullTicket?.subject || "Customer inquiry").replace(/\s+/g, " ").trim();
 
   // 2. FOCUS ON RECENT MESSAGES (the current conversation turn!)
   const recentCustomerTexts = customerTexts.slice(-3);
   const recentJoined = recentCustomerTexts.join(" | ");
   const lowerRecent = recentJoined.toLowerCase();
-  const lowerLast = lastCustomerText.toLowerCase();
 
   // All texts for backup reference lookup
-  const allTexts = [fullTicket?.subject || "", ...(msgs || []).map(m => m.text || "")].join(" ");
+  const allTexts = [fullTicket?.subject || "", ...(msgs || []).map(m => m.text || m.body || m.content || "")].join(" ");
 
   // Reference codes in recent turn vs entire history
   const recentTrackMatch = recentJoined.match(/\b(?:track(?:ing)?\s*(?:id|#|number|code)?|portal\s*(?:id|#)?)\s*[:#=]?\s*([0-9]{4,9})\b/i);
@@ -8311,7 +8354,16 @@ function analyzeTicketSmart(fullTicket, msgs = [], t = {}, brand = "DataMart") {
 
   const recentPhoneMatch = recentJoined.match(/\b(0[2357]\d{8})\b/);
   const historyPhoneMatch = allTexts.match(/\b(0[2357]\d{8})\b/);
-  const phone = recentPhoneMatch ? recentPhoneMatch[0] : (historyPhoneMatch ? historyPhoneMatch[0] : null);
+  const rawProfilePhone = String(fullTicket?.customer?.phone || t?.customer?.phone || "").replace(/\D/g, "");
+  const profilePhoneMatch = rawProfilePhone.match(/^0([2357]\d{8})$/) ? rawProfilePhone : (rawProfilePhone.match(/^233([2357]\d{8})$/) ? `0${rawProfilePhone.slice(3)}` : null);
+  const phone = recentPhoneMatch ? recentPhoneMatch[0] : (historyPhoneMatch ? historyPhoneMatch[0] : (profilePhoneMatch || null));
+
+  // Real last message from customer
+  const rawLastCustomerText = customerTexts.length > 0
+    ? customerTexts[customerTexts.length - 1]
+    : (t?.lastMessage?.text || fullTicket?.lastMessage?.text || fullTicket?.subject || "").replace(/\s+/g, " ").trim();
+  const lastCustomerText = rawLastCustomerText || (phone ? `Recipient: ${phone}` : "Customer support inquiry");
+  const lowerLast = lastCustomerText.toLowerCase();
 
   let mainIssue = "";
   let draftText = "";
@@ -8320,7 +8372,7 @@ function analyzeTicketSmart(fullTicket, msgs = [], t = {}, brand = "DataMart") {
   let isSpecialIntent = false;
 
   // 1. DEPOSIT / MOMO PAYMENT REFLECTION
-  if (/\b(?:deposit|deposited|momo\s*deduct|deducted|reflect|reflected|uncredited|credit\s*my|into\s*my\s*wallet)\b/i.test(lowerRecent)) {
+  if (/\b(?:deposit|deposited|momo\s*deduct|deducted|reflect|reflected|uncredited|credit\s*my|into\s*my\s*wallet)\b/i.test(lowerRecent) || /\b(?:deposit|deposited)\b/i.test(lowerLast)) {
     const amtMatch = recentJoined.match(/(?:gh[c₵]?\s*|amt\s*|amount\s*)(\d+(?:\.\d{2})?)/i) || recentJoined.match(/deposited\s*(\d+)/i) || recentJoined.match(/(\d+)\s*(?:cedis|ghc|cedi)/i);
     const amtStr = amtMatch ? `GH₵${amtMatch[1]}` : "money";
     mainIssue = `Customer deposited ${amtStr} on MoMo but wallet has not reflected`;
@@ -8336,7 +8388,7 @@ function analyzeTicketSmart(fullTicket, msgs = [], t = {}, brand = "DataMart") {
     isSpecialIntent = true;
   }
   // 3. REFUND REQUEST
-  else if (/\b(?:refund|reverse|reversal|money\s*back)\b/i.test(lowerRecent)) {
+  else if (/\b(?:refund|reverse|reversal|money\s*back)\b/i.test(lowerRecent) || /\b(?:refund|reverse)\b/i.test(lowerLast)) {
     const refStr = orderRef ? ` (${orderRef})` : (trackId ? ` (Track ID: ${trackId})` : "");
     mainIssue = `Customer requesting refund for delayed or failed order${refStr}`;
     trackingDiagnostic = `💰 Refund Request${refStr}`;
@@ -8359,12 +8411,12 @@ function analyzeTicketSmart(fullTicket, msgs = [], t = {}, brand = "DataMart") {
     isSpecialIntent = true;
   }
   // 6. ORDER TRACKING / DATA DELIVERY (when reference, track ID, or phone is provided)
-  else if (trackId || orderRef || (phone && /\b(?:data|bundle|order|deliver|land|sent|delayed?|not\s*come|waiting)\b/i.test(lowerRecent))) {
+  else if (trackId || orderRef || phone) {
     const idStr = trackId ? `Track ID: ${trackId}` : (orderRef ? `Ref: ${orderRef}` : `Phone: ${phone}`);
-    const phDisplay = phone ? ` to ${phone}` : "";
+    const phDisplay = phone && (trackId || orderRef) ? ` to ${phone}` : "";
     mainIssue = `Customer checking data bundle delivery status (${idStr}${phDisplay})`;
     trackingDiagnostic = `🔍 Order Verification: ${idStr}${phDisplay}`;
-    draftText = `Hello ${firstName}, we have located your order (${idStr}) on ${brand}. We are tracking this with the telecom network right now to ensure your bundle is delivered immediately. Kindly dial *124# to verify your balance. Thank you!`;
+    draftText = `Hello ${firstName}, we have located your order (${idStr}) on ${brand}. We are tracking this with the telecom network right now to ensure your bundle is delivered immediately. Kindly dial *124# or *126# to verify your balance. Thank you!`;
   }
   // 7. GENERAL DELIVERY QUESTION WITHOUT CODE
   else if (/\b(?:data|bundle|order|deliver|waiting|delay|not\s*come|not\s*received|hasn'?t\s*come|not\s*in|since\s*morning)\b/i.test(lowerRecent)) {
@@ -8380,10 +8432,10 @@ function analyzeTicketSmart(fullTicket, msgs = [], t = {}, brand = "DataMart") {
   }
   // 9. GENERAL INQUIRY / FALLBACK
   else {
-    const safeText = lastCustomerText.length > 0 ? lastCustomerText : "Customer inquiry";
+    const safeText = lastCustomerText && lastCustomerText !== "Customer support inquiry" ? lastCustomerText : (phone ? `Order delivery to ${phone}` : "Customer assistance request");
     mainIssue = `Customer inquiry: "${safeText.slice(0, 70)}"`;
     trackingDiagnostic = `💬 Customer Support Inquiry`;
-    draftText = `Hello ${firstName}, thank you for contacting ${brand} support. We have reviewed your message ("${safeText.slice(0, 50)}") and our team is actively assisting you right now!`;
+    draftText = `Hello ${firstName}, thank you for contacting ${brand} support. We have reviewed your inquiry and our team is actively assisting you right now!`;
   }
 
   return {
@@ -8459,45 +8511,37 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
         const batchPart = liveTrack.batchNumber ? ` · Batch #${liveTrack.batchNumber}` : "";
         const pidDisplay = portalId ? `🆔 *Portal ID:* *${portalId}*` : `🆔 *Portal ID:* *Pending Export*`;
 
-        if (st === "failed" || st === "cancelled" || (liveTrack.failed && liveTrack.failed > 0)) {
-          const batchItems = Array.isArray(liveTrack.items) ? liveTrack.items : [];
-          const norm9 = (num) => String(num || "").replace(/\D/g, "").slice(-9);
-          const targetCustPhone = norm9(smart.phone || liveTrack.phone || fullTicket?.customer?.phone || (typeof targetQuery === "string" && /^0[2357]\d{8}$/.test(targetQuery) ? targetQuery : null));
+        const batchItems = Array.isArray(liveTrack.items) ? liveTrack.items : [];
+        const norm9 = (num) => String(num || "").replace(/\D/g, "").slice(-9);
+        const targetCustPhone = norm9(smart.phone || liveTrack.phone || fullTicket?.customer?.phone || (typeof targetQuery === "string" && /^0[2357]\d{8}$/.test(targetQuery) ? targetQuery : null));
 
-          const failedBatchItems = batchItems.filter(it => {
-            const itSt = String(it.status || "").toLowerCase();
-            return itSt === "failed" || itSt === "cancelled" || itSt === "rejected" || (itSt !== "sent" && itSt !== "delivered");
-          });
+        const failedBatchItems = batchItems.filter(it => {
+          const itSt = String(it.status || "").toLowerCase();
+          return itSt === "failed" || itSt === "cancelled" || itSt === "rejected";
+        });
 
-          const sentBatchItems = batchItems.filter(it => {
-            const itSt = String(it.status || "").toLowerCase();
-            return itSt === "sent" || itSt === "delivered" || itSt === "completed" || itSt === "success";
-          });
+        const sentBatchItems = batchItems.filter(it => {
+          const itSt = String(it.status || "").toLowerCase();
+          return itSt === "sent" || itSt === "delivered" || itSt === "completed" || itSt === "success";
+        });
 
-          const isCustPhoneInFailed = targetCustPhone && targetCustPhone.length >= 9 && failedBatchItems.some(it => norm9(it.phone) === targetCustPhone);
-          const isCustPhoneInSent = targetCustPhone && targetCustPhone.length >= 9 && sentBatchItems.some(it => norm9(it.phone) === targetCustPhone);
+        const custItem = targetCustPhone && targetCustPhone.length >= 9
+          ? batchItems.find(it => norm9(it.phone) === targetCustPhone)
+          : null;
 
-          // Submit failed ID to WhatsApp group automatically per operational mandate
-          if (portalId && /^\d{4,9}$/.test(String(portalId))) {
-            submitFailedPortalIdToGroup(portalId, {
-              reason: "customer_support_delivery_failed",
-              failedCount: liveTrack.failed || failedBatchItems.length || 1,
-              totalItems: liveTrack.totalItems || 1,
-              failedPhones: failedBatchItems.map(it => it.phone),
-              callerPhone: from
-            }).catch(e => console.warn("Submit failed ticket ID to group error:", e.message));
-          }
+        const custItemStatus = custItem ? String(custItem.status || "").toLowerCase() : null;
+        const isCustPhoneInFailed = Boolean(custItemStatus && ["failed", "cancelled", "rejected"].includes(custItemStatus)) ||
+          Boolean(targetCustPhone && targetCustPhone.length >= 9 && failedBatchItems.some(it => norm9(it.phone) === targetCustPhone));
+        const isCustPhoneInSent = Boolean(custItemStatus && ["sent", "delivered", "completed", "success"].includes(custItemStatus)) ||
+          Boolean(targetCustPhone && targetCustPhone.length >= 9 && sentBatchItems.some(it => norm9(it.phone) === targetCustPhone)) ||
+          Boolean(liveTrack.allDelivered || st === "delivered" || st === "completed" || st === "success");
 
-          if (batchItems.length > 0 && isCustPhoneInSent && !isCustPhoneInFailed) {
-            mainIssue = `✅ Customer line DELIVERED (${ph}) · ${pidDisplay} (${liveTrack.failed || failedBatchItems.length} other lines failed in batch — Submitted to Group)`;
-            trackingDiagnostic = `✅ ALREADY DELIVERED to customer line (${ph}) · ${pidDisplay}${batchPart} (${liveTrack.failed || failedBatchItems.length} other lines failed in batch ➔ 🚀 Submitted to team group)`;
-            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Your data bundle has already been successfully delivered to your number (${ph})! Kindly dial *124# or *126# to verify your main balance. Thank you!`;
-          } else {
-            mainIssue = `❌ Data bundle FAILED on carrier (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""}) — Submitted to Group`;
-            trackingDiagnostic = `❌ FAILED on carrier dispatch (${ph}) · ${pidDisplay} (Ref: ${refCode}) ➔ 🚀 Submitted to Unprocessed Orders group!`;
-            draftText = `Hello ${smart.firstName}, we have checked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and noticed that the data delivery to your line (${ph}) encountered a network dispatch issue. Don't worry at all, our technical team is fixing and re-processing it for you right now so your data delivers shortly. Thank you for your patience!`;
-          }
-        } else if (st === "delivered" || st === "completed" || st === "success" || liveTrack.allDelivered) {
+        const orderDate = liveTrack.orderCreatedAt;
+        const ageMs = orderDate ? (Date.now() - new Date(orderDate).getTime()) : null;
+        const isOver24H = Boolean(liveTrack.isQueuedOver24Hours || (orderDate && !isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)));
+        const hasValidPortalId = portalId && /^\d{4,9}$/.test(String(portalId));
+
+        if (isCustPhoneInSent) {
           mainIssue = `🎯 Order confirmed DELIVERED on carrier (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""})`;
           if (liveTrack.isCarrierAudit) {
             trackingDiagnostic = `✅ 100% DELIVERED on carrier to ${ph} · ${pidDisplay}${batchPart} (${liveTrack.sent || liveTrack.totalItems || 1} Sent)`;
@@ -8506,36 +8550,48 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
             trackingDiagnostic = `✅ CONFIRMED DELIVERED on ${net} to ${ph} · ${pidDisplay} (Ref: ${refCode})`;
             draftText = `Hello ${smart.firstName}, we have tracked your order (${refCode}) on ${brand} and it is confirmed DELIVERED on the ${net} network to your line (${ph}). Kindly dial *124# or *126# to check your main data balance. Thank you for your patience!`;
           }
-        } else if (st === "queued" || liveTrack.isQueued) {
-          const orderDate = liveTrack.orderCreatedAt;
-          const ageMs = orderDate ? (Date.now() - new Date(orderDate).getTime()) : null;
-          const isOver24H = Boolean(liveTrack.isQueuedOver24Hours || (orderDate && !isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)));
-          const hasValidPortalId = portalId && /^\d{4,9}$/.test(String(portalId));
-
-          if (isOver24H && hasValidPortalId) {
+          if (failedBatchItems.length > 0 && hasValidPortalId) {
             submitFailedPortalIdToGroup(portalId, {
-              reason: "vendor_queue_over_24h",
-              queuedHours: liveTrack.queuedHours,
-              orderDate: liveTrack.orderCreatedAt,
+              reason: "customer_support_delivery_failed",
+              failedCount: failedBatchItems.length,
+              totalItems: liveTrack.totalItems || batchItems.length,
+              failedPhones: failedBatchItems.map(it => it.phone),
               callerPhone: from
-            }).catch(e => console.warn("Submit queued portal ID error:", e.message));
-
-            mainIssue = `⏳ In vendor queue > 24 hours (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}) — Submitted to Group`;
-            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""} ➔ 🚀 Submitted to Group`;
-            draftText = `Hello ${smart.firstName}, we have checked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. It has been in the carrier vendor queue, so we have forwarded it directly to our technical team for immediate priority dispatch and it will be delivered for you shortly. Thank you for your patience!`;
-          } else if (isOver24H) {
-            mainIssue = `⏳ In vendor queue > 24 hours (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`})`;
-            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, our team has prioritized it and your data will land shortly. Thank you for your patience!`;
-          } else {
-            mainIssue = `⏳ In carrier processing queue (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""})`;
-            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
-            draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Please relax, your bundle is currently processing in the network queue and will land on your number (${ph}) shortly. Kindly dial *124# or *126# to verify your balance. Thank you!`;
+            }).catch(e => console.warn("Submit failed ticket ID to group error:", e.message));
           }
-        } else if (st === "processing") {
+        } else if (isCustPhoneInFailed || st === "failed" || st === "cancelled" || (liveTrack.failed && liveTrack.failed > 0)) {
+          mainIssue = `❌ Data bundle FAILED on carrier (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""}) — Submitted to Group`;
+          trackingDiagnostic = `❌ FAILED on carrier dispatch (${ph}) · ${pidDisplay} (Ref: ${refCode}) ➔ 🚀 Submitted to Unprocessed Orders group!`;
+          draftText = `Hello ${smart.firstName}, we have checked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and noticed that the data delivery to your line (${ph}) encountered a network dispatch issue. Don't worry at all, our technical team is fixing and re-processing it for you right now so your data delivers shortly. Thank you for your patience!`;
+
+          if (hasValidPortalId) {
+            submitFailedPortalIdToGroup(portalId, {
+              reason: "customer_support_delivery_failed",
+              failedCount: liveTrack.failed || failedBatchItems.length || 1,
+              totalItems: liveTrack.totalItems || 1,
+              failedPhones: failedBatchItems.map(it => it.phone),
+              callerPhone: from
+            }).catch(e => console.warn("Submit failed ticket ID to group error:", e.message));
+          }
+        } else if (isOver24H && hasValidPortalId) {
+          submitFailedPortalIdToGroup(portalId, {
+            reason: "vendor_queue_over_24h",
+            queuedHours: liveTrack.queuedHours,
+            orderDate: liveTrack.orderCreatedAt,
+            callerPhone: from
+          }).catch(e => console.warn("Submit queued portal ID error:", e.message));
+
+          mainIssue = `⏳ In vendor queue > 24 hours (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""}) — Submitted to Group`;
+          trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""} ➔ 🚀 Submitted to Group`;
+          draftText = `Hello ${smart.firstName}, we have checked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. It has been in the carrier vendor queue, so we have forwarded it directly to our technical team for immediate priority dispatch and it will be delivered for you shortly. Thank you for your patience!`;
+        } else if (isOver24H) {
+          mainIssue = `⏳ In vendor queue > 24 hours (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""})`;
+          trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
+          draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, our team has prioritized it and your data will land shortly. Thank you for your patience!`;
+        } else {
           mainIssue = `⏳ Carrier dispatch PROCESSING (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""})`;
           trackingDiagnostic = `⏳ PROCESSING on ${net} · ${pidDisplay} (Ref: ${refCode})`;
-          draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Please relax, your bundle is currently processing on the network and will land on your phone (${ph}) shortly. Kindly dial *124# or *126# to check. Thank you!`;
+          draftText = `Hello ${smart.firstName}, we have tracked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`}. Please relax, your bundle is currently processing in the network queue and will land on your number (${ph}) shortly. Kindly dial *124# or *126# to verify your balance. Thank you!`;
         }
       }
     } catch (_) { }
