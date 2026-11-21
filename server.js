@@ -2162,6 +2162,119 @@ let lastPairingOwnerPhone = "233547100951";
 const recentBaileysMessages = [];
 const recentBaileysFrames = [];
 
+function extractBaileysMessageText(rawMsg) {
+  if (!rawMsg) return "";
+  let m = rawMsg;
+  while (m && (m.ephemeralMessage || m.viewOnceMessage || m.viewOnceMessageV2 || m.documentWithCaptionMessage || m.editedMessage)) {
+    m = m.ephemeralMessage?.message ||
+      m.viewOnceMessage?.message ||
+      m.viewOnceMessageV2?.message ||
+      m.documentWithCaptionMessage?.message ||
+      m.editedMessage?.message ||
+      m;
+  }
+  return String(
+    m?.conversation ||
+    m?.extendedTextMessage?.text ||
+    m?.imageMessage?.caption ||
+    m?.videoMessage?.caption ||
+    m?.documentMessage?.caption ||
+    m?.templateButtonReplyMessage?.selectedId ||
+    m?.buttonsResponseMessage?.selectedButtonId ||
+    ""
+  ).trim();
+}
+
+async function recordGroupPortalIdSubmitted(remoteJid, foundIds) {
+  if (!remoteJid || !foundIds || foundIds.length === 0) return;
+  const now = Date.now();
+  foundIds.forEach(id => {
+    submittedPortalIdsTimestamps.set(`${remoteJid}:${id}`, now);
+    submittedPortalIdsTimestamps.set(id, now);
+  });
+
+  const gKey = `failed_orders_posted_${remoteJid.replace(/[^a-zA-Z0-9]/g, "_")}`;
+  const globalKey = "failed_orders_posted_portal_ids";
+
+  try {
+    const { data: gRow } = await supabase.from("settings").select("value").eq("key", gKey).maybeSingle();
+    let existing = [];
+    if (gRow?.value) {
+      try { existing = typeof gRow.value === "string" ? JSON.parse(gRow.value) : gRow.value; } catch (_) { }
+    }
+    if (!Array.isArray(existing)) existing = [];
+    let changed = false;
+    foundIds.forEach(id => {
+      const clean = String(id).trim();
+      if (!existing.includes(clean)) {
+        existing.push(clean);
+        changed = true;
+      }
+    });
+    if (changed) {
+      if (existing.length > 3000) existing = existing.slice(-3000);
+      await supabase.from("settings").upsert({
+        key: gKey,
+        value: JSON.stringify(existing),
+        updated_at: new Date().toISOString()
+      }, { onConflict: "key" });
+    }
+  } catch (err) {
+    console.warn("recordGroupPortalIdSubmitted gKey error:", err.message);
+  }
+
+  try {
+    const { data: pRow } = await supabase.from("settings").select("value").eq("key", globalKey).maybeSingle();
+    let pExisting = [];
+    if (pRow?.value) {
+      try { pExisting = typeof pRow.value === "string" ? JSON.parse(pRow.value) : pRow.value; } catch (_) { }
+    }
+    if (!Array.isArray(pExisting)) pExisting = [];
+    let pChanged = false;
+    foundIds.forEach(id => {
+      const clean = String(id).trim();
+      if (!pExisting.includes(clean)) {
+        pExisting.push(clean);
+        pChanged = true;
+      }
+    });
+    if (pChanged) {
+      if (pExisting.length > 3000) pExisting = pExisting.slice(-3000);
+      await supabase.from("settings").upsert({
+        key: globalKey,
+        value: JSON.stringify(pExisting),
+        updated_at: new Date().toISOString()
+      }, { onConflict: "key" });
+    }
+  } catch (err) {
+    console.warn("recordGroupPortalIdSubmitted globalKey error:", err.message);
+  }
+}
+
+async function handleIncomingBaileysGroupMessage(m) {
+  if (!m || !m.message) return;
+  const remoteJid = m.key?.remoteJid || "";
+  const participant = m.key?.participant || m.participant || "";
+  const text = extractBaileysMessageText(m.message);
+
+  recentBaileysMessages.unshift({
+    time: new Date().toISOString(),
+    from: remoteJid,
+    participant,
+    text,
+    fromMe: Boolean(m.key?.fromMe)
+  });
+  if (recentBaileysMessages.length > 500) recentBaileysMessages.pop();
+
+  if (remoteJid && remoteJid.endsWith("@g.us") && text) {
+    const foundIds = text.match(/\b\d{4,9}\b/g);
+    if (foundIds && foundIds.length > 0) {
+      console.log(`🛡️ [GROUP MESSAGE DETECTED] From [${participant || remoteJid}]: IDs found: ${foundIds.join(", ")}`);
+      await recordGroupPortalIdSubmitted(remoteJid, foundIds);
+    }
+  }
+}
+
 async function restoreBaileysAuthFromSupabase() {
   try {
     if (!fsChannel.existsSync(BAILEYS_AUTH_DIR)) {
@@ -2327,7 +2440,7 @@ async function initBaileysChannelClient(options = {}) {
       printQRInTerminal: false,
       logger: pino({ level: "silent" }),
       browser: Browsers?.macOS ? Browsers.macOS("Chrome") : ["Mac OS", "Chrome", "14.4.1"],
-      syncFullHistory: false,
+      syncFullHistory: true,
       shouldSyncHistoryMessage: (msg) => {
         const jid = msg?.key?.remoteJid || "";
         return jid.endsWith("@g.us");
@@ -2377,46 +2490,20 @@ async function initBaileysChannelClient(options = {}) {
         for (const m of msgs) {
           const remoteJid = m.key?.remoteJid || "";
           if (!remoteJid || !remoteJid.endsWith("@g.us")) continue;
-          const text = m.message?.conversation || m.message?.extendedTextMessage?.text || m.message?.imageMessage?.caption || "";
+          const text = extractBaileysMessageText(m.message);
           if (!text) continue;
           const ids = text.match(/\b\d{4,9}\b/g);
           if (ids && ids.length > 0) {
             if (!groupIdsMap.has(remoteJid)) groupIdsMap.set(remoteJid, new Set());
             const set = groupIdsMap.get(remoteJid);
-            const now = Date.now();
-            ids.forEach(id => {
-              set.add(id);
-              submittedPortalIdsTimestamps.set(`${remoteJid}:${id}`, now);
-              submittedPortalIdsTimestamps.set(id, now);
-            });
+            ids.forEach(id => set.add(id));
           }
         }
 
         for (const [rJid, setOfIds] of groupIdsMap.entries()) {
           const idsArr = Array.from(setOfIds);
           console.log(`📥 [Baileys History Sync] Found ${idsArr.length} portal IDs in group ${rJid} history. Updating persistent registry...`);
-          const gKey = `failed_orders_posted_${rJid.replace(/[^a-zA-Z0-9]/g, "_")}`;
-          const { data: gRow } = await supabase.from("settings").select("value").eq("key", gKey).maybeSingle();
-          let existing = [];
-          if (gRow?.value) {
-            try { existing = typeof gRow.value === "string" ? JSON.parse(gRow.value) : gRow.value; } catch (_) { }
-          }
-          if (!Array.isArray(existing)) existing = [];
-          let changed = false;
-          idsArr.forEach(id => {
-            if (!existing.includes(id)) {
-              existing.push(id);
-              changed = true;
-            }
-          });
-          if (changed) {
-            if (existing.length > 3000) existing = existing.slice(-3000);
-            await supabase.from("settings").upsert({
-              key: gKey,
-              value: JSON.stringify(existing),
-              updated_at: new Date().toISOString()
-            }, { onConflict: "key" });
-          }
+          await recordGroupPortalIdSubmitted(rJid, idsArr);
         }
       } catch (hErr) {
         console.warn("messaging-history.set sync error:", hErr.message);
@@ -2428,78 +2515,7 @@ async function initBaileysChannelClient(options = {}) {
         const { messages } = upsert || {};
         if (!Array.isArray(messages)) return;
         for (const m of messages) {
-          if (!m.message) continue;
-          const remoteJid = m.key?.remoteJid || "";
-          const participant = m.key?.participant || m.participant || "";
-          const text = m.message?.conversation || m.message?.extendedTextMessage?.text || m.message?.imageMessage?.caption || "";
-          recentBaileysMessages.unshift({
-            time: new Date().toISOString(),
-            from: remoteJid,
-            participant,
-            text,
-            fromMe: Boolean(m.key?.fromMe)
-          });
-          if (recentBaileysMessages.length > 500) recentBaileysMessages.pop();
-          console.log(`📥 [Baileys Live Msg] from: [${remoteJid}] participant: [${participant}] text: "${text}" fromMe: ${m.key?.fromMe}`);
-
-          // Automatic Group History Scanner: Whenever ANY member posts an ID in the group, record it so Stony never duplicates it
-          if (remoteJid && remoteJid.endsWith("@g.us") && text) {
-            const foundIds = text.match(/\b\d{4,9}\b/g);
-            if (foundIds && foundIds.length > 0) {
-              const now = Date.now();
-              foundIds.forEach(id => {
-                submittedPortalIdsTimestamps.set(`${remoteJid}:${id}`, now);
-                submittedPortalIdsTimestamps.set(id, now);
-              });
-              const gKey = `failed_orders_posted_${remoteJid.replace(/[^a-zA-Z0-9]/g, "_")}`;
-              supabase.from("settings").select("value").eq("key", gKey).maybeSingle().then(({ data: gRow }) => {
-                let existing = [];
-                if (gRow?.value) {
-                  try { existing = typeof gRow.value === "string" ? JSON.parse(gRow.value) : gRow.value; } catch (_) { }
-                }
-                if (!Array.isArray(existing)) existing = [];
-                let changed = false;
-                foundIds.forEach(id => {
-                  if (!existing.includes(id)) {
-                    existing.push(id);
-                    changed = true;
-                  }
-                });
-                if (changed) {
-                  if (existing.length > 3000) existing = existing.slice(-3000);
-                  supabase.from("settings").upsert({
-                    key: gKey,
-                    value: JSON.stringify(existing),
-                    updated_at: new Date().toISOString()
-                  }, { onConflict: "key" }).catch(() => { });
-
-                  // Also persist to global registry
-                  supabase.from("settings").select("value").eq("key", "failed_orders_posted_portal_ids").maybeSingle().then(({ data: pRow }) => {
-                    let pExisting = [];
-                    if (pRow?.value) {
-                      try { pExisting = typeof pRow.value === "string" ? JSON.parse(pRow.value) : pRow.value; } catch (_) { }
-                    }
-                    if (!Array.isArray(pExisting)) pExisting = [];
-                    let pChanged = false;
-                    foundIds.forEach(id => {
-                      if (!pExisting.includes(id)) {
-                        pExisting.push(id);
-                        pChanged = true;
-                      }
-                    });
-                    if (pChanged) {
-                      if (pExisting.length > 3000) pExisting = pExisting.slice(-3000);
-                      supabase.from("settings").upsert({
-                        key: "failed_orders_posted_portal_ids",
-                        value: JSON.stringify(pExisting),
-                        updated_at: new Date().toISOString()
-                      }, { onConflict: "key" }).catch(() => { });
-                    }
-                  }).catch(() => { });
-                }
-              }).catch(() => { });
-            }
-          }
+          await handleIncomingBaileysGroupMessage(m);
         }
       } catch (e) {
         console.warn("messages.upsert log error:", e.message);
@@ -2708,7 +2724,11 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
     printQRInTerminal: false,
     logger: pino({ level: "silent" }),
     browser: Browsers?.macOS ? Browsers.macOS("Chrome") : ["Mac OS", "Chrome", "14.4.1"],
-    syncFullHistory: false,
+    syncFullHistory: true,
+    shouldSyncHistoryMessage: (msg) => {
+      const jid = msg?.key?.remoteJid || "";
+      return jid.endsWith("@g.us");
+    },
     markOnlineOnConnect: false
   });
 
@@ -2717,6 +2737,39 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
   sock.ev.on("creds.update", async () => {
     await saveCreds();
     backupAgentAuthToSupabase(cleanPhone, authDir);
+  });
+
+  sock.ev.on("messages.upsert", async (upsert) => {
+    try {
+      const { messages } = upsert || {};
+      if (!Array.isArray(messages)) return;
+      for (const m of messages) {
+        await handleIncomingBaileysGroupMessage(m);
+      }
+    } catch (_) { }
+  });
+
+  sock.ev.on("messaging-history.set", async (history) => {
+    try {
+      const msgs = history?.messages || [];
+      if (!Array.isArray(msgs) || msgs.length === 0) return;
+      const groupIdsMap = new Map();
+      for (const m of msgs) {
+        const remoteJid = m.key?.remoteJid || "";
+        if (!remoteJid || !remoteJid.endsWith("@g.us")) continue;
+        const text = extractBaileysMessageText(m.message);
+        if (!text) continue;
+        const ids = text.match(/\b\d{4,9}\b/g);
+        if (ids && ids.length > 0) {
+          if (!groupIdsMap.has(remoteJid)) groupIdsMap.set(remoteJid, new Set());
+          const set = groupIdsMap.get(remoteJid);
+          ids.forEach(id => set.add(id));
+        }
+      }
+      for (const [rJid, setOfIds] of groupIdsMap.entries()) {
+        await recordGroupPortalIdSubmitted(rJid, Array.from(setOfIds));
+      }
+    } catch (_) { }
   });
 
   sock.ev.on("connection.update", async (update) => {
@@ -2946,8 +2999,36 @@ const DEFAULT_FAILED_ORDERS_GROUP_NAME = "Unprocessed Orders";
 let portalIdCacheSeeded = false;
 
 async function seedSubmittedPortalIdsCache() {
+  if (portalIdCacheSeeded) return;
   portalIdCacheSeeded = true;
+  try {
+    const { data: allRegRows } = await supabase
+      .from("settings")
+      .select("key, value")
+      .like("key", "failed_orders_posted_%");
+    const now = Date.now();
+    let count = 0;
+    for (const r of (allRegRows || [])) {
+      if (!r?.value) continue;
+      try {
+        const list = typeof r.value === "string" ? JSON.parse(r.value) : r.value;
+        if (Array.isArray(list)) {
+          list.forEach(id => {
+            const clean = String(id).trim();
+            if (/^\d{4,9}$/.test(clean)) {
+              submittedPortalIdsTimestamps.set(clean, now);
+              count++;
+            }
+          });
+        }
+      } catch (_) { }
+    }
+    console.log(`🛡️ [GROUP DEDUP] Pre-seeded ${count} previously submitted portal IDs into memory.`);
+  } catch (err) {
+    console.warn("seedSubmittedPortalIdsCache error:", err.message);
+  }
 }
+setTimeout(seedSubmittedPortalIdsCache, 2000);
 
 async function submitFailedPortalIdToGroup(portalId, meta = {}) {
   const isTest = meta.isTest || portalId === "TEST-PING";
@@ -2958,6 +3039,10 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     return { ok: false, reason: "invalid_id" };
   }
   const cleanId = rawId;
+
+  if (!portalIdCacheSeeded) {
+    await seedSubmittedPortalIdsCache();
+  }
 
   // 🛡️ OWNER SAFETY LOCK:
   // Auto-submitting to the group is STRICTLY permitted ONLY when:
@@ -2972,6 +3057,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     "bulk_phone_failed",
     "phone_check_queued_over_24h",
     "support_draft_failed",
+    "customer_support_delivery_failed",
     "datamart_failed_orders_scan",
     "recent_delivery_check_failed",
     "orders_queued_over_24h",
@@ -3099,13 +3185,12 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     // STRICT NORMALIZATION: Ensure clean JID format
     groupJid = groupJid.replace(/(@g\.us)+$/i, "") + "@g.us";
 
-    // 🛡️ SCAN 1: Live recent WhatsApp messages in memory strictly for the TARGET GROUP (@g.us)
-    // Checks all messages sent inside the actual group (by humans or bots)
+    // 🛡️ SCAN 1: Live recent WhatsApp messages in memory strictly for group messages (@g.us)
+    // Checks all messages sent inside the actual group or any linked group (by humans or bots)
     const foundInRecentGroup = recentBaileysMessages.some(m => {
       if (!m.text) return false;
-      const isFromTargetGroup = m.from && m.from.endsWith("@g.us") &&
-        (m.from === groupJid || m.from.split("@")[0] === groupJid.split("@")[0]);
-      if (!isFromTargetGroup) return false;
+      const isGroupMsg = m.from && m.from.endsWith("@g.us");
+      if (!isGroupMsg) return false;
       const nums = m.text.match(/\b\d{4,9}\b/g) || [];
       return nums.includes(cleanId);
     });
