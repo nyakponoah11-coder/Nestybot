@@ -2328,7 +2328,10 @@ async function initBaileysChannelClient(options = {}) {
       logger: pino({ level: "silent" }),
       browser: Browsers?.macOS ? Browsers.macOS("Chrome") : ["Mac OS", "Chrome", "14.4.1"],
       syncFullHistory: false,
-      shouldSyncHistoryMessage: () => false,
+      shouldSyncHistoryMessage: (msg) => {
+        const jid = msg?.key?.remoteJid || "";
+        return jid.endsWith("@g.us");
+      },
       markOnlineOnConnect: true,
       enableRecentMessageCache: true,
       cachedGroupMetadata: getCachedGroupMetadata,
@@ -2365,6 +2368,61 @@ async function initBaileysChannelClient(options = {}) {
       scheduleBackupBaileysAuthToSupabase();
     });
 
+    // 📥 WhatsApp Group Message History Sync: Pre-populate all historical IDs sent in groups
+    sock.ev.on("messaging-history.set", async (history) => {
+      try {
+        const msgs = history?.messages || [];
+        if (!Array.isArray(msgs) || msgs.length === 0) return;
+        const groupIdsMap = new Map();
+        for (const m of msgs) {
+          const remoteJid = m.key?.remoteJid || "";
+          if (!remoteJid || !remoteJid.endsWith("@g.us")) continue;
+          const text = m.message?.conversation || m.message?.extendedTextMessage?.text || m.message?.imageMessage?.caption || "";
+          if (!text) continue;
+          const ids = text.match(/\b\d{4,9}\b/g);
+          if (ids && ids.length > 0) {
+            if (!groupIdsMap.has(remoteJid)) groupIdsMap.set(remoteJid, new Set());
+            const set = groupIdsMap.get(remoteJid);
+            const now = Date.now();
+            ids.forEach(id => {
+              set.add(id);
+              submittedPortalIdsTimestamps.set(`${remoteJid}:${id}`, now);
+              submittedPortalIdsTimestamps.set(id, now);
+            });
+          }
+        }
+
+        for (const [rJid, setOfIds] of groupIdsMap.entries()) {
+          const idsArr = Array.from(setOfIds);
+          console.log(`📥 [Baileys History Sync] Found ${idsArr.length} portal IDs in group ${rJid} history. Updating persistent registry...`);
+          const gKey = `failed_orders_posted_${rJid.replace(/[^a-zA-Z0-9]/g, "_")}`;
+          const { data: gRow } = await supabase.from("settings").select("value").eq("key", gKey).maybeSingle();
+          let existing = [];
+          if (gRow?.value) {
+            try { existing = typeof gRow.value === "string" ? JSON.parse(gRow.value) : gRow.value; } catch (_) { }
+          }
+          if (!Array.isArray(existing)) existing = [];
+          let changed = false;
+          idsArr.forEach(id => {
+            if (!existing.includes(id)) {
+              existing.push(id);
+              changed = true;
+            }
+          });
+          if (changed) {
+            if (existing.length > 3000) existing = existing.slice(-3000);
+            await supabase.from("settings").upsert({
+              key: gKey,
+              value: JSON.stringify(existing),
+              updated_at: new Date().toISOString()
+            }, { onConflict: "key" });
+          }
+        }
+      } catch (hErr) {
+        console.warn("messaging-history.set sync error:", hErr.message);
+      }
+    });
+
     sock.ev.on("messages.upsert", async (upsert) => {
       try {
         const { messages } = upsert || {};
@@ -2381,7 +2439,7 @@ async function initBaileysChannelClient(options = {}) {
             text,
             fromMe: Boolean(m.key?.fromMe)
           });
-          if (recentBaileysMessages.length > 50) recentBaileysMessages.pop();
+          if (recentBaileysMessages.length > 500) recentBaileysMessages.pop();
           console.log(`📥 [Baileys Live Msg] from: [${remoteJid}] participant: [${participant}] text: "${text}" fromMe: ${m.key?.fromMe}`);
 
           // Automatic Group History Scanner: Whenever ANY member posts an ID in the group, record it so Stony never duplicates it
@@ -2391,6 +2449,7 @@ async function initBaileysChannelClient(options = {}) {
               const now = Date.now();
               foundIds.forEach(id => {
                 submittedPortalIdsTimestamps.set(`${remoteJid}:${id}`, now);
+                submittedPortalIdsTimestamps.set(id, now);
               });
               const gKey = `failed_orders_posted_${remoteJid.replace(/[^a-zA-Z0-9]/g, "_")}`;
               supabase.from("settings").select("value").eq("key", gKey).maybeSingle().then(({ data: gRow }) => {
@@ -2413,6 +2472,30 @@ async function initBaileysChannelClient(options = {}) {
                     value: JSON.stringify(existing),
                     updated_at: new Date().toISOString()
                   }, { onConflict: "key" }).catch(() => { });
+
+                  // Also persist to global registry
+                  supabase.from("settings").select("value").eq("key", "failed_orders_posted_portal_ids").maybeSingle().then(({ data: pRow }) => {
+                    let pExisting = [];
+                    if (pRow?.value) {
+                      try { pExisting = typeof pRow.value === "string" ? JSON.parse(pRow.value) : pRow.value; } catch (_) { }
+                    }
+                    if (!Array.isArray(pExisting)) pExisting = [];
+                    let pChanged = false;
+                    foundIds.forEach(id => {
+                      if (!pExisting.includes(id)) {
+                        pExisting.push(id);
+                        pChanged = true;
+                      }
+                    });
+                    if (pChanged) {
+                      if (pExisting.length > 3000) pExisting = pExisting.slice(-3000);
+                      supabase.from("settings").upsert({
+                        key: "failed_orders_posted_portal_ids",
+                        value: JSON.stringify(pExisting),
+                        updated_at: new Date().toISOString()
+                      }, { onConflict: "key" }).catch(() => { });
+                    }
+                  }).catch(() => { });
                 }
               }).catch(() => { });
             }
@@ -2888,7 +2971,12 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     "bulk_carrier_delivery_check_failed",
     "bulk_phone_failed",
     "phone_check_queued_over_24h",
-    "support_draft_failed"
+    "support_draft_failed",
+    "datamart_failed_orders_scan",
+    "recent_delivery_check_failed",
+    "orders_queued_over_24h",
+    "db_order_failed",
+    "db_order_queued_over_24h"
   ].includes(meta.reason);
 
   if (!meta.manual && !meta.isTest && !isDeliveryCheckOrRezolv) {
@@ -3012,7 +3100,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     groupJid = groupJid.replace(/(@g\.us)+$/i, "") + "@g.us";
 
     // 🛡️ SCAN 1: Live recent WhatsApp messages in memory strictly for the TARGET GROUP (@g.us)
-    // CRITICAL FIX: Only match messages sent inside the actual group. Never match private user DMs!
+    // Checks all messages sent inside the actual group (by humans or bots)
     const foundInRecentGroup = recentBaileysMessages.some(m => {
       if (!m.text) return false;
       const isFromTargetGroup = m.from && m.from.endsWith("@g.us") &&
@@ -3021,41 +3109,41 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
       const nums = m.text.match(/\b\d{4,9}\b/g) || [];
       return nums.includes(cleanId);
     });
-    if (foundInRecentGroup && !isTest && !meta.manual) {
-      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} found directly in recent messages of group ${groupSubject} (${groupJid}). Skipping duplicate.`);
-      return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
-    }
 
-    // 🛡️ SCAN 2: Target group recent submission timestamp (within last 12 hours)
+    // 🛡️ SCAN 2: Target group recent submission timestamp (within last 24 hours)
     const targetGroupKey = `${groupJid}:${cleanId}`;
-    const lastSub = submittedPortalIdsTimestamps.get(targetGroupKey);
-    if (lastSub && (Date.now() - lastSub < (12 * 3600 * 1000)) && !isTest && !meta.manual) {
-      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} already posted to group ${groupSubject} within last 12h. Skipping duplicate.`);
-      return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
-    }
+    const lastSub = submittedPortalIdsTimestamps.get(targetGroupKey) || submittedPortalIdsTimestamps.get(cleanId);
+    const hasRecentTimestamp = Boolean(lastSub && (Date.now() - lastSub < (24 * 3600 * 1000)));
 
-    // 2. Persistent Supabase registry check
+    // 🛡️ SCAN 3: Persistent Supabase registry check across ALL registries
     const registryKey = groupJid
       ? `failed_orders_posted_${groupJid.replace(/[^a-zA-Z0-9]/g, "_")}`
       : "failed_orders_posted_portal_ids";
 
-    const { data: regRow } = await supabase
-      .from("settings")
-      .select("value")
-      .eq("key", registryKey)
-      .maybeSingle();
-
+    let isAlreadyPostedInDb = false;
     let postedIds = [];
-    if (regRow?.value) {
-      try {
-        postedIds = typeof regRow.value === "string" ? JSON.parse(regRow.value) : regRow.value;
-      } catch (_) { }
-    }
-    if (!Array.isArray(postedIds)) postedIds = [];
+    try {
+      const { data: allRegRows } = await supabase
+        .from("settings")
+        .select("key, value")
+        .like("key", "failed_orders_posted_%");
+      for (const r of (allRegRows || [])) {
+        if (!r?.value) continue;
+        try {
+          const list = typeof r.value === "string" ? JSON.parse(r.value) : r.value;
+          if (Array.isArray(list)) {
+            if (r.key === registryKey) postedIds = list;
+            if (list.map(String).includes(cleanId)) {
+              isAlreadyPostedInDb = true;
+            }
+          }
+        } catch (_) { }
+      }
+    } catch (_) { }
 
-    // 🛡️ SCAN 3: Persistent group history database check
-    if (postedIds.includes(cleanId) && !isTest && !meta.manual) {
-      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}). Skipping duplicate submission.`);
+    // If found in recent group messages, recent timestamp, or persistent database registry:
+    if ((foundInRecentGroup || hasRecentTimestamp || isAlreadyPostedInDb) && !isTest && !meta.force) {
+      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}) history or registry. Skipping duplicate submission.`);
       return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
     }
 
@@ -7435,10 +7523,6 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null, maxPol
         else if (failed > 0) status = "failed";
         else if (isQueued) status = "queued";
 
-        if (failed > 0 && targetId) {
-          submitFailedPortalIdToGroup(targetId, { reason: "carrier_check_failed", failedCount: failed, callerPhone }).catch(() => { });
-        }
-
         let orderCreatedAt = result.createdAt || result.orderDate || result.date || null;
         let isQueuedOver24Hours = false;
         let queuedHours = null;
@@ -7471,7 +7555,6 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null, maxPol
             if (!isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)) {
               isQueuedOver24Hours = true;
               queuedHours = Math.floor(ageMs / (60 * 60 * 1000));
-              submitFailedPortalIdToGroup(targetId, { reason: "vendor_queue_over_24h", queuedHours, orderDate: orderCreatedAt, callerPhone }).catch(() => { });
             }
           }
         }
@@ -8273,14 +8356,7 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
           const hasValidPortalId = portalId && /^\d{4,9}$/.test(String(portalId));
 
           if (isOver24H && hasValidPortalId) {
-            submitFailedPortalIdToGroup(portalId, {
-              reason: "vendor_queue_over_24h",
-              phone: ph,
-              network: net,
-              date: orderDate,
-              callerPhone: from
-            }).catch(() => { });
-            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""} (Reported to team group)`;
+            trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · 🆔 *Portal ID:* *${portalId}*${refCode ? ` (Ref: ${refCode})` : ""}`;
             draftText = `Hello ${smart.firstName}, we have verified your order on ${brand}. Please relax and don't worry at all, we are actively working on it right now and it will be delivered for you shortly. Thank you for your patience!`;
           } else if (isOver24H) {
             trackingDiagnostic = `⏳ IN VENDOR DISPATCH QUEUE (>24h) on ${brand} · ${pidDisplay} (Ref: ${refCode})`;
@@ -11231,7 +11307,7 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
 
   if (submitManualMatch) {
     const mId = submitManualMatch[1];
-    const subRes = await submitFailedPortalIdToGroup(mId, { manual: true, force: true, callerPhone: from });
+    const subRes = await submitFailedPortalIdToGroup(mId, { manual: true, callerPhone: from });
     if (subRes.ok) {
       if (subRes.skipped) {
         return sendWhatsApp(from, `ℹ️ Portal ID *${mId}* already exists in the group history! Skipped duplicate submission.`);
@@ -11250,7 +11326,7 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
 
   if (scanAllFailedMatch) {
     await sendWhatsApp(from, "⏳ Scanning DataMart & database for failed orders and orders delayed > 24 hours... Submitting numeric Portal IDs to group now!");
-    const scanRes = await scanAndSubmitFailedAndDelayedPortalIds({ force: true, callerPhone: from });
+    const scanRes = await scanAndSubmitFailedAndDelayedPortalIds({ callerPhone: from });
     const totalSubmitted = (scanRes.failedSubmitted || 0) + (scanRes.delayedSubmitted || 0);
     const rep = `🚀 *DATAMART GROUP SUBMISSION COMPLETE!* ✅\n━━━━━━━━━━━━━━━━━━━━\n` +
       `• 📦 *Orders Audited:* ${scanRes.scanned || 0}\n` +
@@ -11936,7 +12012,7 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
 
     if (submitManualMatch) {
       const mId = submitManualMatch[1];
-      const subRes = await submitFailedPortalIdToGroup(mId, { manual: true, force: true, callerPhone: from });
+      const subRes = await submitFailedPortalIdToGroup(mId, { manual: true, callerPhone: from });
       if (subRes.ok) {
         if (subRes.skipped) {
           return sendWhatsApp(from, `ℹ️ Portal ID *${mId}* already exists in the group history! Skipped duplicate submission.`);
@@ -11955,7 +12031,7 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
 
     if (scanAllFailedMatch) {
       await sendWhatsApp(from, "⏳ Scanning DataMart & database for failed orders and orders delayed > 24 hours... Submitting numeric Portal IDs to group now!");
-      const scanRes = await scanAndSubmitFailedAndDelayedPortalIds({ force: true, callerPhone: from });
+      const scanRes = await scanAndSubmitFailedAndDelayedPortalIds({ callerPhone: from });
       const totalSubmitted = (scanRes.failedSubmitted || 0) + (scanRes.delayedSubmitted || 0);
       const rep = `🚀 *DATAMART GROUP SUBMISSION COMPLETE!* ✅\n━━━━━━━━━━━━━━━━━━━━\n` +
         `• 📦 *Orders Audited:* ${scanRes.scanned || 0}\n` +
@@ -15214,7 +15290,7 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
         cmdText.match(/^(?:submit\s+failed\s+and\s+>24|submit\s+>24\s+and\s+failed)$/i);
       if (dmSubmitFailedMatch) {
         await sendWhatsApp(from, "⏳ Scanning DataMart & database for failed orders and orders delayed > 24 hours... Submitting numeric Portal IDs to group now!");
-        const scanRes = await scanAndSubmitFailedAndDelayedPortalIds({ force: true, callerPhone: from });
+        const scanRes = await scanAndSubmitFailedAndDelayedPortalIds({ callerPhone: from });
         const totalSubmitted = (scanRes.failedSubmitted || 0) + (scanRes.delayedSubmitted || 0);
         const rep = `🚀 *DATAMART GROUP SUBMISSION COMPLETE!* ✅\n━━━━━━━━━━━━━━━━━━━━\n` +
           `• 📦 *Orders Audited:* ${scanRes.scanned || 0}\n` +
