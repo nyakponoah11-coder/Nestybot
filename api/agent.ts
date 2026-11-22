@@ -2589,12 +2589,12 @@ Glad to have you!`;
     }
 
     // -------------------------------------------------------------
-    // 2B. FORGOT PASSWORD (REQUEST RESET CODE TO EMAIL & PHONE)
+    // 2B. FORGOT PASSWORD (REQUEST RESET CODE TO EMAIL)
     // -------------------------------------------------------------
     if (action === "forgotPassword") {
       const identifier = String(body?.identifier || body?.email || body?.phone || "").trim();
       if (!identifier) {
-        return res.status(400).json({ ok: false, error: "Please enter your registered email or phone number." });
+        return res.status(400).json({ ok: false, error: "Please enter your registered email address or phone number." });
       }
 
       let agents = await loadAgents(supabase);
@@ -2615,48 +2615,44 @@ Glad to have you!`;
         return res.status(404).json({ ok: false, error: "No agent account found with that email or phone number." });
       }
 
+      if (!matched.email || !matched.email.includes("@")) {
+        return res.status(400).json({
+          ok: false,
+          error: "No email address found for this agent account. Please contact admin to reset your password.",
+        });
+      }
+
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       await saveOtp(supabase, `reset_${matched.id}`, code, 15 * 60 * 1000); // 15 mins
 
       const subject = "Data1gh - Password Reset Verification Code";
       const message = `Hello ${matched.name},\n\nYour Data1gh password reset verification code is: ${code}\n\nThis code expires in 15 minutes. Enter this code to set a new password for your account.\n\nData1gh Reseller Network`;
 
-      const recipientPhone = matched.phone || matched.whatsapp_number || matched.momo_number || "";
-      const { emailSent, smsSent, waSent, deliveredEmail, error } = await sendAgentNotification(supabase, {
+      const { emailSent, deliveredEmail, error } = await sendAgentNotification(supabase, {
         email: matched.email,
-        phone: recipientPhone,
         code,
         subject,
         message,
       });
 
-      if (!emailSent && !smsSent && !waSent) {
-        return res.status(400).json({
-          ok: false,
-          error: error || "Failed to deliver reset code. Please ensure your registered phone or email is active.",
-        });
-      }
-
       const targetEmail = deliveredEmail || matched.email || "";
       const maskedEmail = targetEmail.includes("@")
         ? `${targetEmail.slice(0, 3)}***@${targetEmail.split("@")[1]}`
         : targetEmail;
-      const maskedPhone = recipientPhone.length > 4 ? `***${recipientPhone.slice(-4)}` : recipientPhone;
 
-      const channels: string[] = [];
-      if (waSent) channels.push(`WhatsApp (${maskedPhone})`);
-      if (smsSent) channels.push(`SMS (${maskedPhone})`);
-      if (emailSent) channels.push(`email (${maskedEmail})`);
-
-      const notifMsg = `Verification code sent to your ${channels.join(" and ")}!`;
+      if (!emailSent) {
+        return res.status(400).json({
+          ok: false,
+          error: error || `Failed to send password reset code to your email (${maskedEmail}). Please check your spam folder or try again in a few minutes.`,
+        });
+      }
 
       return res.status(200).json({
         ok: true,
         agent_id: matched.id,
-        message: notifMsg,
-        email_sent: emailSent,
-        sms_sent: smsSent,
-        wa_sent: waSent,
+        email: targetEmail,
+        message: `Password reset verification code sent to your email (${maskedEmail})! Please check your inbox or spam folder.`,
+        email_sent: true,
       });
     }
 
@@ -2689,7 +2685,7 @@ Glad to have you!`;
         return res.status(404).json({ ok: false, error: "Agent account not found." });
       }
 
-      const isValid = await verifyAndConsumeOtp(supabase, `reset_${matched.id}`, code);
+      const isValid = await verifyAndConsumeOtp(supabase, `reset_${matched.id}`, code, matched.email);
       if (!isValid) {
         return res.status(400).json({ ok: false, error: "Invalid or expired reset code. Please request a new one." });
       }
