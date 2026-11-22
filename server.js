@@ -2628,6 +2628,14 @@ async function initBaileysChannelClient(options = {}) {
         baileysChannelReady = true;
         baileysChannelConnecting = false;
         scheduleBackupBaileysAuthToSupabase();
+
+        // 🛡️ Ensure bot never remains in unrelated groups like Princess Talks
+        try {
+          if (typeof sock.groupLeave === "function") {
+            sock.groupLeave("120363411024608637@g.us").catch(() => {});
+          }
+        } catch (_) { }
+
         const jid = await resolveNewsletterJidViaBaileys(sock, DEFAULT_WHATSAPP_CHANNEL_URL);
         console.log("✅ Native Baileys WhatsApp Channel Publisher Connected! JID:", jid || "pending");
 
@@ -3294,12 +3302,6 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
       } catch (_) { }
     }
 
-    // Safety guard: If stored group is an unrelated group, strictly revert to official Unprocessed Orders group
-    if (/princess|health|real life/i.test(groupSubject) || (groupJid && groupJid.includes("120363411024608637"))) {
-      groupJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
-      groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
-    }
-
     // FALLBACK 2: Check owner phone variants in settings
     if (!groupJid) {
       const ownerKeys = ["233547100951", "0547100951", "547100951"];
@@ -3720,26 +3722,36 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
         }
       } catch (_) { }
 
-      try {
-        // Join group if not already a member
-        const joinedId = await sock.groupAcceptInvite(inviteCode);
-        if (joinedId && !targetJid) {
-          targetJid = `${String(joinedId).replace(/(@g\.us)+$/i, "")}@g.us`;
-        }
-      } catch (joinErr) {
-        const eMsg = String(joinErr?.message || joinErr || "");
-        if (eMsg.includes("409") || /already|conflict/i.test(eMsg)) {
-          try {
-            const allGroups = await sock.groupFetchAllParticipating();
-            for (const [gId, gMeta] of Object.entries(allGroups || {})) {
-              if (gMeta?.subject && ((groupSubject !== DEFAULT_FAILED_ORDERS_GROUP_NAME && gMeta.subject.toLowerCase() === groupSubject.toLowerCase()) || /failed|order|unprocessed/i.test(gMeta.subject))) {
-                targetJid = `${String(gId).replace(/(@g\.us)+$/i, "")}@g.us`;
-                groupSubject = gMeta.subject;
-                break;
-              }
+      // 🛡️ Strict Group Guard: The bot will NEVER accept group invites from random messages or non-owners
+      if (isCallerOwner) {
+        try {
+          const invInfo = await sock.groupGetInviteInfo(inviteCode).catch(() => null);
+          const invSubject = invInfo?.subject || "";
+          if (/princess|health|real life|dating|church|family/i.test(invSubject)) {
+            console.warn(`[FAILED ORDER GROUP] Refused to join unrelated group: "${invSubject}".`);
+          } else {
+            const joinedId = await sock.groupAcceptInvite(inviteCode);
+            if (joinedId && !targetJid) {
+              targetJid = `${String(joinedId).replace(/(@g\.us)+$/i, "")}@g.us`;
             }
-          } catch (_) { }
+          }
+        } catch (joinErr) {
+          const eMsg = String(joinErr?.message || joinErr || "");
+          if (eMsg.includes("409") || /already|conflict/i.test(eMsg)) {
+            try {
+              const allGroups = await sock.groupFetchAllParticipating();
+              for (const [gId, gMeta] of Object.entries(allGroups || {})) {
+                if (gMeta?.subject && ((groupSubject !== DEFAULT_FAILED_ORDERS_GROUP_NAME && gMeta.subject.toLowerCase() === groupSubject.toLowerCase()) || /failed|order|unprocessed/i.test(gMeta.subject))) {
+                  targetJid = `${String(gId).replace(/(@g\.us)+$/i, "")}@g.us`;
+                  groupSubject = gMeta.subject;
+                  break;
+                }
+              }
+            } catch (_) { }
+          }
         }
+      } else {
+        console.warn(`[FAILED ORDER GROUP] Ignored group invite from non-owner: ${normCaller}. Only the verified owner can connect groups.`);
       }
     }
 
@@ -3759,13 +3771,6 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
         const meta = await sock.groupMetadata(targetJid);
         if (meta?.subject) groupSubject = meta.subject;
       } catch (_) { }
-    }
-
-    // Safety guard: Never allow random personal or non-order groups to overwrite failed orders group
-    if (/princess|health|real life|dating|church|family/i.test(groupSubject) || (targetJid && targetJid.includes("120363411024608637"))) {
-      console.warn(`[FAILED ORDER GROUP] Rejected unrelated group: "${groupSubject}" (${targetJid}). Reverting to default Unprocessed Orders group.`);
-      targetJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
-      groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
     }
 
     // 1. If caller is an agent / non-owner, save to their account settings
@@ -19030,11 +19035,8 @@ app.get("/api/debug-group", async (req, res) => {
       } catch (e) {
         inviteErr = e.message;
       }
-      try {
-        joinRes = await baileysChannelSock.groupAcceptInvite(code);
-      } catch (e) {
-        joinErr = e.message;
-      }
+      // Auto-join disabled: Bot never joins groups via debug endpoint
+      joinRes = { skipped: true, reason: "automatic_joining_disabled" };
       try {
         groupMeta = await baileysChannelSock.groupMetadata("120363411273230975@g.us");
       } catch (e) {
