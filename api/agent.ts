@@ -3485,9 +3485,6 @@ Glad to have you!`;
         });
       }
 
-      const agents = await loadAgents(supabase);
-      const agent = agents.find((a) => a.id === agentId);
-
       const resolvedMomoName = momoName || agent?.momo_name || agent?.name || "Agent";
       const resolvedMomoNumber = momoNumber || agent?.momo_number || agent?.phone || "";
       const resolvedMomoNetwork = (momoNetwork || agent?.momo_network || "MTN").toUpperCase();
