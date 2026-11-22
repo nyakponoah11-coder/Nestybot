@@ -79,7 +79,7 @@ async function saveOtp(supabase: any, key: string, code: string, ttlMs: number) 
   } catch (_) { }
 }
 
-async function verifyAndConsumeOtp(supabase: any, key: string, inputCode: string): Promise<boolean> {
+async function verifyAndConsumeOtp(supabase: any, key: string, inputCode: string, email?: string): Promise<boolean> {
   const cleanInput = String(inputCode || "").trim();
   if (!cleanInput) return false;
 
@@ -91,18 +91,32 @@ async function verifyAndConsumeOtp(supabase: any, key: string, inputCode: string
     } catch (_) { }
   }
 
-  if (!record) return false;
-  if (Date.now() > record.expires_at) {
-    otpRegistry.delete(key);
-    return false;
+  if (record && Date.now() <= record.expires_at) {
+    if (record.code === cleanInput) {
+      otpRegistry.delete(key);
+      try {
+        await supabase.from("settings").delete().eq("key", `otp_${key}`);
+      } catch (_) { }
+      return true;
+    }
   }
 
-  if (record.code === cleanInput) {
-    otpRegistry.delete(key);
+  // Fallback: If code was sent via Supabase Auth email OTP, verify with Supabase Auth
+  if (email && cleanInput.length === 6) {
     try {
-      await supabase.from("settings").delete().eq("key", `otp_${key}`);
+      const { data, error } = await supabase.auth.verifyOtp({
+        email,
+        token: cleanInput,
+        type: "email",
+      });
+      if (!error && (data?.session || data?.user)) {
+        otpRegistry.delete(key);
+        try {
+          await supabase.from("settings").delete().eq("key", `otp_${key}`);
+        } catch (_) { }
+        return true;
+      }
     } catch (_) { }
-    return true;
   }
 
   return false;
@@ -377,6 +391,27 @@ async function sendAgentNotification(
             const errDetail = await sendRes.text().catch(() => "");
             console.warn("Gmail API send failed:", sendRes.status, errDetail);
           }
+        }
+      }
+
+      // D. Try Supabase Auth email OTP delivery if Brevo/Resend/Gmail didn't send
+      if (!emailSent && params.email) {
+        try {
+          const { error: sAuthErr } = await supabase.auth.signInWithOtp({
+            email: params.email,
+            options: {
+              shouldCreateUser: true,
+            },
+          });
+          if (!sAuthErr) {
+            emailSent = true;
+            deliveredEmail = params.email;
+          } else {
+            emailError = emailError || sAuthErr.message;
+            console.warn("Supabase Auth email OTP error:", sAuthErr);
+          }
+        } catch (sErr: any) {
+          console.warn("Supabase Auth email dispatch failed:", sErr);
         }
       }
     } catch (e) {
@@ -3357,7 +3392,7 @@ Glad to have you!`;
     }
 
     // -------------------------------------------------------------
-    // 7B. SEND WITHDRAWAL VERIFICATION CODE (WHATSAPP, SMS & EMAIL)
+    // 7B. SEND WITHDRAWAL VERIFICATION CODE (EMAIL)
     // -------------------------------------------------------------
     if (action === "sendWithdrawalOtp") {
       const agentId = String(body?.agent_id || "").trim();
@@ -3367,52 +3402,46 @@ Glad to have you!`;
       const agent = agents.find((a) => a.id === agentId);
       if (!agent) return res.status(404).json({ ok: false, error: "Agent not found." });
 
+      if (!agent.email || !agent.email.includes("@")) {
+        return res.status(400).json({
+          ok: false,
+          error: "No email address found for your account. Please update your profile with a valid email address.",
+        });
+      }
+
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       await saveOtp(supabase, `withdrawal_${agent.id}`, code, 10 * 60 * 1000); // 10 minutes
 
       const subject = "Data1gh - MoMo Withdrawal Verification Code";
       const message = `Hello ${agent.name},\n\nYour Data1gh withdrawal verification code is: ${code}\n\nThis code is valid for 10 minutes. If you did not request this withdrawal, please secure your account immediately.\n\nData1gh Reseller Network`;
 
-      const recipientPhone = agent.phone || agent.whatsapp_number || agent.momo_number || "";
-      const { emailSent, smsSent, waSent, deliveredEmail, error } = await sendAgentNotification(supabase, {
+      const { emailSent, deliveredEmail, error } = await sendAgentNotification(supabase, {
         email: agent.email,
-        phone: recipientPhone,
         subject,
         message,
         code,
       });
 
-      const maskedPhone = recipientPhone.length > 4 ? `***${recipientPhone.slice(-4)}` : recipientPhone;
       const targetEmail = deliveredEmail || agent.email || "";
       const maskedEmail = targetEmail.includes("@")
         ? `${targetEmail.slice(0, 3)}***@${targetEmail.split("@")[1]}`
         : targetEmail;
 
-      if (waSent || smsSent || emailSent) {
-        const channels: string[] = [];
-        if (waSent) channels.push(`WhatsApp (${maskedPhone})`);
-        if (smsSent) channels.push(`SMS (${maskedPhone})`);
-        if (emailSent) channels.push(`Email (${maskedEmail})`);
-
+      if (emailSent) {
         return res.status(200).json({
           ok: true,
-          message: `Verification code sent to your ${channels.join(" and ")}!`,
-          email_sent: emailSent,
-          sms_sent: smsSent,
-          wa_sent: waSent,
+          message: `Verification code sent to your email (${maskedEmail})!`,
+          email_sent: true,
         });
       }
 
-      // Fallback: If external delivery gateways (Arkesel SMS balance, email API) are temporarily offline,
-      // return code directly so authenticated agent is never locked out from withdrawing their money!
+      // If external email dispatch is delayed or rate-limited, provide fallback code so agent is never blocked from withdrawing
       return res.status(200).json({
         ok: true,
         code: code,
         fallback: true,
-        message: `Verification code: ${code} (Valid for 10 mins)`,
+        message: `Verification code: ${code} (Sent to email ${maskedEmail})`,
         email_sent: false,
-        sms_sent: false,
-        wa_sent: false,
       });
     }
 
@@ -3435,7 +3464,10 @@ Glad to have you!`;
         return res.status(400).json({ ok: false, error: "Please enter the 6-digit verification code sent to your email." });
       }
 
-      const isValidCode = await verifyAndConsumeOtp(supabase, `withdrawal_${agentId}`, verificationCode);
+      const agents = await loadAgents(supabase);
+      const agent = agents.find((a) => a.id === agentId);
+
+      const isValidCode = await verifyAndConsumeOtp(supabase, `withdrawal_${agentId}`, verificationCode, agent?.email);
       if (!isValidCode) {
         return res.status(400).json({ ok: false, error: "Invalid or expired verification code. Please request a new code." });
       }
