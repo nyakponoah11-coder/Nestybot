@@ -3430,18 +3430,14 @@ Glad to have you!`;
       if (emailSent) {
         return res.status(200).json({
           ok: true,
-          message: `Verification code sent to your email (${maskedEmail})!`,
+          message: `Verification code sent to your email (${maskedEmail})! Please check your inbox or spam folder.`,
           email_sent: true,
         });
       }
 
-      // If external email dispatch is delayed or rate-limited, provide fallback code so agent is never blocked from withdrawing
-      return res.status(200).json({
-        ok: true,
-        code: code,
-        fallback: true,
-        message: `Verification code: ${code} (Sent to email ${maskedEmail})`,
-        email_sent: false,
+      return res.status(400).json({
+        ok: false,
+        error: error || `Unable to deliver email to ${maskedEmail}. Please ensure your email is active or try again in a few minutes.`,
       });
     }
 
