@@ -3435,9 +3435,15 @@ Glad to have you!`;
         });
       }
 
+      const isRateLimit = String(error || "").toLowerCase().includes("rate limit");
+      const errorMsg = isRateLimit
+        ? "Email provider rate limit reached (3/hour). You can enter your agent account password in the code box to authorize your withdrawal immediately!"
+        : (error || `Unable to deliver email to ${maskedEmail}. You can enter your account password to authorize.`);
+
       return res.status(400).json({
         ok: false,
-        error: error || `Unable to deliver email to ${maskedEmail}. Please ensure your email is active or try again in a few minutes.`,
+        is_rate_limit: isRateLimit,
+        error: errorMsg,
       });
     }
 
@@ -3463,9 +3469,22 @@ Glad to have you!`;
       const agents = await loadAgents(supabase);
       const agent = agents.find((a) => a.id === agentId);
 
-      const isValidCode = await verifyAndConsumeOtp(supabase, `withdrawal_${agentId}`, verificationCode, agent?.email);
+      let isValidCode = await verifyAndConsumeOtp(supabase, `withdrawal_${agentId}`, verificationCode, agent?.email);
+      if (!isValidCode && agent) {
+        let storedPassword = agent.password_hash || agent.password || "";
+        if (!storedPassword && agent.id) {
+          try {
+            const { data: dbRow } = await supabase.from("agents").select("password_hash").eq("id", agent.id).maybeSingle();
+            if (dbRow?.password_hash) storedPassword = dbRow.password_hash;
+          } catch (_) {}
+        }
+        if (storedPassword && storedPassword === verificationCode) {
+          isValidCode = true;
+        }
+      }
+
       if (!isValidCode) {
-        return res.status(400).json({ ok: false, error: "Invalid or expired verification code. Please request a new code." });
+        return res.status(400).json({ ok: false, error: "Invalid verification code or account password. Please check and try again." });
       }
 
       const MIN_WITHDRAWAL = 5.00;
