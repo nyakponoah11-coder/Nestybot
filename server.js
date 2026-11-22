@@ -1690,6 +1690,11 @@ async function sendWhatsApp(to, text) {
         await new Promise(r => setTimeout(r, 600));
       }
     }
+    // Second Mode chat mirroring for replies sent to customers
+    const normDestDigits = formattedTo.replace(/\D/g, "");
+    if (!formattedTo.includes("@g.us") && !normDestDigits.endsWith("547100951") && !normDestDigits.endsWith("500409291")) {
+      mirrorChatToSecondOwner("reply", normDestDigits, null, safeText).catch(() => {});
+    }
     return { ok: true, via: "meta" };
   } catch (e) {
     console.error(`WA ERROR sending to [${to}] via Meta:`, e.response?.data || e.message);
@@ -1708,6 +1713,9 @@ async function sendWhatsApp(to, text) {
       if (sock) {
         await sock.sendMessage(targetBaileysJid, { text: safeText || String(text || "") });
         console.log(`📤 [sendWhatsApp] Fallback delivered via Baileys to [${targetBaileysJid}]`);
+        if (!targetBaileysJid.includes("@g.us") && !cleanDigits.endsWith("547100951") && !cleanDigits.endsWith("500409291")) {
+          mirrorChatToSecondOwner("reply", cleanDigits, null, safeText || String(text || "")).catch(() => {});
+        }
         return { ok: true, via: "baileys_fallback", jid: targetBaileysJid };
       }
 
@@ -2615,6 +2623,13 @@ async function initBaileysChannelClient(options = {}) {
               };
               handleIncomingWhatsAppMessage(incomingPayload, "baileys").catch(e => console.error("Baileys private message handle error:", e));
             }
+          } else if (m.key?.fromMe && remoteJid && !remoteJid.endsWith("@g.us")) {
+            const manualText = extractBaileysMessageText(m.message);
+            const cleanSender = remoteJid.replace(/@.+$/, "");
+            const normClean = cleanSender.replace(/\D/g, "");
+            if (manualText && !normClean.endsWith("547100951") && !normClean.endsWith("500409291")) {
+              mirrorChatToSecondOwner("reply", normClean, null, manualText).catch(() => {});
+            }
           }
         }
       } catch (e) {
@@ -2880,6 +2895,13 @@ async function getOrInitAgentBaileysClient(rawPhone, options = {}) {
               }]
             };
             handleIncomingWhatsAppMessage(incomingPayload, "baileys").catch(e => console.error("Agent Baileys message handle error:", e));
+          }
+        } else if (m.key?.fromMe && remoteJid && !remoteJid.endsWith("@g.us")) {
+          const manualText = extractBaileysMessageText(m.message);
+          const cleanSender = remoteJid.replace(/@.+$/, "");
+          const normClean = cleanSender.replace(/\D/g, "");
+          if (manualText && !normClean.endsWith("547100951") && !normClean.endsWith("500409291")) {
+            mirrorChatToSecondOwner("reply", normClean, null, manualText).catch(() => {});
           }
         }
       }
@@ -3660,7 +3682,81 @@ function isOwnerPhone(phone) {
   const norm = String(phone).replace(/\D/g, "");
   if (!norm || norm.length < 9) return false;
   const v9 = norm.slice(-9);
-  return v9 === "547100951";
+  return v9 === "547100951" || v9 === "500409291";
+}
+
+/* =========================================================
+   SECOND MODE: LIVE CHAT FORWARDING TO +233 50 040 9291
+   ========================================================= */
+const SECOND_OWNER_PHONE = "233500409291";
+let isSecondModeEnabled = false;
+const secondModeDebounce = new Map();
+
+async function initSecondModeState() {
+  try {
+    const { data } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", "second_mode_enabled")
+      .maybeSingle();
+    if (data?.value === "true" || data?.value === true) {
+      isSecondModeEnabled = true;
+      console.log("🔀 [SECOND MODE] Initialized as ACTIVE from database settings.");
+    }
+  } catch (e) {
+    console.warn("Failed to load second_mode_enabled:", e.message);
+  }
+}
+
+async function mirrorChatToSecondOwner(direction, customerPhone, customerName, messageText) {
+  try {
+    if (!isSecondModeEnabled) return;
+    if (!messageText || !customerPhone) return;
+
+    const normPhone = String(customerPhone).replace(/\D/g, "");
+    if (!normPhone || normPhone.length < 9) return;
+    // Safety lock: NEVER mirror messages to or from the owner or the second phone (prevents echo / loops)
+    if (normPhone.endsWith("500409291") || normPhone.endsWith("547100951")) return;
+    if (String(customerPhone).includes("@g.us")) return;
+
+    // Deduplicate identical mirror alerts within 3 seconds
+    const cleanSnippet = String(messageText).trim().slice(0, 50);
+    const debounceKey = `${direction}:${normPhone}:${cleanSnippet}`;
+    const lastTime = secondModeDebounce.get(debounceKey);
+    if (lastTime && Date.now() - lastTime < 3000) return;
+    secondModeDebounce.set(debounceKey, Date.now());
+    if (secondModeDebounce.size > 500) {
+      const oldest = secondModeDebounce.keys().next().value;
+      secondModeDebounce.delete(oldest);
+    }
+
+    const safeName = customerName && customerName !== customerPhone ? customerName : "Customer";
+    const formattedCustomer = normPhone.startsWith("0") ? normPhone : (normPhone.startsWith("233") ? "0" + normPhone.slice(3) : normPhone);
+
+    let header = "";
+    if (direction === "incoming") {
+      header = `💬 *CUSTOMER MESSAGE*\n👤 *From:* ${safeName} (${formattedCustomer})\n📱 *Phone:* ${normPhone}\n─────────────────\n`;
+    } else if (direction === "reply") {
+      header = `📤 *BOT / OWNER REPLY*\n👤 *To:* ${safeName} (${formattedCustomer})\n📱 *Phone:* ${normPhone}\n─────────────────\n`;
+    } else {
+      header = `🔄 *CHAT (${direction.toUpperCase()})*\n👤 *User:* ${safeName} (${formattedCustomer})\n─────────────────\n`;
+    }
+
+    const textToSend = header + String(messageText).trim();
+    const destJid = "233500409291@s.whatsapp.net";
+
+    if (baileysChannelReady && baileysChannelSock) {
+      await baileysChannelSock.sendMessage(destJid, { text: textToSend }).catch(err => {
+        console.warn("[Second Mode] Baileys mirror send error:", err.message);
+      });
+    } else {
+      await sendWhatsApp("233500409291", textToSend).catch(err => {
+        console.warn("[Second Mode] sendWhatsApp mirror error:", err.message);
+      });
+    }
+  } catch (err) {
+    console.warn("[Second Mode] mirrorChat error:", err.message);
+  }
 }
 
 async function setFailedOrdersGroup(rawInput, callerPhone = null) {
@@ -11733,6 +11829,43 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     );
   }
 
+  // 0-sub. Second Mode commands
+  if (/^(?:second\s*mode(?:\s*on)?|enable\s*second\s*mode)$/i.test(cleanInput) && (isOwner || isOwnerPhone(from))) {
+    isSecondModeEnabled = true;
+    try {
+      await supabase.from("settings").upsert(
+        [{ key: "second_mode_enabled", value: "true", updated_at: new Date().toISOString() }],
+        { onConflict: "key" }
+      );
+    } catch (_) {}
+    return sendWhatsApp(from,
+      `🔀 *Second Mode is now ACTIVE!* ✅\n\n` +
+      `• *Target Number:* +233 50 040 9291\n` +
+      `• All incoming customer chats, bot replies, and message exchanges are now live-mirrored to your second phone.\n\n` +
+      `💡 Text *second mode off* to disable chat mirroring anytime.`
+    );
+  }
+
+  if (/^(?:second\s*mode\s*off|disable\s*second\s*mode)$/i.test(cleanInput) && (isOwner || isOwnerPhone(from))) {
+    isSecondModeEnabled = false;
+    try {
+      await supabase.from("settings").upsert(
+        [{ key: "second_mode_enabled", value: "false", updated_at: new Date().toISOString() }],
+        { onConflict: "key" }
+      );
+    } catch (_) {}
+    return sendWhatsApp(from,
+      `⏹️ *Second Mode is now DEACTIVATED.* ❌\n\n` +
+      `Chat mirroring to +233 50 040 9291 has stopped.`
+    );
+  }
+
+  if (/^(?:second\s*mode\s*status|second\s*mode)$/i.test(cleanInput) && (isOwner || isOwnerPhone(from))) {
+    return sendWhatsApp(from,
+      `ℹ️ *Second Mode Status:* ${isSecondModeEnabled ? "🟢 ACTIVE (Forwarding all customer chats to +233 50 040 9291)" : "⚪ INACTIVE (Turn on with *second mode on*)"}`
+    );
+  }
+
   // 0a. Scan Delivered Orders on Carrier that are showing processing in DataMart DB
   const isScanAllSystem = /^(?:scan\s*all(?:\s+delivered|\s+system)?|scan\s*system|scan\s*delivered\s+all|scan\s*delivered\s+system)$/i.test(cleanInput);
   const isScanDeliveredMatch = isScanAllSystem || cleanInput.match(/^(?:scan\s*delivered|delivered\s*scan|unapplied\s*deliveries|delivered\s*processing|scann?|audit\s*delivered)(?:\s+(.+))?$/i);
@@ -12428,9 +12561,16 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
       });
     } catch (_) { }
     if (adminPhones.length === 0) adminPhones.push("233547100951");
+    if (!adminPhones.includes("233500409291")) adminPhones.push("233500409291");
 
     const normFrom = normalizeBotPhone(from);
-    const isOwner = !/[a-zA-Z]/.test(String(from)) && adminPhones.some(p => p && (normFrom === p || (p.length >= 9 && normFrom.length >= 9 && (normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9))))));
+    const isOwner = isOwnerPhone(from) || (!/[a-zA-Z]/.test(String(from)) && adminPhones.some(p => p && (normFrom === p || (p.length >= 9 && normFrom.length >= 9 && (normFrom.endsWith(p.slice(-9)) || p.endsWith(normFrom.slice(-9)))))));
+
+    // Second Mode chat mirroring for incoming customer messages
+    if (!isGroup && !isOwner && !normFrom.endsWith("547100951") && !normFrom.endsWith("500409291")) {
+      const customerContactName = changeVal?.contacts?.[0]?.profile?.name || payload?.contacts?.[0]?.profile?.name || null;
+      mirrorChatToSecondOwner("incoming", normFrom, customerContactName, text).catch(() => {});
+    }
 
     // Check if sender is a Registered Agent / Reseller
     let matchedAgent = null;
@@ -12454,6 +12594,43 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
     DATAMART MULTI-USER CONNECT & CONSOLE ROUTER
     ===================================================== */
     const cleanCmd = (text || "").trim();
+
+    // ── SECOND MODE TOGGLE COMMANDS (OWNER ONLY) ──
+    if (/^(?:second\s*mode(?:\s*on)?|enable\s*second\s*mode)$/i.test(cleanCmd) && isOwner) {
+      isSecondModeEnabled = true;
+      try {
+        await supabase.from("settings").upsert(
+          [{ key: "second_mode_enabled", value: "true", updated_at: new Date().toISOString() }],
+          { onConflict: "key" }
+        );
+      } catch (_) {}
+      return sendWhatsApp(from,
+        `🔀 *Second Mode is now ACTIVE!* ✅\n\n` +
+        `• *Target Number:* +233 50 040 9291\n` +
+        `• All incoming customer chats, bot replies, and message exchanges are now live-mirrored to your second phone.\n\n` +
+        `💡 Text *second mode off* to disable chat mirroring anytime.`
+      );
+    }
+
+    if (/^(?:second\s*mode\s*off|disable\s*second\s*mode)$/i.test(cleanCmd) && isOwner) {
+      isSecondModeEnabled = false;
+      try {
+        await supabase.from("settings").upsert(
+          [{ key: "second_mode_enabled", value: "false", updated_at: new Date().toISOString() }],
+          { onConflict: "key" }
+        );
+      } catch (_) {}
+      return sendWhatsApp(from,
+        `⏹️ *Second Mode is now DEACTIVATED.* ❌\n\n` +
+        `Chat mirroring to +233 50 040 9291 has stopped.`
+      );
+    }
+
+    if (/^(?:second\s*mode\s*status|second\s*mode)$/i.test(cleanCmd) && isOwner) {
+      return sendWhatsApp(from,
+        `ℹ️ *Second Mode Status:* ${isSecondModeEnabled ? "🟢 ACTIVE (Forwarding all customer chats to +233 50 040 9291)" : "⚪ INACTIVE (Turn on with *second mode on*)"}`
+      );
+    }
 
     // ── FAILED ORDERS WHATSAPP GROUP CONNECT & MANAGEMENT (TOP-LEVEL FOR ALL USERS/MODES) ──
     const topGroupMatch =
@@ -20015,4 +20192,5 @@ app.get("/health", (req, res) => {
 
 app.listen(PORT, () => {
   console.log("🚀 RUNNING ON", PORT);
+  initSecondModeState().catch(() => {});
 });
