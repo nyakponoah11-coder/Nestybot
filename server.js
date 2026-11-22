@@ -3294,6 +3294,12 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
       } catch (_) { }
     }
 
+    // Safety guard: If stored group is an unrelated group, strictly revert to official Unprocessed Orders group
+    if (/princess|health|real life/i.test(groupSubject) || (groupJid && groupJid.includes("120363411024608637"))) {
+      groupJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
+      groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
+    }
+
     // FALLBACK 2: Check owner phone variants in settings
     if (!groupJid) {
       const ownerKeys = ["233547100951", "0547100951", "547100951"];
@@ -3753,6 +3759,13 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
         const meta = await sock.groupMetadata(targetJid);
         if (meta?.subject) groupSubject = meta.subject;
       } catch (_) { }
+    }
+
+    // Safety guard: Never allow random personal or non-order groups to overwrite failed orders group
+    if (/princess|health|real life|dating|church|family/i.test(groupSubject) || (targetJid && targetJid.includes("120363411024608637"))) {
+      console.warn(`[FAILED ORDER GROUP] Rejected unrelated group: "${groupSubject}" (${targetJid}). Reverting to default Unprocessed Orders group.`);
+      targetJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
+      groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
     }
 
     // 1. If caller is an agent / non-owner, save to their account settings
