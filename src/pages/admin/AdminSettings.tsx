@@ -730,9 +730,11 @@ const AdminSettings = () => {
       { key: "announcement_title", value: values.announcement_title ?? "" },
       { key: "announcement_message", value: values.announcement_message ?? "" },
       { key: "spin_game_enabled", value: values.spin_game_enabled === "true" ? "true" : "false" },
+      { key: "christmas_theme_enabled", value: values.christmas_theme_enabled === "false" ? "false" : "true" },
       { key: "auto_payment_sms_enabled", value: values.auto_payment_sms_enabled === "false" ? "false" : "true" },
-      { key: "admin_payment_alert_phone", value: (values.admin_payment_alert_phone ?? supportPhone).trim() },
-      { key: "admin_whatsapp_number", value: (values.admin_whatsapp_number || values.admin_payment_alert_phone || supportPhone || "0547100951").trim() },
+      { key: "admin_whatsapp_number", value: (values.admin_whatsapp_number || values.admin_payment_alert_phone || supportPhone || "").trim() },
+      { key: "admin_payment_alert_phone", value: (values.admin_whatsapp_number || values.admin_payment_alert_phone || supportPhone || "").trim() },
+      { key: "admin_alert_phone", value: (values.admin_whatsapp_number || values.admin_payment_alert_phone || supportPhone || "").trim() },
       { key: "whatsapp_access_token", value: (values.whatsapp_access_token ?? "").trim() },
       { key: "ACCESS_TOKEN", value: (values.whatsapp_access_token ?? "").trim() },
       { key: "whatsapp_phone_id", value: (values.whatsapp_phone_id ?? "").trim() },
@@ -2202,6 +2204,54 @@ Time: 06/10/2026 12:30`}
                 id="spin_game_enabled"
                 checked={values.spin_game_enabled === "true"}
                 onCheckedChange={(c) => setValues(v => ({ ...v, spin_game_enabled: c ? "true" : "false" }))}
+              />
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      {/* Card 7: 🎄 Festive Christmas Design Toggle */}
+      <Card className="overflow-hidden border-2 border-red-500/50 bg-gradient-to-br from-red-950/60 via-card to-emerald-950/40 shadow-[0_8px_32px_rgba(239,68,68,0.2)] rounded-2xl">
+        <div className="h-1.5 w-full bg-gradient-to-r from-red-500 via-amber-400 to-emerald-500" />
+        <div className="p-4 md:p-6 space-y-4">
+          <div className="flex items-start justify-between gap-3 pb-3 border-b border-red-500/20">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-red-500/20 border border-red-500/40 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.25)] shrink-0 text-xl">
+                🎅
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="font-bold text-lg text-foreground">Christmas Season Festive Design</h2>
+                  <span
+                    className={`px-2.5 py-0.5 text-[11px] font-bold rounded-full ${
+                      values.christmas_theme_enabled !== "false"
+                        ? "bg-red-500/20 text-red-300 border border-red-500/40 font-black"
+                        : "bg-muted text-muted-foreground border border-border"
+                    }`}
+                  >
+                    {values.christmas_theme_enabled !== "false" ? "🎄 Christmas Design Active" : "Default Design Active"}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  When enabled, shows Santa hats on logos &amp; network pills, snowfall, hanging fairy lights, and Father Christmas Reindeer Sleigh across both Main Store and Agent Storefronts. When turned off, the default design is restored everywhere.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Label htmlFor="christmas_theme_enabled" className="text-xs font-semibold text-red-300">
+                {values.christmas_theme_enabled !== "false" ? "On" : "Off"}
+              </Label>
+              <Switch
+                id="christmas_theme_enabled"
+                checked={values.christmas_theme_enabled !== "false"}
+                onCheckedChange={(c) => {
+                  const val = c ? "true" : "false";
+                  setValues(v => ({ ...v, christmas_theme_enabled: val }));
+                  try {
+                    localStorage.setItem("christmas_theme_enabled", val);
+                    window.dispatchEvent(new CustomEvent("christmas-theme-changed", { detail: c }));
+                  } catch (_) {}
+                }}
               />
             </div>
           </div>
