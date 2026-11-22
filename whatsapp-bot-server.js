@@ -4693,11 +4693,22 @@ async function updateOrderDeliveryStatusSafely(ref, newStatus) {
     : `reference.ilike.%${cleanRef}%,datamart_reference.ilike.%${cleanRef}%`;
 
   try {
-    // 1. Check & update in orders table
+    // 1. Check & update in orders table (append [manual_override] to prevent background delivery watchers from reverting)
+    let existingNotes = "";
+    try {
+      const { data: nRow } = await supabase.from("orders").select("notes").or(filter).maybeSingle();
+      existingNotes = String(nRow?.notes || "");
+    } catch (_) { }
+
+    const manualNotes = existingNotes.includes("[manual_override]")
+      ? existingNotes
+      : (existingNotes ? `${existingNotes} [manual_override]` : "[manual_override]");
+
     const { data: ord } = await supabase
       .from("orders")
       .update({
         delivery_status: newStatus,
+        notes: manualNotes,
         updated_at: new Date().toISOString()
       })
       .or(filter)
@@ -7794,9 +7805,9 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null, maxPol
     const jobId = startRes?.data?.jobId || startRes?.jobId;
     if (!jobId) return null;
 
-    const actualMax = Math.max(10, Number(maxPolls || 25));
+    const actualMax = Math.min(Math.max(4, Number(maxPolls || 8)), 12);
     for (let i = 0; i < actualMax; i++) {
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 350));
       const jobRes = await fetchDatamartSupportEndpoint(`/api/support/delivery-check/job/${jobId}`, {}, callerPhone);
       const st = jobRes?.data?.jobStatus;
       if (st === 'done' || st === 'completed') {
@@ -7879,7 +7890,7 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null, maxPol
     try {
       const dmSearch = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(targetId)}`, {}, callerPhone);
       const dmOrders = dmSearch?.data?.results?.orders || (Array.isArray(dmSearch?.data?.results) ? dmSearch.data.results.filter(x => x.type === "order" || x.network) : []);
-      const foundOrd = dmOrders?.find(o => String(o.apiOrderId || o.exportTracking?.portalId || o.portalOrderId) === String(targetId) || String(o.reference || o.geonetReference) === String(targetId));
+      const foundOrd = dmOrders?.find(o => String(o.apiOrderId || o.exportTracking?.portalId || o.portalOrderId) === String(targetId) || String(o.reference || o.geonetReference) === String(targetId)) || (dmOrders && dmOrders.length > 0 ? dmOrders[0] : null);
       if (foundOrd) {
         const oSt = String(foundOrd.status || "").toLowerCase();
         const pSt = String(foundOrd.exportTracking?.portalStatus || "").toLowerCase();
@@ -7901,6 +7912,34 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null, maxPol
           capacity: foundOrd.capacity,
           orderCreatedAt: foundOrd.createdAt || null,
           items: [{ phone: foundOrd.phoneNumber, status: isDelivered ? "delivered" : (isFailed ? "failed" : "processing") }]
+        };
+      }
+
+      const { data: dbOrds } = await supabase
+        .from("orders")
+        .select("*")
+        .or(`reference.ilike.%${targetId}%,datamart_reference.ilike.%${targetId}%`)
+        .limit(1);
+      if (dbOrds && dbOrds.length > 0) {
+        const dbO = dbOrds[0];
+        const isDelivered = ["delivered", "completed"].includes(String(dbO.delivery_status || "").toLowerCase());
+        const isFailed = ["failed", "cancelled"].includes(String(dbO.delivery_status || "").toLowerCase());
+        return {
+          found: true,
+          portalId: targetId,
+          reference: dbO.reference,
+          totalItems: 1,
+          sent: isDelivered ? 1 : 0,
+          pending: (!isDelivered && !isFailed) ? 1 : 0,
+          failed: isFailed ? 1 : 0,
+          allDelivered: isDelivered,
+          status: isDelivered ? "delivered" : (isFailed ? "failed" : "processing"),
+          rawStatus: dbO.delivery_status,
+          network: dbO.network,
+          phone: dbO.recipient_phone,
+          capacity: dbO.capacity,
+          orderCreatedAt: dbO.created_at,
+          items: [{ phone: dbO.recipient_phone, status: isDelivered ? "delivered" : (isFailed ? "failed" : "processing") }]
         };
       }
     } catch (_) { }
@@ -8542,7 +8581,7 @@ function analyzeTicketSmart(fullTicket, msgs = [], t = {}, brand = "DataMart") {
     const phDisplay = phone && (trackId || orderRef) ? ` to ${phone}` : "";
     mainIssue = `Customer checking data bundle delivery status (${idStr}${phDisplay})`;
     trackingDiagnostic = `🔍 Order Verification: ${idStr}${phDisplay}`;
-    draftText = `Hello ${firstName}, we have located your order (${idStr}) on ${brand}. We are tracking this with the telecom network right now to ensure your bundle is delivered immediately. Kindly dial *124# or *126# to verify your balance. Thank you!`;
+    draftText = `Hello ${firstName}, we have located your order (${idStr}) on ${brand}. We are actively checking the carrier dispatch status for your line${phDisplay} to ensure prompt delivery. Thank you!`;
   }
   // 7. GENERAL DELIVERY QUESTION WITHOUT CODE
   else if (/\b(?:data|bundle|order|deliver|waiting|delay|not\s*come|not\s*received|hasn'?t\s*come|not\s*in|since\s*morning)\b/i.test(lowerRecent)) {
@@ -11560,83 +11599,6 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   if (/^(?:my\s*group|group\s*status|check\s*group)$/i.test(cleanInput)) {
     const rep = await getUserFailedOrdersGroupStatus(from);
     return sendWhatsApp(from, rep);
-  }
-
-  // Test / Ping Group
-  if (/^(?:test\s*group|ping\s*group|check\s*group\s*ping)$/i.test(cleanInput)) {
-    const res = await submitFailedPortalIdToGroup("TEST-PING", { isTest: true, manual: true, force: true, callerPhone: from });
-    if (res.ok) {
-      return sendWhatsApp(from, `🔔 *TEST PING SENT!* Sent a test message to group *${res.group || "Unprocessed Orders"}*.\n\n👉 If you do NOT see it in your group, send your group's invite link here (e.g. *https://chat.whatsapp.com/...*) to re-link it.`);
-    } else {
-      return sendWhatsApp(from, `⚠️ Could not send test ping to group: ${res.reason || res.error}\n\n💡 Send your group invite link (e.g. *https://chat.whatsapp.com/...*) to re-link.`);
-    }
-  }
-
-  // Disconnect / Unlink Group
-  if (/^(?:disconnect\s*group|unlink\s*group|remove\s*group|reset\s*group)$/i.test(cleanInput)) {
-    const rep = await disconnectUserFailedOrdersGroup(from);
-    return sendWhatsApp(from, rep);
-  }
-
-  // Set / Connect Failed Orders Group (Invite Link or JID)
-  const setGroupMatch =
-    cleanInput.match(/https:\/\/chat\.whatsapp\.com\/([A-Za-z0-9_-]{15,35})/i) ||
-    cleanInput.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
-
-  if (setGroupMatch) {
-    const rawMatch = setGroupMatch[1].trim();
-    const linkOrJid = rawMatch.includes("@g.us")
-      ? rawMatch
-      : `https://chat.whatsapp.com/${rawMatch}`;
-    const rep = await setFailedOrdersGroup(linkOrJid, from);
-    return sendWhatsApp(from, rep);
-  }
-
-  // WhatsApp Pairing Commands (Owner pairs primary bot session; Agents pair companion sessions)
-  if (/^(?:pair\s*whatsapp|link\s*whatsapp|connect\s*whatsapp|pair\s*bot)$/i.test(cleanInput)) {
-    const isOwner = isOwnerPhone(from);
-    if (isOwner) {
-      await sendWhatsApp(from, "⏳ *Generating your Stony Bot WhatsApp pairing code...*");
-      const pairRes = await initBaileysChannelClient({ forceReset: true, requestPairForPhone: from });
-      if (pairRes?.pairingCode) {
-        return sendWhatsApp(from,
-          `🔐 *YOUR STONY BOT WHATSAPP PAIRING CODE:*\n\n` +
-          `👉 Code: *${pairRes.pairingCode}*\n\n` +
-          `📲 *How to link on your phone (code is active for 3 minutes):*\n` +
-          `1. Open WhatsApp on your phone\n` +
-          `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
-          `3. *(Important: Check that you don't have 4 active devices already — log out an old one if full)*\n` +
-          `4. Tap *Link a Device*\n` +
-          `5. Tap *Link with phone number instead*\n` +
-          `6. Enter: *${pairRes.pairingCode}*\n\n` +
-          `✅ Once linked, all failed order IDs and channel broadcasts will send directly from your account (Stony)!`
-        );
-      } else if (pairRes?.ready) {
-        return sendWhatsApp(from, `✅ *Your Stony Bot WhatsApp account is already linked and active!*`);
-      } else {
-        return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please try again in 10 seconds."}`);
-      }
-    } else {
-      const pairRes = await getOrInitAgentBaileysClient(from, { requestPair: true });
-      if (pairRes?.pairingCode) {
-        return sendWhatsApp(from,
-          `🔑 *YOUR WHATSAPP PAIRING CODE:*\n\n` +
-          `👉 Code: *${pairRes.pairingCode}*\n\n` +
-          `📲 *How to link on your phone:*\n` +
-          `1. Open WhatsApp on your phone\n` +
-          `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
-          `3. Tap *Link a Device*\n` +
-          `4. Tap *Link with phone number instead*\n` +
-          `5. Enter the code above: *${pairRes.pairingCode}*\n\n` +
-          `✅ Once linked, any failed orders from your account will post into the group with *your own name and number*!\n` +
-          `*(No notifications are sent to the group upon connecting).*`
-        );
-      } else if (pairRes?.ready) {
-        return sendWhatsApp(from, `✅ *Your WhatsApp account is already linked and ready!*\nFailed order IDs are automatically posted to your group under your own number.`);
-      } else {
-        return sendWhatsApp(from, `⚠️ Could not generate pairing code: ${pairRes?.error || "Please ensure your phone number is valid."}`);
-      }
-    }
   }
 
   // Toggle Delivered Order WhatsApp Alerts (explicit mute / unmute commands)
@@ -16130,18 +16092,48 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
         );
       }
 
-      const orderCmdMatch =
-        cmdText.match(/(?:mark|set|update|change)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})\s+(?:to|as)?\s*(delivered|processing|pending|failed|cancelled|refunded)/i) ||
-        cmdText.match(/(?:mark|set|update)\s+(delivered|processing|pending|failed|cancelled|refunded)\s+(?:for\s+)?(?:order\s+)?([A-Za-z0-9_-]{5,35})/i);
+      const statusWords = "(?:delivered|processing|pending|failed|cancelled|refunded)";
+      const statusFirstCmdMatch = cmdText.match(
+        new RegExp(`(?:mark|set|update|change)\\s+(?:the\\s+)?(?:order\\s+)?(?:to\\s+|as\\s+)?(${statusWords})\\s+(?:for\\s+)?(?:order\\s+)?([A-Za-z0-9_-]{4,35})`, "i")
+      );
+      const refFirstCmdMatch = cmdText.match(
+        new RegExp(`(?:mark|set|update|change)\\s+(?:the\\s+)?(?:order\\s+)?([A-Za-z0-9_-]{4,35})\\s+(?:to\\s+|as\\s+)?\\s*(${statusWords})`, "i")
+      );
+      const orderNoRefCmdMatch = cmdText.match(
+        new RegExp(`(?:mark|set|update|change)\\s+(?:the\\s+)?(?:latest\\s+)?order\\s+(?:to\\s+|as\\s+)?(${statusWords})$`, "i")
+      );
 
-      if (orderCmdMatch) {
-        const isFirst = /^(delivered|processing|pending|failed|cancelled|refunded)$/i.test(orderCmdMatch[2]);
-        const targetRef = isFirst ? orderCmdMatch[1].trim() : orderCmdMatch[2].trim();
-        const rawStatus = (isFirst ? orderCmdMatch[2] : orderCmdMatch[1]).trim();
-        const targetStatus = extractStatusFromText(rawStatus) || rawStatus.toLowerCase();
-        await updateOrderDeliveryStatusSafely(targetRef, targetStatus);
-        await syncActionToSite("update_order_status", { reference: targetRef, delivery_status: targetStatus });
-        return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n📦 Order *${targetRef}* has been marked as *${targetStatus.toUpperCase()}* live in the database!`);
+      if (statusFirstCmdMatch || refFirstCmdMatch || orderNoRefCmdMatch) {
+        let targetRef = "";
+        let targetStatus = "";
+
+        if (statusFirstCmdMatch) {
+          targetStatus = extractStatusFromText(statusFirstCmdMatch[1]) || statusFirstCmdMatch[1].toLowerCase().trim();
+          targetRef = statusFirstCmdMatch[2].trim();
+        } else if (refFirstCmdMatch) {
+          targetRef = refFirstCmdMatch[1].trim();
+          targetStatus = extractStatusFromText(refFirstCmdMatch[2]) || refFirstCmdMatch[2].toLowerCase().trim();
+        } else if (orderNoRefCmdMatch) {
+          targetStatus = extractStatusFromText(orderNoRefCmdMatch[1]) || orderNoRefCmdMatch[1].toLowerCase().trim();
+          try {
+            const { data: latestOrd } = await supabase
+              .from("orders")
+              .select("reference")
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            if (latestOrd?.reference) targetRef = latestOrd.reference;
+          } catch (_) { }
+          if (!targetRef) {
+            return sendWhatsApp(from, `⚠️ Boss, please specify the order reference code (e.g. *mark order to ${targetStatus} WS-XXXX*).`);
+          }
+        }
+
+        if (targetRef && targetStatus) {
+          await updateOrderDeliveryStatusSafely(targetRef, targetStatus);
+          await syncActionToSite("update_order_status", { reference: targetRef, delivery_status: targetStatus });
+          return sendWhatsApp(from, `✅ *ACTION COMPLETED BOSS!*\n\n📦 Order *${targetRef}* has been marked as *${targetStatus.toUpperCase()}* live in the database! (Manual override locked 🔒)`);
+        }
       }
 
       // Direct Action Command 1b: Announcement Update
