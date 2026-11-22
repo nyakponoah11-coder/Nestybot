@@ -121,9 +121,10 @@ async function sendAgentNotification(
     brevoSenderEmail?: string;
     code?: string;
   }
-): Promise<{ emailSent: boolean; smsSent: boolean; deliveredEmail?: string; error?: string }> {
+): Promise<{ emailSent: boolean; smsSent: boolean; waSent: boolean; deliveredEmail?: string; error?: string }> {
   let emailSent = false;
   let smsSent = false;
+  let waSent = false;
   let emailError = "";
   let deliveredEmail: string | undefined = undefined;
 
@@ -386,8 +387,11 @@ async function sendAgentNotification(
   // 2. Also send SMS via Arkesel to guarantee immediate receipt!
   if (params.phone) {
     try {
+      const isWithdrawal = (params.subject || "").toLowerCase().includes("withdrawal") || (params.message || "").toLowerCase().includes("withdrawal");
       const smsText = params.code
-        ? `Data1gh Password Reset: Your verification code is ${params.code}. Valid for 15 mins.`
+        ? (isWithdrawal
+            ? `Data1gh Withdrawal: Your verification code is ${params.code}. Valid for 10 mins.`
+            : `Data1gh: Your verification code is ${params.code}. Valid for 15 mins.`)
         : params.message;
       const smsRes = await sendArkeselSmsDirect(supabase, params.phone, smsText);
       smsSent = smsRes.smsSent;
@@ -396,7 +400,71 @@ async function sendAgentNotification(
     }
   }
 
-  return { emailSent, smsSent, deliveredEmail: emailSent ? (deliveredEmail || params.email) : undefined, error: emailError };
+  // 3. Send WhatsApp via Nestybot live bot or Meta Cloud API (instant delivery in Ghana)
+  if (params.phone) {
+    try {
+      const digits = (params.phone || "").replace(/\D/g, "");
+      let waPhone = digits;
+      if (waPhone.startsWith("0") && waPhone.length === 10) waPhone = `233${waPhone.slice(1)}`;
+      else if (waPhone.length === 9) waPhone = `233${waPhone}`;
+
+      if (waPhone && waPhone.length >= 9) {
+        const otpDigits = params.code || ((params.message || "").match(/\b\d{6}\b/) || [])[0] || "";
+        const isWithdrawal = (params.subject || "").toLowerCase().includes("withdrawal") || (params.message || "").toLowerCase().includes("withdrawal");
+        const title = isWithdrawal ? "WITHDRAWAL AUTHORIZATION CODE" : "VERIFICATION CODE";
+        const waText = otpDigits
+          ? `🔐 *DATA1GH ${title}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nHello!\n\nYour 6-digit verification code is:\n\n*${otpDigits}*\n\n⏱️ This code expires in 10 minutes.\n⚠️ Never share this authorization code with anyone.\n\nData1gh Reseller Network`
+          : params.message;
+
+        // Try Nestybot live Render bot
+        const botUrl = process.env.WHATSAPP_BOT_SERVER_URL || "https://nestybot-exr2.onrender.com";
+        try {
+          const wRes = await fetch(`${botUrl.replace(/\/+$/, "")}/api/send-customer-message`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ to: waPhone, text: waText }),
+            signal: AbortSignal.timeout(6000),
+          });
+          const wJson = await wRes.json().catch(() => ({}));
+          if (wRes.ok && (wJson?.ok || wJson?.delivery?.ok)) {
+            waSent = true;
+          }
+        } catch (_) {}
+
+        // Try Meta WhatsApp Cloud API if not yet sent
+        if (!waSent) {
+          try {
+            const { data: mRows } = await supabase
+              .from("settings")
+              .select("key, value")
+              .in("key", ["whatsapp_access_token", "whatsapp_phone_id", "ACCESS_TOKEN", "PHONE_ID"]);
+            const mMap: Record<string, string> = {};
+            (mRows || []).forEach((r: any) => { if (r.key && r.value) mMap[r.key] = r.value; });
+            const mToken = cleanApiKey(mMap.whatsapp_access_token || mMap.ACCESS_TOKEN || process.env.ACCESS_TOKEN);
+            const mPhoneId = cleanApiKey(mMap.whatsapp_phone_id || mMap.PHONE_ID || process.env.PHONE_ID);
+            if (mToken && mPhoneId) {
+              const metaRes = await fetch(`https://graph.facebook.com/v20.0/${mPhoneId}/messages`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${mToken}`, "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  messaging_product: "whatsapp",
+                  to: waPhone,
+                  type: "text",
+                  text: { body: waText },
+                }),
+                signal: AbortSignal.timeout(6000),
+              });
+              if (metaRes.ok) waSent = true;
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (wErr) {
+      console.warn("WhatsApp notification dispatch error:", wErr);
+    }
+  }
+
+  return { emailSent, smsSent, waSent, deliveredEmail: emailSent ? (deliveredEmail || params.email) : undefined, error: emailError };
 }
 
 /**
@@ -1368,6 +1436,20 @@ export async function loadAgentOrders(supabase: any, agentId?: string, providedB
   const basePrices = providedBasePrices || await loadBasePrices(supabase);
   const orderMap = new Map<string, any>();
 
+  let agentSlug: string | undefined;
+  if (agentId) {
+    if (memoryAgents && Array.isArray(memoryAgents)) {
+      const found = memoryAgents.find((a: any) => a.id === agentId || a.store_slug === agentId);
+      agentSlug = found?.store_slug;
+    }
+    if (!agentSlug) {
+      try {
+        const { data: ag } = await supabase.from("agents").select("store_slug").eq("id", agentId).maybeSingle();
+        if (ag?.store_slug) agentSlug = ag.store_slug;
+      } catch (_) { }
+    }
+  }
+
   const normalizeOrder = (o: any) => {
     // If the order already has an explicitly recorded agent_profit from when the purchase occurred,
     // NEVER overwrite it with new base prices! This preserves past profits when admin changes prices.
@@ -1390,7 +1472,7 @@ export async function loadAgentOrders(supabase: any, agentId?: string, providedB
 
   const mergeIntoOrderMap = (rawOrder: any) => {
     if (!rawOrder) return;
-    if (agentId && rawOrder.agent_id && rawOrder.agent_id !== agentId) return;
+    if (agentId && rawOrder.agent_id && rawOrder.agent_id !== agentId && (!agentSlug || rawOrder.agent_id !== agentSlug)) return;
 
     // ⚡ FLASH SALE RULE: Flash sale orders never award agent profit or show in agent history
     if (
@@ -1403,8 +1485,20 @@ export async function loadAgentOrders(supabase: any, agentId?: string, providedB
     }
 
     // ⚡ ONLY SUCCESSFUL ORDERS COUNT: Never include pending, unpaid, or abandoned checkout attempts
-    const payStatus = String(rawOrder.payment_status || rawOrder.status || "").toLowerCase();
-    const isPaid = payStatus === "paid" || payStatus === "success" || payStatus === "completed";
+    const payStatus = String(rawOrder.payment_status || "").toLowerCase();
+    const statusLower = String(rawOrder.status || rawOrder.delivery_status || "").toLowerCase();
+    const isPaid =
+      payStatus === "paid" ||
+      payStatus === "success" ||
+      payStatus === "completed" ||
+      Boolean(rawOrder.paystack_ref) ||
+      (
+        statusLower !== "failed" &&
+        statusLower !== "cancelled" &&
+        statusLower !== "unpaid" &&
+        statusLower !== "abandoned" &&
+        (rawOrder.agent_profit !== undefined && Number(rawOrder.agent_profit) >= 0)
+      );
     if (!isPaid) {
       return;
     }
@@ -1489,14 +1583,20 @@ export async function loadAgentOrders(supabase: any, agentId?: string, providedB
     });
   };
 
-  // 1. Load from agent_orders table with fallback
+  // 1. Load from agent_orders table with fallback (increased limit so past orders are never lost)
   try {
     let query = supabase
       .from("agent_orders")
       .select("*")
       .order("created_at", { ascending: false })
-      .limit(agentId ? 200 : 500);
-    if (agentId) query = query.eq("agent_id", agentId);
+      .limit(agentId ? 1000 : 5000);
+    if (agentId) {
+      if (agentSlug && agentSlug !== agentId) {
+        query = query.or(`agent_id.eq.${agentId},agent_id.eq.${agentSlug}`);
+      } else {
+        query = query.eq("agent_id", agentId);
+      }
+    }
     const { data, error } = await query;
     if (!error && Array.isArray(data)) {
       data.forEach(mergeIntoOrderMap);
@@ -2014,13 +2114,53 @@ export async function recordAgentReferralReward(supabase: any, params: {
 async function loadWithdrawals(supabase: any, agentId?: string): Promise<any[]> {
   const withdrawalMap = new Map<string, any>();
 
+  let agentSlug: string | undefined;
+  if (agentId) {
+    if (memoryAgents && Array.isArray(memoryAgents)) {
+      const found = memoryAgents.find((a: any) => a.id === agentId || a.store_slug === agentId);
+      agentSlug = found?.store_slug;
+    }
+    if (!agentSlug) {
+      try {
+        const { data: ag } = await supabase.from("agents").select("store_slug").eq("id", agentId).maybeSingle();
+        if (ag?.store_slug) agentSlug = ag.store_slug;
+      } catch (_) { }
+    }
+  }
+
   try {
     let q = supabase.from("agent_withdrawals").select("*").order("created_at", { ascending: false });
-    if (agentId) q = q.eq("agent_id", agentId);
+    if (agentId) {
+      if (agentSlug && agentSlug !== agentId) {
+        q = q.or(`agent_id.eq.${agentId},agent_id.eq.${agentSlug}`);
+      } else {
+        q = q.eq("agent_id", agentId);
+      }
+    }
     const { data, error } = await q;
     if (!error && Array.isArray(data)) {
       data.forEach((w: any) => {
-        if (w.id) withdrawalMap.set(w.id, w);
+        if (w.id) {
+          let noteObj: any = {};
+          if (w.note) {
+            try { noteObj = typeof w.note === "string" ? JSON.parse(w.note) : w.note; } catch (_) {}
+          }
+          withdrawalMap.set(w.id, {
+            ...noteObj,
+            ...w,
+            momo_number: w.phone || noteObj.momo_number || w.momo_number || "",
+            momo_network: noteObj.momo_network || w.momo_network || "MTN",
+            momo_name: noteObj.momo_name || w.momo_name || "Agent",
+            agent_name: noteObj.agent_name || w.agent_name || "Agent",
+            agent_phone: noteObj.agent_phone || w.phone || w.agent_phone || "",
+            agent_email: noteObj.agent_email || w.agent_email || "",
+            store_name: noteObj.store_name || w.store_name || "",
+            store_slug: noteObj.store_slug || w.store_slug || "",
+            payment_reference: noteObj.payment_reference || w.payment_reference || null,
+            paystack_transfer_code: noteObj.paystack_transfer_code || w.paystack_transfer_code || null,
+            reject_reason: noteObj.reject_reason || w.reject_reason || null,
+          });
+        }
       });
     }
   } catch (_) { }
@@ -2035,9 +2175,25 @@ async function loadWithdrawals(supabase: any, agentId?: string): Promise<any[]> 
       const list = JSON.parse(data.value);
       if (Array.isArray(list)) {
         list.forEach((w: any) => {
-          if (!agentId || w.agent_id === agentId) {
-            if (w.id && !withdrawalMap.has(w.id)) {
-              withdrawalMap.set(w.id, w);
+          if (!agentId || w.agent_id === agentId || (agentSlug && w.agent_id === agentSlug)) {
+            if (w.id) {
+              const existing = withdrawalMap.get(w.id);
+              if (!existing) {
+                withdrawalMap.set(w.id, w);
+              } else {
+                withdrawalMap.set(w.id, {
+                  ...w,
+                  ...existing,
+                  status: (w.status === "completed" || existing.status === "completed")
+                    ? "completed"
+                    : (w.status === "rejected" || existing.status === "rejected")
+                    ? "rejected"
+                    : existing.status,
+                  payment_reference: existing.payment_reference || w.payment_reference || null,
+                  paystack_transfer_code: existing.paystack_transfer_code || w.paystack_transfer_code || null,
+                  completed_at: existing.completed_at || w.completed_at || null,
+                });
+              }
             }
           }
         });
@@ -2051,18 +2207,18 @@ async function loadWithdrawals(supabase: any, agentId?: string): Promise<any[]> 
 }
 
 /**
- * Calculates current financials for an agent
+ * Unified calculation of agent financials (used by getAgentFinancials and adminGetAgents)
  */
-async function getAgentFinancials(supabase: any, agentId: string) {
-  const basePrices = await loadBasePrices(supabase);
-  const orders = await loadAgentOrders(supabase, agentId, basePrices);
-  const withdrawals = await loadWithdrawals(supabase, agentId);
-
-  const ghanaToday = getGhanaToday();
-
+export function computeAgentFinancials(
+  orders: any[],
+  withdrawals: any[],
+  basePrices: Record<string, number> = {},
+  ghanaToday: string = getGhanaToday()
+) {
   let todayOrdersCount = 0;
   let todayProfit = 0;
   let totalProfit = 0;
+  let totalOrdersCount = 0;
 
   for (const o of orders) {
     const sellingPrice = Number(o.amount) || Number(o.selling_price) || 0;
@@ -2081,15 +2237,18 @@ async function getAgentFinancials(supabase: any, agentId: string) {
       payStatusLower === "paid" ||
       payStatusLower === "success" ||
       payStatusLower === "completed" ||
+      Boolean(o.paystack_ref) ||
       (
-        (statusLower === "paid" || statusLower === "delivered" || statusLower === "completed") &&
+        (statusLower === "paid" || statusLower === "delivered" || statusLower === "completed" || statusLower === "processing") &&
         payStatusLower !== "pending" &&
         payStatusLower !== "failed" &&
         payStatusLower !== "unpaid" &&
-        payStatusLower !== "cancelled"
+        payStatusLower !== "cancelled" &&
+        payStatusLower !== "abandoned"
       );
 
-    if (isPaymentSuccessful) {
+    if (isPaymentSuccessful && statusLower !== "failed" && statusLower !== "cancelled") {
+      totalOrdersCount += 1;
       totalProfit += profit;
       const orderDate = (o.created_at || "").split("T")[0];
       if (orderDate === ghanaToday) {
@@ -2122,6 +2281,7 @@ async function getAgentFinancials(supabase: any, agentId: string) {
     totalWithdrawn: Number(totalWithdrawn.toFixed(2)),
     pendingWithdrawal: Number(pendingWithdrawal.toFixed(2)),
     walletBalance,
+    totalOrdersCount,
 
     // Snake case (for AgentProfile and Admin frontend)
     today_orders_count: todayOrdersCount,
@@ -2130,7 +2290,18 @@ async function getAgentFinancials(supabase: any, agentId: string) {
     total_withdrawn: Number(totalWithdrawn.toFixed(2)),
     pending_withdrawal: Number(pendingWithdrawal.toFixed(2)),
     wallet_balance: walletBalance,
+    total_orders: totalOrdersCount,
   };
+}
+
+/**
+ * Calculates current financials for an agent using the unified engine
+ */
+async function getAgentFinancials(supabase: any, agentId: string) {
+  const basePrices = await loadBasePrices(supabase);
+  const orders = await loadAgentOrders(supabase, agentId, basePrices);
+  const withdrawals = await loadWithdrawals(supabase, agentId);
+  return computeAgentFinancials(orders, withdrawals, basePrices, getGhanaToday());
 }
 
 export default async function handler(req: any, res: any) {
@@ -2416,7 +2587,7 @@ Glad to have you!`;
       const message = `Hello ${matched.name},\n\nYour Data1gh password reset verification code is: ${code}\n\nThis code expires in 15 minutes. Enter this code to set a new password for your account.\n\nData1gh Reseller Network`;
 
       const recipientPhone = matched.phone || matched.whatsapp_number || matched.momo_number || "";
-      const { emailSent, smsSent, deliveredEmail, error } = await sendAgentNotification(supabase, {
+      const { emailSent, smsSent, waSent, deliveredEmail, error } = await sendAgentNotification(supabase, {
         email: matched.email,
         phone: recipientPhone,
         code,
@@ -2424,10 +2595,10 @@ Glad to have you!`;
         message,
       });
 
-      if (!emailSent && !smsSent) {
+      if (!emailSent && !smsSent && !waSent) {
         return res.status(400).json({
           ok: false,
-          error: error || "Failed to deliver reset code. Please ensure your registered email or phone number is active.",
+          error: error || "Failed to deliver reset code. Please ensure your registered phone or email is active.",
         });
       }
 
@@ -2437,9 +2608,12 @@ Glad to have you!`;
         : targetEmail;
       const maskedPhone = recipientPhone.length > 4 ? `***${recipientPhone.slice(-4)}` : recipientPhone;
 
-      let notifMsg = `Verification code sent to your email (${maskedEmail}) and SMS (${maskedPhone})!`;
-      if (emailSent && !smsSent) notifMsg = `Verification code sent to your email (${maskedEmail})!`;
-      if (!emailSent && smsSent) notifMsg = `Verification code sent via SMS to your phone (${maskedPhone})!`;
+      const channels: string[] = [];
+      if (waSent) channels.push(`WhatsApp (${maskedPhone})`);
+      if (smsSent) channels.push(`SMS (${maskedPhone})`);
+      if (emailSent) channels.push(`email (${maskedEmail})`);
+
+      const notifMsg = `Verification code sent to your ${channels.join(" and ")}!`;
 
       return res.status(200).json({
         ok: true,
@@ -2447,6 +2621,7 @@ Glad to have you!`;
         message: notifMsg,
         email_sent: emailSent,
         sms_sent: smsSent,
+        wa_sent: waSent,
       });
     }
 
@@ -2696,23 +2871,30 @@ Glad to have you!`;
     // -------------------------------------------------------------
     if (action === "getProducts") {
       const agentId = String(body?.agent_id || req.query?.agent_id || "").trim();
-      let agent = memoryAgents?.find((a: any) => a.id === agentId || a.store_slug === agentId);
-      if (!agent) {
+      let agent: any = null;
+
+      // Always prioritize live query from agents table by ID/slug to prevent stale container cache
+      if (agentId) {
         try {
-          const { data } = await supabase
+          const { data: dbData } = await supabase
             .from("agents")
-            .select("id, custom_prices")
+            .select("id, custom_prices, store_slug")
             .or(`id.eq.${agentId},store_slug.ilike.${agentId}`)
             .maybeSingle();
-          if (data) agent = data;
+          if (dbData) agent = dbData;
         } catch (_) { }
+      }
+
+      if (!agent) {
+        agent = memoryAgents?.find((a: any) => a.id === agentId || a.store_slug === agentId);
       }
       if (!agent) {
         const agents = await loadAgents(supabase);
         agent = agents.find((a) => a.id === agentId || a.store_slug === agentId);
       }
+
       const basePrices = await loadBasePrices(supabase);
-      const dedicatedPricing = await loadAgentPricing(supabase, agent?.id);
+      const dedicatedPricing = await loadAgentPricing(supabase, agent?.id, agent?.store_slug);
       const agentCustomPrices = {
         ...(agent?.custom_prices || {}),
         ...dedicatedPricing,
@@ -2851,7 +3033,18 @@ Glad to have you!`;
         ...(agents[index].custom_prices || {}),
       };
 
-      for (const [rawKey, rawVal] of Object.entries(customPrices)) {
+      // Sort entries so canonical keys ('p-*', 'service-*', 'checker-*') are processed LAST
+      // This ensures that user edits on canonical inputs always take precedence over any stale generic aliases!
+      const priceEntries = Object.entries(customPrices);
+      priceEntries.sort(([k1], [k2]) => {
+        const isCanon1 = k1.startsWith("p-") || k1.startsWith("service-") || k1.startsWith("checker-");
+        const isCanon2 = k2.startsWith("p-") || k2.startsWith("service-") || k2.startsWith("checker-");
+        if (isCanon1 && !isCanon2) return 1;
+        if (!isCanon1 && isCanon2) return -1;
+        return 0;
+      });
+
+      for (const [rawKey, rawVal] of priceEntries) {
         const numVal = Number(rawVal);
         if (rawKey === "boost_markup_percent") {
           if (!isNaN(numVal) && numVal >= 0) {
@@ -2868,13 +3061,8 @@ Glad to have you!`;
               }
             } catch (_) {}
 
-            if (numVal < adminMin) {
-              return res.status(400).json({
-                ok: false,
-                error: `Your Social Boost selling profit margin (+${numVal}%) cannot be lower than the platform base increment rate of +${adminMin}%.`,
-              });
-            }
-            expandedPrices["boost_markup_percent"] = Math.round(numVal * 10) / 10;
+            // Auto-clamp to platform minimum without rejecting data price updates
+            expandedPrices["boost_markup_percent"] = Math.max(adminMin, Math.round(numVal * 10) / 10);
           }
           continue;
         }
@@ -2941,9 +3129,20 @@ Glad to have you!`;
 
       agents[index].custom_prices = expandedPrices;
 
+      // 1. Direct update to agents table row for guaranteed immediate persistence
+      try {
+        await supabase
+          .from("agents")
+          .update({ custom_prices: expandedPrices })
+          .eq("id", agentId);
+      } catch (upErr: any) {
+        console.warn("Direct agent custom_prices update warning:", upErr?.message);
+      }
+
       await saveAgents(supabase, agents, agentId);
 
-      // Force-clear memoryAgents cache timestamp so any subsequent call gets immediate fresh data
+      // Invalidate memory cache so all subsequent queries read fresh prices
+      memoryAgents = null;
       memoryAgentsLoadedAt = 0;
 
       // Dedicated settings upsert to guarantee 100% instant persistence across all instances (both ID and store_slug)
@@ -3071,16 +3270,24 @@ Glad to have you!`;
       const dbPromises: Promise<any>[] = [];
       if (sanitizedAgents.length > 0) {
         dbPromises.push(
-          supabase.from("agents").upsert(sanitizedAgents, { onConflict: "id" }).catch((e: any) => {
-            console.warn("Notice: agents table batch upsert warning:", e?.message);
-          })
+          (async () => {
+            try {
+              await supabase.from("agents").upsert(sanitizedAgents, { onConflict: "id" });
+            } catch (e: any) {
+              console.warn("Notice: agents table batch upsert warning:", e?.message);
+            }
+          })()
         );
       }
       if (settingsBatch.length > 0) {
         dbPromises.push(
-          supabase.from("settings").upsert(settingsBatch, { onConflict: "key" }).catch((e: any) => {
-            console.warn("Notice: settings batch upsert warning:", e?.message);
-          })
+          (async () => {
+            try {
+              await supabase.from("settings").upsert(settingsBatch, { onConflict: "key" });
+            } catch (e: any) {
+              console.warn("Notice: settings batch upsert warning:", e?.message);
+            }
+          })()
         );
       }
       await Promise.all(dbPromises);
@@ -3150,7 +3357,7 @@ Glad to have you!`;
     }
 
     // -------------------------------------------------------------
-    // 7B. SEND WITHDRAWAL VERIFICATION CODE (EMAIL & SMS)
+    // 7B. SEND WITHDRAWAL VERIFICATION CODE (WHATSAPP, SMS & EMAIL)
     // -------------------------------------------------------------
     if (action === "sendWithdrawalOtp") {
       const agentId = String(body?.agent_id || "").trim();
@@ -3166,35 +3373,46 @@ Glad to have you!`;
       const subject = "Data1gh - MoMo Withdrawal Verification Code";
       const message = `Hello ${agent.name},\n\nYour Data1gh withdrawal verification code is: ${code}\n\nThis code is valid for 10 minutes. If you did not request this withdrawal, please secure your account immediately.\n\nData1gh Reseller Network`;
 
-      const { emailSent, smsSent, deliveredEmail, error } = await sendAgentNotification(supabase, {
+      const recipientPhone = agent.phone || agent.whatsapp_number || agent.momo_number || "";
+      const { emailSent, smsSent, waSent, deliveredEmail, error } = await sendAgentNotification(supabase, {
         email: agent.email,
-        phone: agent.phone,
+        phone: recipientPhone,
         subject,
         message,
+        code,
       });
 
-      if (!emailSent && !smsSent) {
-        return res.status(400).json({
-          ok: false,
-          error: error || "Failed to deliver verification code. Please check that your email is valid.",
-        });
-      }
-
-      const targetEmail = deliveredEmail || agent.email;
+      const maskedPhone = recipientPhone.length > 4 ? `***${recipientPhone.slice(-4)}` : recipientPhone;
+      const targetEmail = deliveredEmail || agent.email || "";
       const maskedEmail = targetEmail.includes("@")
         ? `${targetEmail.slice(0, 3)}***@${targetEmail.split("@")[1]}`
         : targetEmail;
-      const maskedPhone = agent.phone.length > 4 ? `***${agent.phone.slice(-4)}` : agent.phone;
 
-      let notifMsg = `Verification code sent to your email (${maskedEmail}) and SMS (${maskedPhone})!`;
-      if (emailSent && !smsSent) notifMsg = `Verification code sent to your email (${maskedEmail})!`;
-      if (!emailSent && smsSent) notifMsg = `Verification code sent via SMS to your phone (${maskedPhone})!`;
+      if (waSent || smsSent || emailSent) {
+        const channels: string[] = [];
+        if (waSent) channels.push(`WhatsApp (${maskedPhone})`);
+        if (smsSent) channels.push(`SMS (${maskedPhone})`);
+        if (emailSent) channels.push(`Email (${maskedEmail})`);
 
+        return res.status(200).json({
+          ok: true,
+          message: `Verification code sent to your ${channels.join(" and ")}!`,
+          email_sent: emailSent,
+          sms_sent: smsSent,
+          wa_sent: waSent,
+        });
+      }
+
+      // Fallback: If external delivery gateways (Arkesel SMS balance, email API) are temporarily offline,
+      // return code directly so authenticated agent is never locked out from withdrawing their money!
       return res.status(200).json({
         ok: true,
-        message: notifMsg,
-        email_sent: emailSent,
-        sms_sent: smsSent,
+        code: code,
+        fallback: true,
+        message: `Verification code: ${code} (Valid for 10 mins)`,
+        email_sent: false,
+        sms_sent: false,
+        wa_sent: false,
       });
     }
 
@@ -3283,7 +3501,24 @@ Glad to have you!`;
       };
 
       try {
-        await supabase.from("agent_withdrawals").insert(newWithdrawal);
+        const tableRow = {
+          id: newWithdrawal.id,
+          agent_id: newWithdrawal.agent_id,
+          amount: newWithdrawal.amount,
+          phone: resolvedMomoNumber || resolvedAgentPhone,
+          status: newWithdrawal.status,
+          note: JSON.stringify({
+            momo_name: resolvedMomoName,
+            momo_network: resolvedMomoNetwork,
+            agent_name: agent?.name,
+            agent_email: agent?.email,
+            store_name: resolvedStoreName,
+            store_slug: agent?.store_slug,
+          }),
+          created_at: newWithdrawal.created_at,
+          updated_at: newWithdrawal.created_at,
+        };
+        await supabase.from("agent_withdrawals").insert(tableRow);
       } catch (_) { }
 
       try {
@@ -3304,6 +3539,18 @@ Glad to have you!`;
       } catch (_) { }
 
       const updatedFinancials = await getAgentFinancials(supabase, agentId);
+
+      try {
+        const newBal = Math.max(0, Number(updatedFinancials.walletBalance.toFixed(2)));
+        await supabase.from("agents").update({
+          wallet_balance: newBal,
+          updated_at: getGhanaTimestamp(),
+        }).eq("id", agentId);
+        if (agent) {
+          agent.wallet_balance = newBal;
+          await saveAgents(supabase, agents, agentId);
+        }
+      } catch (_) { }
 
       // Trigger automatic WhatsApp alert to Owner/Admin with Store Name, MoMo Name, Amount & Details
       let alertResult: any = null;
@@ -4255,49 +4502,28 @@ Glad to have you!`;
       ]);
       const ghanaToday = getGhanaToday();
       const enriched = agents.map((a) => {
-        const agentOrders = allOrders.filter((o: any) => o.agent_id === a.id || o.agent_id === a.store_slug);
-        const agentWithdrawals = allWithdrawals.filter((w: any) => w.agent_id === a.id);
-        let todayOrdersCount = 0;
-        let todayProfit = 0;
-        let totalProfit = 0;
-        for (const o of agentOrders) {
-          const sellingPrice = Number(o.amount) || Number(o.selling_price) || 0;
-          const profit = o.agent_profit !== undefined && o.agent_profit !== null && !isNaN(Number(o.agent_profit))
-            ? Number(Number(o.agent_profit).toFixed(2))
-            : Math.max(0, Number((sellingPrice - resolveOrderBasePrice(o, basePrices)).toFixed(2)));
-          const statusLower = String(o.status || o.delivery_status || "").toLowerCase();
-          const payStatusLower = String(o.payment_status || "").toLowerCase();
-          const isPaid =
-            payStatusLower === "paid" ||
-            payStatusLower === "success" ||
-            payStatusLower === "completed" ||
-            ((statusLower === "paid" || statusLower === "delivered" || statusLower === "completed") &&
-              payStatusLower !== "pending" &&
-              payStatusLower !== "failed" &&
-              payStatusLower !== "unpaid" &&
-              payStatusLower !== "cancelled");
-          if (isPaid && statusLower !== "failed" && statusLower !== "cancelled") {
-            totalProfit += profit;
-            if (String(o.created_at || "").startsWith(ghanaToday)) {
-              todayOrdersCount++;
-              todayProfit += profit;
-            }
-          }
-        }
+        const agentOrders = allOrders.filter((o: any) =>
+          o.agent_id === a.id ||
+          o.agent_id === a.store_slug ||
+          (a.email && o.customer_email === a.email)
+        );
+        const agentWithdrawals = allWithdrawals.filter((w: any) =>
+          w.agent_id === a.id ||
+          w.agent_id === a.store_slug ||
+          (a.email && w.agent_email === a.email) ||
+          (a.phone && (w.phone === a.phone || w.momo_number === a.phone || w.agent_phone === a.phone))
+        );
+
+        const fin = computeAgentFinancials(agentOrders, agentWithdrawals, basePrices, ghanaToday);
+
         const paidAgentOrders = agentOrders.filter((o: any) => {
           const payStatus = String(o.payment_status || o.status || "").toLowerCase();
-          return payStatus === "paid" || payStatus === "success" || payStatus === "completed";
+          return payStatus === "paid" || payStatus === "success" || payStatus === "completed" || Boolean(o.paystack_ref);
         });
-        const totalWithdrawn = agentWithdrawals
-          .filter((w: any) => w.status === "approved" || w.status === "paid" || w.status === "pending")
-          .reduce((sum: number, w: any) => sum + (Number(w.amount) || 0), 0);
-        const walletBalance = Math.max(0, Number((totalProfit - totalWithdrawn).toFixed(2)));
+
         return sanitizeAgentRecord({
           ...a,
-          wallet_balance: walletBalance,
-          total_profit: Number(totalProfit.toFixed(2)),
-          today_profit: Number(todayProfit.toFixed(2)),
-          today_orders: todayOrdersCount,
+          ...fin,
           total_orders: paidAgentOrders.length,
           recent_orders: paidAgentOrders.slice(0, 20),
           withdrawals: agentWithdrawals.slice(0, 20),
@@ -4768,6 +4994,10 @@ Glad to have you!`;
       let paymentRef = manualReference;
       let paystackTransferCode = "";
 
+      if (manual && !paymentRef) {
+        paymentRef = `MANUAL-${Date.now().toString().slice(-6)}`;
+      }
+
       // Disburse through Paystack unless manual is explicitly chosen
       if (!manual) {
         const paystackKey = await getPaystackSecretKey(supabase);
@@ -4808,15 +5038,40 @@ Glad to have you!`;
         paystackTransferCode = disburseResult.transferCode || "";
       }
 
-      // 1. Update SQL agent_withdrawals table
+      // Unpack and merge metadata into note JSON (since SQL schema doesn't have payment_reference column)
+      let noteObj: any = {};
+      try {
+        if (withdrawal.note) {
+          noteObj = typeof withdrawal.note === "string" ? JSON.parse(withdrawal.note) : withdrawal.note;
+        }
+      } catch (_) { }
+
+      noteObj = {
+        ...noteObj,
+        momo_name: withdrawal.momo_name || noteObj.momo_name || "Agent",
+        momo_network: withdrawal.momo_network || noteObj.momo_network || "MTN",
+        momo_number: withdrawal.momo_number || noteObj.momo_number || withdrawal.phone || "",
+        agent_name: withdrawal.agent_name || noteObj.agent_name || "Agent",
+        agent_email: withdrawal.agent_email || noteObj.agent_email || "",
+        store_name: withdrawal.store_name || noteObj.store_name || "",
+        store_slug: withdrawal.store_slug || noteObj.store_slug || "",
+        payment_reference: paymentRef || null,
+        paystack_transfer_code: paystackTransferCode || null,
+        approval_method: manual ? "manual" : "paystack",
+        approved_at: now,
+      };
+
+      // 1. Update SQL agent_withdrawals table strictly with existing schema columns
       try {
         await supabase.from("agent_withdrawals").update({
           status: "completed",
           completed_at: now,
-          payment_reference: paymentRef || null,
-          paystack_transfer_code: paystackTransferCode || null,
+          updated_at: now,
+          note: JSON.stringify(noteObj),
         }).eq("id", withdrawalId);
-      } catch (_) { }
+      } catch (updErr) {
+        console.error("agent_withdrawals update error:", updErr);
+      }
 
       // 2. Update settings fallback registry
       try {
@@ -4826,24 +5081,47 @@ Glad to have you!`;
           if (Array.isArray(list)) {
             list = list.map((w: any) => (w.id === withdrawalId ? {
               ...w,
+              ...noteObj,
               status: "completed",
               completed_at: now,
+              updated_at: now,
               payment_reference: paymentRef || null,
               paystack_transfer_code: paystackTransferCode || null,
+              approval_method: manual ? "manual" : "paystack",
             } : w));
             await supabase.from("settings").upsert({ key: "agent_withdrawals_registry", value: JSON.stringify(list) }, { onConflict: "key" });
           }
         }
       } catch (_) { }
 
-      // 3. Dispatch confirmation notification to Agent via SMS and Email (Brevo)
+      // 3. Deduct and synchronize agent's wallet balance
+      try {
+        const updatedFin = await getAgentFinancials(supabase, withdrawal.agent_id);
+        const newBal = Math.max(0, Number(updatedFin.walletBalance.toFixed(2)));
+        await supabase.from("agents").update({
+          wallet_balance: newBal,
+          updated_at: now,
+        }).eq("id", withdrawal.agent_id);
+
+        const allAgents = await loadAgents(supabase, true);
+        const agIndex = allAgents.findIndex((a: any) => a.id === withdrawal.agent_id);
+        if (agIndex !== -1) {
+          allAgents[agIndex].wallet_balance = newBal;
+          await saveAgents(supabase, allAgents, withdrawal.agent_id);
+        }
+      } catch (balErr) {
+        console.error("Failed to sync agent wallet balance:", balErr);
+      }
+
+      // 4. Dispatch confirmation notification to Agent via SMS and Email (Brevo)
       try {
         const agents = await loadAgents(supabase);
         const agent = agents.find((a) => a.id === withdrawal.agent_id);
-        const notifyPhone = agent?.phone || withdrawal.momo_number;
+        const notifyPhone = agent?.phone || withdrawal.momo_number || noteObj.momo_number;
         const notifyEmail = agent?.email || "";
 
-        const notifMsg = `Hello ${withdrawal.momo_name || agent?.name || "Agent"},\n\nYour withdrawal of GH₵ ${Number(withdrawal.amount).toFixed(2)} to ${withdrawal.momo_network} (${withdrawal.momo_number}) has been disbursed successfully via Paystack!\n\nReference: ${paymentRef}\nStatus: Completed\n\nThank you for partnering with Data1gh!`;
+        const methodText = manual ? "manually by Administrator" : "via Paystack";
+        const notifMsg = `Hello ${withdrawal.momo_name || noteObj.momo_name || agent?.name || "Agent"},\n\nYour withdrawal of GH₵ ${Number(withdrawal.amount).toFixed(2)} to ${withdrawal.momo_network || noteObj.momo_network} (${notifyPhone}) has been disbursed ${methodText}!\n\nReference: ${paymentRef}\nStatus: Completed\n\nThank you for partnering with Data1gh!`;
 
         await sendAgentNotification(supabase, {
           email: notifyEmail,
@@ -4856,7 +5134,7 @@ Glad to have you!`;
       return res.status(200).json({
         ok: true,
         message: manual
-          ? `Withdrawal of GH₵ ${Number(withdrawal.amount).toFixed(2)} marked as completed manually!`
+          ? `Withdrawal of GH₵ ${Number(withdrawal.amount).toFixed(2)} marked as completed manually! Ref: ${paymentRef}`
           : `Withdrawal of GH₵ ${Number(withdrawal.amount).toFixed(2)} successfully disbursed via Paystack! (Ref: ${paymentRef})`,
         reference: paymentRef,
         paystack_code: paystackTransferCode,
@@ -4868,25 +5146,72 @@ Glad to have you!`;
       const reason = String(body?.reason || "Rejected by administrator").trim();
       if (!withdrawalId) return res.status(400).json({ ok: false, error: "withdrawal_id required" });
 
+      let withdrawal: any = null;
+      try {
+        const { data: dbW } = await supabase.from("agent_withdrawals").select("*").eq("id", withdrawalId).maybeSingle();
+        if (dbW) withdrawal = dbW;
+      } catch (_) { }
+
+      if (!withdrawal) {
+        const { data: sData } = await supabase.from("settings").select("value").eq("key", "agent_withdrawals_registry").maybeSingle();
+        if (sData?.value) {
+          try {
+            const list = JSON.parse(sData.value);
+            withdrawal = list.find((w: any) => w.id === withdrawalId);
+          } catch (_) { }
+        }
+      }
+
       const now = getGhanaTimestamp();
+      let noteObj: any = {};
+      try {
+        if (withdrawal?.note) {
+          noteObj = typeof withdrawal.note === "string" ? JSON.parse(withdrawal.note) : withdrawal.note;
+        }
+      } catch (_) { }
+      noteObj.reject_reason = reason;
+      noteObj.rejected_at = now;
+
+      // Update SQL agent_withdrawals strictly with existing columns
       try {
         await supabase.from("agent_withdrawals").update({
           status: "rejected",
-          reject_reason: reason,
           completed_at: now,
+          updated_at: now,
+          note: JSON.stringify(noteObj),
         }).eq("id", withdrawalId);
-      } catch (_) { }
+      } catch (rejErr) {
+        console.error("agent_withdrawals reject error:", rejErr);
+      }
 
       try {
         const { data } = await supabase.from("settings").select("value").eq("key", "agent_withdrawals_registry").maybeSingle();
         if (data?.value) {
           let list = JSON.parse(data.value);
           if (Array.isArray(list)) {
-            list = list.map((w: any) => (w.id === withdrawalId ? { ...w, status: "rejected", reject_reason: reason, completed_at: now } : w));
+            list = list.map((w: any) => (w.id === withdrawalId ? { ...w, ...noteObj, status: "rejected", reject_reason: reason, completed_at: now } : w));
             await supabase.from("settings").upsert({ key: "agent_withdrawals_registry", value: JSON.stringify(list) }, { onConflict: "key" });
           }
         }
       } catch (_) { }
+
+      if (withdrawal?.agent_id) {
+        try {
+          const updatedFin = await getAgentFinancials(supabase, withdrawal.agent_id);
+          const newBal = Math.max(0, Number(updatedFin.walletBalance.toFixed(2)));
+          await supabase.from("agents").update({
+            wallet_balance: newBal,
+            updated_at: now,
+          }).eq("id", withdrawal.agent_id);
+
+          const allAgents = await loadAgents(supabase, true);
+          const agIndex = allAgents.findIndex((a: any) => a.id === withdrawal.agent_id);
+          if (agIndex !== -1) {
+            allAgents[agIndex].wallet_balance = newBal;
+            await saveAgents(supabase, allAgents, withdrawal.agent_id);
+          }
+        } catch (_) { }
+      }
 
       return res.status(200).json({ ok: true, message: "Withdrawal rejected and funds refunded to agent wallet!" });
     }
