@@ -1498,12 +1498,14 @@ async function sendWhatsApp(to, text) {
   const rawTo = String(to).trim();
   let formattedTo = "";
 
-  // 1. WhatsApp Groups or Newsletters (@g.us, @newsletter)
-  if (rawTo.includes("@g.us") || rawTo.includes("@newsletter")) {
+  // 1. WhatsApp JID format (already has @g.us, @s.whatsapp.net, or @newsletter)
+  if (rawTo.includes("@")) {
     formattedTo = rawTo;
+  } else if (/[a-zA-Z]/.test(rawTo)) {
+    formattedTo = rawTo.replace(/@.+$/, "").trim();
   } else {
-    // 2. Standard numeric phone number or direct contact JID (@s.whatsapp.net / @c.us)
-    const digitsOnly = rawTo.replace(/@.+$/, "").replace(/\D/g, "");
+    // 2. Standard numeric phone number (e.g. "0547100951", "233547100951")
+    const digitsOnly = rawTo.replace(/\D/g, "");
     if (digitsOnly.startsWith("0") && digitsOnly.length === 10) {
       formattedTo = "233" + digitsOnly.slice(1);
     } else {
@@ -3337,19 +3339,18 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     groupJid = groupJid.replace(/(@g\.us)+$/i, "") + "@g.us";
 
     // 🛡️ SCAN 1: Live recent WhatsApp messages in memory strictly for group messages (@g.us)
-    // Checks all messages sent inside the actual group or any linked group (by humans or bots)
+    // Checks all messages sent inside the actual group or any linked group (by humans like Crystal or bots)
     const foundInRecentGroup = recentBaileysMessages.some(m => {
       if (!m.text) return false;
       const isGroupMsg = m.from && m.from.endsWith("@g.us");
       if (!isGroupMsg) return false;
       const nums = m.text.match(/\b\d{4,9}\b/g) || [];
-      return nums.includes(cleanId);
+      return nums.includes(cleanId) || m.text.includes(cleanId);
     });
 
-    // 🛡️ SCAN 2: Target group recent submission timestamp (within last 7 days)
+    // 🛡️ SCAN 2: Memory registry & timestamp record
     const targetGroupKey = `${groupJid}:${cleanId}`;
-    const lastSub = submittedPortalIdsTimestamps.get(targetGroupKey) || submittedPortalIdsTimestamps.get(cleanId);
-    const hasRecentTimestamp = Boolean(lastSub && (Date.now() - lastSub < (7 * 24 * 3600 * 1000)));
+    const hasTimestampRecord = submittedPortalIdsTimestamps.has(targetGroupKey) || submittedPortalIdsTimestamps.has(cleanId);
 
     // 🛡️ SCAN 3: Persistent Supabase registry check across ALL registries
     const registryKey = groupJid
@@ -3388,7 +3389,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
         if (bRow?.value) {
           const buf = typeof bRow.value === "string" ? JSON.parse(bRow.value) : bRow.value;
           if (Array.isArray(buf)) {
-            if (buf.some(m => m.text && (m.text.match(/\b\d{4,9}\b/g) || []).includes(cleanId))) {
+            if (buf.some(m => m.text && ((m.text.match(/\b\d{4,9}\b/g) || []).includes(cleanId) || m.text.includes(cleanId)))) {
               isAlreadyPostedInDb = true;
             }
           }
@@ -3396,9 +3397,9 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
       } catch (_) { }
     }
 
-    // If found in recent group messages, recent timestamp, or persistent database registry:
-    if ((foundInRecentGroup || hasRecentTimestamp || isAlreadyPostedInDb) && !isTest && !meta.explicitUserForce) {
-      console.log(`[FAILED ORDER GROUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}) history or registry. Skipping duplicate submission.`);
+    // If found in recent group messages, memory registry, or persistent database registry:
+    if ((foundInRecentGroup || hasTimestampRecord || isAlreadyPostedInDb) && !isTest && !meta.explicitUserForce) {
+      console.log(`🛡️ [GROUP DEDUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}) history or registry (posted previously by Crystal, user, or bot). Skipping duplicate submission.`);
       return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
     }
 
@@ -5048,9 +5049,26 @@ async function updateStoreAnnouncement({ title, message, enabled }) {
 SECURITY INTRUSION ALERTS (ADMIN-ONLY PROTECTION)
 Dispatches immediate alerts to Admin WhatsApp & logs to DB
 ========================================================= */
+const securityAlertCooldowns = new Map();
+
 async function sendSecurityIntrusionAlert(intruderPhone, commandText, reason) {
   try {
     const normIntruder = String(intruderPhone || "").replace(/\D/g, "");
+    // NEVER alert on the bot's own Meta WhatsApp business ID or bot/owner phone
+    if (normIntruder === "51450185031736" || isOwnerPhone(normIntruder) || !normIntruder) {
+      return;
+    }
+    // NEVER alert on the bot's own order, delivery, or security notifications
+    if (/NEW ORDER PAYMENT RECEIVED|DATA ORDER DELIVERED|SECURITY INTRUSION ALERT|PAYMENT RECEIVED|ACCESS RESTRICTED/i.test(commandText || "")) {
+      return;
+    }
+    // Rate limit cooldown: Max 1 intrusion alert per phone number per 15 minutes
+    const lastAlert = securityAlertCooldowns.get(normIntruder);
+    if (lastAlert && (Date.now() - lastAlert < 15 * 60 * 1000)) {
+      return;
+    }
+    securityAlertCooldowns.set(normIntruder, Date.now());
+
     const timeStr = new Date().toLocaleString("en-GB", { timeZone: "Africa/Accra" });
 
     // Log intrusion to security_logs in Supabase
@@ -7851,10 +7869,41 @@ async function checkDatamartCarrierRaw(portalOrderId, callerPhone = null, maxPol
           items: result.items || []
         };
       }
-      if (st === 'failed') {
-        return { found: true, portalId: targetId, status: "failed", rawStatus: "failed", error: jobRes.data?.error };
+      if (st === 'error' || st === 'failed') {
+        console.warn(`[CARRIER CHECK] Job ${jobId} ended with ${st}:`, jobRes?.data?.error);
+        break; // Stop polling immediately and fall back to search
       }
     }
+
+    // ── FALLBACK RESOLUTION: If carrier check failed (e.g. nonce error or timeout), check DataMart search & DB ──
+    try {
+      const dmSearch = await fetchDatamartSupportEndpoint(`/api/support/search?query=${encodeURIComponent(targetId)}`, {}, callerPhone);
+      const dmOrders = dmSearch?.data?.results?.orders || (Array.isArray(dmSearch?.data?.results) ? dmSearch.data.results.filter(x => x.type === "order" || x.network) : []);
+      const foundOrd = dmOrders?.find(o => String(o.apiOrderId || o.exportTracking?.portalId || o.portalOrderId) === String(targetId) || String(o.reference || o.geonetReference) === String(targetId));
+      if (foundOrd) {
+        const oSt = String(foundOrd.status || "").toLowerCase();
+        const pSt = String(foundOrd.exportTracking?.portalStatus || "").toLowerCase();
+        const isDelivered = oSt === "completed" || oSt === "delivered" || pSt === "completed" || pSt === "delivered";
+        const isFailed = oSt === "failed" || oSt === "cancelled" || pSt === "failed";
+        return {
+          found: true,
+          portalId: targetId,
+          batchNumber: foundOrd.exportTracking?.batchNumber || null,
+          totalItems: 1,
+          sent: isDelivered ? 1 : 0,
+          pending: (!isDelivered && !isFailed) ? 1 : 0,
+          failed: isFailed ? 1 : 0,
+          allDelivered: isDelivered,
+          status: isDelivered ? "delivered" : (isFailed ? "failed" : "processing"),
+          rawStatus: foundOrd.status,
+          network: foundOrd.network,
+          phone: foundOrd.phoneNumber,
+          capacity: foundOrd.capacity,
+          orderCreatedAt: foundOrd.createdAt || null,
+          items: [{ phone: foundOrd.phoneNumber, status: isDelivered ? "delivered" : (isFailed ? "failed" : "processing") }]
+        };
+      }
+    } catch (_) { }
   } catch (err) {
     console.warn("checkDatamartCarrierRaw error:", err.message);
   }
@@ -8618,7 +8667,22 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
         const isOver24H = Boolean(liveTrack.isQueuedOver24Hours || (orderDate && !isNaN(ageMs) && ageMs >= (24 * 60 * 60 * 1000)));
         const hasValidPortalId = portalId && /^\d{4,9}$/.test(String(portalId));
 
-        if (isCustPhoneInSent) {
+        // Check FAILED FIRST: if this customer's number failed or order failed, inform customer and submit ID to group
+        if (isCustPhoneInFailed || st === "failed" || st === "cancelled" || (custItemStatus && ["failed", "cancelled", "rejected"].includes(custItemStatus)) || (liveTrack.failed && liveTrack.failed > 0 && !custItem)) {
+          mainIssue = `❌ Data bundle FAILED on carrier (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""}) — Submitted to Group`;
+          trackingDiagnostic = `❌ FAILED on carrier dispatch (${ph}) · ${pidDisplay} (Ref: ${refCode}) ➔ 🚀 Submitted to Unprocessed Orders group!`;
+          draftText = `Hello ${smart.firstName}, we have checked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and noticed that the data delivery to your line (${ph}) encountered a network dispatch issue. Don't worry at all, our technical team is fixing and re-processing it for you right now so your data delivers shortly. Thank you for your patience!`;
+
+          if (hasValidPortalId) {
+            submitFailedPortalIdToGroup(portalId, {
+              reason: "customer_support_delivery_failed",
+              failedCount: liveTrack.failed || failedBatchItems.length || 1,
+              totalItems: liveTrack.totalItems || 1,
+              failedPhones: failedBatchItems.map(it => it.phone),
+              callerPhone: from
+            }).catch(e => console.warn("Submit failed ticket ID to group error:", e.message));
+          }
+        } else if (isCustPhoneInSent || (custItemStatus && ["sent", "delivered", "completed", "success"].includes(custItemStatus)) || liveTrack.allDelivered || st === "delivered" || st === "completed" || st === "success") {
           mainIssue = `🎯 Order confirmed DELIVERED on carrier (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""})`;
           if (liveTrack.isCarrierAudit) {
             trackingDiagnostic = `✅ 100% DELIVERED on carrier to ${ph} · ${pidDisplay}${batchPart} (${liveTrack.sent || liveTrack.totalItems || 1} Sent)`;
@@ -8632,20 +8696,6 @@ async function composeIntelligentSupportDraft({ firstName, custFullName, tNum, f
               reason: "customer_support_delivery_failed",
               failedCount: failedBatchItems.length,
               totalItems: liveTrack.totalItems || batchItems.length,
-              failedPhones: failedBatchItems.map(it => it.phone),
-              callerPhone: from
-            }).catch(e => console.warn("Submit failed ticket ID to group error:", e.message));
-          }
-        } else if (isCustPhoneInFailed || st === "failed" || st === "cancelled" || (liveTrack.failed && liveTrack.failed > 0)) {
-          mainIssue = `❌ Data bundle FAILED on carrier (${portalId ? `Track ID: ${portalId}` : `Ref: ${refCode}`}${ph ? ` to ${ph}` : ""}) — Submitted to Group`;
-          trackingDiagnostic = `❌ FAILED on carrier dispatch (${ph}) · ${pidDisplay} (Ref: ${refCode}) ➔ 🚀 Submitted to Unprocessed Orders group!`;
-          draftText = `Hello ${smart.firstName}, we have checked your order on ${brand}${portalId ? ` (Track ID: ${portalId})` : ` (Ref: ${refCode})`} and noticed that the data delivery to your line (${ph}) encountered a network dispatch issue. Don't worry at all, our technical team is fixing and re-processing it for you right now so your data delivers shortly. Thank you for your patience!`;
-
-          if (hasValidPortalId) {
-            submitFailedPortalIdToGroup(portalId, {
-              reason: "customer_support_delivery_failed",
-              failedCount: liveTrack.failed || failedBatchItems.length || 1,
-              totalItems: liveTrack.totalItems || 1,
               failedPhones: failedBatchItems.map(it => it.phone),
               callerPhone: from
             }).catch(e => console.warn("Submit failed ticket ID to group error:", e.message));
@@ -8854,6 +8904,9 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
         const waitMins = Math.max(1, Math.round(waitTimeMs / (60 * 1000)));
         const waitLabel = waitMins >= 60 ? `${Math.floor(waitMins / 60)}h ${waitMins % 60}m` : `${waitMins} mins`;
 
+        // Slight stagger so multiple tickets in this batch don't flood DataMart API at the same millisecond
+        if (idx > 0) await new Promise(r => setTimeout(r, idx * 350));
+
         // If smartFallback is already a special intent (deposit, acknowledgment, refund, pin, spin), use it immediately!
         let draftResult;
         if (smartFallback.isSpecialIntent) {
@@ -8884,7 +8937,7 @@ async function buildSupportInboxBatchDraft(from, limit = 5, page = 1) {
             trackingDiagnostic: smartFallback.trackingDiagnostic,
             actualCustomerLastMsg: smartFallback.lastMessage,
             portalId: smartFallback.portalId
-          }), 18000));
+          }), 25000));
 
           draftResult = await Promise.race([draftPromise, timeoutPromise]);
         }
@@ -10903,44 +10956,27 @@ async function initiateMomoCharge(from, session, bundle) {
     if (status === "pay_offline" || status === "pending" || status === "success") {
       await saveCustomerSession(from, { ref, step: 5 });
 
-      const storeDisplayName = session.agent_name || (session.agent_slug ? session.agent_slug : "DataOne GH");
-      const pkgDesc = `${effectiveBundle?.capacity || session.bundle || "1"}GB ${session.network || "MTN"}`;
-      const orderSummaryHeader =
-`🛍️ *ORDER PLACED — APPROVE MOMO PROMPT* ⏳\n` +
-`━━━━━━━━━━━━━━━━━━━━━\n` +
-`🏪 *Shop:* ${storeDisplayName}\n` +
-`🆔 *Order Ref:* ${ref}\n` +
-`📶 *Package:* ${pkgDesc}\n` +
-`📱 *Delivery to:* ${session.phone_number}\n` +
-`💳 *Payment from:* ${session.momo_number}\n` +
-`💰 *Amount:* GH₵ ${Number(effectiveBundle.price).toFixed(2)}\n` +
-`━━━━━━━━━━━━━━━━━━━━━\n`;
-
       if (status === "success") {
-        await saveCustomerSession(from, { step: 1, bundle: null, momo_number: null, ref: null });
-        return sendWhatsApp(
-          from,
-          `✅ *PAYMENT RECEIVED!* 🎉\n━━━━━━━━━━━━━━━━━━━━━\n🏪 *Shop:* ${storeDisplayName}\n🆔 *Order Ref:* ${ref}\n📶 *Package:* ${pkgDesc}\n📱 *Delivery to:* ${session.phone_number}\n💰 *Amount:* GH₵ ${Number(effectiveBundle.price).toFixed(2)}\n⚡ *Status:* Processing & Dispatching ⏳\n\nYour data bundle order has been placed and is currently being processed! It will land shortly. 📶\n\n💡 *Track Order:* https://www.data1gh.com/track?ref=${encodeURIComponent(ref)}\nReply *hi* to return to main menu.`
-        );
+        return sendWhatsApp(from, `✅ Payment received of ₵${bundle.price.toFixed(2)}! Processing your order now...`);
       }
 
       if (provider === "mtn") {
         return sendWhatsApp(
           from,
-          `${orderSummaryHeader}📲 *A payment prompt has been sent to your phone (${session.momo_number}).*\n\n👉 *Prompt didn't pop up?*\n1. Dial *170#\n2. Select 6 (My Wallet)\n3. Select 3 (My Approvals)\n4. Enter your PIN & select 1 to approve!\n\n⏳ Once approved, your data bundle will land automatically.\n💡 *Track:* https://www.data1gh.com/track?ref=${encodeURIComponent(ref)}\n_Reply LINK if you prefer to pay online._`
+          `📲 PAYMENT PROMPT SENT (MTN MoMo)\n\nA payment prompt has been sent to ${session.momo_number} for ₵${bundle.price.toFixed(2)}.\n\n👉 *Prompt didn't pop up?*\n1. Dial *170#\n2. Select 6 (My Wallet)\n3. Select 3 (My Approvals)\n4. Enter your PIN & select 1 to approve!\n\n⏳ Once approved, your order will be delivered automatically.\n\n_Reply LINK if you prefer to pay online._`
         );
       }
 
       if (provider === "vod") {
         return sendWhatsApp(
           from,
-          `${orderSummaryHeader}📲 *A Telecel payment prompt has been initiated for ${session.momo_number}.*\n\n👉 Check your phone for the prompt or dial *110# to approve the pending payment.\n\n⏳ Once approved, your data bundle will land automatically.\n💡 *Track:* https://www.data1gh.com/track?ref=${encodeURIComponent(ref)}\n_Reply LINK if you prefer to pay online._`
+          `📲 TELECEL PAYMENT PENDING\n\nA prompt has been initiated for ${session.momo_number} for ₵${bundle.price.toFixed(2)}.\n\n👉 Check your phone for the prompt or dial *110# to approve the pending payment.\n\n⏳ Once approved, your order will be delivered automatically.\n\n_Reply LINK if you prefer to pay online._`
         );
       }
 
       return sendWhatsApp(
         from,
-        `${orderSummaryHeader}📲 *An AirtelTigo / AT payment prompt has been sent to ${session.momo_number}.*\n\n👉 *Prompt didn't pop up?* Dial *110# to approve.\n\n⏳ Once approved, your data bundle will land automatically.\n💡 *Track:* https://www.data1gh.com/track?ref=${encodeURIComponent(ref)}\n_Reply LINK if you prefer to pay online._`
+        `📲 PAYMENT PROMPT SENT (AirtelTigo / AT)\n\nA prompt has been sent to ${session.momo_number} for ₵${bundle.price.toFixed(2)}.\n\n👉 *Prompt didn't pop up?* Dial *110# to approve.\n\n⏳ Once approved, your order will be delivered automatically.\n\n_Reply LINK if you prefer to pay online._`
       );
     }
 
@@ -12154,6 +12190,15 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
       ""
     ).trim();
 
+    // 🛡️ CRITICAL ECHO & SELF-LOOP FILTER: Drop bot's own messages and Meta API echoes
+    if (msg.key?.fromMe) return;
+    const normSenderDigits = from.replace(/\D/g, "");
+    if (normSenderDigits === "51450185031736") return; // Meta WhatsApp Phone Number ID echo
+
+    if (text && /^(?:🛍️\s*\*NEW ORDER|🚨\s*\*DATA 1 GH — SECURITY|📦\s*\*DATA ORDER DELIVERED|✅\s*\*PAYMENT RECEIVED|⚠️\s*\*ACCESS RESTRICTED|🔔\s*\*ORDER CONFIRMATION)/i.test(text)) {
+      return; // Never process the bot's own outgoing alerts as incoming messages
+    }
+
     let isVoiceNote = false;
     const isAudioMsg = msg.type === "audio" || msg.type === "voice" || Boolean(msg.audio);
 
@@ -13327,11 +13372,15 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
     2. Send Security Intrusion Alert to the Admin WhatsApp
     3. Log incident to database
     ===================================================== */
-    const isAdminIntent =
-      /^(admin|dashboard|report)$/i.test(text) ||
-      /\b(update\s+order|order\s+status|delivery\s+status|payment\s+status|mark\s+delivered|mark\s+paid|change\s+price|toggle\s+stock|send\s+sms|generate\s+voucher|free\s+data\s+code|turn\s+(?:on|off)\s+free\s+data|credit\s+agent|list\s+agents|change\s+color|change\s+theme|update\s+announcement|admin\s+password|admin\s+login|secret\s+key|resync\s+order|retry\s+order|stuck\s+order|issue\s+radar)\b/i.test(text);
+    const isSystemBotNotification = /^(?:🛍️|🚨|📦|✅|⚠️|🔔)/i.test(text) ||
+      /\b(?:NEW ORDER PAYMENT RECEIVED|DATA ORDER DELIVERED|SECURITY INTRUSION ALERT|PAYMENT RECEIVED|ACCESS RESTRICTED)\b/i.test(text);
 
-    if (!isOwner && !matchedAgent && isAdminIntent) {
+    const isAdminIntent = !isSystemBotNotification && (
+      /^(admin|dashboard|report)$/i.test(text) ||
+      /\b(mark\s+delivered|mark\s+paid|change\s+price|toggle\s+stock|send\s+sms|generate\s+voucher|free\s+data\s+code|turn\s+(?:on|off)\s+free\s+data|credit\s+agent|list\s+agents|change\s+color|change\s+theme|update\s+announcement|admin\s+password|admin\s+login|secret\s+key|resync\s+order|retry\s+order|stuck\s+order|issue\s+radar)\b/i.test(text)
+    );
+
+    if (!isOwner && !matchedAgent && isAdminIntent && normSenderDigits !== "51450185031736") {
       console.warn("🚨 UNAUTHORIZED ADMIN COMMAND ATTEMPT FROM:", from, text);
       await sendSecurityIntrusionAlert(from, text, "Unauthorized phone attempted administrative command/tampering");
       return await sendWhatsApp(
@@ -18571,10 +18620,6 @@ app.post("/paystack-webhook", async (req, res) => {
           recordWebhookLog("CUSTOMER_NOTIFIED_IN_PROGRESS", { phone: session.phone });
         }
       }
-      // Reset customer session so they are not stuck in payment awaiting step!
-      try {
-        await saveCustomerSession(session.phone, { step: 1, bundle: null, momo_number: null, ref: null });
-      } catch (_) {}
 
       sendAdminSms(
         `NEW DATA ORDER: ${bundle.capacity}GB ${session.network} to ${session.phone_number}. Paid: ₵${paidAmount.toFixed(2)}. Status: ${mappedDeliveryStatus === "delivered" ? "Delivered" : "In Progress"} (${orderReference})`
