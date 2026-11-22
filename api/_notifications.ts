@@ -65,6 +65,7 @@ export interface PaymentNotificationParams {
   adminWhatsAppNumber?: string | null;
   whatsappAccessToken?: string | null;
   whatsappPhoneId?: string | null;
+  whatsappPhone?: string | null;
   agentId?: string | null;
   agentStoreName?: string | null;
   storeName?: string | null;
@@ -304,6 +305,10 @@ export async function sendPaymentReceivedNotification(
     }
 
     // 2. Resolve Admin Alert Phones
+    const explicitAdminWhatsApp = formatPhoneForWhatsApp(
+      params.adminWhatsAppNumber || sMap.admin_whatsapp_number || sMap.admin_payment_alert_phone || sMap.admin_alert_phone
+    );
+
     const candidatePhones: string[] = [
       params.adminWhatsAppNumber,
       isTest ? (recipientPhone || customerPhone) : null,
@@ -323,15 +328,17 @@ export async function sendPaymentReceivedNotification(
           .filter((p) => !isBlockedFromAdminSms(p))
       )
     );
-    const adminWhatsAppPhones = Array.from(
-      new Set(
-        [sMap.admin_whatsapp_number, ...candidatePhones, ADMIN_WHATSAPP_ONLY_PHONE]
-          .filter(Boolean)
-          .map(formatPhoneForWhatsApp)
-          .filter(Boolean)
-          .filter((p) => !isBlockedFromData1Notification(p))
-      )
-    );
+    const adminWhatsAppPhones = explicitAdminWhatsApp
+      ? [explicitAdminWhatsApp].filter((p) => !isBlockedFromData1Notification(p))
+      : Array.from(
+          new Set(
+            [...candidatePhones, ADMIN_WHATSAPP_ONLY_PHONE]
+              .filter(Boolean)
+              .map(formatPhoneForWhatsApp)
+              .filter(Boolean)
+              .filter((p) => !isBlockedFromData1Notification(p))
+          )
+        );
 
     // Database deduplication across serverless lambdas so only ONE WhatsApp alert is ever sent
     let existingNotes = "";
@@ -628,6 +635,74 @@ ${deliveryStatusObj.fullLine}
             },
             supabase
           );
+        } catch (_) {}
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // D. Send WhatsApp Order Placed Confirmation to Customer (100% Free via Bot / Meta Cloud API)
+    // -----------------------------------------------------------------
+    let customerWhatsAppSent = false;
+    const rawCustomerPhone =
+      params.whatsappPhone ||
+      (params as any).phone ||
+      recipientPhone ||
+      customerPhone ||
+      "";
+    const custWaPhone = formatPhoneForWhatsApp(rawCustomerPhone);
+
+    if (custWaPhone && !adminWhatsAppPhones.includes(custWaPhone) && !isBlockedFromData1Notification(custWaPhone)) {
+      const customerMsg =
+`✅ *PAYMENT RECEIVED!* 🎉
+━━━━━━━━━━━━━━━━━━━━━
+🏪 *Shop:* ${displayShopName}
+🆔 *Order Ref:* ${reference}
+📶 *Package:* ${itemDescription || "Data Bundle"}
+📱 *Recipient Phone:* ${cleanPhone}
+💰 *Amount Paid:* GHS ${formattedAmount}
+⚡ *Status:* Order placed & processing ⏳
+⏰ *Time:* ${dateStr} ${timeStr}
+
+Your data bundle order has been placed and is currently being processed! It will be delivered to your number shortly. 📶
+
+💡 *Track Order:* https://www.data1gh.com/track?ref=${encodeURIComponent(reference)}
+Reply *hi* to return to main menu.`;
+
+      // 1. Try Meta WhatsApp API
+      if (waToken && waPhoneId) {
+        try {
+          const cRes = await fetch(`https://graph.facebook.com/v20.0/${waPhoneId}/messages`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${waToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              messaging_product: "whatsapp",
+              to: custWaPhone,
+              type: "text",
+              text: { body: customerMsg },
+            }),
+            signal: AbortSignal.timeout(6000),
+          });
+          if (cRes.ok) customerWhatsAppSent = true;
+        } catch (_) {}
+      }
+
+      // 2. Render Bot Baileys Fallback
+      if (!customerWhatsAppSent) {
+        try {
+          const botUrl =
+            sMap.whatsapp_bot_server_url ||
+            process.env.WHATSAPP_BOT_SERVER_URL ||
+            "https://nestybot-exr2.onrender.com";
+          const bRes = await fetch(`${botUrl.replace(/\/+$/, "")}/api/send-admin-alert`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ to: custWaPhone, text: customerMsg }),
+            signal: AbortSignal.timeout(6000),
+          });
+          if (bRes.ok) customerWhatsAppSent = true;
         } catch (_) {}
       }
     }
@@ -930,6 +1005,10 @@ export async function sendWithdrawalAlertNotification(
     }
 
     // 2. Resolve Admin Alert Phones
+    const explicitAdminWhatsApp = formatPhoneForWhatsApp(
+      params.adminWhatsAppNumber || sMap.admin_whatsapp_number || sMap.admin_payment_alert_phone || sMap.admin_alert_phone
+    );
+
     const candidatePhones: string[] = [
       params.adminWhatsAppNumber,
       isTest ? (params.momoNumber || params.agentPhone) : null,
@@ -941,15 +1020,17 @@ export async function sendWithdrawalAlertNotification(
       process.env.ADMIN_WHATSAPP_NUMBER,
     ].filter(Boolean) as string[];
 
-    const adminWhatsAppPhones = Array.from(
-      new Set(
-        [sMap.admin_whatsapp_number, ...candidatePhones, ADMIN_WHATSAPP_ONLY_PHONE]
-          .filter(Boolean)
-          .map(formatPhoneForWhatsApp)
-          .filter(Boolean)
-          .filter((p) => !isBlockedFromData1Notification(p))
-      )
-    );
+    const adminWhatsAppPhones = explicitAdminWhatsApp
+      ? [explicitAdminWhatsApp].filter((p) => !isBlockedFromData1Notification(p))
+      : Array.from(
+          new Set(
+            [...candidatePhones, ADMIN_WHATSAPP_ONLY_PHONE]
+              .filter(Boolean)
+              .map(formatPhoneForWhatsApp)
+              .filter(Boolean)
+              .filter((p) => !isBlockedFromData1Notification(p))
+          )
+        );
     const adminSmsPhones = Array.from(
       new Set(
         candidatePhones
@@ -1254,6 +1335,10 @@ ${storeUrl}`;
     }
 
     // 2. Resolve Admin Alert Phones
+    const explicitAdminWhatsApp = formatPhoneForWhatsApp(
+      params.adminWhatsAppNumber || sMap.admin_whatsapp_number || sMap.admin_payment_alert_phone || sMap.admin_alert_phone
+    );
+
     const candidatePhones: string[] = [
       params.adminWhatsAppNumber,
       isTest ? phone : null,
@@ -1265,9 +1350,11 @@ ${storeUrl}`;
       process.env.ADMIN_WHATSAPP_NUMBER,
     ].filter(Boolean) as string[];
 
-    const adminWhatsAppPhones = Array.from(
-      new Set([sMap.admin_whatsapp_number, ...candidatePhones, ADMIN_WHATSAPP_ONLY_PHONE].filter(Boolean).map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
-    );
+    const adminWhatsAppPhones = explicitAdminWhatsApp
+      ? [explicitAdminWhatsApp].filter((p) => !isBlockedFromData1Notification(p))
+      : Array.from(
+          new Set([...candidatePhones, ADMIN_WHATSAPP_ONLY_PHONE].filter(Boolean).map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
+        );
     const adminSmsPhones = Array.from(
       new Set(
         candidatePhones
@@ -1705,6 +1792,10 @@ export async function sendAdminLowBalanceOrderFailedAlert(
       (p) => !isBlockedFromAdminSms(p)
     );
 
+    const explicitAdminWhatsApp = formatPhoneForWhatsApp(
+      params.adminWhatsAppNumber || sMap.admin_whatsapp_number || sMap.admin_payment_alert_phone || sMap.admin_alert_phone
+    );
+
     const candidateWhatsAppPhones = [
       params.adminWhatsAppNumber,
       sMap.admin_whatsapp_number,
@@ -1714,9 +1805,11 @@ export async function sendAdminLowBalanceOrderFailedAlert(
       ADMIN_WHATSAPP_ONLY_PHONE, // "0547100951"
     ].filter(Boolean) as string[];
 
-    const adminWhatsAppPhones = Array.from(
-      new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
-    );
+    const adminWhatsAppPhones = explicitAdminWhatsApp
+      ? [explicitAdminWhatsApp].filter((p) => !isBlockedFromData1Notification(p))
+      : Array.from(
+          new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
+        );
 
     let arkeselKey = cleanApiKey(
       getEnvVar([
@@ -1845,6 +1938,7 @@ export interface PaymentIncompleteCustomerParams {
   gatewayResponse?: string | null;
   storeName?: string | null;
   shopUrl?: string | null;
+  whatsappPhone?: string | null;
   agentId?: string | null;
   storeSlug?: string | null;
 }
@@ -2270,6 +2364,10 @@ export async function sendAdminSpinWinnerAlert(
       }
     }
 
+    const explicitAdminWhatsApp = formatPhoneForWhatsApp(
+      sMap.admin_whatsapp_number || sMap.admin_payment_alert_phone || sMap.admin_alert_phone
+    );
+
     const candidateWhatsAppPhones = [
       process.env.ADMIN_WHATSAPP_NUMBER,
       process.env.ADMIN_ALERT_PHONE,
@@ -2281,9 +2379,11 @@ export async function sendAdminSpinWinnerAlert(
       "0547100951",
     ].filter(Boolean) as string[];
 
-    const adminWhatsAppPhones = Array.from(
-      new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
-    );
+    const adminWhatsAppPhones = explicitAdminWhatsApp
+      ? [explicitAdminWhatsApp].filter((p) => !isBlockedFromData1Notification(p))
+      : Array.from(
+          new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
+        );
 
     const adminSmsPhones = [
       sMap.admin_alert_phone ? formatPhoneForArkesel(sMap.admin_alert_phone) : null,
@@ -2459,6 +2559,10 @@ export async function sendAdminAgentReferralWinnerAlert(
       }
     }
 
+    const explicitAdminWhatsApp = formatPhoneForWhatsApp(
+      sMap.admin_whatsapp_number || sMap.admin_payment_alert_phone || sMap.admin_alert_phone
+    );
+
     const candidateWhatsAppPhones = [
       process.env.ADMIN_WHATSAPP_NUMBER,
       process.env.ADMIN_ALERT_PHONE,
@@ -2470,9 +2574,11 @@ export async function sendAdminAgentReferralWinnerAlert(
       "0547100951",
     ].filter(Boolean) as string[];
 
-    const adminWhatsAppPhones = Array.from(
-      new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
-    );
+    const adminWhatsAppPhones = explicitAdminWhatsApp
+      ? [explicitAdminWhatsApp].filter((p) => !isBlockedFromData1Notification(p))
+      : Array.from(
+          new Set(candidateWhatsAppPhones.map(formatPhoneForWhatsApp).filter(Boolean).filter((p) => !isBlockedFromData1Notification(p)))
+        );
 
     const adminSmsPhones = [
       sMap.admin_alert_phone ? formatPhoneForArkesel(sMap.admin_alert_phone) : null,
@@ -2942,6 +3048,7 @@ export interface OrderDeliveredNotificationParams {
   capacity?: string;
   network?: string;
   recipientPhone?: string | null;
+  whatsappPhone?: string | null;
   agentId?: string | null;
   agentStoreName?: string | null;
   storeName?: string | null;
@@ -3050,20 +3157,24 @@ export async function sendOrderDeliveredNotification(
       cleanApiKey(sMap.PHONE_ID) ||
       cleanApiKey(sMap.whatsapp_phone_number_id);
 
-    const adminWhatsAppPhones = Array.from(
-      new Set(
-        [
-          sMap.admin_whatsapp_number,
-          ADMIN_WHATSAPP_ONLY_PHONE,
-          sMap.admin_alert_phone,
-          process.env.ADMIN_WHATSAPP_NUMBER,
-          process.env.ADMIN_ALERT_PHONE,
-        ]
-          .map(formatPhoneForWhatsApp)
-          .filter(Boolean)
-          .filter((p) => !isBlockedFromData1Notification(p))
-      )
+    const explicitAdminWhatsApp = formatPhoneForWhatsApp(
+      sMap.admin_whatsapp_number || sMap.admin_payment_alert_phone || sMap.admin_alert_phone
     );
+
+    const adminWhatsAppPhones = explicitAdminWhatsApp
+      ? [explicitAdminWhatsApp].filter((p) => !isBlockedFromData1Notification(p))
+      : Array.from(
+          new Set(
+            [
+              process.env.ADMIN_WHATSAPP_NUMBER,
+              process.env.ADMIN_ALERT_PHONE,
+              ADMIN_WHATSAPP_ONLY_PHONE,
+            ]
+              .map(formatPhoneForWhatsApp)
+              .filter(Boolean)
+              .filter((p) => !isBlockedFromData1Notification(p))
+          )
+        );
 
     const resolvedPhone = params.recipientPhone || ordData?.recipient_phone || "";
     const cleanPhone = resolvedPhone.startsWith("233")
@@ -3199,7 +3310,7 @@ export async function sendOrderDeliveredNotification(
         const fbRes = await fetch(`${botUrl.replace(/\/+$/, "")}/api/send-admin-alert`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: deliveredAlertText, to: targetAdmin }),
+          body: JSON.stringify({ text: deliveredAlertText, message: deliveredAlertText, to: targetAdmin, phone: targetAdmin }),
           signal: AbortSignal.timeout(6000),
         });
         if (fbRes.ok) adminWhatsAppSent = true;
@@ -3355,6 +3466,71 @@ export async function sendOrderDeliveredNotification(
           }
         }
       } catch (_) {}
+    }
+
+    // -----------------------------------------------------------------
+    // Notify Customer on WhatsApp that their bundle has landed!
+    // -----------------------------------------------------------------
+    const rawDelivCustPhone =
+      params.whatsappPhone ||
+      ordData?.whatsapp_phone ||
+      ordData?.phone ||
+      params.recipientPhone ||
+      ordData?.recipient_phone ||
+      "";
+    const delivCustWa = formatPhoneForWhatsApp(rawDelivCustPhone);
+    if (delivCustWa && !adminWhatsAppPhones.includes(delivCustWa) && !isBlockedFromData1Notification(delivCustWa)) {
+      const custDeliveredText =
+`🎉 *DATA ORDER DELIVERED!* ✅
+━━━━━━━━━━━━━━━━━━━━━
+🏪 *Shop:* ${displayShopName}
+🆔 *Order Ref:* ${reference}
+📶 *Package:* ${itemDesc}
+📱 *Delivered To:* ${cleanPhone}
+💰 *Amount:* GHS ${formattedAmount}
+⚡ *Status:* Delivered Successfully! ✅
+⏰ *Delivered At:* ${dateStr} ${timeStr}
+
+📶 Your data bundle has been successfully delivered by the network! Kindly check your balance (MTN: *124#) to confirm.
+
+Thank you for choosing ${displayShopName}! 💙
+Reply *hi* to buy again.`;
+
+      let sentCustDeliv = false;
+      if (waToken && waPhoneId) {
+        try {
+          const dRes = await fetch(`https://graph.facebook.com/v20.0/${waPhoneId}/messages`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${waToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              messaging_product: "whatsapp",
+              to: delivCustWa,
+              type: "text",
+              text: { body: custDeliveredText },
+            }),
+            signal: AbortSignal.timeout(6000),
+          });
+          if (dRes.ok) sentCustDeliv = true;
+        } catch (_) {}
+      }
+
+      if (!sentCustDeliv) {
+        try {
+          const botUrl =
+            sMap.whatsapp_bot_server_url ||
+            process.env.WHATSAPP_BOT_SERVER_URL ||
+            "https://nestybot-exr2.onrender.com";
+          await fetch(`${botUrl.replace(/\/+$/, "")}/api/send-admin-alert`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ to: delivCustWa, text: custDeliveredText }),
+            signal: AbortSignal.timeout(6000),
+          });
+        } catch (_) {}
+      }
     }
 
     return { ok: true, adminWhatsAppSent };

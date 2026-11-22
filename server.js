@@ -2010,35 +2010,40 @@ async function sendAdminWhatsApp(text) {
     }
 
     const adminTargets = new Set();
-    if (process.env.ADMIN_ALERT_PHONE) {
-      const p = normalizeWhatsAppTarget(process.env.ADMIN_ALERT_PHONE);
-      if (p) adminTargets.add(p);
-    }
-    if (process.env.ADMIN_WHATSAPP_NUMBER) {
-      const p = normalizeWhatsAppTarget(process.env.ADMIN_WHATSAPP_NUMBER);
-      if (p) adminTargets.add(p);
-    }
+    let configuredAdminPhone = null;
 
     if (supabase) {
       try {
         const { data: sRows } = await supabase
           .from("settings")
           .select("key,value")
-          .in("key", ["admin_whatsapp_number", "admin_payment_alert_phone", "admin_alert_phone", "support_phone"]);
+          .in("key", ["admin_whatsapp_number", "admin_payment_alert_phone", "admin_alert_phone"]);
         if (sRows) {
-          sRows.forEach((r) => {
-            if (r.value) {
-              const clean = normalizeWhatsAppTarget(r.value);
-              if (clean) adminTargets.add(clean);
-            }
-          });
+          const sMap = {};
+          sRows.forEach((r) => { sMap[r.key] = r.value; });
+          const explicitAdmin = (sMap["admin_whatsapp_number"] || sMap["admin_payment_alert_phone"] || sMap["admin_alert_phone"] || "").trim();
+          if (explicitAdmin) {
+            configuredAdminPhone = normalizeWhatsAppTarget(explicitAdmin);
+          }
         }
       } catch (_) { }
     }
 
-    // Fallback only if no admin number is configured anywhere in dashboard or environment
-    if (adminTargets.size === 0) {
-      adminTargets.add("233547100951");
+    if (configuredAdminPhone) {
+      // Send strictly ONLY to the phone number configured by the admin on the admin dashboard
+      adminTargets.add(configuredAdminPhone);
+    } else {
+      if (process.env.ADMIN_WHATSAPP_NUMBER) {
+        const p = normalizeWhatsAppTarget(process.env.ADMIN_WHATSAPP_NUMBER);
+        if (p) adminTargets.add(p);
+      }
+      if (process.env.ADMIN_ALERT_PHONE) {
+        const p = normalizeWhatsAppTarget(process.env.ADMIN_ALERT_PHONE);
+        if (p) adminTargets.add(p);
+      }
+      if (adminTargets.size === 0) {
+        adminTargets.add("233547100951");
+      }
     }
 
     // Filter out permanently blocked notification numbers (e.g. 0599599254)
