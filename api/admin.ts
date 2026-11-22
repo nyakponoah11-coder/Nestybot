@@ -1131,6 +1131,19 @@ export default async function handler(req: any, res: any) {
               else updates.delivery_status = status.toLowerCase();
             }
 
+            if (updates.delivery_status) {
+              try {
+                let noteQ = admin.from("orders").select("notes");
+                if (reference) noteQ = noteQ.eq("reference", reference);
+                else if (order_id) noteQ = noteQ.eq("id", order_id);
+                const { data: nRow } = await noteQ.maybeSingle();
+                const curNotes = String(nRow?.notes || "");
+                if (!curNotes.includes("[manual_override]")) {
+                  updates.notes = curNotes ? `${curNotes} [manual_override]` : "[manual_override]";
+                }
+              } catch (_) { }
+            }
+
             try {
               let lq = data1db.getClient().from("orders").update(updates);
               if (reference) lq = lq.eq("reference", reference);
@@ -1155,6 +1168,63 @@ export default async function handler(req: any, res: any) {
               action_type,
               message: `Order ${reference || order_id} successfully ${desc}!`,
               order: data,
+            });
+          }
+
+          // Action A2: Bulk Update Orders Delivery Status
+          if (action_type === "bulk_update_orders" || (action_type === "update_order_status" && (payload.from_status || payload.filter_status || payload.all))) {
+            const rawFrom = String(payload.from_status || payload.filter_status || "processing").toLowerCase().trim();
+            let fromStatus = "processing";
+            if (rawFrom.includes("fail")) fromStatus = "failed";
+            else if (rawFrom.includes("process")) fromStatus = "processing";
+            else if (rawFrom.includes("pend")) fromStatus = "pending";
+            else if (rawFrom.includes("wait")) fromStatus = "waiting";
+
+            const rawTo = String(payload.to_status || payload.delivery_status || payload.status || "delivered").toLowerCase().trim();
+            let toStatus = "delivered";
+            if (rawTo.includes("deliv") || rawTo.includes("complete") || rawTo.includes("done") || rawTo.includes("success")) toStatus = "delivered";
+            else if (rawTo.includes("fail")) toStatus = "failed";
+            else if (rawTo.includes("process")) toStatus = "processing";
+            else if (rawTo.includes("pend")) toStatus = "pending";
+            else if (rawTo.includes("cancel")) toStatus = "cancelled";
+            else if (rawTo.includes("refund")) toStatus = "refunded";
+
+            const { data: ords, error: fetchErr } = await admin
+              .from("orders")
+              .select("id, reference, recipient_phone, network, capacity, amount, notes")
+              .ilike("delivery_status", fromStatus)
+              .order("created_at", { ascending: false })
+              .limit(100);
+
+            if (fetchErr) return res.status(500).json({ error: fetchErr.message });
+
+            const updated: string[] = [];
+            for (const ord of (ords || [])) {
+              const curNotes = String(ord.notes || "");
+              const manualNotes = curNotes.includes("[manual_override]")
+                ? curNotes
+                : (curNotes ? `${curNotes} [manual_override]` : "[manual_override]");
+
+              const { error: updErr } = await admin
+                .from("orders")
+                .update({
+                  delivery_status: toStatus,
+                  notes: manualNotes,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", ord.id);
+
+              if (!updErr) updated.push(ord.reference);
+            }
+
+            return res.status(200).json({
+              ok: true,
+              action_type,
+              count: updated.length,
+              from_status: fromStatus,
+              to_status: toStatus,
+              updated,
+              message: `Updated ${updated.length} ${fromStatus} order(s) to ${toStatus.toUpperCase()}!`,
             });
           }
 
@@ -2470,29 +2540,56 @@ export default async function handler(req: any, res: any) {
 
           // ── DIRECT COMMAND NLP PARSERS (Execute directly or Stage safely) ──
 
-          // A. Order Delivery Status Update (e.g., "mark ORD-1234 delivered", "update order 123 to delivered")
-          const orderStatusMatch =
-            cleanCmd.match(/(?:mark|set|update|change)\s+(?:order\s+)?([A-Za-z0-9_-]{5,35})\s+(?:to|as)?\s*(delivered|processing|pending|failed|cancelled|refunded)/i) ||
-            cleanCmd.match(/(?:mark|set|update)\s+(delivered|processing|pending|failed|cancelled|refunded)\s+(?:for\s+)?(?:order\s+)?([A-Za-z0-9_-]{5,35})/i);
+          // A. Order Delivery Status Update
+          // Supports: "mark order to processing WS-123", "set order to pending WS-123", "mark WS-123 as processing", "mark order to processing"
+          const statusWords = "(?:delivered|processing|pending|failed|cancelled|refunded)";
+          const statusFirstMatch = cleanCmd.match(
+            new RegExp(`(?:mark|set|update|change)\\s+(?:the\\s+)?(?:order\\s+)?(?:to\\s+|as\\s+)?(${statusWords})\\s+(?:for\\s+)?(?:order\\s+)?([A-Za-z0-9_-]{4,35})`, "i")
+          );
+          const refFirstMatch = cleanCmd.match(
+            new RegExp(`(?:mark|set|update|change)\\s+(?:the\\s+)?(?:order\\s+)?([A-Za-z0-9_-]{4,35})\\s+(?:to\\s+|as\\s+)?\\s*(${statusWords})`, "i")
+          );
+          const orderNoRefMatch = cleanCmd.match(
+            new RegExp(`(?:mark|set|update|change)\\s+(?:the\\s+)?(?:latest\\s+)?order\\s+(?:to\\s+|as\\s+)?(${statusWords})$`, "i")
+          );
 
-          if (orderStatusMatch) {
-            const isFirstPattern = /^(delivered|processing|pending|failed|cancelled|refunded)$/i.test(orderStatusMatch[2]);
-            const targetRef = isFirstPattern ? orderStatusMatch[1].trim() : orderStatusMatch[2].trim();
-            const targetStatus = (isFirstPattern ? orderStatusMatch[2] : orderStatusMatch[1]).toLowerCase().trim();
+          if (statusFirstMatch || refFirstMatch || orderNoRefMatch) {
+            let targetRef = "";
+            let targetStatus = "";
 
-            const upd = await updateOrderDeliveryStatusDirect(admin, targetRef, targetStatus);
-            if (upd.found) {
+            if (statusFirstMatch) {
+              targetStatus = statusFirstMatch[1].toLowerCase().trim();
+              targetRef = statusFirstMatch[2].trim();
+            } else if (refFirstMatch) {
+              targetRef = refFirstMatch[1].trim();
+              targetStatus = refFirstMatch[2].toLowerCase().trim();
+            } else if (orderNoRefMatch) {
+              targetStatus = orderNoRefMatch[1].toLowerCase().trim();
+              if (recentOrders && recentOrders.length > 0) {
+                targetRef = recentOrders[0].reference;
+              } else {
+                return res.status(200).json({
+                  ok: true,
+                  reply: `⚠️ Please specify which order reference you want to mark as *${targetStatus.toUpperCase()}* (e.g. *mark order to ${targetStatus} WS-XXXX*).`,
+                });
+              }
+            }
+
+            if (targetRef && targetStatus) {
+              const upd = await updateOrderDeliveryStatusDirect(admin, targetRef, targetStatus);
+              if (upd.found) {
+                return res.status(200).json({
+                  ok: true,
+                  reply: `Done bossu! 🚀 Order *${targetRef}* has been marked as *${targetStatus.toUpperCase()}* in the database live!`,
+                  executed: true,
+                  action_type: "update_order_status",
+                });
+              }
               return res.status(200).json({
                 ok: true,
-                reply: `Done bossu! 🚀 Order *${targetRef}* has been marked as *${targetStatus.toUpperCase()}* in the database live!`,
-                executed: true,
-                action_type: "update_order_status",
+                reply: `⚠️ I searched the database but couldn't find order *${targetRef}*. Please verify the reference code.`,
               });
             }
-            return res.status(200).json({
-              ok: true,
-              reply: `⚠️ I searched the database but couldn't find order *${targetRef}*. Please verify the reference code.`,
-            });
           }
 
           // B. Product Price Update (e.g. "change MTN 1GB to 4.50", "set Telecel 20GB price to 28")
@@ -3721,6 +3818,22 @@ export default async function handler(req: any, res: any) {
           const initialDeliveryStatus = rawOrder.delivery_status;
           let targetOrder = { ...rawOrder };
 
+          // Admin Manual Override Shield: never let background sync overwrite an order manually set by admin
+          const hasManualOverride = Boolean(
+            String(targetOrder.notes || "").includes("[manual_status]") ||
+            String(targetOrder.notes || "").includes("[manual_override]")
+          );
+          if (hasManualOverride) {
+            return {
+              success: true,
+              statusChanged: false,
+              payment_status: targetOrder.payment_status || "paid",
+              delivery_status: targetOrder.delivery_status || "delivered",
+              order: targetOrder,
+              message: "Order preserved via manual admin override",
+            };
+          }
+
           // Free data vouchers don't require Paystack verification
           if (targetOrder.source === "free_data") {
             return {
@@ -4367,10 +4480,30 @@ export default async function handler(req: any, res: any) {
           if (payment_status !== undefined) updates.payment_status = payment_status;
           if (delivery_status !== undefined) {
             updates.delivery_status = delivery_status;
-            if (status !== undefined) updates.status = delivery_status;
+            updates.status = delivery_status;
+            updates.datamart_status = delivery_status === "delivered" || delivery_status === "completed" ? "completed" : delivery_status;
           }
-          if (status !== undefined && delivery_status === undefined) updates.status = status;
-          if (notes !== undefined) updates.notes = notes;
+          if (status !== undefined && delivery_status === undefined) {
+            updates.status = status;
+            updates.delivery_status = status;
+            updates.datamart_status = status === "delivered" || status === "completed" ? "completed" : status;
+          }
+
+          // Fetch current order to preserve notes and tag with [manual_status]
+          let existingNotes = notes;
+          try {
+            const targetFilter = id && reference ? `id.eq.${id},reference.eq.${reference}` : (id ? `id.eq.${id}` : `reference.eq.${reference}`);
+            const { data: curOrd } = await admin.from("orders").select("notes").or(targetFilter).maybeSingle();
+            if (curOrd?.notes && notes === undefined) {
+              existingNotes = curOrd.notes;
+            }
+          } catch (_) { }
+
+          let cleanNotes = String(existingNotes || "").trim();
+          if (!cleanNotes.includes("[manual_status]")) {
+            cleanNotes = cleanNotes ? `${cleanNotes} [manual_status]` : "[manual_status]";
+          }
+          updates.notes = cleanNotes;
 
           let query = admin.from("orders").update(updates);
           if (id) query = query.eq("id", id);
@@ -4772,1132 +4905,1132 @@ export default async function handler(req: any, res: any) {
           return res.status(200).json({ ...r, message: testMsg, reference: testRef });
         }
 
-      if (action === "testPaymentIssueSms") {
-        const target = body?.recipient || "0547100951";
-        const testRef = `TEST-${Date.now().toString(36).toUpperCase()}`;
-        const isAgent = Boolean(body?.is_agent || body?.agent_id || body?.store_slug);
-        const storeName = body?.store_name || (isAgent ? "Senerity Data" : "Data1GH");
-        const storeSlug = body?.store_slug || (isAgent ? "senerity-data" : "");
-        const trackUrl = isAgent
-          ? `https://gooddata1.vercel.app/s/${storeSlug}?ref=${testRef}`
-          : `https://www.data1gh.com/track?ref=${testRef}`;
-        const testMsg = `Dear customer, your payment of GHS 4.30 for 1GB MTN Data could not complete due to low MoMo wallet balance. Top up your wallet & complete here: ${trackUrl} - ${storeName}`;
-        const r = await sendArkeselSms(admin, target, testMsg);
-        logSmsNotification(admin, {
-          recipient: target,
-          message: testMsg,
-          reference: testRef,
-          status: r.ok ? "sent" : "failed",
-          error: r.ok ? null : (r.error || "Arkesel test dispatch rejected"),
-          type: "test_payment_issue",
-        }).catch(() => {});
-        return res.status(200).json({ ...r, message: testMsg, reference: testRef });
+        if (action === "testPaymentIssueSms") {
+          const target = body?.recipient || "0547100951";
+          const testRef = `TEST-${Date.now().toString(36).toUpperCase()}`;
+          const isAgent = Boolean(body?.is_agent || body?.agent_id || body?.store_slug);
+          const storeName = body?.store_name || (isAgent ? "Senerity Data" : "Data1GH");
+          const storeSlug = body?.store_slug || (isAgent ? "senerity-data" : "");
+          const trackUrl = isAgent
+            ? `https://gooddata1.vercel.app/s/${storeSlug}?ref=${testRef}`
+            : `https://www.data1gh.com/track?ref=${testRef}`;
+          const testMsg = `Dear customer, your payment of GHS 4.30 for 1GB MTN Data could not complete due to low MoMo wallet balance. Top up your wallet & complete here: ${trackUrl} - ${storeName}`;
+          const r = await sendArkeselSms(admin, target, testMsg);
+          logSmsNotification(admin, {
+            recipient: target,
+            message: testMsg,
+            reference: testRef,
+            status: r.ok ? "sent" : "failed",
+            error: r.ok ? null : (r.error || "Arkesel test dispatch rejected"),
+            type: "test_payment_issue",
+          }).catch(() => { });
+          return res.status(200).json({ ...r, message: testMsg, reference: testRef });
+        }
       }
-    }
 
     // ----------------------------------------------------
     // Bulk SMS Handler (for AdminBulkSms)
     // ----------------------------------------------------
     if (fn === "bulk-sms" || body?.action === "sendBulkSms") {
-      try {
-        const message = String(body?.message || "").trim();
-        if (!message) return res.status(400).json({ error: "Message is required" });
-        if (message.length > 1600) return res.status(400).json({ error: "Message must be 1600 characters or fewer" });
+        try {
+          const message = String(body?.message || "").trim();
+          if (!message) return res.status(400).json({ error: "Message is required" });
+          if (message.length > 1600) return res.status(400).json({ error: "Message must be 1600 characters or fewer" });
 
-        const rawRecipients = Array.isArray(body?.recipients) ? body.recipients : [];
-        const formatPhone = (raw: string) => {
-          const digits = raw.replace(/\D/g, "");
-          if (digits.startsWith("233") && digits.length === 12) return digits;
-          if (digits.startsWith("0") && digits.length === 10) return `233${digits.slice(1)}`;
-          if (digits.length === 9) return `233${digits}`;
-          return null;
-        };
+          const rawRecipients = Array.isArray(body?.recipients) ? body.recipients : [];
+          const formatPhone = (raw: string) => {
+            const digits = raw.replace(/\D/g, "");
+            if (digits.startsWith("233") && digits.length === 12) return digits;
+            if (digits.startsWith("0") && digits.length === 10) return `233${digits.slice(1)}`;
+            if (digits.length === 9) return `233${digits}`;
+            return null;
+          };
 
-        const recipients = Array.from(new Set(rawRecipients.map(formatPhone).filter(Boolean))) as string[];
-        if (!recipients.length) return res.status(400).json({ error: "At least one valid phone number is required" });
+          const recipients = Array.from(new Set(rawRecipients.map(formatPhone).filter(Boolean))) as string[];
+          if (!recipients.length) return res.status(400).json({ error: "At least one valid phone number is required" });
 
-        // Resolve Arkesel Key from environment (case-insensitive) or database settings
-        let arkeselKey = getEnvVar([
-          "ARKESEL_API_KEY",
-          "ARKESEL_KEY",
-          "VITE_ARKESEL_API_KEY",
-          "VITE_ARKESEL_KEY",
-          "ARKESEL_SMS_KEY",
-          "ARKESEL_SMS_API_KEY",
-          "ARKESEL_API_SECRET",
-          "ARKESEL_SECRET",
-          "ARKESEL_TOKEN",
-        ]);
+          // Resolve Arkesel Key from environment (case-insensitive) or database settings
+          let arkeselKey = getEnvVar([
+            "ARKESEL_API_KEY",
+            "ARKESEL_KEY",
+            "VITE_ARKESEL_API_KEY",
+            "VITE_ARKESEL_KEY",
+            "ARKESEL_SMS_KEY",
+            "ARKESEL_SMS_API_KEY",
+            "ARKESEL_API_SECRET",
+            "ARKESEL_SECRET",
+            "ARKESEL_TOKEN",
+          ]);
 
-        if (!arkeselKey) {
-          const { data: sRows } = await admin
-            .from("settings")
-            .select("key,value")
-            .in("key", ["arkesel_api_key", "ARKESEL_API_KEY", "arkesel_key"]);
-          for (const row of sRows || []) {
-            const c = cleanApiKey(row?.value);
-            if (c) { arkeselKey = c; break; }
-          }
-        }
-
-        if (!arkeselKey) {
-          return res.status(400).json({
-            error: "Arkesel API key is not configured. Please add ARKESEL_API_KEY in Vercel Environment Variables.",
-          });
-        }
-
-        // Approved sender ID check (defaults to D_1Gh)
-        let rawSender = String(body?.sender_id || "").trim();
-        if (!rawSender || rawSender.toLowerCase() === "data1gh") {
-          rawSender = getEnvVar(["ARKESEL_SENDER_ID", "SENDER_ID", "ARKESEL_SENDER", "SMS_SENDER_ID"]) || "D_1Gh";
-        }
-        const sender = (rawSender || "D_1Gh").slice(0, 11);
-
-        // Process in batches of 50 recipients to stay within carrier limits
-        const BATCH_SIZE = 50;
-        let totalSent = 0;
-        let totalFailed = 0;
-        let lastDetails: any = null;
-        let lastErrorMessage = "";
-
-        for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
-          const chunk = recipients.slice(i, i + BATCH_SIZE);
-          let batchOk = false;
-
-          // Try 1: Arkesel v2 SMS endpoint
-          try {
-            const arkeselRes = await fetch("https://sms.arkesel.com/api/v2/sms/send", {
-              method: "POST",
-              headers: {
-                "api-key": arkeselKey,
-                "api_key": arkeselKey,
-                "X-API-Key": arkeselKey,
-                "Content-Type": "application/json",
-                Accept: "application/json",
-              },
-              body: JSON.stringify({
-                sender,
-                message,
-                recipients: chunk,
-              }),
-            });
-
-            const details = await arkeselRes.json().catch(() => ({}));
-            lastDetails = details;
-
-            if (arkeselRes.ok && (details?.status === "success" || details?.code === 100 || details?.code === "100" || details?.code === 1000 || details?.code === "1000" || details?.data || !details?.error)) {
-              batchOk = true;
-              totalSent += chunk.length;
-            } else {
-              lastErrorMessage = details?.message || details?.error || `Arkesel HTTP ${arkeselRes.status}`;
-              console.warn("Arkesel v2 send warning:", lastErrorMessage);
+          if (!arkeselKey) {
+            const { data: sRows } = await admin
+              .from("settings")
+              .select("key,value")
+              .in("key", ["arkesel_api_key", "ARKESEL_API_KEY", "arkesel_key"]);
+            for (const row of sRows || []) {
+              const c = cleanApiKey(row?.value);
+              if (c) { arkeselKey = c; break; }
             }
-
-          } catch (e: any) {
-            lastErrorMessage = e?.message || "Connection timeout to Arkesel v2";
           }
 
-          // Try 2: Fallback to Arkesel v1 endpoint if v2 returned an error
-          if (!batchOk) {
+          if (!arkeselKey) {
+            return res.status(400).json({
+              error: "Arkesel API key is not configured. Please add ARKESEL_API_KEY in Vercel Environment Variables.",
+            });
+          }
+
+          // Approved sender ID check (defaults to D_1Gh)
+          let rawSender = String(body?.sender_id || "").trim();
+          if (!rawSender || rawSender.toLowerCase() === "data1gh") {
+            rawSender = getEnvVar(["ARKESEL_SENDER_ID", "SENDER_ID", "ARKESEL_SENDER", "SMS_SENDER_ID"]) || "D_1Gh";
+          }
+          const sender = (rawSender || "D_1Gh").slice(0, 11);
+
+          // Process in batches of 50 recipients to stay within carrier limits
+          const BATCH_SIZE = 50;
+          let totalSent = 0;
+          let totalFailed = 0;
+          let lastDetails: any = null;
+          let lastErrorMessage = "";
+
+          for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
+            const chunk = recipients.slice(i, i + BATCH_SIZE);
+            let batchOk = false;
+
+            // Try 1: Arkesel v2 SMS endpoint
             try {
-              const v1Url = `https://sms.arkesel.com/sms/api?action=send-sms&api_key=${encodeURIComponent(arkeselKey)}&to=${encodeURIComponent(chunk.join(","))}&from=${encodeURIComponent(sender)}&sms=${encodeURIComponent(message)}&response=json`;
-              const v1Res = await fetch(v1Url, {
-                method: "GET",
-                headers: { Accept: "application/json" },
+              const arkeselRes = await fetch("https://sms.arkesel.com/api/v2/sms/send", {
+                method: "POST",
+                headers: {
+                  "api-key": arkeselKey,
+                  "api_key": arkeselKey,
+                  "X-API-Key": arkeselKey,
+                  "Content-Type": "application/json",
+                  Accept: "application/json",
+                },
+                body: JSON.stringify({
+                  sender,
+                  message,
+                  recipients: chunk,
+                }),
               });
-              const v1Details = await v1Res.json().catch(() => ({}));
-              lastDetails = v1Details;
-              if (v1Res.ok && (v1Details?.code === "ok" || v1Details?.status === "success" || v1Details?.code === 100)) {
+
+              const details = await arkeselRes.json().catch(() => ({}));
+              lastDetails = details;
+
+              if (arkeselRes.ok && (details?.status === "success" || details?.code === 100 || details?.code === "100" || details?.code === 1000 || details?.code === "1000" || details?.data || !details?.error)) {
                 batchOk = true;
                 totalSent += chunk.length;
               } else {
-                lastErrorMessage = v1Details?.message || v1Details?.error || lastErrorMessage;
+                lastErrorMessage = details?.message || details?.error || `Arkesel HTTP ${arkeselRes.status}`;
+                console.warn("Arkesel v2 send warning:", lastErrorMessage);
               }
-            } catch (v1Err: any) {
-              console.warn("Arkesel v1 fallback warning:", v1Err);
+
+            } catch (e: any) {
+              lastErrorMessage = e?.message || "Connection timeout to Arkesel v2";
+            }
+
+            // Try 2: Fallback to Arkesel v1 endpoint if v2 returned an error
+            if (!batchOk) {
+              try {
+                const v1Url = `https://sms.arkesel.com/sms/api?action=send-sms&api_key=${encodeURIComponent(arkeselKey)}&to=${encodeURIComponent(chunk.join(","))}&from=${encodeURIComponent(sender)}&sms=${encodeURIComponent(message)}&response=json`;
+                const v1Res = await fetch(v1Url, {
+                  method: "GET",
+                  headers: { Accept: "application/json" },
+                });
+                const v1Details = await v1Res.json().catch(() => ({}));
+                lastDetails = v1Details;
+                if (v1Res.ok && (v1Details?.code === "ok" || v1Details?.status === "success" || v1Details?.code === 100)) {
+                  batchOk = true;
+                  totalSent += chunk.length;
+                } else {
+                  lastErrorMessage = v1Details?.message || v1Details?.error || lastErrorMessage;
+                }
+              } catch (v1Err: any) {
+                console.warn("Arkesel v1 fallback warning:", v1Err);
+              }
+            }
+
+            if (!batchOk) {
+              totalFailed += chunk.length;
             }
           }
 
-          if (!batchOk) {
-            totalFailed += chunk.length;
-          }
-        }
-
-        if (totalSent === 0 && totalFailed > 0) {
-          return res.status(400).json({
-            error: lastErrorMessage || "Arkesel rejected the SMS. Check that your Sender ID ('D_1Gh') is approved on your Arkesel account.",
-            details: lastDetails,
-          });
-        }
-
-        return res.status(200).json({
-          ok: true,
-          sent: totalSent,
-          total: recipients.length,
-          failed: totalFailed,
-          details: lastDetails,
-        });
-      } catch (err: any) {
-        console.error("bulk-sms error:", err);
-        return res.status(500).json({ error: err?.message || "Failed to send bulk SMS" });
-      }
-    }
-
-    // ----------------------------------------------------
-    // B. Admin Analytics Handler (for AdminAnalytics)
-    // ----------------------------------------------------
-    if (fn === "admin-analytics" || body?.action === "analytics") {
-      try {
-        const PAYSTACK_FEE_PERCENT = Number(process.env.PAYSTACK_FEE_PERCENT ?? "1.95");
-        const SAVINGS_PERCENT = 45;
-        const ANALYTICS_START_DATE = process.env.ANALYTICS_START_DATE ?? "2026-01-01";
-
-        let datamartKey = cleanApiKey(
-          getEnvVar([
-            "DATA_API_KEY",
-            "DATAMART_API_KEY",
-            "DATAMART_KEY",
-            "DM_API_KEY",
-            "VITE_DATAMART_API_KEY",
-            "VITE_DATA_API_KEY",
-            "VITE_DM_API_KEY",
-          ])
-        );
-
-        const basePriceMap = new Map<string, number>();
-        if (datamartKey) {
-          try {
-            const r = await fetch("https://api.datamartgh.shop/api/developer/data-packages", {
-              headers: { "X-API-Key": datamartKey },
+          if (totalSent === 0 && totalFailed > 0) {
+            return res.status(400).json({
+              error: lastErrorMessage || "Arkesel rejected the SMS. Check that your Sender ID ('D_1Gh') is approved on your Arkesel account.",
+              details: lastDetails,
             });
-            const j = await r.json().catch(() => ({}));
-            const data = j?.data || {};
-            for (const [net, ourNet] of [["YELLO", "MTN"], ["at", "AT"], ["TELECEL", "TELECEL"]] as const) {
-              const arr = data[net] || [];
-              for (const p of arr) {
-                basePriceMap.set(`${ourNet}-${String(p.capacity)}`, Number(p.price));
-              }
-            }
-          } catch (_) { }
-        }
-
-        const now = new Date();
-        const baseline = new Date(`${ANALYTICS_START_DATE}T00:00:00Z`);
-
-        const [ordersRes, firstSeenRes] = await Promise.all([
-          admin.from("orders").select("amount, payment_status, created_at, network, capacity").gte("created_at", baseline.toISOString()).order("created_at", { ascending: false }),
-          admin.from("orders").select("customer_email, recipient_phone, created_at").gte("created_at", baseline.toISOString()).order("created_at", { ascending: true }),
-        ]);
-
-        const orders = ordersRes.data || [];
-        const firstSeen = new Map<string, string>();
-        for (const r of firstSeenRes.data || []) {
-          const id = (r.customer_email || r.recipient_phone || "").toLowerCase().trim();
-          if (id && !firstSeen.has(id)) firstSeen.set(id, r.created_at);
-        }
-
-        const clamp = (d: Date) => (d < baseline ? baseline : d);
-        const startOfDay = clamp(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())));
-        const startOfWeek = clamp(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - 6 * 24 * 3600 * 1000));
-        const startOfMonth = clamp(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)));
-
-        const buildPeriodStats = (from: Date) => {
-          const paid = orders.filter(o => o.payment_status === "paid" && new Date(o.created_at) >= from);
-          const revenue = paid.reduce((s, o) => s + Number(o.amount || 0), 0);
-          const baseCost = paid.reduce((s, o) => {
-            const bp = basePriceMap.get(`${o.network}-${o.capacity}`) ?? (Number(o.amount || 0) * 0.8);
-            return s + bp;
-          }, 0);
-          const paystackFee = revenue * (PAYSTACK_FEE_PERCENT / 100);
-          const afterFee = revenue - paystackFee;
-          const netProfit = afterFee - baseCost;
-          const grossProfit = revenue - baseCost;
-          const savings = Math.max(0, netProfit) * (SAVINGS_PERCENT / 100);
-
-          const newCustomers = new Set<string>();
-          firstSeen.forEach((ts, id) => {
-            if (new Date(ts) >= from) newCustomers.add(id);
-          });
-
-          return {
-            orders: paid.length,
-            revenue,
-            paystack_fee: paystackFee,
-            after_fee: afterFee,
-            base_cost: baseCost,
-            gross_profit: grossProfit,
-            net_profit: netProfit,
-            savings,
-            new_customers: newCustomers.size,
-          };
-        };
-
-        const periods = {
-          daily: buildPeriodStats(startOfDay),
-          weekly: buildPeriodStats(startOfWeek),
-          monthly: buildPeriodStats(startOfMonth),
-        };
-
-        // Sales by bundle size for monthly window
-        const salesByBundle: Record<string, { network: string; capacity: string; count: number; revenue: number; profit: number }> = {};
-        for (const o of orders) {
-          if (o.payment_status !== "paid") continue;
-          if (new Date(o.created_at) < startOfMonth) continue;
-          const key = `${o.network}-${o.capacity}`;
-          salesByBundle[key] ||= { network: o.network, capacity: String(o.capacity), count: 0, revenue: 0, profit: 0 };
-          salesByBundle[key].count += 1;
-          salesByBundle[key].revenue += Number(o.amount || 0);
-          const bp = basePriceMap.get(key) ?? (Number(o.amount || 0) * 0.8);
-          salesByBundle[key].profit += Number(o.amount || 0) - bp;
-        }
-
-        // Daily time series
-        const series: { date: string; revenue: number; profit: number; savings: number; orders: number }[] = [];
-        const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-        const days = 14;
-        for (let i = days - 1; i >= 0; i--) {
-          const d = new Date(today.getTime() - i * 24 * 3600 * 1000);
-          const next = new Date(d.getTime() + 24 * 3600 * 1000);
-          const slice = orders.filter(o =>
-            o.payment_status === "paid" &&
-            new Date(o.created_at) >= d && new Date(o.created_at) < next
-          );
-          const revenue = slice.reduce((s, o) => s + Number(o.amount || 0), 0);
-          const baseCost = slice.reduce((s, o) => s + (basePriceMap.get(`${o.network}-${o.capacity}`) ?? (Number(o.amount || 0) * 0.8)), 0);
-          const fee = revenue * (PAYSTACK_FEE_PERCENT / 100);
-          const profit = revenue - fee - baseCost;
-          const savings = Math.max(0, profit) * (SAVINGS_PERCENT / 100);
-          series.push({
-            date: d.toISOString().slice(5, 10),
-            revenue: Number(revenue.toFixed(2)),
-            profit: Number(profit.toFixed(2)),
-            savings: Number(savings.toFixed(2)),
-            orders: slice.length,
-          });
-        }
-
-        return res.status(200).json({
-          periods,
-          sales_by_bundle: Object.values(salesByBundle).sort((a, b) => b.count - a.count),
-          series,
-          meta: {
-            paystack_fee_percent: PAYSTACK_FEE_PERCENT,
-            savings_percent: SAVINGS_PERCENT,
-            base_prices_loaded: basePriceMap.size,
-            start_date: ANALYTICS_START_DATE,
-          },
-        });
-      } catch (err: any) {
-        console.error("admin-analytics error:", err);
-        return res.status(500).json({ error: err?.message || "Internal server error" });
-      }
-    }
-
-    // ----------------------------------------------------
-    // C. Admin Services Handler (for AdminServices, AdminReferrals, AdminSpinReport)
-    // ----------------------------------------------------
-    const isServices =
-      fn === "admin-services" ||
-      body?.action === "overview" ||
-      body?.action === "togglePromo" ||
-      body?.action === "setPrices" ||
-      body?.action === "updateOrder" ||
-      body?.action === "deleteOrder";
-
-    if (isServices) {
-      try {
-        const action = body?.action || "overview";
-
-        if (action === "togglePromo") {
-          const enabled = !!body.enabled;
-          await admin
-            .from("settings")
-            .upsert({ key: "promo_enabled", value: enabled ? "true" : "false" }, { onConflict: "key" });
-          return res.status(200).json({ ok: true, enabled });
-        }
-
-        if (action === "toggleSpin") {
-          const enabled = !!body.enabled;
-          await admin
-            .from("settings")
-            .upsert({ key: "spin_game_enabled", value: enabled ? "true" : "false" }, { onConflict: "key" });
-          return res.status(200).json({ ok: true, enabled });
-        }
-
-        if (action === "markSpinSent") {
-          const winId = body.id || body.winId;
-          const code = body.code;
-          if (!winId && !code) {
-            return res.status(400).json({ error: "Missing spin ID or code" });
-          }
-          let q = admin.from("spin_wins").update({
-            reward_sent: true,
-            reward_sent_at: new Date().toISOString(),
-            reward_reference: "MANUAL",
-          });
-          if (winId) q = q.eq("id", winId);
-          else if (code) q = q.eq("code", code);
-
-          const { data: updData, error: updErr } = await q.select("*").maybeSingle();
-          if (updErr) {
-            return res.status(500).json({ error: updErr.message });
-          }
-          return res.status(200).json({ ok: true, message: "Marked as sent successfully", spin: updData });
-        }
-
-        if (action === "setPrices") {
-          const netflix = Number(body.netflix_price);
-          const afa = Number(body.afa_price);
-          const mashup = Number(body.mashup_price);
-          const upserts: { key: string; value: string }[] = [];
-
-          if (Number.isFinite(netflix) && netflix > 0) {
-            upserts.push({ key: "netflix_price", value: String(netflix) });
-          }
-          if (Number.isFinite(afa) && afa > 0) {
-            upserts.push({ key: "afa_price", value: String(afa) });
-          }
-          if (Number.isFinite(mashup) && mashup > 0) {
-            upserts.push({ key: "mashup_price", value: String(mashup) });
           }
 
-          if (upserts.length === 0) {
-            return res.status(400).json({ error: "Please enter at least one valid positive price." });
-          }
-
-          const { error: upErr } = await admin.from("settings").upsert(upserts, { onConflict: "key" });
-          if (upErr) return res.status(500).json({ error: upErr.message });
           return res.status(200).json({
             ok: true,
-            netflix_price: Number.isFinite(netflix) && netflix > 0 ? netflix : undefined,
-            afa_price: Number.isFinite(afa) && afa > 0 ? afa : undefined,
-            mashup_price: Number.isFinite(mashup) && mashup > 0 ? mashup : undefined,
+            sent: totalSent,
+            total: recipients.length,
+            failed: totalFailed,
+            details: lastDetails,
           });
+        } catch (err: any) {
+          console.error("bulk-sms error:", err);
+          return res.status(500).json({ error: err?.message || "Failed to send bulk SMS" });
         }
+      }
 
-        if (action === "updateOrder") {
-          const { id, reference, delivery_status, netflix_last_code, notes } = body;
-          if (!id && !reference) {
-            return res.status(400).json({ error: "Missing order ID or reference" });
+      // ----------------------------------------------------
+      // B. Admin Analytics Handler (for AdminAnalytics)
+      // ----------------------------------------------------
+      if (fn === "admin-analytics" || body?.action === "analytics") {
+        try {
+          const PAYSTACK_FEE_PERCENT = Number(process.env.PAYSTACK_FEE_PERCENT ?? "1.95");
+          const SAVINGS_PERCENT = 45;
+          const ANALYTICS_START_DATE = process.env.ANALYTICS_START_DATE ?? "2026-01-01";
+
+          let datamartKey = cleanApiKey(
+            getEnvVar([
+              "DATA_API_KEY",
+              "DATAMART_API_KEY",
+              "DATAMART_KEY",
+              "DM_API_KEY",
+              "VITE_DATAMART_API_KEY",
+              "VITE_DATA_API_KEY",
+              "VITE_DM_API_KEY",
+            ])
+          );
+
+          const basePriceMap = new Map<string, number>();
+          if (datamartKey) {
+            try {
+              const r = await fetch("https://api.datamartgh.shop/api/developer/data-packages", {
+                headers: { "X-API-Key": datamartKey },
+              });
+              const j = await r.json().catch(() => ({}));
+              const data = j?.data || {};
+              for (const [net, ourNet] of [["YELLO", "MTN"], ["at", "AT"], ["TELECEL", "TELECEL"]] as const) {
+                const arr = data[net] || [];
+                for (const p of arr) {
+                  basePriceMap.set(`${ourNet}-${String(p.capacity)}`, Number(p.price));
+                }
+              }
+            } catch (_) { }
           }
-          const updates: Record<string, any> = {};
-          if (delivery_status !== undefined) updates.delivery_status = delivery_status;
-          let finalNotes = notes !== undefined ? notes : undefined;
-          if (netflix_last_code !== undefined) {
-            finalNotes = setOrderTag(finalNotes || "", "netflix_code", netflix_last_code);
-            finalNotes = setOrderTag(finalNotes, "netflix_code_at", new Date().toISOString());
+
+          const now = new Date();
+          const baseline = new Date(`${ANALYTICS_START_DATE}T00:00:00Z`);
+
+          const [ordersRes, firstSeenRes] = await Promise.all([
+            admin.from("orders").select("amount, payment_status, created_at, network, capacity").gte("created_at", baseline.toISOString()).order("created_at", { ascending: false }),
+            admin.from("orders").select("customer_email, recipient_phone, created_at").gte("created_at", baseline.toISOString()).order("created_at", { ascending: true }),
+          ]);
+
+          const orders = ordersRes.data || [];
+          const firstSeen = new Map<string, string>();
+          for (const r of firstSeenRes.data || []) {
+            const id = (r.customer_email || r.recipient_phone || "").toLowerCase().trim();
+            if (id && !firstSeen.has(id)) firstSeen.set(id, r.created_at);
           }
-          if (finalNotes !== undefined) updates.notes = finalNotes;
 
-          let query = admin.from("service_orders").update(updates);
-          if (id) query = query.eq("id", id);
-          else query = query.eq("reference", reference);
+          const clamp = (d: Date) => (d < baseline ? baseline : d);
+          const startOfDay = clamp(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())));
+          const startOfWeek = clamp(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - 6 * 24 * 3600 * 1000));
+          const startOfMonth = clamp(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)));
 
-          const { data, error } = await query.select("*").maybeSingle();
-          if (error) return res.status(500).json({ error: error.message });
+          const buildPeriodStats = (from: Date) => {
+            const paid = orders.filter(o => o.payment_status === "paid" && new Date(o.created_at) >= from);
+            const revenue = paid.reduce((s, o) => s + Number(o.amount || 0), 0);
+            const baseCost = paid.reduce((s, o) => {
+              const bp = basePriceMap.get(`${o.network}-${o.capacity}`) ?? (Number(o.amount || 0) * 0.8);
+              return s + bp;
+            }, 0);
+            const paystackFee = revenue * (PAYSTACK_FEE_PERCENT / 100);
+            const afterFee = revenue - paystackFee;
+            const netProfit = afterFee - baseCost;
+            const grossProfit = revenue - baseCost;
+            const savings = Math.max(0, netProfit) * (SAVINGS_PERCENT / 100);
 
-          // Automated customer SMS disabled per owner instruction.
-          // Admin can use resendSms action if explicit dispatch is desired.
+            const newCustomers = new Set<string>();
+            firstSeen.forEach((ts, id) => {
+              if (new Date(ts) >= from) newCustomers.add(id);
+            });
 
-          return res.status(200).json({ ok: true, order: enrichAdminService(data) });
-        }
+            return {
+              orders: paid.length,
+              revenue,
+              paystack_fee: paystackFee,
+              after_fee: afterFee,
+              base_cost: baseCost,
+              gross_profit: grossProfit,
+              net_profit: netProfit,
+              savings,
+              new_customers: newCustomers.size,
+            };
+          };
 
-        if (action === "resendSms") {
-          const { phone, code, reference } = body;
-          if (!phone || !code) return res.status(400).json({ error: "Missing phone or code" });
-          const smsMsg = `DATA 1 GH: Your Netflix sign-in code is: ${code}\nEnter this code on Netflix to complete your sign-in. Valid for 15 minutes.`;
-          const r = await sendArkeselSms(admin, phone, smsMsg);
-          return res.status(200).json(r);
-        }
+          const periods = {
+            daily: buildPeriodStats(startOfDay),
+            weekly: buildPeriodStats(startOfWeek),
+            monthly: buildPeriodStats(startOfMonth),
+          };
 
-        if (action === "deleteOrder") {
-          const { id, reference } = body;
-          if (!id && !reference) {
-            return res.status(400).json({ error: "Missing order ID or reference" });
+          // Sales by bundle size for monthly window
+          const salesByBundle: Record<string, { network: string; capacity: string; count: number; revenue: number; profit: number }> = {};
+          for (const o of orders) {
+            if (o.payment_status !== "paid") continue;
+            if (new Date(o.created_at) < startOfMonth) continue;
+            const key = `${o.network}-${o.capacity}`;
+            salesByBundle[key] ||= { network: o.network, capacity: String(o.capacity), count: 0, revenue: 0, profit: 0 };
+            salesByBundle[key].count += 1;
+            salesByBundle[key].revenue += Number(o.amount || 0);
+            const bp = basePriceMap.get(key) ?? (Number(o.amount || 0) * 0.8);
+            salesByBundle[key].profit += Number(o.amount || 0) - bp;
           }
-          let query = admin.from("service_orders").delete();
-          if (id) query = query.eq("id", id);
-          else query = query.eq("reference", reference);
-          const { error } = await query;
-          if (error) return res.status(500).json({ error: error.message });
-          return res.status(200).json({ ok: true });
+
+          // Daily time series
+          const series: { date: string; revenue: number; profit: number; savings: number; orders: number }[] = [];
+          const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+          const days = 14;
+          for (let i = days - 1; i >= 0; i--) {
+            const d = new Date(today.getTime() - i * 24 * 3600 * 1000);
+            const next = new Date(d.getTime() + 24 * 3600 * 1000);
+            const slice = orders.filter(o =>
+              o.payment_status === "paid" &&
+              new Date(o.created_at) >= d && new Date(o.created_at) < next
+            );
+            const revenue = slice.reduce((s, o) => s + Number(o.amount || 0), 0);
+            const baseCost = slice.reduce((s, o) => s + (basePriceMap.get(`${o.network}-${o.capacity}`) ?? (Number(o.amount || 0) * 0.8)), 0);
+            const fee = revenue * (PAYSTACK_FEE_PERCENT / 100);
+            const profit = revenue - fee - baseCost;
+            const savings = Math.max(0, profit) * (SAVINGS_PERCENT / 100);
+            series.push({
+              date: d.toISOString().slice(5, 10),
+              revenue: Number(revenue.toFixed(2)),
+              profit: Number(profit.toFixed(2)),
+              savings: Number(savings.toFixed(2)),
+              orders: slice.length,
+            });
+          }
+
+          return res.status(200).json({
+            periods,
+            sales_by_bundle: Object.values(salesByBundle).sort((a, b) => b.count - a.count),
+            series,
+            meta: {
+              paystack_fee_percent: PAYSTACK_FEE_PERCENT,
+              savings_percent: SAVINGS_PERCENT,
+              base_prices_loaded: basePriceMap.size,
+              start_date: ANALYTICS_START_DATE,
+            },
+          });
+        } catch (err: any) {
+          console.error("admin-analytics error:", err);
+          return res.status(500).json({ error: err?.message || "Internal server error" });
         }
+      }
 
-        // Default: Return overview data
-        // Fast path: If explicitly requested for Services page only
-        const isServicesOnly = body?.action === "servicesOnly" || body?.action === "servicesOverview";
+      // ----------------------------------------------------
+      // C. Admin Services Handler (for AdminServices, AdminReferrals, AdminSpinReport)
+      // ----------------------------------------------------
+      const isServices =
+        fn === "admin-services" ||
+        body?.action === "overview" ||
+        body?.action === "togglePromo" ||
+        body?.action === "setPrices" ||
+        body?.action === "updateOrder" ||
+        body?.action === "deleteOrder";
 
-        const [servicesRes, settingsRes] = await Promise.all([
-          admin.from("service_orders").select("*").order("created_at", { ascending: false }).limit(50),
-          admin.from("settings").select("key,value").in("key", ["promo_enabled", "netflix_price", "afa_price", "mashup_price", "spin_game_enabled"]),
-        ]);
+      if (isServices) {
+        try {
+          const action = body?.action || "overview";
 
-        const smap = Object.fromEntries((settingsRes.data || []).map((s: any) => [s.key, s.value]));
+          if (action === "togglePromo") {
+            const enabled = !!body.enabled;
+            await admin
+              .from("settings")
+              .upsert({ key: "promo_enabled", value: enabled ? "true" : "false" }, { onConflict: "key" });
+            return res.status(200).json({ ok: true, enabled });
+          }
 
-        const servicesEnriched = (servicesRes.data || []).map(enrichAdminService);
+          if (action === "toggleSpin") {
+            const enabled = !!body.enabled;
+            await admin
+              .from("settings")
+              .upsert({ key: "spin_game_enabled", value: enabled ? "true" : "false" }, { onConflict: "key" });
+            return res.status(200).json({ ok: true, enabled });
+          }
 
-        if (isServicesOnly) {
+          if (action === "markSpinSent") {
+            const winId = body.id || body.winId;
+            const code = body.code;
+            if (!winId && !code) {
+              return res.status(400).json({ error: "Missing spin ID or code" });
+            }
+            let q = admin.from("spin_wins").update({
+              reward_sent: true,
+              reward_sent_at: new Date().toISOString(),
+              reward_reference: "MANUAL",
+            });
+            if (winId) q = q.eq("id", winId);
+            else if (code) q = q.eq("code", code);
+
+            const { data: updData, error: updErr } = await q.select("*").maybeSingle();
+            if (updErr) {
+              return res.status(500).json({ error: updErr.message });
+            }
+            return res.status(200).json({ ok: true, message: "Marked as sent successfully", spin: updData });
+          }
+
+          if (action === "setPrices") {
+            const netflix = Number(body.netflix_price);
+            const afa = Number(body.afa_price);
+            const mashup = Number(body.mashup_price);
+            const upserts: { key: string; value: string }[] = [];
+
+            if (Number.isFinite(netflix) && netflix > 0) {
+              upserts.push({ key: "netflix_price", value: String(netflix) });
+            }
+            if (Number.isFinite(afa) && afa > 0) {
+              upserts.push({ key: "afa_price", value: String(afa) });
+            }
+            if (Number.isFinite(mashup) && mashup > 0) {
+              upserts.push({ key: "mashup_price", value: String(mashup) });
+            }
+
+            if (upserts.length === 0) {
+              return res.status(400).json({ error: "Please enter at least one valid positive price." });
+            }
+
+            const { error: upErr } = await admin.from("settings").upsert(upserts, { onConflict: "key" });
+            if (upErr) return res.status(500).json({ error: upErr.message });
+            return res.status(200).json({
+              ok: true,
+              netflix_price: Number.isFinite(netflix) && netflix > 0 ? netflix : undefined,
+              afa_price: Number.isFinite(afa) && afa > 0 ? afa : undefined,
+              mashup_price: Number.isFinite(mashup) && mashup > 0 ? mashup : undefined,
+            });
+          }
+
+          if (action === "updateOrder") {
+            const { id, reference, delivery_status, netflix_last_code, notes } = body;
+            if (!id && !reference) {
+              return res.status(400).json({ error: "Missing order ID or reference" });
+            }
+            const updates: Record<string, any> = {};
+            if (delivery_status !== undefined) updates.delivery_status = delivery_status;
+            let finalNotes = notes !== undefined ? notes : undefined;
+            if (netflix_last_code !== undefined) {
+              finalNotes = setOrderTag(finalNotes || "", "netflix_code", netflix_last_code);
+              finalNotes = setOrderTag(finalNotes, "netflix_code_at", new Date().toISOString());
+            }
+            if (finalNotes !== undefined) updates.notes = finalNotes;
+
+            let query = admin.from("service_orders").update(updates);
+            if (id) query = query.eq("id", id);
+            else query = query.eq("reference", reference);
+
+            const { data, error } = await query.select("*").maybeSingle();
+            if (error) return res.status(500).json({ error: error.message });
+
+            // Automated customer SMS disabled per owner instruction.
+            // Admin can use resendSms action if explicit dispatch is desired.
+
+            return res.status(200).json({ ok: true, order: enrichAdminService(data) });
+          }
+
+          if (action === "resendSms") {
+            const { phone, code, reference } = body;
+            if (!phone || !code) return res.status(400).json({ error: "Missing phone or code" });
+            const smsMsg = `DATA 1 GH: Your Netflix sign-in code is: ${code}\nEnter this code on Netflix to complete your sign-in. Valid for 15 minutes.`;
+            const r = await sendArkeselSms(admin, phone, smsMsg);
+            return res.status(200).json(r);
+          }
+
+          if (action === "deleteOrder") {
+            const { id, reference } = body;
+            if (!id && !reference) {
+              return res.status(400).json({ error: "Missing order ID or reference" });
+            }
+            let query = admin.from("service_orders").delete();
+            if (id) query = query.eq("id", id);
+            else query = query.eq("reference", reference);
+            const { error } = await query;
+            if (error) return res.status(500).json({ error: error.message });
+            return res.status(200).json({ ok: true });
+          }
+
+          // Default: Return overview data
+          // Fast path: If explicitly requested for Services page only
+          const isServicesOnly = body?.action === "servicesOnly" || body?.action === "servicesOverview";
+
+          const [servicesRes, settingsRes] = await Promise.all([
+            admin.from("service_orders").select("*").order("created_at", { ascending: false }).limit(50),
+            admin.from("settings").select("key,value").in("key", ["promo_enabled", "netflix_price", "afa_price", "mashup_price", "spin_game_enabled"]),
+          ]);
+
+          const smap = Object.fromEntries((settingsRes.data || []).map((s: any) => [s.key, s.value]));
+
+          const servicesEnriched = (servicesRes.data || []).map(enrichAdminService);
+
+          if (isServicesOnly) {
+            return res.status(200).json({
+              services: servicesEnriched,
+              referrals: [],
+              redemptions: [],
+              spin_wins: [],
+              spin_redemptions: [],
+              promo_enabled: (smap.promo_enabled ?? "true") !== "false",
+              spin_game_enabled: smap.spin_game_enabled === "true",
+              netflix_price: Number(smap.netflix_price) || 30,
+              afa_price: Number(smap.afa_price) || 20,
+              mashup_price: Number(smap.mashup_price) || 25,
+            });
+          }
+
+          const referralsData: any[] = [];
+          const redemptionsData: any[] = [];
+          const spinWinsData: any[] = [];
+          const spinRedemptionsData: any[] = [];
+
           return res.status(200).json({
             services: servicesEnriched,
-            referrals: [],
-            redemptions: [],
-            spin_wins: [],
-            spin_redemptions: [],
+            referrals: referralsData,
+            redemptions: redemptionsData,
+            spin_wins: spinWinsData,
+            spin_redemptions: spinRedemptionsData,
             promo_enabled: (smap.promo_enabled ?? "true") !== "false",
             spin_game_enabled: smap.spin_game_enabled === "true",
             netflix_price: Number(smap.netflix_price) || 30,
             afa_price: Number(smap.afa_price) || 20,
             mashup_price: Number(smap.mashup_price) || 25,
           });
+        } catch (err: any) {
+          console.error("admin/services error:", err);
+          return res.status(500).json({ error: err?.message || "Internal server error" });
         }
-
-        const referralsData: any[] = [];
-        const redemptionsData: any[] = [];
-        const spinWinsData: any[] = [];
-        const spinRedemptionsData: any[] = [];
-
-        return res.status(200).json({
-          services: servicesEnriched,
-          referrals: referralsData,
-          redemptions: redemptionsData,
-          spin_wins: spinWinsData,
-          spin_redemptions: spinRedemptionsData,
-          promo_enabled: (smap.promo_enabled ?? "true") !== "false",
-          spin_game_enabled: smap.spin_game_enabled === "true",
-          netflix_price: Number(smap.netflix_price) || 30,
-          afa_price: Number(smap.afa_price) || 20,
-          mashup_price: Number(smap.mashup_price) || 25,
-        });
-      } catch (err: any) {
-        console.error("admin/services error:", err);
-        return res.status(500).json({ error: err?.message || "Internal server error" });
       }
-    }
 
 
-    // ----------------------------------------------------
-    // D. Admin Stats Handler (for AdminDashboard)
-    // ----------------------------------------------------
-    const forceRefresh = body?.force === true || req.query?.force === "true" || req.query?.refresh === "true";
-    if (!forceRefresh && cachedAdminStats && Date.now() - cachedAdminStatsAt < ADMIN_STATS_TTL) {
-      return res.status(200).json(cachedAdminStats);
-    }
-    const now = new Date();
-    const startOfDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
-    const [
-      ordersTodayRes,
-      recentAllRes,
-      serviceOrdersRes,
-      checkerOrdersRes,
-      freeDataRes,
-      supportChatsRes,
-      productsCountRes,
-      referralsCountRes,
-      settingsRes,
-    ] = await Promise.all([
-      admin.from("orders").select("amount, payment_status, delivery_status, status, datamart_status, created_at").gte("created_at", startOfDay.toISOString()),
-      admin.from("orders").select("id, reference, amount, payment_status, delivery_status, network, capacity, created_at, notes, whatsapp_phone, recipient_phone, status, datamart_status").order("created_at", { ascending: false }).limit(40),
-      admin.from("service_orders").select("id, reference, service, notes, customer_phone, amount, status, delivery_status, created_at").order("created_at", { ascending: false }).limit(30),
-      admin.from("checker_orders").select("id, reference, checker_type, customer_phone, amount, status, delivery_status, notes, created_at").order("created_at", { ascending: false }).limit(30),
-      admin.from("free_data_codes").select("id, claimed").limit(80),
-      admin.from("chat_conversations").select("id, status, unread_for_support").eq("status", "open").limit(20),
-      admin.from("products").select("id, in_stock, network", { count: "exact" }),
-      admin.from("referrals").select("id", { count: "exact" }),
-      admin.from("settings").select("key, value").in("key", ["shop_name", "whatsapp_bot_url", "whatsapp_channel_url", "support_phone", "ai_support_enabled", "arkesel_last_balance", "arkesel_sms_balance", "arkesel_main_balance", "datamart_last_balance", "akwaaba_last_balance", "arkesel_sender_id"]),
-    ]);
+      // ----------------------------------------------------
+      // D. Admin Stats Handler (for AdminDashboard)
+      // ----------------------------------------------------
+      const forceRefresh = body?.force === true || req.query?.force === "true" || req.query?.refresh === "true";
+      if (!forceRefresh && cachedAdminStats && Date.now() - cachedAdminStatsAt < ADMIN_STATS_TTL) {
+        return res.status(200).json(cachedAdminStats);
+      }
+      const now = new Date();
+      const startOfDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+      const [
+        ordersTodayRes,
+        recentAllRes,
+        serviceOrdersRes,
+        checkerOrdersRes,
+        freeDataRes,
+        supportChatsRes,
+        productsCountRes,
+        referralsCountRes,
+        settingsRes,
+      ] = await Promise.all([
+        admin.from("orders").select("amount, payment_status, delivery_status, status, datamart_status, created_at").gte("created_at", startOfDay.toISOString()),
+        admin.from("orders").select("id, reference, amount, payment_status, delivery_status, network, capacity, created_at, notes, whatsapp_phone, recipient_phone, status, datamart_status").order("created_at", { ascending: false }).limit(40),
+        admin.from("service_orders").select("id, reference, service, notes, customer_phone, amount, status, delivery_status, created_at").order("created_at", { ascending: false }).limit(30),
+        admin.from("checker_orders").select("id, reference, checker_type, customer_phone, amount, status, delivery_status, notes, created_at").order("created_at", { ascending: false }).limit(30),
+        admin.from("free_data_codes").select("id, claimed").limit(80),
+        admin.from("chat_conversations").select("id, status, unread_for_support").eq("status", "open").limit(20),
+        admin.from("products").select("id, in_stock, network", { count: "exact" }),
+        admin.from("referrals").select("id", { count: "exact" }),
+        admin.from("settings").select("key, value").in("key", ["shop_name", "whatsapp_bot_url", "whatsapp_channel_url", "support_phone", "ai_support_enabled", "arkesel_last_balance", "arkesel_sms_balance", "arkesel_main_balance", "datamart_last_balance", "akwaaba_last_balance", "arkesel_sender_id"]),
+      ]);
 
-    const settingsMap: Record<string, string> = {};
-    // First populate from data1db settings
-    try {
-      for (const row of data1db.loadTable("settings")) {
-        if (row?.key && row?.value !== undefined && row?.value !== null) {
+      const settingsMap: Record<string, string> = {};
+      // First populate from data1db settings
+      try {
+        for (const row of data1db.loadTable("settings")) {
+          if (row?.key && row?.value !== undefined && row?.value !== null) {
+            const val = String(row.value).trim();
+            settingsMap[row.key] = val;
+            settingsMap[row.key.toLowerCase()] = val;
+          }
+        }
+      } catch (_) { }
+      // Then merge remote settings & sync into data1db
+      if (Array.isArray(settingsRes.data) && settingsRes.data.length > 0) {
+        try { data1db.setTableRecords("settings", settingsRes.data); } catch (_) { }
+      }
+      (settingsRes.data || []).forEach((row: any) => {
+        if (row?.key && row?.value) {
           const val = String(row.value).trim();
           settingsMap[row.key] = val;
           settingsMap[row.key.toLowerCase()] = val;
         }
+      });
+
+      // Sync orders, service_orders, checker_orders into data1db so data1db is always warm and unified
+      if (Array.isArray(recentAllRes.data) && recentAllRes.data.length > 0) {
+        try { data1db.setTableRecords("orders", recentAllRes.data); } catch (_) { }
       }
-    } catch (_) { }
-    // Then merge remote settings & sync into data1db
-    if (Array.isArray(settingsRes.data) && settingsRes.data.length > 0) {
-      try { data1db.setTableRecords("settings", settingsRes.data); } catch (_) { }
-    }
-    (settingsRes.data || []).forEach((row: any) => {
-      if (row?.key && row?.value) {
-        const val = String(row.value).trim();
-        settingsMap[row.key] = val;
-        settingsMap[row.key.toLowerCase()] = val;
+      if (Array.isArray(ordersTodayRes.data) && ordersTodayRes.data.length > 0) {
+        try { data1db.setTableRecords("orders", ordersTodayRes.data); } catch (_) { }
       }
-    });
+      if (Array.isArray(serviceOrdersRes.data) && serviceOrdersRes.data.length > 0) {
+        try { data1db.setTableRecords("service_orders", serviceOrdersRes.data); } catch (_) { }
+      }
+      if (Array.isArray(checkerOrdersRes.data) && checkerOrdersRes.data.length > 0) {
+        try { data1db.setTableRecords("checker_orders", checkerOrdersRes.data); } catch (_) { }
+      }
 
-    // Sync orders, service_orders, checker_orders into data1db so data1db is always warm and unified
-    if (Array.isArray(recentAllRes.data) && recentAllRes.data.length > 0) {
-      try { data1db.setTableRecords("orders", recentAllRes.data); } catch (_) { }
-    }
-    if (Array.isArray(ordersTodayRes.data) && ordersTodayRes.data.length > 0) {
-      try { data1db.setTableRecords("orders", ordersTodayRes.data); } catch (_) { }
-    }
-    if (Array.isArray(serviceOrdersRes.data) && serviceOrdersRes.data.length > 0) {
-      try { data1db.setTableRecords("service_orders", serviceOrdersRes.data); } catch (_) { }
-    }
-    if (Array.isArray(checkerOrdersRes.data) && checkerOrdersRes.data.length > 0) {
-      try { data1db.setTableRecords("checker_orders", checkerOrdersRes.data); } catch (_) { }
-    }
+      const ordersAll = data1db.loadTable("orders").length > 0
+        ? data1db.loadTable("orders")
+        : (recentAllRes.data || []);
 
-    const ordersAll = data1db.loadTable("orders").length > 0
-      ? data1db.loadTable("orders")
-      : (recentAllRes.data || []);
-
-    // Merge ordersTodayRes with ordersAll filtered by startOfDay so no order is ever missed
-    const todayMap = new Map<string, any>();
-    for (const o of ordersTodayRes.data || []) {
-      const k = String(o.reference || o.ref || o.id || Math.random());
-      todayMap.set(k, o);
-    }
-    for (const o of ordersAll) {
-      if (o?.created_at && new Date(o.created_at) >= startOfDay) {
+      // Merge ordersTodayRes with ordersAll filtered by startOfDay so no order is ever missed
+      const todayMap = new Map<string, any>();
+      for (const o of ordersTodayRes.data || []) {
         const k = String(o.reference || o.ref || o.id || Math.random());
-        if (!todayMap.has(k)) todayMap.set(k, o);
+        todayMap.set(k, o);
       }
-    }
-    const ordersToday = Array.from(todayMap.values());
-
-    const isOrderPaid = (o: any) =>
-      o?.payment_status === "paid" ||
-      o?.status === "paid" ||
-      o?.status === "delivered" ||
-      o?.status === "completed" ||
-      o?.delivery_status === "delivered" ||
-      o?.delivery_status === "completed" ||
-      Boolean(o?.whatsapp_phone);
-
-    const isOrderDelivered = (o: any) =>
-      o?.delivery_status === "delivered" ||
-      o?.delivery_status === "completed" ||
-      o?.status === "delivered" ||
-      o?.status === "completed" ||
-      o?.datamart_status === "completed" ||
-      o?.datamart_status === "delivered";
-
-    // Today metrics
-    const paidToday = ordersToday.filter(isOrderPaid);
-    const deliveredToday = paidToday.filter(isOrderDelivered);
-    const todayDataRevenue = paidToday.reduce((s: number, o: any) => s + Number(o.amount || 0), 0);
-
-    const serviceAllList = data1db.loadTable("service_orders").length > 0
-      ? data1db.loadTable("service_orders")
-      : (serviceOrdersRes.data || []);
-    const checkerAllList = data1db.loadTable("checker_orders").length > 0
-      ? data1db.loadTable("checker_orders")
-      : (checkerOrdersRes.data || []);
-
-    const paidTodayServices = serviceAllList.filter(
-      (s: any) => (s.payment_status === "paid" || s.status === "paid") && new Date(s.created_at) >= startOfDay
-    );
-    const todayServicesRevenue = paidTodayServices.reduce((sum: number, s: any) => sum + Number(s.amount || 0), 0);
-
-    const paidTodayCheckers = checkerAllList.filter(
-      (c: any) => (c.payment_status === "paid" || c.status === "paid") && new Date(c.created_at) >= startOfDay
-    );
-    const todayCheckersRevenue = paidTodayCheckers.reduce((sum: number, c: any) => sum + Number(sum ? c.amount || 0 : c.amount || 0), 0);
-
-    const todayOrdersCount = paidToday.length + paidTodayServices.length + paidTodayCheckers.length;
-    const todayRevenueTotal = todayDataRevenue + todayServicesRevenue + todayCheckersRevenue;
-    const todayDeliveredTotal = deliveredToday.length;
-
-    // All-time metrics
-    const all = ordersAll;
-    const paid = all.filter(isOrderPaid);
-    const delivered = paid.filter(isOrderDelivered);
-    const totalRevenue = paid.reduce((s: number, o: any) => s + Number(o.amount || 0), 0);
-    const pending = paid.filter((o: any) => !isOrderDelivered(o) && !["failed", "refunded"].includes(o.delivery_status));
-    const failed = all.filter((o: any) => o.delivery_status === "failed");
-
-    // Service orders stats (all-time)
-    const serviceList = serviceAllList;
-    const paidServices = serviceList.filter((s: any) => s.payment_status === "paid" || s.status === "paid");
-    const serviceRevenue = paidServices.reduce((sum: number, s: any) => sum + Number(s.amount || 0), 0);
-    const pendingServices = paidServices.filter((s: any) => s.delivery_status !== "delivered" && s.delivery_status !== "failed");
-
-    // Checker orders stats (all-time)
-    const checkerList = checkerAllList;
-    const paidCheckers = checkerList.filter((c: any) => c.payment_status === "paid" || c.status === "paid");
-    const checkerRevenue = paidCheckers.reduce((sum: number, c: any) => sum + Number(c.amount || 0), 0);
-    const pendingCheckers = paidCheckers.filter((c: any) => c.delivery_status !== "delivered" && c.delivery_status !== "failed");
-
-    // Free data stats
-    const freeDataList = freeDataRes.data || [];
-    const freeDataClaimed = freeDataList.filter((f: any) => f.claimed).length;
-
-    // Support chats stats
-    const chatList = supportChatsRes.data || [];
-    const openChats = chatList.filter((c: any) => c.status === "open").length;
-    const totalUnreadSupport = chatList.reduce((sum: number, c: any) => sum + Number(c.unread_for_support || 0), 0);
-
-    // Products stats
-    const d1Products = data1db.loadTable("products");
-    const productsSource = (productsCountRes.data && productsCountRes.data.length > 0) ? productsCountRes.data : d1Products;
-    const productsCount = productsCountRes.count ?? productsSource.length;
-    const productsInStock = productsSource.filter((p: any) => p.in_stock !== false).length;
-
-    // Unified recent orders list from web data, services, and checkers
-    const unifiedRecent: any[] = [];
-    ordersAll.slice(0, 150).forEach((o: any) => {
-      const isWhatsApp = Boolean(o.notes && String(o.notes).toLowerCase().includes("whatsapp")) || Boolean(o.whatsapp_phone) || String(o.network || "").toUpperCase() === "MASHUP";
-      const recipientPhone = o.recipient_phone || o.phone_number || o.whatsapp_phone || o.momo_number || o.customer_phone || o.phone || "—";
-      unifiedRecent.push({
-        id: o.id,
-        reference: o.reference || o.ref || o.id,
-        type: isWhatsApp ? "whatsapp" : "data",
-        category_label: isWhatsApp ? "WhatsApp Bot" : "Data Bundle",
-        network: o.network,
-        capacity: o.capacity ? `${o.capacity}GB` : (o.bundle || "Data"),
-        recipient: recipientPhone,
-        amount: Number(o.amount || 0),
-        payment_status: isOrderPaid(o) ? "paid" : (o.payment_status || o.status || "pending"),
-        delivery_status: isOrderDelivered(o) ? "delivered" : (o.delivery_status || o.status || "pending"),
-        datamart_status: o.datamart_status || null,
-        created_at: o.created_at,
-      });
-    });
-
-    serviceList.slice(0, 20).forEach((s: any) => {
-      unifiedRecent.push({
-        id: s.id,
-        reference: s.reference,
-        type: s.service || "service",
-        category_label: s.service === "netflix" ? "Netflix Pass" : s.service === "mashup" ? "MTN Mashup" : "Service",
-        network: s.service === "netflix" ? "Netflix" : "MTN",
-        capacity: s.notes || (s.service === "netflix" ? "Netflix 30-Day Pass" : "Mashup Combo"),
-        recipient: s.customer_phone || "—",
-        amount: Number(s.amount || 0),
-        payment_status: s.payment_status,
-        delivery_status: s.delivery_status,
-        created_at: s.created_at,
-      });
-    });
-
-    checkerList.slice(0, 20).forEach((c: any) => {
-      unifiedRecent.push({
-        id: c.id,
-        reference: c.reference,
-        type: "checker",
-        category_label: `${String(c.checker_type || "WAEC").toUpperCase()} Checker`,
-        network: "WAEC",
-        capacity: `${String(c.checker_type || "WAEC").toUpperCase()} Serial & PIN`,
-        recipient: c.customer_phone || "—",
-        amount: Number(c.amount || 0),
-        payment_status: c.payment_status,
-        delivery_status: c.delivery_status,
-        created_at: c.created_at,
-      });
-    });
-
-    unifiedRecent.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
-    const byNetwork: Record<string, { orders: number; revenue: number; delivered: number }> = {};
-    for (const o of all) {
-      const k = o.network || "UNKNOWN";
-      byNetwork[k] ||= { orders: 0, revenue: 0, delivered: 0 };
-      byNetwork[k].orders += 1;
-      if (o.payment_status === "paid") {
-        byNetwork[k].revenue += Number(o.amount || 0);
-      }
-      if (o.payment_status === "paid" && o.delivery_status === "delivered") {
-        byNetwork[k].delivered += 1;
-      }
-    }
-
-    // Resolve DataMart API Key from environment (case-insensitive) or settings
-    let datamartKey = getEnvVar([
-      "DATA_API_KEY",
-      "DATAMART_API_KEY",
-      "DATAMART_KEY",
-      "DM_API_KEY",
-      "VITE_DATAMART_API_KEY",
-      "VITE_DATA_API_KEY",
-      "VITE_DM_API_KEY",
-      "DATAMART_API_TOKEN",
-      "DATA_MART_API_KEY",
-      "DATAMART_TOKEN",
-    ]);
-    if (!datamartKey) {
-      for (const k of ["datamart_api_key", "data_api_key", "DATA_API_KEY", "dm_api_key", "DATAMART_API_KEY", "datamart_key"]) {
-        const c = cleanApiKey(settingsMap[k]);
-        if (c && c.length > 5) {
-          datamartKey = c;
-          break;
+      for (const o of ordersAll) {
+        if (o?.created_at && new Date(o.created_at) >= startOfDay) {
+          const k = String(o.reference || o.ref || o.id || Math.random());
+          if (!todayMap.has(k)) todayMap.set(k, o);
         }
       }
-    }
+      const ordersToday = Array.from(todayMap.values());
 
-    // Resolve Arkesel API Key from environment (case-insensitive) or settings
-    let arkeselKey = getEnvVar([
-      "ARKESEL_API_KEY",
-      "ARKESEL_KEY",
-      "VITE_ARKESEL_API_KEY",
-      "VITE_ARKESEL_KEY",
-      "ARKESEL_SMS_KEY",
-      "ARKESEL_SMS_API_KEY",
-      "ARKESEL_API_SECRET",
-      "ARKESEL_SECRET",
-      "ARKESEL_TOKEN",
-    ]);
-    if (!arkeselKey) {
-      for (const [k, v] of Object.entries(settingsMap)) {
-        if (k.toLowerCase().includes("arkesel") && k.toLowerCase().includes("key")) {
-          const c = cleanApiKey(v);
+      const isOrderPaid = (o: any) =>
+        o?.payment_status === "paid" ||
+        o?.status === "paid" ||
+        o?.status === "delivered" ||
+        o?.status === "completed" ||
+        o?.delivery_status === "delivered" ||
+        o?.delivery_status === "completed" ||
+        Boolean(o?.whatsapp_phone);
+
+      const isOrderDelivered = (o: any) =>
+        o?.delivery_status === "delivered" ||
+        o?.delivery_status === "completed" ||
+        o?.status === "delivered" ||
+        o?.status === "completed" ||
+        o?.datamart_status === "completed" ||
+        o?.datamart_status === "delivered";
+
+      // Today metrics
+      const paidToday = ordersToday.filter(isOrderPaid);
+      const deliveredToday = paidToday.filter(isOrderDelivered);
+      const todayDataRevenue = paidToday.reduce((s: number, o: any) => s + Number(o.amount || 0), 0);
+
+      const serviceAllList = data1db.loadTable("service_orders").length > 0
+        ? data1db.loadTable("service_orders")
+        : (serviceOrdersRes.data || []);
+      const checkerAllList = data1db.loadTable("checker_orders").length > 0
+        ? data1db.loadTable("checker_orders")
+        : (checkerOrdersRes.data || []);
+
+      const paidTodayServices = serviceAllList.filter(
+        (s: any) => (s.payment_status === "paid" || s.status === "paid") && new Date(s.created_at) >= startOfDay
+      );
+      const todayServicesRevenue = paidTodayServices.reduce((sum: number, s: any) => sum + Number(s.amount || 0), 0);
+
+      const paidTodayCheckers = checkerAllList.filter(
+        (c: any) => (c.payment_status === "paid" || c.status === "paid") && new Date(c.created_at) >= startOfDay
+      );
+      const todayCheckersRevenue = paidTodayCheckers.reduce((sum: number, c: any) => sum + Number(sum ? c.amount || 0 : c.amount || 0), 0);
+
+      const todayOrdersCount = paidToday.length + paidTodayServices.length + paidTodayCheckers.length;
+      const todayRevenueTotal = todayDataRevenue + todayServicesRevenue + todayCheckersRevenue;
+      const todayDeliveredTotal = deliveredToday.length;
+
+      // All-time metrics
+      const all = ordersAll;
+      const paid = all.filter(isOrderPaid);
+      const delivered = paid.filter(isOrderDelivered);
+      const totalRevenue = paid.reduce((s: number, o: any) => s + Number(o.amount || 0), 0);
+      const pending = paid.filter((o: any) => !isOrderDelivered(o) && !["failed", "refunded"].includes(o.delivery_status));
+      const failed = all.filter((o: any) => o.delivery_status === "failed");
+
+      // Service orders stats (all-time)
+      const serviceList = serviceAllList;
+      const paidServices = serviceList.filter((s: any) => s.payment_status === "paid" || s.status === "paid");
+      const serviceRevenue = paidServices.reduce((sum: number, s: any) => sum + Number(s.amount || 0), 0);
+      const pendingServices = paidServices.filter((s: any) => s.delivery_status !== "delivered" && s.delivery_status !== "failed");
+
+      // Checker orders stats (all-time)
+      const checkerList = checkerAllList;
+      const paidCheckers = checkerList.filter((c: any) => c.payment_status === "paid" || c.status === "paid");
+      const checkerRevenue = paidCheckers.reduce((sum: number, c: any) => sum + Number(c.amount || 0), 0);
+      const pendingCheckers = paidCheckers.filter((c: any) => c.delivery_status !== "delivered" && c.delivery_status !== "failed");
+
+      // Free data stats
+      const freeDataList = freeDataRes.data || [];
+      const freeDataClaimed = freeDataList.filter((f: any) => f.claimed).length;
+
+      // Support chats stats
+      const chatList = supportChatsRes.data || [];
+      const openChats = chatList.filter((c: any) => c.status === "open").length;
+      const totalUnreadSupport = chatList.reduce((sum: number, c: any) => sum + Number(c.unread_for_support || 0), 0);
+
+      // Products stats
+      const d1Products = data1db.loadTable("products");
+      const productsSource = (productsCountRes.data && productsCountRes.data.length > 0) ? productsCountRes.data : d1Products;
+      const productsCount = productsCountRes.count ?? productsSource.length;
+      const productsInStock = productsSource.filter((p: any) => p.in_stock !== false).length;
+
+      // Unified recent orders list from web data, services, and checkers
+      const unifiedRecent: any[] = [];
+      ordersAll.slice(0, 150).forEach((o: any) => {
+        const isWhatsApp = Boolean(o.notes && String(o.notes).toLowerCase().includes("whatsapp")) || Boolean(o.whatsapp_phone) || String(o.network || "").toUpperCase() === "MASHUP";
+        const recipientPhone = o.recipient_phone || o.phone_number || o.whatsapp_phone || o.momo_number || o.customer_phone || o.phone || "—";
+        unifiedRecent.push({
+          id: o.id,
+          reference: o.reference || o.ref || o.id,
+          type: isWhatsApp ? "whatsapp" : "data",
+          category_label: isWhatsApp ? "WhatsApp Bot" : "Data Bundle",
+          network: o.network,
+          capacity: o.capacity ? `${o.capacity}GB` : (o.bundle || "Data"),
+          recipient: recipientPhone,
+          amount: Number(o.amount || 0),
+          payment_status: isOrderPaid(o) ? "paid" : (o.payment_status || o.status || "pending"),
+          delivery_status: isOrderDelivered(o) ? "delivered" : (o.delivery_status || o.status || "pending"),
+          datamart_status: o.datamart_status || null,
+          created_at: o.created_at,
+        });
+      });
+
+      serviceList.slice(0, 20).forEach((s: any) => {
+        unifiedRecent.push({
+          id: s.id,
+          reference: s.reference,
+          type: s.service || "service",
+          category_label: s.service === "netflix" ? "Netflix Pass" : s.service === "mashup" ? "MTN Mashup" : "Service",
+          network: s.service === "netflix" ? "Netflix" : "MTN",
+          capacity: s.notes || (s.service === "netflix" ? "Netflix 30-Day Pass" : "Mashup Combo"),
+          recipient: s.customer_phone || "—",
+          amount: Number(s.amount || 0),
+          payment_status: s.payment_status,
+          delivery_status: s.delivery_status,
+          created_at: s.created_at,
+        });
+      });
+
+      checkerList.slice(0, 20).forEach((c: any) => {
+        unifiedRecent.push({
+          id: c.id,
+          reference: c.reference,
+          type: "checker",
+          category_label: `${String(c.checker_type || "WAEC").toUpperCase()} Checker`,
+          network: "WAEC",
+          capacity: `${String(c.checker_type || "WAEC").toUpperCase()} Serial & PIN`,
+          recipient: c.customer_phone || "—",
+          amount: Number(c.amount || 0),
+          payment_status: c.payment_status,
+          delivery_status: c.delivery_status,
+          created_at: c.created_at,
+        });
+      });
+
+      unifiedRecent.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+      const byNetwork: Record<string, { orders: number; revenue: number; delivered: number }> = {};
+      for (const o of all) {
+        const k = o.network || "UNKNOWN";
+        byNetwork[k] ||= { orders: 0, revenue: 0, delivered: 0 };
+        byNetwork[k].orders += 1;
+        if (o.payment_status === "paid") {
+          byNetwork[k].revenue += Number(o.amount || 0);
+        }
+        if (o.payment_status === "paid" && o.delivery_status === "delivered") {
+          byNetwork[k].delivered += 1;
+        }
+      }
+
+      // Resolve DataMart API Key from environment (case-insensitive) or settings
+      let datamartKey = getEnvVar([
+        "DATA_API_KEY",
+        "DATAMART_API_KEY",
+        "DATAMART_KEY",
+        "DM_API_KEY",
+        "VITE_DATAMART_API_KEY",
+        "VITE_DATA_API_KEY",
+        "VITE_DM_API_KEY",
+        "DATAMART_API_TOKEN",
+        "DATA_MART_API_KEY",
+        "DATAMART_TOKEN",
+      ]);
+      if (!datamartKey) {
+        for (const k of ["datamart_api_key", "data_api_key", "DATA_API_KEY", "dm_api_key", "DATAMART_API_KEY", "datamart_key"]) {
+          const c = cleanApiKey(settingsMap[k]);
           if (c && c.length > 5) {
-            arkeselKey = c;
+            datamartKey = c;
             break;
           }
         }
       }
-    }
 
-    // Resolve Akwaaba Sale API Key
-    let akwaabaKey = getEnvVar(["AKWAABA_API_KEY", "AKWAABA_SALE_API_KEY", "akwaaba_api_key"]);
-    if (!akwaabaKey && settingsMap["akwaaba_api_key"]) {
-      akwaabaKey = cleanApiKey(settingsMap["akwaaba_api_key"]);
-    }
-    let akwaabaBalance: number | null = null;
-    if (settingsMap["akwaaba_last_balance"]) {
-      const ab = Number(settingsMap["akwaaba_last_balance"]);
-      if (!isNaN(ab)) akwaabaBalance = ab;
-    }
-    const akwaabaUrl = getEnvVar(["AKWAABA_API_URL", "AKWAABA_URL"]) || settingsMap["akwaaba_api_url"] || "https://akwaabasale.com/api";
-
-    let walletBalance: number | null = cachedBalance;
-    let arkeselSmsBalance: number | null = cachedArkesel?.sms ?? null;
-    let arkeselMainBalance: string | null = cachedArkesel?.main ?? null;
-    let datamartSecret = getEnvVar([
-      "DATAMART_API_SECRET",
-      "DM_API_SECRET",
-      "datamart_api_secret",
-      "datamart_secret",
-      "DATAMART_SECRET",
-    ]);
-    if (!datamartSecret) {
-      for (const k of ["datamart_api_secret", "DATAMART_API_SECRET", "datamart_secret", "dm_api_secret"]) {
-        const c = cleanApiKey(settingsMap[k]);
-        if (c && c.length > 2) {
-          datamartSecret = c;
-          break;
+      // Resolve Arkesel API Key from environment (case-insensitive) or settings
+      let arkeselKey = getEnvVar([
+        "ARKESEL_API_KEY",
+        "ARKESEL_KEY",
+        "VITE_ARKESEL_API_KEY",
+        "VITE_ARKESEL_KEY",
+        "ARKESEL_SMS_KEY",
+        "ARKESEL_SMS_API_KEY",
+        "ARKESEL_API_SECRET",
+        "ARKESEL_SECRET",
+        "ARKESEL_TOKEN",
+      ]);
+      if (!arkeselKey) {
+        for (const [k, v] of Object.entries(settingsMap)) {
+          if (k.toLowerCase().includes("arkesel") && k.toLowerCase().includes("key")) {
+            const c = cleanApiKey(v);
+            if (c && c.length > 5) {
+              arkeselKey = c;
+              break;
+            }
+          }
         }
       }
-    }
 
-    if (settingsMap["datamart_last_balance"] && walletBalance === null) {
-      const b = Number(settingsMap["datamart_last_balance"]);
-      if (!isNaN(b)) walletBalance = b;
-    }
-    if (settingsMap["arkesel_last_balance"] && arkeselSmsBalance === null) {
-      const s = Number(settingsMap["arkesel_last_balance"]);
-      if (!isNaN(s)) arkeselSmsBalance = s;
-    }
-    if (settingsMap["arkesel_main_balance"] && !arkeselMainBalance) {
-      arkeselMainBalance = settingsMap["arkesel_main_balance"];
-    }
+      // Resolve Akwaaba Sale API Key
+      let akwaabaKey = getEnvVar(["AKWAABA_API_KEY", "AKWAABA_SALE_API_KEY", "akwaaba_api_key"]);
+      if (!akwaabaKey && settingsMap["akwaaba_api_key"]) {
+        akwaabaKey = cleanApiKey(settingsMap["akwaaba_api_key"]);
+      }
+      let akwaabaBalance: number | null = null;
+      if (settingsMap["akwaaba_last_balance"]) {
+        const ab = Number(settingsMap["akwaaba_last_balance"]);
+        if (!isNaN(ab)) akwaabaBalance = ab;
+      }
+      const akwaabaUrl = getEnvVar(["AKWAABA_API_URL", "AKWAABA_URL"]) || settingsMap["akwaaba_api_url"] || "https://akwaabasale.com/api";
 
-    const tasks: Promise<any>[] = [];
+      let walletBalance: number | null = cachedBalance;
+      let arkeselSmsBalance: number | null = cachedArkesel?.sms ?? null;
+      let arkeselMainBalance: string | null = cachedArkesel?.main ?? null;
+      let datamartSecret = getEnvVar([
+        "DATAMART_API_SECRET",
+        "DM_API_SECRET",
+        "datamart_api_secret",
+        "datamart_secret",
+        "DATAMART_SECRET",
+      ]);
+      if (!datamartSecret) {
+        for (const k of ["datamart_api_secret", "DATAMART_API_SECRET", "datamart_secret", "dm_api_secret"]) {
+          const c = cleanApiKey(settingsMap[k]);
+          if (c && c.length > 2) {
+            datamartSecret = c;
+            break;
+          }
+        }
+      }
 
-    let datamartError: string | null = null;
-    let arkeselError: string | null = null;
+      if (settingsMap["datamart_last_balance"] && walletBalance === null) {
+        const b = Number(settingsMap["datamart_last_balance"]);
+        if (!isNaN(b)) walletBalance = b;
+      }
+      if (settingsMap["arkesel_last_balance"] && arkeselSmsBalance === null) {
+        const s = Number(settingsMap["arkesel_last_balance"]);
+        if (!isNaN(s)) arkeselSmsBalance = s;
+      }
+      if (settingsMap["arkesel_main_balance"] && !arkeselMainBalance) {
+        arkeselMainBalance = settingsMap["arkesel_main_balance"];
+      }
 
-    // DataMart balance fetch (fast parallel requests with strict timeout)
-    if (datamartKey && (walletBalance === null || forceRefresh || Date.now() - cachedAt > 15000)) {
-      tasks.push(
-        (async () => {
-          const tryFetch = async (url: string) => {
+      const tasks: Promise<any>[] = [];
+
+      let datamartError: string | null = null;
+      let arkeselError: string | null = null;
+
+      // DataMart balance fetch (fast parallel requests with strict timeout)
+      if (datamartKey && (walletBalance === null || forceRefresh || Date.now() - cachedAt > 15000)) {
+        tasks.push(
+          (async () => {
+            const tryFetch = async (url: string) => {
+              try {
+                const res = await fetch(url, {
+                  headers: {
+                    "x-api-key": datamartKey,
+                    ...(datamartSecret ? { "X-API-Secret": datamartSecret } : {}),
+                    "Authorization": `Bearer ${datamartKey}`,
+                    Accept: "application/json",
+                  },
+                  signal: AbortSignal.timeout(3500),
+                });
+                if (res.ok) return await res.json();
+                datamartError = `DataMart balance request failed (${res.status})`;
+              } catch (_) { }
+              return null;
+            };
+
             try {
-              const res = await fetch(url, {
+              const results = await Promise.all([
+                tryFetch("https://api.datamartgh.shop/api/developer/balance"),
+                tryFetch("https://api.datamartgh.shop/api/developer/user/balance"),
+                tryFetch("https://api.datamartgh.shop/api/developer/wallet-balance"),
+                tryFetch("https://api.datamartgh.shop/api/wallet-balance"),
+                tryFetch("https://api.datamartgh.shop/api/developer/profile"),
+              ]);
+              let foundBalance = false;
+              for (const json of results) {
+                if (!json) continue;
+                const rawBal =
+                  json?.data?.balance ??
+                  json?.data?.walletBalance ??
+                  json?.data?.wallet_balance ??
+                  json?.data?.user?.walletBalance ??
+                  json?.data?.user?.balance ??
+                  (typeof json?.data === "number" ? json.data : null) ??
+                  json?.balance ??
+                  json?.walletBalance ??
+                  json?.wallet_balance ??
+                  json?.user?.walletBalance;
+                if (rawBal !== undefined && rawBal !== null) {
+                  const num = Number(rawBal);
+                  if (!isNaN(num)) {
+                    walletBalance = num;
+                    cachedBalance = num;
+                    cachedAt = Date.now();
+                    datamartError = null;
+                    foundBalance = true;
+                    checkAndAlertLowDatamartBalance(num, admin).catch(() => null);
+                    try {
+                      data1db.upsert("settings", { key: "datamart_last_balance", value: String(num) }, "key");
+                      await admin.from("settings").upsert({ key: "datamart_last_balance", value: String(num) }, { onConflict: "key" });
+                    } catch (_) { }
+                    break;
+                  }
+                }
+              }
+              if (!foundBalance && !datamartError) {
+                datamartError = "DataMart returned no wallet balance. Check the API key and optional API secret.";
+              }
+            } catch (e: any) {
+              datamartError = e?.message || "DataMart connection timeout";
+            }
+          })()
+        );
+      } else if (!datamartKey) {
+        datamartError = "DataMart API key not set";
+      }
+
+      // Arkesel balance fetch (fast parallel v2 and v1 requests with strict timeout)
+      if (arkeselKey && (arkeselSmsBalance === null || forceRefresh || Date.now() - cachedArkeselAt > 15000)) {
+        tasks.push(
+          (async () => {
+            let foundSms: number | null = null;
+            let foundMain: string | null = null;
+            let v2Error = "";
+            let v1Error = "";
+
+            try {
+              const res2 = await fetch("https://sms.arkesel.com/api/v2/clients/balance-details", {
                 headers: {
-                  "x-api-key": datamartKey,
-                  ...(datamartSecret ? { "X-API-Secret": datamartSecret } : {}),
-                  "Authorization": `Bearer ${datamartKey}`,
+                  "api-key": arkeselKey,
+                  "apiKey": arkeselKey,
                   Accept: "application/json",
                 },
-                signal: AbortSignal.timeout(3500),
-              });
-              if (res.ok) return await res.json();
-              datamartError = `DataMart balance request failed (${res.status})`;
-            } catch (_) { }
-            return null;
-          };
-
-          try {
-            const results = await Promise.all([
-              tryFetch("https://api.datamartgh.shop/api/developer/balance"),
-              tryFetch("https://api.datamartgh.shop/api/developer/user/balance"),
-              tryFetch("https://api.datamartgh.shop/api/developer/wallet-balance"),
-              tryFetch("https://api.datamartgh.shop/api/wallet-balance"),
-              tryFetch("https://api.datamartgh.shop/api/developer/profile"),
-            ]);
-            let foundBalance = false;
-            for (const json of results) {
-              if (!json) continue;
-              const rawBal =
-                json?.data?.balance ??
-                json?.data?.walletBalance ??
-                json?.data?.wallet_balance ??
-                json?.data?.user?.walletBalance ??
-                json?.data?.user?.balance ??
-                (typeof json?.data === "number" ? json.data : null) ??
-                json?.balance ??
-                json?.walletBalance ??
-                json?.wallet_balance ??
-                json?.user?.walletBalance;
-              if (rawBal !== undefined && rawBal !== null) {
-                const num = Number(rawBal);
-                if (!isNaN(num)) {
-                  walletBalance = num;
-                  cachedBalance = num;
-                  cachedAt = Date.now();
-                  datamartError = null;
-                  foundBalance = true;
-                  checkAndAlertLowDatamartBalance(num, admin).catch(() => null);
-                  try {
-                    data1db.upsert("settings", { key: "datamart_last_balance", value: String(num) }, "key");
-                    await admin.from("settings").upsert({ key: "datamart_last_balance", value: String(num) }, { onConflict: "key" });
-                  } catch (_) { }
-                  break;
-                }
-              }
-            }
-            if (!foundBalance && !datamartError) {
-              datamartError = "DataMart returned no wallet balance. Check the API key and optional API secret.";
-            }
-          } catch (e: any) {
-            datamartError = e?.message || "DataMart connection timeout";
-          }
-        })()
-      );
-    } else if (!datamartKey) {
-      datamartError = "DataMart API key not set";
-    }
-
-    // Arkesel balance fetch (fast parallel v2 and v1 requests with strict timeout)
-    if (arkeselKey && (arkeselSmsBalance === null || forceRefresh || Date.now() - cachedArkeselAt > 15000)) {
-      tasks.push(
-        (async () => {
-          let foundSms: number | null = null;
-          let foundMain: string | null = null;
-          let v2Error = "";
-          let v1Error = "";
-
-          try {
-            const res2 = await fetch("https://sms.arkesel.com/api/v2/clients/balance-details", {
-              headers: {
-                "api-key": arkeselKey,
-                "apiKey": arkeselKey,
-                Accept: "application/json",
-              },
-              signal: AbortSignal.timeout(4000),
-            });
-            const d2 = await res2.json().catch(() => null);
-            if (res2.ok && d2) {
-              const payload = d2.data || d2;
-              const s = payload.sms_balance ?? payload.smsBalance ?? payload.sms ?? payload.balance;
-              if (s !== undefined && s !== null && !isNaN(Number(s))) foundSms = Number(s);
-              const m = payload.main_balance ?? payload.mainBalance ?? payload.account_balance;
-              if (m !== undefined && m !== null) {
-                const strM = String(m).trim();
-                if (strM && strM !== "undefined") {
-                  foundMain = !isNaN(Number(strM)) ? Number(strM).toFixed(2) : strM;
-                }
-              }
-            } else {
-              v2Error = d2?.message || `HTTP ${res2.status}`;
-            }
-          } catch (e: any) {
-            v2Error = e.message;
-          }
-
-          if (foundSms === null || foundMain === null) {
-            try {
-              const res1 = await fetch(`https://sms.arkesel.com/sms/api?action=check-balance&api_key=${encodeURIComponent(arkeselKey)}&response=json`, {
                 signal: AbortSignal.timeout(4000),
               });
-              const text = await res1.text().catch(() => "");
-              if (res1.ok && text) {
-                try {
-                  const d1 = JSON.parse(text);
-                  const payload = d1.data || d1;
-                  const s = payload.balance ?? payload.sms_balance ?? payload.smsBalance;
-                  if (s !== undefined && s !== null && !isNaN(Number(s)) && foundSms === null) {
-                    foundSms = Number(s);
-                  }
-                  const m = payload.main_balance ?? payload.mainBalance ?? payload.account_balance;
-                  if (m !== undefined && m !== null && foundMain === null) {
-                    const strM = String(m).trim();
-                    if (strM && strM !== "undefined") {
-                      foundMain = !isNaN(Number(strM)) ? Number(strM).toFixed(2) : strM;
-                    }
-                  }
-                } catch {
-                  const numMatch = text.match(/\b\d+(\.\d+)?\b/);
-                  if (numMatch && !text.toLowerCase().includes("invalid") && !text.toLowerCase().includes("error")) {
-                    if (foundSms === null) foundSms = Number(numMatch[0]);
-                  } else if (text.toLowerCase().includes("invalid") || text.toLowerCase().includes("error")) {
-                    v1Error = text.trim().slice(0, 100);
+              const d2 = await res2.json().catch(() => null);
+              if (res2.ok && d2) {
+                const payload = d2.data || d2;
+                const s = payload.sms_balance ?? payload.smsBalance ?? payload.sms ?? payload.balance;
+                if (s !== undefined && s !== null && !isNaN(Number(s))) foundSms = Number(s);
+                const m = payload.main_balance ?? payload.mainBalance ?? payload.account_balance;
+                if (m !== undefined && m !== null) {
+                  const strM = String(m).trim();
+                  if (strM && strM !== "undefined") {
+                    foundMain = !isNaN(Number(strM)) ? Number(strM).toFixed(2) : strM;
                   }
                 }
               } else {
-                v1Error = `HTTP ${res1.status}`;
+                v2Error = d2?.message || `HTTP ${res2.status}`;
               }
             } catch (e: any) {
-              v1Error = e.message;
+              v2Error = e.message;
             }
-          }
 
-          if (foundSms !== null || foundMain !== null) {
-            if (foundSms !== null) arkeselSmsBalance = foundSms;
-            if (foundMain !== null) arkeselMainBalance = foundMain;
-            cachedArkesel = { sms: arkeselSmsBalance ?? 0, main: arkeselMainBalance || "0" };
-            cachedArkeselAt = Date.now();
-            arkeselError = null;
-            if (foundSms !== null) {
+            if (foundSms === null || foundMain === null) {
               try {
-                data1db.upsert("settings", { key: "arkesel_last_balance", value: String(foundSms) }, "key");
-                await admin.from("settings").upsert({ key: "arkesel_last_balance", value: String(foundSms) }, { onConflict: "key" });
-              } catch (_) { }
-            }
-            if (foundMain !== null) {
-              try {
-                data1db.upsert("settings", { key: "arkesel_main_balance", value: String(foundMain) }, "key");
-                await admin.from("settings").upsert({ key: "arkesel_main_balance", value: String(foundMain) }, { onConflict: "key" });
-              } catch (_) { }
-            }
-          } else {
-            arkeselError = v2Error || v1Error || "Could not retrieve balance from Arkesel";
-          }
-        })()
-      );
-    } else if (!arkeselKey) {
-      arkeselError = "Arkesel SMS API key not set";
-    }
-
-    // Akwaaba Sale balance fetch
-    if (akwaabaKey && (akwaabaBalance === null || forceRefresh)) {
-      tasks.push(
-        (async () => {
-          try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 6000);
-            const akRes = await fetch(`${akwaabaUrl.replace(/\/+$/, "")}/balance`, {
-              headers: {
-                Authorization: `Bearer ${akwaabaKey}`,
-                "X-API-Key": akwaabaKey,
-                Accept: "application/json",
-              },
-              signal: controller.signal,
-            });
-            clearTimeout(timeoutId);
-            if (akRes.ok) {
-              const akJson = await akRes.json().catch(() => null);
-              const val = Number(akJson?.balance ?? akJson?.data?.balance ?? akJson?.wallet_balance);
-              if (Number.isFinite(val)) {
-                akwaabaBalance = val;
-                try {
-                  await admin.from("settings").upsert({ key: "akwaaba_last_balance", value: String(val) }, { onConflict: "key" });
-                } catch (_) { }
+                const res1 = await fetch(`https://sms.arkesel.com/sms/api?action=check-balance&api_key=${encodeURIComponent(arkeselKey)}&response=json`, {
+                  signal: AbortSignal.timeout(4000),
+                });
+                const text = await res1.text().catch(() => "");
+                if (res1.ok && text) {
+                  try {
+                    const d1 = JSON.parse(text);
+                    const payload = d1.data || d1;
+                    const s = payload.balance ?? payload.sms_balance ?? payload.smsBalance;
+                    if (s !== undefined && s !== null && !isNaN(Number(s)) && foundSms === null) {
+                      foundSms = Number(s);
+                    }
+                    const m = payload.main_balance ?? payload.mainBalance ?? payload.account_balance;
+                    if (m !== undefined && m !== null && foundMain === null) {
+                      const strM = String(m).trim();
+                      if (strM && strM !== "undefined") {
+                        foundMain = !isNaN(Number(strM)) ? Number(strM).toFixed(2) : strM;
+                      }
+                    }
+                  } catch {
+                    const numMatch = text.match(/\b\d+(\.\d+)?\b/);
+                    if (numMatch && !text.toLowerCase().includes("invalid") && !text.toLowerCase().includes("error")) {
+                      if (foundSms === null) foundSms = Number(numMatch[0]);
+                    } else if (text.toLowerCase().includes("invalid") || text.toLowerCase().includes("error")) {
+                      v1Error = text.trim().slice(0, 100);
+                    }
+                  }
+                } else {
+                  v1Error = `HTTP ${res1.status}`;
+                }
+              } catch (e: any) {
+                v1Error = e.message;
               }
             }
-          } catch (_) { }
-        })()
-      );
-    }
 
-    if (tasks.length > 0) {
-      await Promise.allSettled(tasks);
-    }
+            if (foundSms !== null || foundMain !== null) {
+              if (foundSms !== null) arkeselSmsBalance = foundSms;
+              if (foundMain !== null) arkeselMainBalance = foundMain;
+              cachedArkesel = { sms: arkeselSmsBalance ?? 0, main: arkeselMainBalance || "0" };
+              cachedArkeselAt = Date.now();
+              arkeselError = null;
+              if (foundSms !== null) {
+                try {
+                  data1db.upsert("settings", { key: "arkesel_last_balance", value: String(foundSms) }, "key");
+                  await admin.from("settings").upsert({ key: "arkesel_last_balance", value: String(foundSms) }, { onConflict: "key" });
+                } catch (_) { }
+              }
+              if (foundMain !== null) {
+                try {
+                  data1db.upsert("settings", { key: "arkesel_main_balance", value: String(foundMain) }, "key");
+                  await admin.from("settings").upsert({ key: "arkesel_main_balance", value: String(foundMain) }, { onConflict: "key" });
+                } catch (_) { }
+              }
+            } else {
+              arkeselError = v2Error || v1Error || "Could not retrieve balance from Arkesel";
+            }
+          })()
+        );
+      } else if (!arkeselKey) {
+        arkeselError = "Arkesel SMS API key not set";
+      }
 
-    const grandTotalOrders = paid.length + paidServices.length + paidCheckers.length;
-    const grandTotalRevenue = totalRevenue + serviceRevenue + checkerRevenue;
-    const grandTotalDelivered = delivered.length;
-    const grandTotalPending = pending.length + pendingServices.length + pendingCheckers.length;
+      // Akwaaba Sale balance fetch
+      if (akwaabaKey && (akwaabaBalance === null || forceRefresh)) {
+        tasks.push(
+          (async () => {
+            try {
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 6000);
+              const akRes = await fetch(`${akwaabaUrl.replace(/\/+$/, "")}/balance`, {
+                headers: {
+                  Authorization: `Bearer ${akwaabaKey}`,
+                  "X-API-Key": akwaabaKey,
+                  Accept: "application/json",
+                },
+                signal: controller.signal,
+              });
+              clearTimeout(timeoutId);
+              if (akRes.ok) {
+                const akJson = await akRes.json().catch(() => null);
+                const val = Number(akJson?.balance ?? akJson?.data?.balance ?? akJson?.wallet_balance);
+                if (Number.isFinite(val)) {
+                  akwaabaBalance = val;
+                  try {
+                    await admin.from("settings").upsert({ key: "akwaaba_last_balance", value: String(val) }, { onConflict: "key" });
+                  } catch (_) { }
+                }
+              }
+            } catch (_) { }
+          })()
+        );
+      }
 
-    const totalsObj = {
-      orders: grandTotalOrders,
-      total_orders: grandTotalOrders,
-      paid_orders: grandTotalOrders,
-      delivered: grandTotalDelivered,
-      delivered_orders: grandTotalDelivered,
-      pending: grandTotalPending,
-      pending_delivery: grandTotalPending,
-      failed: failed.length,
-      failed_orders: failed.length,
-      revenue: grandTotalRevenue,
-    };
+      if (tasks.length > 0) {
+        await Promise.allSettled(tasks);
+      }
 
-    const todayObj = {
-      orders: todayOrdersCount,
-      count: todayOrdersCount,
-      paid_orders: todayOrdersCount,
-      revenue: todayRevenueTotal,
-      delivered: todayDeliveredTotal,
-      pending: Math.max(0, todayOrdersCount - todayDeliveredTotal),
-    };
+      const grandTotalOrders = paid.length + paidServices.length + paidCheckers.length;
+      const grandTotalRevenue = totalRevenue + serviceRevenue + checkerRevenue;
+      const grandTotalDelivered = delivered.length;
+      const grandTotalPending = pending.length + pendingServices.length + pendingCheckers.length;
 
-    const statsPayload = {
-      totals: totalsObj,
-      today: todayObj,
-      by_network: byNetwork || {},
-      wallet_balance: walletBalance,
-      akwaaba_balance: akwaabaBalance,
-      datamart_source: datamartKey ? "configured" : "missing",
-      datamart_status: {
-        configured: Boolean(datamartKey),
-        balance: walletBalance,
-        error: walletBalance !== null ? null : datamartError,
-      },
-      arkesel_main_balance: arkeselMainBalance,
-      arkesel_sms_balance: arkeselSmsBalance,
-      arkesel_status: {
-        configured: Boolean(arkeselKey),
-        sms_balance: arkeselSmsBalance,
-        main_balance: arkeselMainBalance,
-        error: (arkeselSmsBalance !== null || arkeselMainBalance !== null) ? null : arkeselError,
-      },
-      recent_orders: recentAllRes.data || [],
-      unified_recent_orders: unifiedRecent,
-      sections: {
-        products: { total: productsCount, in_stock: productsInStock },
-        orders: { total: all.length, paid: paid.length, delivered: delivered.length, pending: pending.length, failed: failed.length, revenue: totalRevenue },
-        services: { total: serviceList.length, paid: paidServices.length, revenue: serviceRevenue, pending: pendingServices.length },
-        checkers: { total: checkerList.length, paid: paidCheckers.length, revenue: checkerRevenue, pending: pendingCheckers.length },
-        free_data: { total: freeDataList.length, claimed: freeDataClaimed },
-        support: { open_chats: openChats, unread: totalUnreadSupport },
-        referrals: { total: referralsCountRes.count ?? 0 },
-        bulk_sms: { sms_balance: arkeselSmsBalance, sender_id: settingsMap["arkesel_sender_id"] || "D_1Gh" },
-        settings: {
-          shop_name: settingsMap["shop_name"] || "DATA 1 GH",
-          bot_url: settingsMap["whatsapp_bot_url"] || "",
-          channel_url: settingsMap["whatsapp_channel_url"] || "",
-          support_phone: settingsMap["support_phone"] || "",
-          ai_support_enabled: settingsMap["ai_support_enabled"] !== "false",
+      const totalsObj = {
+        orders: grandTotalOrders,
+        total_orders: grandTotalOrders,
+        paid_orders: grandTotalOrders,
+        delivered: grandTotalDelivered,
+        delivered_orders: grandTotalDelivered,
+        pending: grandTotalPending,
+        pending_delivery: grandTotalPending,
+        failed: failed.length,
+        failed_orders: failed.length,
+        revenue: grandTotalRevenue,
+      };
+
+      const todayObj = {
+        orders: todayOrdersCount,
+        count: todayOrdersCount,
+        paid_orders: todayOrdersCount,
+        revenue: todayRevenueTotal,
+        delivered: todayDeliveredTotal,
+        pending: Math.max(0, todayOrdersCount - todayDeliveredTotal),
+      };
+
+      const statsPayload = {
+        totals: totalsObj,
+        today: todayObj,
+        by_network: byNetwork || {},
+        wallet_balance: walletBalance,
+        akwaaba_balance: akwaabaBalance,
+        datamart_source: datamartKey ? "configured" : "missing",
+        datamart_status: {
+          configured: Boolean(datamartKey),
+          balance: walletBalance,
+          error: walletBalance !== null ? null : datamartError,
         },
-      },
-      env_diagnostic: {
-        has_datamart_api_key: Boolean(datamartKey),
-        datamart_key_source: datamartKey ? "configured" : "missing",
-        datamart_key_length: datamartKey.length,
-      },
-      arkesel: {
-        configured: Boolean(arkeselKey),
-        smsBalance: arkeselSmsBalance,
-        mainBalance: arkeselMainBalance,
-        error: arkeselError,
-      },
-    };
+        arkesel_main_balance: arkeselMainBalance,
+        arkesel_sms_balance: arkeselSmsBalance,
+        arkesel_status: {
+          configured: Boolean(arkeselKey),
+          sms_balance: arkeselSmsBalance,
+          main_balance: arkeselMainBalance,
+          error: (arkeselSmsBalance !== null || arkeselMainBalance !== null) ? null : arkeselError,
+        },
+        recent_orders: recentAllRes.data || [],
+        unified_recent_orders: unifiedRecent,
+        sections: {
+          products: { total: productsCount, in_stock: productsInStock },
+          orders: { total: all.length, paid: paid.length, delivered: delivered.length, pending: pending.length, failed: failed.length, revenue: totalRevenue },
+          services: { total: serviceList.length, paid: paidServices.length, revenue: serviceRevenue, pending: pendingServices.length },
+          checkers: { total: checkerList.length, paid: paidCheckers.length, revenue: checkerRevenue, pending: pendingCheckers.length },
+          free_data: { total: freeDataList.length, claimed: freeDataClaimed },
+          support: { open_chats: openChats, unread: totalUnreadSupport },
+          referrals: { total: referralsCountRes.count ?? 0 },
+          bulk_sms: { sms_balance: arkeselSmsBalance, sender_id: settingsMap["arkesel_sender_id"] || "D_1Gh" },
+          settings: {
+            shop_name: settingsMap["shop_name"] || "DATA 1 GH",
+            bot_url: settingsMap["whatsapp_bot_url"] || "",
+            channel_url: settingsMap["whatsapp_channel_url"] || "",
+            support_phone: settingsMap["support_phone"] || "",
+            ai_support_enabled: settingsMap["ai_support_enabled"] !== "false",
+          },
+        },
+        env_diagnostic: {
+          has_datamart_api_key: Boolean(datamartKey),
+          datamart_key_source: datamartKey ? "configured" : "missing",
+          datamart_key_length: datamartKey.length,
+        },
+        arkesel: {
+          configured: Boolean(arkeselKey),
+          smsBalance: arkeselSmsBalance,
+          mainBalance: arkeselMainBalance,
+          error: arkeselError,
+        },
+      };
 
-    cachedAdminStats = statsPayload;
-    cachedAdminStatsAt = Date.now();
+      cachedAdminStats = statsPayload;
+      cachedAdminStatsAt = Date.now();
 
-    return res.status(200).json(statsPayload);
-  } catch (fatalErr: any) {
-    console.error("FATAL api/admin error:", fatalErr);
-    return res.status(500).json({
-      error: fatalErr?.message || "Internal server error in admin handler",
-    });
+      return res.status(200).json(statsPayload);
+    } catch (fatalErr: any) {
+      console.error("FATAL api/admin error:", fatalErr);
+      return res.status(500).json({
+        error: fatalErr?.message || "Internal server error in admin handler",
+      });
+    }
   }
-}

@@ -4818,6 +4818,99 @@ async function updateOrderPaymentStatusSafely(ref, newPaymentStatus) {
 }
 
 /* =========================================================
+BULK ORDER DELIVERY STATUS UPDATER
+Updates all orders matching a given status (e.g. processing -> delivered)
+Appends [manual_override] to lock them against background reversion
+========================================================= */
+async function bulkUpdateOrdersDeliveryStatus(rawFromStatus, rawToStatus, limit = 100) {
+  const normFrom = String(rawFromStatus || "").toLowerCase().trim();
+  let fromStatus = "processing";
+  if (normFrom.includes("fail")) fromStatus = "failed";
+  else if (normFrom.includes("process")) fromStatus = "processing";
+  else if (normFrom.includes("pend")) fromStatus = "pending";
+  else if (normFrom.includes("wait")) fromStatus = "waiting";
+  else if (normFrom.includes("cancel")) fromStatus = "cancelled";
+
+  const normTo = String(rawToStatus || "delivered").toLowerCase().trim();
+  let toStatus = "delivered";
+  if (normTo.includes("deliv") || normTo.includes("complete") || normTo.includes("done") || normTo.includes("success")) toStatus = "delivered";
+  else if (normTo.includes("fail")) toStatus = "failed";
+  else if (normTo.includes("process")) toStatus = "processing";
+  else if (normTo.includes("pend")) toStatus = "pending";
+  else if (normTo.includes("cancel")) toStatus = "cancelled";
+  else if (normTo.includes("refund")) toStatus = "refunded";
+
+  try {
+    const { data: ordersToUpdate, error } = await supabase
+      .from("orders")
+      .select("id, reference, recipient_phone, network, capacity, amount, notes, agent_id, base_price, created_at")
+      .ilike("delivery_status", fromStatus)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.warn("bulkUpdateOrdersDeliveryStatus query error:", error.message);
+      return { success: false, error: error.message, count: 0, fromStatus, toStatus, updated: [] };
+    }
+
+    if (!ordersToUpdate || ordersToUpdate.length === 0) {
+      return { success: true, count: 0, fromStatus, toStatus, updated: [] };
+    }
+
+    const updated = [];
+    for (const ord of ordersToUpdate) {
+      const existingNotes = String(ord.notes || "");
+      let manualNotes = existingNotes;
+      if (toStatus === "delivered" || toStatus === "failed" || toStatus === "cancelled") {
+        manualNotes = existingNotes.includes("[manual_override]")
+          ? existingNotes
+          : (existingNotes ? `${existingNotes} [manual_override]` : "[manual_override]");
+      } else if (toStatus === "processing" || toStatus === "pending") {
+        // Clear manual_override and old failure locks so delivery watcher can monitor and sync live status
+        manualNotes = existingNotes
+          .replace(/\[manual_override\]/gi, "")
+          .replace(/\[failed[^\]]*\]/gi, "")
+          .trim();
+      }
+
+      const { error: updErr } = await supabase
+        .from("orders")
+        .update({
+          delivery_status: toStatus,
+          notes: manualNotes,
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", ord.id);
+
+      if (!updErr) {
+        updated.push({
+          reference: ord.reference,
+          phone: ord.recipient_phone,
+          network: ord.network,
+          capacity: ord.capacity,
+          amount: ord.amount
+        });
+
+        if (toStatus === "delivered") {
+          notifyOrderDelivered(ord).catch(err => console.warn("notifyOrderDelivered bulk warning:", err.message));
+        }
+      }
+    }
+
+    return {
+      success: true,
+      count: updated.length,
+      fromStatus,
+      toStatus,
+      updated
+    };
+  } catch (err) {
+    console.error("bulkUpdateOrdersDeliveryStatus exception:", err);
+    return { success: false, error: err.message, count: 0, fromStatus, toStatus, updated: [] };
+  }
+}
+
+/* =========================================================
 OWNER STATE PERSISTENCE (IN-MEMORY CACHE + SUPABASE UPSERT)
 Guarantees pending actions and conversation history are never
 lost across webhooks even if sessions table row didn't exist yet.
@@ -5722,8 +5815,19 @@ async function executeOwnerDirectAction(type, payload = {}) {
   const cleanType = String(type || "").toLowerCase().trim();
 
   try {
-    // 1. Update Order Delivery Status
-    if (cleanType === "update_order_status") {
+    // 1. Update Order Delivery Status (Single, Multiple, or Bulk)
+    if (cleanType === "update_order_status" || cleanType === "bulk_update_orders") {
+      if (cleanType === "bulk_update_orders" || payload.from_status || payload.filter_status || payload.all) {
+        const fromStatus = payload.from_status || payload.filter_status || "processing";
+        const toStatus = payload.to_status || payload.delivery_status || payload.status || "delivered";
+        const res = await bulkUpdateOrdersDeliveryStatus(fromStatus, toStatus);
+        if (res.count === 0) {
+          return `No ${res.fromStatus.toUpperCase()} orders found in the database to update.`;
+        }
+        const sampleRefs = res.updated.slice(0, 5).map(o => o.reference).join(", ");
+        return `Successfully updated ${res.count} order(s) from ${res.fromStatus.toUpperCase()} to ${res.toStatus.toUpperCase()} in the database! (${sampleRefs}${res.count > 5 ? "..." : ""})`;
+      }
+
       const refs = [];
       if (payload.reference) refs.push(payload.reference);
       if (payload.ref) refs.push(payload.ref);
@@ -11549,10 +11653,30 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
     return sendWhatsApp(from, report);
   }
 
-  // 0b. Mark / Apply Delivered Orders in DataMart DB
+  // 0b. Mark / Apply Delivered Orders in DataMart DB or Store Orders
   const isMarkDeliveredMatch = cleanInput.match(/^(?:mark\s*delivered|apply\s*delivered|sync\s*delivered|mark\s*completed|apply\s*deliveries)(?:\s+(.+))?$/i);
   if (isMarkDeliveredMatch) {
-    const targetArg = isMarkDeliveredMatch[1] || "all";
+    const targetArg = (isMarkDeliveredMatch[1] || "all").trim();
+    if (/\b(processing|failed|pending|waiting)\b/i.test(targetArg)) {
+      const fromSt = targetArg.match(/\b(processing|failed|pending|waiting)\b/i)[1].toLowerCase();
+      const res = await bulkUpdateOrdersDeliveryStatus(fromSt, "delivered");
+      await syncActionToSite("bulk_update_orders", { from_status: res.fromStatus, to_status: "delivered", count: res.count });
+      if (res.count === 0) {
+        return sendWhatsApp(from, `ℹ️ *NO ${res.fromStatus.toUpperCase()} ORDERS FOUND BOSS!*\n\nThere are currently 0 orders with delivery status *"${res.fromStatus}"* in the database to update.`);
+      }
+      const topSample = res.updated.slice(0, 10);
+      const moreCount = res.count - topSample.length;
+      return sendWhatsApp(from,
+        `✅ *BULK ORDERS UPDATED BOSS!*\n\n` +
+        `• *Previous Status:* ${res.fromStatus.toUpperCase()}\n` +
+        `• *New Status:* *DELIVERED* ✅\n` +
+        `• *Total Orders Updated:* *${res.count} order${res.count === 1 ? "" : "s"}*\n\n` +
+        `📋 *Updated Orders:*\n` +
+        topSample.map(o => `• *${o.reference}* (${o.network || ""} ${o.capacity || ""}GB${o.phone ? ` - ${o.phone}` : ""})`).join("\n") +
+        (moreCount > 0 ? `\n_...and ${moreCount} more order(s)._` : "") +
+        `\n\n🔒 *All locked with [manual_override] to prevent auto-reversion!*`
+      );
+    }
     const report = await markDatamartDeliveredBatches(targetArg, from);
     return sendWhatsApp(from, report);
   }
@@ -11564,43 +11688,6 @@ async function processDatamartConsoleCommand(from, cleanInput, isOwner = false) 
   }
 
   // Account Status
-  if (/^(?:my\s*datamart|datamart\s*status|account\s*status|whoami)$/i.test(cleanInput)) {
-    const acc = await getUserDatamartAccount(from);
-    if (!acc && !isOwner) {
-      return sendWhatsApp(from, `⚠️ No DataMart account linked to this WhatsApp line. Send *connect datamart <email> <password>* to link.`);
-    }
-    const name = acc?.name || (isOwner ? "Stony Master" : "DataMart Agent");
-    const email = acc?.email || "nyakponoah11@gmail.com";
-    const role = (acc?.role || (isOwner ? "master_worker" : "worker")).toUpperCase();
-    const balance = acc?.walletBalance != null ? Number(acc.walletBalance).toFixed(2) : "0.00";
-    return sendWhatsApp(from,
-      `👤 *DATAMART ACCOUNT STATUS*\n\n` +
-      `• *Name:* *${name}*\n` +
-      `• *Email:* ${email}\n` +
-      `• *Role:* *${role}*\n` +
-      `• *Wallet Balance:* *GH₵ ${balance}*\n` +
-      `• *WhatsApp Line:* ${from}\n` +
-      `• *Active Console:* ✅ Connected & Ready\n\n` +
-      `💡 Text *exit* to leave console mode, or *disconnect datamart* to unlink this account.`
-    );
-  }
-
-  // Disconnect account
-  if (/^(?:disconnect\s*datamart|unlink\s*datamart|logout\s*datamart)$/i.test(cleanInput)) {
-    const acc = await getUserDatamartAccount(from);
-    await disconnectUserDatamartAccount(from);
-    return sendWhatsApp(from,
-      `👋 *DATAMART ACCOUNT DISCONNECTED!*\n\n` +
-      `Your account (${acc?.email || "linked account"}) has been unlinked and your session cleared from this WhatsApp number.`
-    );
-  }
-
-  // Check Group Status
-  if (/^(?:my\s*group|group\s*status|check\s*group)$/i.test(cleanInput)) {
-    const rep = await getUserFailedOrdersGroupStatus(from);
-    return sendWhatsApp(from, rep);
-  }
-
   // Toggle Delivered Order WhatsApp Alerts (explicit mute / unmute commands)
   if (/^(?:mute\s*delivered\s*(?:order\s*)?alerts?|disable\s*delivered\s*(?:order\s*)?alerts?|turn\s*off\s*delivered\s*(?:order\s*)?alerts?|stop\s*delivered\s*(?:order\s*)?alerts?)$/i.test(cleanInput.trim())) {
     await supabase.from("settings").upsert({ key: "disable_delivered_alerts", value: "true", updated_at: new Date().toISOString() }, { onConflict: "key" });
@@ -13934,6 +14021,32 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
 
         targetRefs = [...new Set(targetRefs.map(r => String(r || "").replace(/[*_#`"']/g, "").trim()).filter(Boolean))];
 
+        // 0. BULK UPDATE ORDERS STATUS (e.g. all processing to delivered)
+        if (type === "bulk_update_orders" || pendingAction?.type === "bulk_update_orders") {
+          const fromSt = pendingAction?.from_status || pendingAction?.filter_status || "processing";
+          const toSt = pendingAction?.to_status || pendingAction?.delivery_status || pendingAction?.status || "delivered";
+          const res = await bulkUpdateOrdersDeliveryStatus(fromSt, toSt);
+          await syncActionToSite("bulk_update_orders", { from_status: res.fromStatus, to_status: res.toStatus, count: res.count });
+          await clearOwnerPendingAction(from);
+
+          if (res.count === 0) {
+            return sendWhatsApp(from, `ℹ️ *NO ${res.fromStatus.toUpperCase()} ORDERS FOUND BOSS!*\n\nThere are currently 0 orders with delivery status *"${res.fromStatus}"* in the database to update.`);
+          }
+
+          const topSample = res.updated.slice(0, 10);
+          const moreCount = res.count - topSample.length;
+          return sendWhatsApp(from,
+            `✅ *BULK ORDERS UPDATED BOSS!*\n\n` +
+            `• *Previous Status:* ${res.fromStatus.toUpperCase()}\n` +
+            `• *New Status:* *${res.toStatus.toUpperCase()}* ✅\n` +
+            `• *Total Orders Updated:* *${res.count} order${res.count === 1 ? "" : "s"}*\n\n` +
+            `📋 *Updated Orders:*\n` +
+            topSample.map(o => `• *${o.reference}* (${o.network || ""} ${o.capacity || ""}GB${o.phone ? ` - ${o.phone}` : ""})`).join("\n") +
+            (moreCount > 0 ? `\n_...and ${moreCount} more order(s)._` : "") +
+            `\n\n🔒 *All locked with [manual_override] to prevent auto-reversion!*`
+          );
+        }
+
         // 1. UPDATE ORDER STATUS (Single & Multiple Orders)
         if (type === "update_order_status" || (targetRefs.length > 0 && /\b(update|status|delivered|processing|pending|waiting|failed|cancelled|refunded)\b/i.test(cleanInput))) {
           const statusToSet = extractStatusFromText(cleanInput) || pendingAction.status || status || "delivered";
@@ -14875,7 +14988,9 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
           "      - When owner asks to view a ticket conversation (e.g. 'view ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_view_ticket\", \"ticketId\": \"TKT-179538\"}].\n" +
           "      - When owner asks to reply to a customer on Rezolv (e.g. 'reply to TKT-179538 Hello, your order has been delivered'): output [EXECUTE_ACTION: {\"type\": \"rezolv_reply\", \"ticketId\": \"TKT-179538\", \"message\": \"...\"}].\n" +
           "      - When owner asks to resolve/close a ticket (e.g. 'close ticket TKT-179538'): output [EXECUTE_ACTION: {\"type\": \"rezolv_close\", \"ticketId\": \"TKT-179538\"}].\n" +
-          "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\"|\"datamart_delivery_check\"|\"datamart_search_customer\"|\"datamart_retry_order\"|\"datamart_refund_order\"|\"rezolv_tickets\"|\"rezolv_view_ticket\"|\"rezolv_reply\"|\"rezolv_close\"|\"send_customer_message\", ...}] at the end of your reply.\n" +
+          "  22. BULK ORDER STATUS UPDATES: When the owner commands to update all orders of a certain status at once (e.g. 'mark all processing orders as delivered', 'mark all failed orders as delivered', 'mark failed orders as delivered', 'update all processing orders to delivered', 'mark all processing as completed', 'set all pending orders to delivered'):\n" +
+          "      - Output [EXECUTE_ACTION: {\"type\": \"bulk_update_orders\", \"from_status\": \"processing\", \"to_status\": \"delivered\"}]. (Adjust from_status to 'processing', 'failed', 'pending', etc., and to_status to 'delivered', 'failed', 'cancelled', etc. based on the command).\n" +
+          "  FULL EXECUTIVE AUTHORITY: Whenever the verified owner commands an action, execute it immediately by appending [EXECUTE_ACTION: {\"type\": \"update_order_status\"|\"bulk_update_orders\"|\"update_payment_status\"|\"update_announcement\"|\"update_setting\"|\"retry_order\"|\"resync_order\"|\"send_sms\"|\"broadcast_sms\"|\"toggle_stock\"|\"update_product_price\"|\"resolve_support_chat\"|\"update_service_status\"|\"generate_vouchers\"|\"toggle_free_data\"|\"change_theme_color\"|\"credit_agent\"|\"debit_agent\"|\"set_agent_status\"|\"list_agents\"|\"dispatch_datamart_bundle\"|\"diagnose_system\"|\"fix_all_anomalies\"|\"inspect_codebase\"|\"post_to_channel\"|\"query_boost_balance\"|\"set_boost_provider_markup\"|\"set_all_agents_boost_markup\"|\"query_boost_orders\"|\"datamart_delivery_check\"|\"datamart_search_customer\"|\"datamart_retry_order\"|\"datamart_refund_order\"|\"rezolv_tickets\"|\"rezolv_view_ticket\"|\"rezolv_reply\"|\"rezolv_close\"|\"send_customer_message\", ...}] at the end of your reply.\n" +
           "  Sensitive to security: NEVER output database secrets, raw API tokens, or passwords.\n" +
           "- WHATSAPP FORMATTING RULES (CRITICAL):\n" +
           "  - Use single asterisks *like this* for bold text (NEVER double asterisks **like this**).\n" +
@@ -16075,6 +16190,47 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
       }
 
       const hasUpdateIntent = /\b(update|mark|set|change)\b/i.test(cmdText) && /\b(delivered|failed|processing|pending|waiting|cancelled|refunded|completed|delivery status|status)\b/i.test(cmdText);
+
+      // Direct Action Command: Bulk Update Orders Status (e.g. "mark all processing orders as delivered", "failed to processing")
+      const bulkOrderMatch1 = orderRefsInText.length === 0 && cmdText.match(/(?:(?:mark|update|set|change|move|switch)\s+)?(?:all\s+)?(processing|failed|pending|waiting)\s*(?:orders?|bundles?|data)?\s*(?:as|to|->)\s*(delivered|completed|processing|failed|cancelled|refunded)/i);
+      const bulkOrderMatch2 = !bulkOrderMatch1 && orderRefsInText.length === 0 && cmdText.match(/(?:(?:mark|update|set|change|move|switch)\s+)?(?:all\s+)?(delivered|completed|processing|failed)\s+(?:for\s+)?(?:all\s+)?(processing|failed|pending|waiting)\s*(?:orders?|bundles?|data)?/i);
+
+      if (bulkOrderMatch1 || bulkOrderMatch2) {
+        const rawFrom = bulkOrderMatch1 ? bulkOrderMatch1[1] : bulkOrderMatch2[2];
+        const rawTo = bulkOrderMatch1 ? bulkOrderMatch1[2] : bulkOrderMatch2[1];
+        const res = await bulkUpdateOrdersDeliveryStatus(rawFrom, rawTo);
+        await syncActionToSite("bulk_update_orders", { from_status: res.fromStatus, to_status: res.toStatus, count: res.count });
+
+        if (!res.success) {
+          return sendWhatsApp(from, `⚠️ Boss, error updating orders in bulk: ${res.error || "Unknown error"}`);
+        }
+
+        if (res.count === 0) {
+          return sendWhatsApp(from,
+            `ℹ️ *NO ${res.fromStatus.toUpperCase()} ORDERS FOUND BOSS!*\n\n` +
+            `There are currently 0 orders with delivery status *"${res.fromStatus}"* in the database to update. Everything is already up to date! ✨`
+          );
+        }
+
+        const topSample = res.updated.slice(0, 10);
+        const moreCount = res.count - topSample.length;
+        const listText = topSample.map(o => `• *${o.reference}* (${o.network || ""} ${o.capacity || ""}GB${o.phone ? ` - ${o.phone}` : ""})`).join("\n");
+        const isDelivered = res.toStatus === "delivered";
+        const lockNote = isDelivered
+          ? `\n\n🔒 *All locked with [manual_override] to prevent auto-reversion!*`
+          : `\n\n🔄 *Active Delivery Watcher will now automatically monitor and verify delivery on DataMart!*`;
+
+        return sendWhatsApp(from,
+          `✅ *BULK ORDERS UPDATED BOSS!*\n\n` +
+          `• *Previous Status:* ${res.fromStatus.toUpperCase()}\n` +
+          `• *New Status:* *${res.toStatus.toUpperCase()}* ✅\n` +
+          `• *Total Orders Updated:* *${res.count} order${res.count === 1 ? "" : "s"}*\n\n` +
+          `📋 *Updated Orders:*\n` +
+          listText +
+          (moreCount > 0 ? `\n_...and ${moreCount} more order(s)._` : "") +
+          lockNote
+        );
+      }
 
       if (orderRefsInText.length > 0 && hasUpdateIntent) {
         const targetStatus = extractStatusFromText(cmdText) || "delivered";
