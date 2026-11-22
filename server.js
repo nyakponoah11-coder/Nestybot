@@ -4709,18 +4709,36 @@ async function updateOrderDeliveryStatusSafely(ref, newStatus) {
       ? existingNotes
       : (existingNotes ? `${existingNotes} [manual_override]` : "[manual_override]");
 
+    const updatePayload = {
+      delivery_status: newStatus,
+      status: newStatus,
+      notes: manualNotes,
+      updated_at: new Date().toISOString()
+    };
+    if (newStatus === "delivered" || newStatus === "completed") {
+      updatePayload.datamart_status = "completed";
+    }
+
     const { data: ord } = await supabase
       .from("orders")
-      .update({
-        delivery_status: newStatus,
-        notes: manualNotes,
-        updated_at: new Date().toISOString()
-      })
+      .update(updatePayload)
       .or(filter)
       .select("id, reference, recipient_phone, network, capacity, amount, notes, agent_id, base_price, created_at")
       .maybeSingle();
 
     if (ord) {
+      if (ord.reference) {
+        try {
+          await supabase
+            .from("agent_orders")
+            .update({
+              delivery_status: newStatus,
+              status: newStatus,
+              updated_at: new Date().toISOString()
+            })
+            .or(`reference.eq.${ord.reference},id.eq.${ord.reference}`);
+        } catch (_) { }
+      }
       if (newStatus === "delivered") {
         notifyOrderDelivered(ord).catch(err => console.warn("notifyOrderDelivered error:", err.message));
       }
@@ -4846,24 +4864,48 @@ async function bulkUpdateOrdersDeliveryStatus(rawFromStatus, rawToStatus, limit 
   else if (normTo.includes("refund")) toStatus = "refunded";
 
   try {
-    const { data: ordersToUpdate, error } = await supabase
+    // 1. Guard against ancient orders: bulk operations target recent active queue (last 48 hours)
+    // to strictly prevent resurrecting weeks-old orders from previous months
+    const cutoffIso = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+
+    let query = supabase
       .from("orders")
-      .select("id, reference, recipient_phone, network, capacity, amount, notes, agent_id, base_price, created_at")
-      .ilike("delivery_status", fromStatus)
+      .select("id, reference, recipient_phone, network, capacity, amount, notes, agent_id, base_price, created_at, delivery_status, status")
+      .or(`delivery_status.ilike.%${fromStatus}%,status.ilike.%${fromStatus}%`)
+      .gte("created_at", cutoffIso)
       .order("created_at", { ascending: false })
       .limit(limit);
+
+    // If updating to delivered, explicitly filter out orders that are ALREADY delivered
+    if (toStatus === "delivered") {
+      query = query.not("delivery_status", "in", '("delivered","completed")');
+    }
+
+    const { data: ordersToUpdate, error } = await query;
 
     if (error) {
       console.warn("bulkUpdateOrdersDeliveryStatus query error:", error.message);
       return { success: false, error: error.message, count: 0, fromStatus, toStatus, updated: [] };
     }
 
-    if (!ordersToUpdate || ordersToUpdate.length === 0) {
+    // Secondary in-memory check to strictly avoid re-updating orders already delivered
+    const actualOrders = (ordersToUpdate || []).filter(ord => {
+      if (toStatus === "delivered") {
+        const d = String(ord.delivery_status || "").toLowerCase();
+        const s = String(ord.status || "").toLowerCase();
+        if (d === "delivered" || d === "completed" || s === "delivered" || s === "completed") {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    if (actualOrders.length === 0) {
       return { success: true, count: 0, fromStatus, toStatus, updated: [] };
     }
 
     const updated = [];
-    for (const ord of ordersToUpdate) {
+    for (const ord of actualOrders) {
       const existingNotes = String(ord.notes || "");
       let manualNotes = existingNotes;
       if (toStatus === "delivered" || toStatus === "failed" || toStatus === "cancelled") {
@@ -4878,13 +4920,19 @@ async function bulkUpdateOrdersDeliveryStatus(rawFromStatus, rawToStatus, limit 
           .trim();
       }
 
+      const updatePayload = {
+        delivery_status: toStatus,
+        status: toStatus,
+        notes: manualNotes,
+        updated_at: new Date().toISOString()
+      };
+      if (toStatus === "delivered") {
+        updatePayload.datamart_status = "completed";
+      }
+
       const { error: updErr } = await supabase
         .from("orders")
-        .update({
-          delivery_status: toStatus,
-          notes: manualNotes,
-          updated_at: new Date().toISOString()
-        })
+        .update(updatePayload)
         .eq("id", ord.id);
 
       if (!updErr) {
@@ -4896,8 +4944,26 @@ async function bulkUpdateOrdersDeliveryStatus(rawFromStatus, rawToStatus, limit 
           amount: ord.amount
         });
 
+        // Also synchronize agent_orders table
+        if (ord.reference) {
+          try {
+            await supabase
+              .from("agent_orders")
+              .update({
+                delivery_status: toStatus,
+                status: toStatus,
+                updated_at: new Date().toISOString()
+              })
+              .or(`reference.eq.${ord.reference},id.eq.${ord.reference}`);
+          } catch (_) { }
+        }
+
+        // Send notifications without spamming admin with 50 individual alerts
         if (toStatus === "delivered") {
-          notifyOrderDelivered(ord).catch(err => console.warn("notifyOrderDelivered bulk warning:", err.message));
+          notifyOrderDelivered(
+            { ...ord, delivery_status: toStatus, status: toStatus, notes: manualNotes },
+            { skipAdminAlert: true }
+          ).catch(err => console.warn("notifyOrderDelivered bulk warning:", err.message));
         }
       }
     }
@@ -19322,7 +19388,7 @@ Reply *hi* to return to main menu.`;
   console.log(`📲 [CUSTOMER NOTIFIED] Order placed confirmation sent to ${custPhone} (Ref: ${reference})`);
 }
 
-async function notifyOrderDelivered(order) {
+async function notifyOrderDelivered(order, options = {}) {
   if (!order || !order.reference) return;
   const ref = String(order.reference).trim();
   const refKey = ref.toUpperCase();
@@ -19525,7 +19591,9 @@ async function notifyOrderDelivered(order) {
 ⚡ *Status:* ✅ Delivered to Phone${orderedAtLine}
 ⏰ *Delivered At:* ${dateStr} ${timeStr}`;
 
-  await sendAdminWhatsApp(deliveredText);
+  if (!options?.skipAdminAlert) {
+    await sendAdminWhatsApp(deliveredText);
+  }
 
   // Also send the DATA ORDER DELIVERED! ✅ alert directly to the respective Agent & log to their account
   if (resolvedAgentId) {
