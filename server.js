@@ -12517,7 +12517,7 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
     const cleanCmd = (text || "").trim();
 
     // ── FAILED ORDERS WHATSAPP GROUP CONNECT & MANAGEMENT (OWNER ONLY, EXPLICIT COMMAND ONLY) ──
-    const topGroupMatch = cleanCmd.match(/^(?:connect\s*group|set\s*group|link\s*group)\s+(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,35}|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)$/i);
+    const topGroupMatch = cleanCmd.match(/^(?:connect|set|link)\s+(?:this\s+)?group(?:\s+to)?\s+(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,35}[^\s]*|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
 
     if (topGroupMatch) {
       if (!isOwner) {
@@ -15208,7 +15208,7 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
       const orderRefsInText = extractOrderReferences(cmdText);
 
       // Direct Action Command: Configure Failed Orders WhatsApp Group (Explicit Command Only)
-      const setGroupMatch = cmdText.match(/^(?:connect\s*group|set\s*group|link\s*group)\s+(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,35}|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)$/i);
+      const setGroupMatch = cmdText.match(/^(?:connect|set|link)\s+(?:this\s+)?group(?:\s+to)?\s+(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,35}[^\s]*|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
 
       if (setGroupMatch) {
         const rawMatch = setGroupMatch[1].trim();
