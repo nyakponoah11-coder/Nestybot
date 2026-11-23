@@ -3236,7 +3236,10 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     "customer_support_delivery_failed",
     "orders_queued_over_24h",
     "db_order_failed",
-    "db_order_queued_over_24h"
+    "db_order_queued_over_24h",
+    "datamart_failed_orders_scan",
+    "datamart_delayed_scan",
+    "manual_scan"
   ].includes(meta.reason);
 
   if (!meta.manual && !meta.isTest && !isDeliveryCheckOrRezolv) {
@@ -3500,8 +3503,18 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     try {
       sent = await senderSock.sendMessage(groupJid, { text: sendText });
     } catch (sendErr) {
-      if (groupJid !== DEFAULT_FAILED_ORDERS_GROUP_JID && sock) {
-        console.warn(`[FAILED ORDER GROUP] Send to ${groupJid} failed (${sendErr.message}). Falling back to Unprocessed Orders group...`);
+      console.warn(`[FAILED ORDER GROUP] Send with ${senderLabel} failed (${sendErr.message}). Falling back to default bot...`);
+      if (senderSock !== sock && sock) {
+        try {
+          sent = await sock.sendMessage(groupJid, { text: sendText });
+        } catch (botErr) {
+          if (groupJid !== DEFAULT_FAILED_ORDERS_GROUP_JID) {
+            sent = await sock.sendMessage(DEFAULT_FAILED_ORDERS_GROUP_JID, { text: sendText });
+          } else {
+            throw botErr;
+          }
+        }
+      } else if (groupJid !== DEFAULT_FAILED_ORDERS_GROUP_JID && sock) {
         groupJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
         groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
         sent = await sock.sendMessage(DEFAULT_FAILED_ORDERS_GROUP_JID, { text: sendText });
@@ -3720,8 +3733,8 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
 
     const inviteCode = inviteMatch ? inviteMatch[1] : null;
 
-    // Fast-path: Owner default group invite code (immediate match without socket)
-    if (inviteCode && (inviteCode === "KXfhdb8dg7A6cLvehhGacB" || input.includes("KXfhdb8dg7A6cLvehhGacB"))) {
+    // Fast-path: Owner default group invite code (immediate match without socket) or empty input
+    if (!input || (inviteCode && (inviteCode === "KXfhdb8dg7A6cLvehhGacB" || input.includes("KXfhdb8dg7A6cLvehhGacB")))) {
       targetJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
       groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
     }
@@ -3860,10 +3873,16 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
         const pairRes = await getOrInitAgentBaileysClient(normCaller, { requestPair: true });
         if (pairRes?.pairingCode) {
           pairCodeSection = `\n\n🔑 *POST FROM YOUR OWN WHATSAPP NUMBER:*\n` +
-            `To make failed orders post under **your own name and phone number** (instead of Stony), pair your WhatsApp:\n\n` +
+            `To make failed orders post under **your own name and phone number**, link your WhatsApp:\n\n` +
             `👉 Pairing Code: *${pairRes.pairingCode}*\n\n` +
-            `*(On your phone: WhatsApp > Settings > Linked Devices > Link a Device > Link with phone number instead)*\n\n` +
-            `💡 If you don't pair, failed orders will be submitted using the default bot.`;
+            `📲 *How to link:*\n` +
+            `1. Open WhatsApp on your phone\n` +
+            `2. Tap Settings (or 3 dots) > *Linked Devices*\n` +
+            `3. Tap *Link a Device* > *Link with phone number instead*\n` +
+            `4. Enter: *${pairRes.pairingCode}*\n\n` +
+            `💡 *Note:* If you do not link your WhatsApp account, your failed orders will automatically be submitted using the store owner's account as default.`;
+        } else if (pairRes?.ready) {
+          pairCodeSection = `\n\n✅ *SENDER ACCOUNT:* Your personal WhatsApp account is linked and ready! Failed orders will be posted showing *your own name and phone number*.`;
         }
       } catch (pErr) {
         console.warn("Agent pairing code request note:", pErr.message);
@@ -3877,7 +3896,7 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
       `• *Group JID:* \`${targetJid}\`\n\n` +
       `🛡️ *How it works:*\n` +
       `Whenever an order fails or stays in vendor queue > 24 hours under your account, the numeric Portal ID will be submitted to *${groupSubject}*!\n\n` +
-      `💡 Anyone who connects DataMart without connecting their own group will automatically default to the owner's group.` +
+      `💡 If your WhatsApp is paired, it will post under your own name and phone number. If not paired, it automatically sends using the default bot account.` +
       pairCodeSection;
   } catch (err) {
     console.error("setFailedOrdersGroup error:", err);
@@ -12516,14 +12535,11 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
     ===================================================== */
     const cleanCmd = (text || "").trim();
 
-    // ── FAILED ORDERS WHATSAPP GROUP CONNECT & MANAGEMENT (OWNER ONLY, EXPLICIT COMMAND ONLY) ──
-    const topGroupMatch = cleanCmd.match(/^(?:connect|set|link)\s+(?:this\s+)?group(?:\s+to)?\s+(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,35}[^\s]*|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
+    // ── FAILED ORDERS WHATSAPP GROUP CONNECT & MANAGEMENT ──
+    const topGroupMatch = cleanCmd.match(/^(?:connect|set|link)\s+(?:this\s+|to\s+)?group(?:\s+to)?(?:\s+(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,35}[^\s]*|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us))?$/i);
 
     if (topGroupMatch) {
-      if (!isOwner) {
-        return sendWhatsApp(from, "⚠️ Only the store owner can connect the Failed Orders WhatsApp Group.");
-      }
-      const targetLinkOrJid = topGroupMatch[1].trim();
+      const targetLinkOrJid = (topGroupMatch[1] || "").trim();
       const rep = await setFailedOrdersGroup(targetLinkOrJid, from);
       return sendWhatsApp(from, rep);
     }
