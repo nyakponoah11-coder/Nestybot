@@ -2636,10 +2636,11 @@ async function initBaileysChannelClient(options = {}) {
         baileysChannelConnecting = false;
         scheduleBackupBaileysAuthToSupabase();
 
-        // 🛡️ Ensure bot never remains in unrelated groups like Princess Talks
+        // 🛡️ Ensure bot never remains in unrelated groups
         try {
           if (typeof sock.groupLeave === "function") {
             sock.groupLeave("120363411024608637@g.us").catch(() => {});
+            sock.groupLeave("120363407548007944@g.us").catch(() => {});
           }
         } catch (_) { }
 
@@ -3426,7 +3427,7 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
     }
 
     // If found in recent group messages, memory registry, or persistent database registry:
-    if ((foundInRecentGroup || hasTimestampRecord || isAlreadyPostedInDb) && !isTest && !meta.explicitUserForce) {
+    if ((foundInRecentGroup || hasTimestampRecord || isAlreadyPostedInDb) && !isTest) {
       console.log(`🛡️ [GROUP DEDUP] Portal ID ${cleanId} ALREADY EXISTS in group ${groupSubject} (${groupJid}) history or registry (posted previously by Crystal, user, or bot). Skipping duplicate submission.`);
       return { ok: true, skipped: true, reason: "already_exists", group: groupSubject, isUserGroup };
     }
@@ -9443,7 +9444,6 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
           subRes = await submitFailedPortalIdToGroup(targetId, {
             reason: isFailed ? "carrier_delivery_check_failed" : "vendor_queue_over_24h",
             force: true,
-            explicitUserForce: true,
             callerPhone
           });
         }
@@ -12516,14 +12516,14 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
     ===================================================== */
     const cleanCmd = (text || "").trim();
 
-    // ── FAILED ORDERS WHATSAPP GROUP CONNECT & MANAGEMENT (TOP-LEVEL FOR ALL USERS/MODES) ──
-    const topGroupMatch =
-      cleanCmd.match(/(?:connect\s*group|set\s*group|join\s*group|group\s*link|group)?\s*(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,35})/i) ||
-      cleanCmd.match(/^connect\s*group\s+(.+)$/i) ||
-      cleanCmd.match(/^(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)$/i);
+    // ── FAILED ORDERS WHATSAPP GROUP CONNECT & MANAGEMENT (OWNER ONLY, EXPLICIT COMMAND ONLY) ──
+    const topGroupMatch = cleanCmd.match(/^(?:connect\s*group|set\s*group|link\s*group)\s+(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,35}|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)$/i);
 
     if (topGroupMatch) {
-      const targetLinkOrJid = topGroupMatch[1] ? topGroupMatch[1].trim() : cleanCmd;
+      if (!isOwner) {
+        return sendWhatsApp(from, "⚠️ Only the store owner can connect the Failed Orders WhatsApp Group.");
+      }
+      const targetLinkOrJid = topGroupMatch[1].trim();
       const rep = await setFailedOrdersGroup(targetLinkOrJid, from);
       return sendWhatsApp(from, rep);
     }
@@ -15207,17 +15207,12 @@ async function handleIncomingWhatsAppMessage(payload, source = "webhook") {
       const lt = cmdText.toLowerCase();
       const orderRefsInText = extractOrderReferences(cmdText);
 
-      // Direct Action Command: Configure Failed Orders WhatsApp Group (Invite Link or JID)
-      const setGroupMatch =
-        cmdText.match(/https:\/\/chat\.whatsapp\.com\/([A-Za-z0-9_-]{15,35})/i) ||
-        cmdText.match(/(\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)/i);
+      // Direct Action Command: Configure Failed Orders WhatsApp Group (Explicit Command Only)
+      const setGroupMatch = cmdText.match(/^(?:connect\s*group|set\s*group|link\s*group)\s+(https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9_-]{15,35}|\d{10,25}-[0-9]+@g\.us|\d{15,25}@g\.us)$/i);
 
       if (setGroupMatch) {
         const rawMatch = setGroupMatch[1].trim();
-        const linkOrJid = rawMatch.includes("@g.us")
-          ? rawMatch
-          : `https://chat.whatsapp.com/${rawMatch}`;
-        const rep = await setFailedOrdersGroup(linkOrJid, from);
+        const rep = await setFailedOrdersGroup(rawMatch, from);
         return sendWhatsApp(from, rep);
       }
 
