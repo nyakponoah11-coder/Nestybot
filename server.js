@@ -3355,6 +3355,14 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
       groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
     }
 
+    // Safety guard: strictly enforce that the global failed orders group is ALWAYS Unprocessed Orders
+    if (!isUserGroup) {
+      if (!groupSubject || !/unprocessed|order|failed|dispatch/i.test(groupSubject) || /princess|health|real life|cheapest|dating|church|family/i.test(groupSubject) || (groupJid && (groupJid.includes("120363407548007944") || groupJid.includes("120363411024608637")))) {
+        groupJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
+        groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
+      }
+    }
+
     // STRICT NORMALIZATION: Ensure clean JID format
     groupJid = groupJid.replace(/(@g\.us)+$/i, "") + "@g.us";
 
@@ -3487,7 +3495,19 @@ async function submitFailedPortalIdToGroup(portalId, meta = {}) {
         console.warn("Could not use agent socket, using default:", aErr.message);
       }
     }
-    const sent = await senderSock.sendMessage(groupJid, { text: sendText });
+    let sent;
+    try {
+      sent = await senderSock.sendMessage(groupJid, { text: sendText });
+    } catch (sendErr) {
+      if (groupJid !== DEFAULT_FAILED_ORDERS_GROUP_JID && sock) {
+        console.warn(`[FAILED ORDER GROUP] Send to ${groupJid} failed (${sendErr.message}). Falling back to Unprocessed Orders group...`);
+        groupJid = DEFAULT_FAILED_ORDERS_GROUP_JID;
+        groupSubject = DEFAULT_FAILED_ORDERS_GROUP_NAME;
+        sent = await sock.sendMessage(DEFAULT_FAILED_ORDERS_GROUP_JID, { text: sendText });
+      } else {
+        throw sendErr;
+      }
+    }
     if (sent?.key?.id && sent?.message) {
       recentSentMessagesStore.set(sent.key.id, sent.message);
       if (recentSentMessagesStore.size > 200) {
@@ -3818,11 +3838,16 @@ async function setFailedOrdersGroup(rawInput, callerPhone = null) {
 
     // 2. If caller is owner OR no global default exists yet, also save as the global default fallback
     if (isCallerOwner || !normCaller) {
-      await supabase.from("settings").upsert([
-        { key: "failed_orders_group_jid", value: targetJid },
-        { key: "failed_orders_group_name", value: groupSubject },
-        { key: "failed_orders_group_invite", value: input }
-      ], { onConflict: "key" });
+      const isOrderProcessingGroup = /unprocessed|order|failed|dispatch|carrier/i.test(groupSubject) && !/cheapest|marketing|deals|package/i.test(groupSubject);
+      if (isOrderProcessingGroup || targetJid === DEFAULT_FAILED_ORDERS_GROUP_JID) {
+        await supabase.from("settings").upsert([
+          { key: "failed_orders_group_jid", value: targetJid },
+          { key: "failed_orders_group_name", value: groupSubject },
+          { key: "failed_orders_group_invite", value: input }
+        ], { onConflict: "key" });
+      } else {
+        console.warn(`[FAILED ORDER GROUP] Group "${groupSubject}" (${targetJid}) is not an order group. Preserved Unprocessed Orders as global fallback.`);
+      }
     }
 
     // 🛡️ CRITICAL INSTRUCTION: Never send any message to the group when a user connects!
@@ -9405,7 +9430,7 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
     let groupNotice = "";
     if ((isFailed || (isQueued && isOver24H)) && targetId && /^\d{4,9}$/.test(String(targetId))) {
       try {
-        const subRes = await submitFailedPortalIdToGroup(targetId, {
+        let subRes = await submitFailedPortalIdToGroup(targetId, {
           reason: isFailed ? "carrier_delivery_check_failed" : "vendor_queue_over_24h",
           failedCount: failed || failedItems.length || 1,
           totalItems,
@@ -9414,6 +9439,14 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
           failedPhones: failedItems.map(it => it.phone),
           callerPhone
         });
+        if (!subRes?.ok) {
+          subRes = await submitFailedPortalIdToGroup(targetId, {
+            reason: isFailed ? "carrier_delivery_check_failed" : "vendor_queue_over_24h",
+            force: true,
+            explicitUserForce: true,
+            callerPhone
+          });
+        }
         if (subRes?.ok) {
           if (subRes.submitted) {
             groupNotice = `\n\n🚀 *Submitted Portal ID ${targetId} to ${subRes.group || "Unprocessed Orders"} group!*`;
@@ -9421,11 +9454,11 @@ async function executeDatamartDeliveryCheck(portalOrderIds, callerPhone = null) 
             groupNotice = `\n\nℹ️ *Portal ID ${targetId} was already posted to the ${subRes.group || "Unprocessed Orders"} group.*`;
           }
         } else {
-          groupNotice = `\n\n⚠️ *Could not post Portal ID ${targetId} to group:* ${subRes.reason || subRes.error}`;
+          groupNotice = `\n\n⚠️ *Could not post Portal ID ${targetId} to group:* ${subRes?.reason || subRes?.error || "Connection pending"}\n💡 *Action:* Text *submit ${targetId}* to retry.`;
         }
       } catch (subErr) {
         console.warn("Delivery check submit to group error:", subErr.message);
-        groupNotice = `\n\n💡 *Action:* Text *submit ${targetId}* to forward this ID to the group.`;
+        groupNotice = `\n\n⚠️ *Could not post Portal ID ${targetId} to group:* ${subErr.message}\n💡 *Action:* Text *submit ${targetId}* to retry.`;
       }
     }
 
